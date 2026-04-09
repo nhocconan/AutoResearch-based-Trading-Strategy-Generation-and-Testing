@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Uses 1d Camarilla pivot levels (L3, L4, H3, H4) from prior day for mean reversion entries
-# - Trend filter: 1w EMA(21) - only long when price > EMA, short when price < EMA
-# - Volume confirmation: 1d volume > 1.5x 20-period average to ensure breakout strength
+# Hypothesis: 6h Williams %R with 12h EMA trend filter and volume confirmation
+# - Williams %R(14) for mean reversion signals: long when < -80, short when > -20
+# - 12h EMA(50) trend filter: only take longs when price > EMA, shorts when price < EMA
+# - Volume confirmation: 6h volume > 1.5x 20-period average to avoid false signals
 # - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~10-25 trades/year (40-100 total over 4 years) per 1d strategy guidelines
-# - Novelty: Combines Camarilla pivot mean reversion with weekly trend filter to avoid counter-trend trades
-# - Works in both bull/bear: Camarilla captures reversals, weekly trend filter prevents fighting major trends
+# - Target: ~12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Novelty: Williams %R is underutilized; combining with 12h EMA filter adapts to trend
+# - Works in both bull/bear: mean reversion in ranges, EMA filter prevents counter-trend in strong trends
 
-name = "1d_1w_camarilla_trend_volume_v1"
-timeframe = "1d"
+name = "6h_12h_williams_r_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +23,44 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Pre-compute 1w indicators
-    close_1w = df_1w['close'].values
-    # Calculate 1w EMA(21) for trend filter
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    # Align 1w EMA to 1d timeframe (completed 1w bar only)
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Pre-compute 12h indicators
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1d price data
+    # Calculate 12h EMA(50) for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 12h EMA to 6h timeframe (completed 12h bar only)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values  # Camarilla uses prior day's OHLC
     
-    # Calculate 1d Camarilla pivot levels from prior day
-    # H4 = close + 1.5*(high - low)
-    # H3 = close + 1.0*(high - low)
-    # L3 = close - 1.0*(high - low)
-    # L4 = close - 1.5*(high - low)
-    # Use prior day's values (shift by 1)
-    prior_high = np.roll(high, 1)
-    prior_low = np.roll(low, 1)
-    prior_close = np.roll(close, 1)
-    # First value will be invalid (no prior day), handled by min_periods in rolling
+    # 6h Williams %R(14)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    camarilla_h4 = prior_close + 1.5 * (prior_high - prior_low)
-    camarilla_h3 = prior_close + 1.0 * (prior_high - prior_low)
-    camarilla_l3 = prior_close - 1.0 * (prior_high - prior_low)
-    camarilla_l4 = prior_close - 1.5 * (prior_high - prior_low)
-    
-    # Volume confirmation: 1d volume > 1.5x 20-period average
+    # 6h volume > 1.5x 20-period average (volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * avg_volume_20)
     
-    # 1d ATR(14) for trailing stop
+    # 6h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr[0]  # First TR is just high-low
+    tr[0] = tr[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
@@ -74,15 +68,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    for i in range(20, n):  # Start after 20 bars for volume average
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4[i]) or 
-            np.isnan(camarilla_h3[i]) or
-            np.isnan(camarilla_l3[i]) or
-            np.isnan(camarilla_l4[i]) or
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or
             np.isnan(volume_spike[i]) or
             np.isnan(atr[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or
             atr[i] <= 0):
             signals[i] = 0.0
             continue
@@ -92,8 +83,8 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.0x ATR from high OR breaks above H4 (take profit)
-            if low[i] <= highest_since_entry - (2.0 * atr[i]) or high[i] >= camarilla_h4[i]:
+            # Exit conditions: price retraces 2.0x ATR from high OR Williams %R > -20 (overbought)
+            if low[i] <= highest_since_entry - (2.0 * atr[i]) or williams_r[i] > -20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -104,24 +95,24 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.0x ATR from low OR breaks below L4 (take profit)
-            if high[i] >= lowest_since_entry + (2.0 * atr[i]) or low[i] <= camarilla_l4[i]:
+            # Exit conditions: price retraces 2.0x ATR from low OR Williams %R < -80 (oversold)
+            if high[i] >= lowest_since_entry + (2.0 * atr[i]) or williams_r[i] < -80:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla pivot breakouts with volume confirmation and trend filter
-            # Long: price breaks above H3 AND volume spike AND price > weekly EMA (uptrend)
-            if high[i] >= camarilla_h3[i] and volume_spike[i] and close[i] > ema_21_1w_aligned[i]:
+            # Look for Williams %R signals with EMA trend filter and volume confirmation
+            # Long: Williams %R < -80 (oversold) AND price > 12h EMA AND volume spike
+            if williams_r[i] < -80 and close[i] > ema_50_12h_aligned[i] and volume_spike[i]:
                 position = 1
                 highest_since_entry = high[i]
-                lowest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = 0.25
-            # Short: price breaks below L3 AND volume spike AND price < weekly EMA (downtrend)
-            elif low[i] <= camarilla_l3[i] and volume_spike[i] and close[i] < ema_21_1w_aligned[i]:
+            # Short: Williams %R > -20 (overbought) AND price < 12h EMA AND volume spike
+            elif williams_r[i] > -20 and close[i] < ema_50_12h_aligned[i] and volume_spike[i]:
                 position = -1
-                highest_since_entry = low[i]
+                highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = -0.25
     
