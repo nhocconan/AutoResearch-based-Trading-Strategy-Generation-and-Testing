@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 6h_donchian_1w_trend_volume_v1
-# Hypothesis: 6h Donchian(20) breakout with 1w HTF trend filter and volume confirmation.
-# Uses weekly trend to avoid counter-trend trades, Donchian channels for breakout structure,
-# and volume to confirm institutional participation. Works in bull/bear by aligning with 1w trend.
+# 12h_camarilla_1d_trend_volume_v1
+# Hypothesis: 12h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
+# Camarilla pivots provide institutional support/resistance levels; volume confirms participation;
+# EMA50 defines medium-term trend to avoid counter-trend entries. Works in bull/bear by aligning with HTF trend.
 # Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_1w_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,23 +23,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need sufficient data for EMA50
+    # 1d HTF data for Camarilla pivots and EMA trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 6h Donchian(20) channels
-    donchian_window = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # 1d Camarilla pivot levels (based on previous day's range)
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # Calculated from previous day's high, low, close
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = np.nan  # First value has no previous
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    range_1d = prev_high_1d - prev_low_1d
+    
+    # Camarilla levels
+    h4 = pivot_point + (range_1d * 1.1 / 2)
+    h3 = pivot_point + (range_1d * 1.1 / 4)
+    h2 = pivot_point + (range_1d * 1.1 / 6)
+    h1 = pivot_point + (range_1d * 1.1 / 12)
+    l1 = pivot_point - (range_1d * 1.1 / 12)
+    l2 = pivot_point - (range_1d * 1.1 / 6)
+    l3 = pivot_point - (range_1d * 1.1 / 4)
+    l4 = pivot_point - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    h2_aligned = align_htf_to_ltf(prices, df_1d, h2)
+    h1_aligned = align_htf_to_ltf(prices, df_1d, h1)
+    l1_aligned = align_htf_to_ltf(prices, df_1d, l1)
+    l2_aligned = align_htf_to_ltf(prices, df_1d, l2)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -47,37 +77,37 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below lower channel OR trend turns bearish
-            if close[i] < lower_channel[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit: price closes below H3 (strong resistance) OR trend turns bearish
+            if close[i] < h3_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper channel OR trend turns bullish
-            if close[i] > upper_channel[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit: price closes above L3 (strong support) OR trend turns bullish
+            if close[i] > l3_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+            volume_confirmed = volume[i] > 1.8 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price breaks above upper channel with bullish 1w trend
-                if close[i] > upper_channel[i] and close[i] > ema50_1w_aligned[i]:
+                # Long: price breaks above H3 with bullish trend (intraday continuation)
+                if close[i] > h3_aligned[i] and close[i] > ema50_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below lower channel with bearish 1w trend
-                elif close[i] < lower_channel[i] and close[i] < ema50_1w_aligned[i]:
+                # Short: price breaks below L3 with bearish trend (intraday continuation)
+                elif close[i] < l3_aligned[i] and close[i] < ema50_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
