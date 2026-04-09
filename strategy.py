@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v29"
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and choppiness filter
+# Works in bull/bear by using mean-reversion at extreme levels (S4/R4) with volume confirmation
+# Target: 20-40 trades/year to avoid fee drag, focusing on high-probability breakouts
+
+name = "4h_1d_camarilla_breakout_v30"
 timeframe = "4h"
 leverage = 1.0
 
