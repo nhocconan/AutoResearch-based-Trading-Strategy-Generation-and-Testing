@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel breakout with volume confirmation and ATR-based position sizing
-# - Uses 1w HTF for Donchian channel (20-period high/low) to identify major trend breakouts
-# - Enters long when price breaks above 1w Donchian high with volume > 1.5x 20-period average
-# - Enters short when price breaks below 1w Donchian low with volume > 1.5x 20-period average
-# - Uses ATR(14) for volatility-adjusted position sizing (0.20-0.30 range)
-# - Includes choppiness filter to avoid ranging markets (CHOP > 61.8 = choppy, avoid entries)
-# - Fixed holding period: exit after 10 bars to prevent overtrading and reduce fee drag
-# - Target: 20-50 trades/year on 1d timeframe (80-200 total over 4 years)
+# Hypothesis: 6h strategy using 1d Supertrend for trend direction and 1w Bollinger Bands for mean reversion
+# - Uses 1d HTF for Supertrend(10,3) to establish primary trend (bullish/bearish)
+# - Uses 1w HTF for Bollinger Bands(20,2.0) to identify extreme price deviations
+# - In bullish trend: long when price touches lower BB (oversold pullback)
+# - In bearish trend: short when price touches upper BB (overbought bounce)
+# - Volume confirmation: current 6h volume > 1.5x 20-period average to filter low-quality signals
+# - Fixed position size 0.25 to control drawdown
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets by aligning mean reversion with primary trend
 
-name = "1d_1w_donchian_volume_chop_v1"
-timeframe = "1d"
+name = "6h_1d_1w_supertrend_bb_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,103 +27,146 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1d) < 50 or len(df_1w) < 30:
         return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w Donchian channel (20 periods)
-    period20_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align 1w Donchian levels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, period20_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, period20_low)
-    
-    # Pre-compute volume confirmation (20-period average for 1d)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute ATR(14) for position sizing
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate 1d Supertrend (10,3)
+    # True Range
+    tr1 = pd.Series(high_1d).rolling(2).max().values - pd.Series(low_1d).rolling(2).min().values
+    tr2 = np.abs(pd.Series(high_1d).rolling(2).max().values - pd.Series(close_1d).shift(1).values)
+    tr3 = np.abs(pd.Series(low_1d).rolling(2).min().values - pd.Series(close_1d).shift(1).values)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Pre-compute choppiness index (14 periods) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / (max(high, n) - min(low, n))) / log10(n)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    chop = 100 * (np.log10(atr_14 / (range_14 + 1e-10)) / np.log10(14))
+    # Basic Upper and Lower Bands
+    hl_avg = (high_1d + low_1d) / 2
+    upper_band = hl_avg + (3 * atr)
+    lower_band = hl_avg - (3 * atr)
+    
+    # Initialize Supertrend
+    supertrend = np.zeros_like(close_1d)
+    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1d)):
+        if i < 10:  # Need enough data for ATR
+            supertrend[i] = upper_band[i]
+            direction[i] = 1
+            continue
+            
+        # Upper Band logic
+        if upper_band[i] < supertrend[i-1] or close_1d[i-1] > supertrend[i-1]:
+            upper_band[i] = upper_band[i]
+        else:
+            upper_band[i] = supertrend[i-1]
+            
+        # Lower Band logic
+        if lower_band[i] > supertrend[i-1] or close_1d[i-1] < supertrend[i-1]:
+            lower_band[i] = lower_band[i]
+        else:
+            lower_band[i] = supertrend[i-1]
+            
+        # Supertrend logic
+        if direction[i-1] == -1 and close_1d[i] > upper_band[i]:
+            direction[i] = 1
+            supertrend[i] = lower_band[i]
+        elif direction[i-1] == 1 and close_1d[i] < lower_band[i]:
+            direction[i] = -1
+            supertrend[i] = upper_band[i]
+        elif direction[i-1] == 1:
+            direction[i] = 1
+            supertrend[i] = lower_band[i]
+        else:
+            direction[i] = -1
+            supertrend[i] = upper_band[i]
+    
+    # Calculate 1w Bollinger Bands (20,2.0)
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    
+    # Align all HTF data to 6h timeframe (wait for completed HTF bar)
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1w, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1w, lower_bb)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    bars_since_entry = 0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(chop[i]) or
-            vol_ma_20[i] <= 0 or atr[i] <= 0):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
+            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x average
+        # Volume confirmation: current 6h volume > 1.5x average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Choppiness filter: avoid ranging markets (CHOP > 61.8 = choppy)
-        not_choppy = chop[i] <= 61.8
+        # Trend direction from Supertrend
+        bullish_trend = direction_aligned[i] == 1
+        bearish_trend = direction_aligned[i] == -1
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        # Bollinger Band touches
+        touches_lower_bb = close[i] <= lower_bb_aligned[i]
+        touches_upper_bb = close[i] >= upper_bb_aligned[i]
         
-        # Volatility-adjusted position size (0.20 to 0.30 range)
-        # Scale position size inversely with volatility to maintain consistent risk
-        vol_scaling = np.clip(0.015 / (atr[i] / close[i] + 1e-10), 0.6, 1.2)
-        base_size = 0.25
-        position_size = base_size * vol_scaling
-        position_size = np.clip(position_size, 0.20, 0.30)
-        
-        # Update bars since entry
-        if position != 0:
-            bars_since_entry += 1
+        # Fixed position size
+        position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit conditions: time-based exit or breakdown
-            if bars_since_entry >= 10 or close[i] < donchian_low_aligned[i]:
-                position = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
+            # Exit conditions
+            if bullish_trend:
+                # In bullish trend: exit when price touches upper BB or trend changes
+                if touches_upper_bb or bearish_trend:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
             else:
-                signals[i] = position_size
+                # Not in bullish trend: exit
+                position = 0
+                signals[i] = 0.0
                 
         elif position == -1:  # Short position
-            # Exit conditions: time-based exit or breakout
-            if bars_since_entry >= 10 or close[i] > donchian_high_aligned[i]:
-                position = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
+            # Exit conditions
+            if bearish_trend:
+                # In bearish trend: exit when price touches lower BB or trend changes
+                if touches_lower_bb or bullish_trend:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
             else:
-                signals[i] = -position_size
+                # Not in bearish trend: exit
+                position = 0
+                signals[i] = 0.0
         else:  # Flat
-            # Entry logic: Donchian breakout with volume confirmation and regime filter
-            if volume_confirmed and not_choppy:
-                if breakout_up:
+            # Entry logic based on trend and BB touches
+            if volume_confirmed:
+                if bullish_trend and touches_lower_bb:
+                    # In bullish trend, price touches lower BB: long mean reversion
                     position = 1
-                    bars_since_entry = 0
                     signals[i] = position_size
-                elif breakout_down:
+                elif bearish_trend and touches_upper_bb:
+                    # In bearish trend, price touches upper BB: short mean reversion
                     position = -1
-                    bars_since_entry = 0
                     signals[i] = -position_size
     
     return signals
