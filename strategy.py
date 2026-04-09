@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 6h_1w_1d_camarilla_breakout_v1
-# Hypothesis: Breakout above/below 1d Camarilla pivot levels (H4/L4) on 6h chart with volume confirmation and volatility filter.
+# 12h_1d_camarilla_breakout_v1
+# Hypothesis: Breakout above/below 1d Camarilla pivot levels (H4/L4) on 12h chart with volume confirmation.
 # Long when price closes above H4 (bullish breakout), short when price closes below L4 (bearish breakout).
-# Exit when price returns to pivot point (mean reversion) or volatility filter fails.
-# Uses 1w trend filter: only take long trades when price > 1w EMA(40), only short trades when price < 1w EMA(40).
-# Target: 20-40 trades/year (80-160 total over 4 years) with strict entry conditions.
+# Exit when price returns to pivot point (mean reversion).
+# Uses volume filter: current volume > 1.2x 20-period average to avoid low-volume breakouts.
+# Target: 20-30 trades/year (80-120 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_camarilla_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,20 +23,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate ATR(14) for volatility filter
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1])
-        lc = abs(low[i] - close[i-1])
-        tr[i] = max(hl, hc, lc)
-    
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
     # Load 1d data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -56,26 +42,10 @@ def generate_signals(prices):
     # Pivot point = (high + low + close) / 3
     pp = (ph + pl + pc) / 3
     
-    # Align Camarilla levels to 6h timeframe (wait for previous day's close)
+    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA(40)
-    close_1w = df_1w['close'].values
-    ema_1w = np.zeros_like(close_1w, dtype=float)
-    ema_1w[0] = close_1w[0]
-    alpha = 2.0 / (40 + 1)
-    for i in range(1, len(close_1w)):
-        ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
-    
-    # Align 1w EMA to 6h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.zeros(n)
@@ -92,19 +62,12 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(atr[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility
-        vol_filter = atr[i] < 0.06 * close[i]  # ATR less than 6% of price
-        
-        # Volume confirmation: current volume > 1.25x 20-period average
-        vol_ok = volume[i] > vol_ma_20[i] * 1.25
-        
-        # Trend filter: price > 1w EMA for longs, price < 1w EMA for shorts
-        trend_long = close[i] > ema_1w_aligned[i]
-        trend_short = close[i] < ema_1w_aligned[i]
+        # Volume confirmation: current volume > 1.2x 20-period average
+        vol_ok = volume[i] > vol_ma_20[i] * 1.2
         
         if position == 1:  # Long position
             # Exit: price closes below pivot point (mean reversion)
@@ -122,12 +85,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above H4 with volume confirmation, volatility filter, and trend filter
-            if close[i] > h4_aligned[i] and vol_ok and vol_filter and trend_long:
+            # Enter long: price closes above H4 with volume confirmation
+            if close[i] > h4_aligned[i] and vol_ok:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below L4 with volume confirmation, volatility filter, and trend filter
-            elif close[i] < l4_aligned[i] and vol_ok and vol_filter and trend_short:
+            # Enter short: price closes below L4 with volume confirmation
+            elif close[i] < l4_aligned[i] and vol_ok:
                 position = -1
                 signals[i] = -0.25
     
