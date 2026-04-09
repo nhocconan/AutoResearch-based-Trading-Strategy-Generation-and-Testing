@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
-# Long when price breaks above 20-day high with weekly EMA21 uptrend and volume > 2x average
-# Short when price breaks below 20-day low with weekly EMA21 downtrend and volume > 2x average
-# Weekly EMA21 determines trend direction to avoid counter-trend trades
-# Position size 0.25 to limit drawdown, targeting ~15-25 trades/year for low fee drag
-# Designed to work in both bull (trend following) and bear (counter-trend reversals at extremes)
+# Hypothesis: 6h Ichimoku cloud breakout with daily trend filter
+# Uses Ichimoku conversion/base lines (9,26) and cloud (26,52) from 6h data
+# Daily EMA(50) from 1d timeframe filters trades: only long when price > daily EMA, short when price < daily EMA
+# Reduces false signals by aligning with higher timeframe trend
+# Target: 50-150 total trades over 4 years = 12-37/year
 
-name = "1d_1w_donchian_trend_v2"
-timeframe = "1d"
+name = "6h_1d_ichimoku_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,80 +23,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA21 for trend filter
-    close_1w = df_1w['close'].values
-    ema_21 = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 21:
-        ema_21[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_21[i] = (close_1w[i] * 2/22) + (ema_21[i-1] * 20/22)
+    # Daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align weekly EMA21 to daily timeframe
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
+    # Align daily EMA to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily Donchian channels (20-period)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    
+    # Ichimoku calculations (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = np.full(n, np.nan)
+    low_9 = np.full(n, np.nan)
     for i in range(n):
-        if i >= 19:
-            donch_high[i] = np.max(high[i-19:i+1])
-            donch_low[i] = np.min(low[i-19:i+1])
+        if i >= 8:
+            high_9[i] = np.max(high[i-8:i+1])
+            low_9[i] = np.min(low[i-8:i+1])
+    tenkan = (high_9 + low_9) / 2
     
-    # Volume confirmation: 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0.0
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = np.full(n, np.nan)
+    low_26 = np.full(n, np.nan)
     for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+        if i >= 25:
+            high_26[i] = np.max(high[i-25:i+1])
+            low_26[i] = np.min(low[i-25:i+1])
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Conversion + Base) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = np.full(n, np.nan)
+    low_52 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 51:
+            high_52[i] = np.max(high[i-51:i+1])
+            low_52[i] = np.min(low[i-51:i+1])
+    senkou_b = (high_52 + low_52) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(ema_21_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        
         if position == 1:  # Long position
-            # Exit: price closes below weekly EMA21 OR donch_low breaks (trend change)
-            if close[i] < ema_21_aligned[i] or close[i] < donch_low[i]:
+            # Exit: price closes below cloud OR below daily EMA
+            if close[i] < cloud_bottom or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly EMA21 OR donch_high breaks
-            if close[i] > ema_21_aligned[i] or close[i] > donch_high[i]:
+            # Exit: price closes above cloud OR above daily EMA
+            if close[i] > cloud_top or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above donch_high with weekly uptrend and volume confirmation
-            vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (close[i] > donch_high[i] and 
-                ema_21_aligned[i] > ema_21_aligned[i-1] and  # Weekly EMA rising
-                vol_ratio > 2.0):
+            # Enter long: price breaks above cloud AND above daily EMA
+            if close[i] > cloud_top and close[i] > ema_50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below donch_low with weekly downtrend and volume confirmation
-            elif (close[i] < donch_low[i] and 
-                  ema_21_aligned[i] < ema_21_aligned[i-1] and  # Weekly EMA falling
-                  vol_ratio > 2.0):
+            # Enter short: price breaks below cloud AND below daily EMA
+            elif close[i] < cloud_bottom and close[i] < ema_50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
