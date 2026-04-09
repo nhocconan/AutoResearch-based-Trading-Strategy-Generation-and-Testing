@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and ATR-based position sizing
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ATR stoploss
 # Donchian(20) on 1d provides major support/resistance levels that work in both bull and bear markets
-# Breakout above upper channel = long, breakdown below lower channel = short
-# Volume confirmation (current 4h volume > 1.5x 20-period average) filters false breakouts
-# ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
-# Position size scales with volatility (inverse ATR) to maintain consistent risk
+# Breakout continuation (price > 1d upper/lower channel) captures trends
+# Volume confirmation (current 4h volume > 1.5x 20-period average) filters false signals
+# ATR-based stoploss (2.0 * ATR) manages risk
+# Position size fixed at 0.25 to balance return and drawdown
 # Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
 
-name = "4h_1d_donchian_volume_atr_v2"
+name = "4h_1d_donchian_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,11 +34,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channel (20-period)
+    # Calculate 1d Donchian channels (20-period)
     upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ATR (14-period) for volatility filtering and position sizing
+    # Calculate 1d ATR (14-period) for stoploss
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -46,7 +46,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period has no previous close
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Donchian levels and ATR to 4h timeframe
+    # Align 1d indicators to 4h timeframe
     upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
     lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
@@ -68,51 +68,37 @@ def generate_signals(prices):
         # Volume confirmation: current 4h volume > 1.5x average 4h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Volatility filter: only trade when ATR is above its 50-period average (avoid low-vol chop)
-        atr_ma_50 = pd.Series(atr_aligned).rolling(window=50, min_periods=50).mean()
-        if len(atr_ma_50) > i:
-            vol_filter = atr_aligned[i] > atr_ma_50.iloc[i]
-        else:
-            vol_filter = True  # Not enough data for MA, allow trading
-            
-        if not vol_filter:
-            signals[i] = 0.0
-            continue
-        
-        # Dynamic position size: inverse volatility scaling (target ~0.25 at median ATR)
-        # Clamp ATR to reasonable range to avoid extreme position sizes
-        atr_clamped = np.clip(atr_aligned[i], 0.001, 0.10)  # Avoid division by zero or tiny ATR
-        base_size = 0.25
-        vol_scaling = 0.01 / atr_clamped  # Scale so 1% ATR gives ~0.25 size
-        vol_scaling = np.clip(vol_scaling, 0.5, 2.0)  # Clamp scaling to reasonable range
-        position_size = base_size * vol_scaling
-        position_size = np.clip(position_size, 0.15, 0.35)  # Final clamp to 0.15-0.35
-        
         if position == 1:  # Long position
-            # Exit on retracement to lower Donchian channel or stop at 2x ATR
-            if close[i] < lower_aligned[i]:
+            # Exit on stoploss (2.0 * ATR below entry) or retracement to lower channel
+            if close[i] < upper_aligned[i] - 2.0 * atr_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] < lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = position_size
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit on retracement to upper Donchian channel or stop at 2x ATR
-            if close[i] > upper_aligned[i]:
+            # Exit on stoploss (2.0 * ATR above entry) or retracement to upper channel
+            if close[i] > lower_aligned[i] + 2.0 * atr_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif close[i] > upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.25
         else:  # Flat
-            # Donchian breakout with volume and volatility confirmation
+            # Donchian breakout with volume confirmation
             if volume_confirmed:
-                # Breakout above upper channel = long
+                # Long breakout: price breaks above upper channel
                 if close[i] > upper_aligned[i]:
                     position = 1
-                    signals[i] = position_size
-                # Breakdown below lower channel = short
+                    signals[i] = 0.25
+                # Short breakout: price breaks below lower channel
                 elif close[i] < lower_aligned[i]:
                     position = -1
-                    signals[i] = -position_size
+                    signals[i] = -0.25
     
     return signals
