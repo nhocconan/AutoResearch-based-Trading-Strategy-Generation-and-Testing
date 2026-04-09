@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 12h_trix_volume_sr_1w
-# Hypothesis: TRIX (12) on weekly timeframe for momentum direction, combined with 12h price crossing 
-# dynamic support/resistance (EMA20) and volume confirmation. Designed to capture medium-term 
-# momentum shifts in both bull and bear markets with strict entry conditions to limit trades.
-# Target: 15-35 trades/year (60-140 total over 4 years) with low turnover.
+# 1d_ema_bull_bear_flip_v1
+# Hypothesis: Uses 1-day EMA trend with 21/55 crossover for trend detection, combined with
+# 1-week RSI for overbought/oversold conditions and volume confirmation. In bull markets
+# (price > EMA21), looks for RSI pullbacks to go long. In bear markets (price < EMA55),
+# looks for RSI bounces to go short. Designed to work in both bull and bear regimes by
+# adapting strategy based on longer-term trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_trix_volume_sr_1w"
-timeframe = "12h"
+name = "1d_ema_bull_bear_flip_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,58 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1. Weekly TRIX (12-period) for momentum direction
+    # 1. 1-day EMA21 and EMA55 for trend determination
+    close_series = pd.Series(close)
+    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).values
+    ema55 = close_series.ewm(span=55, adjust=False, min_periods=55).values
+    
+    # 2. 1-week RSI for overbought/oversold conditions
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 15:
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate TRIX: EMA(EMA(EMA(close, 12), 12), 12) then % change
-    close_1w = df_1w['close'].values
-    ema1 = np.zeros(len(close_1w))
-    ema2 = np.zeros(len(close_1w))
-    ema3 = np.zeros(len(close_1w))
+    # Calculate RSI on weekly data
+    rsi_period = 14
+    delta = pd.Series(df_1w['close']).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # First EMA
-    ema1[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        ema1[i] = (close_1w[i] * 2 / (12 + 1)) + (ema1[i-1] * (1 - 2 / (12 + 1)))
+    # Align weekly RSI to daily timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi_values)
     
-    # Second EMA
-    ema2[0] = ema1[0]
-    for i in range(1, len(close_1w)):
-        ema2[i] = (ema1[i] * 2 / (12 + 1)) + (ema2[i-1] * (1 - 2 / (12 + 1)))
-    
-    # Third EMA
-    ema3[0] = ema2[0]
-    for i in range(1, len(close_1w)):
-        ema3[i] = (ema2[i] * 2 / (12 + 1)) + (ema3[i-1] * (1 - 2 / (12 + 1)))
-    
-    # TRIX = % change of triple EMA
-    trix = np.zeros(len(close_1w))
-    for i in range(1, len(close_1w)):
-        if ema3[i-1] != 0:
-            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
-    
-    # Align TRIX to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
-    
-    # 2. Dynamic support/resistance: 20-period EMA on 1d
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema20_1d = np.zeros(len(close_1d))
-    
-    # Calculate EMA20
-    ema20_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        ema20_1d[i] = (close_1d[i] * 2 / (20 + 1)) + (ema20_1d[i-1] * (1 - 2 / (20 + 1)))
-    
-    # Align EMA20 to 12h timeframe
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # 3. Volume confirmation: 20-period average volume on 12h
+    # 3. Volume confirmation (20-day average)
     vol_ma_20 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
@@ -87,43 +59,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after EMA warmup
+    for i in range(55, n):  # Start after EMA55 warmup
         # Skip if any required data is invalid
-        if (np.isnan(trix_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema21[i]) or np.isnan(ema55[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-day average
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 1:  # Long position
-            # Exit: TRIX turns negative OR price closes below EMA20
-            if trix_aligned[i] < 0 or close[i] < ema20_1d_aligned[i]:
+            # Exit: price closes below EMA21 OR RSI becomes overbought (>70)
+            if close[i] < ema21[i] or rsi_aligned[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TRIX turns positive OR price closes above EMA20
-            if trix_aligned[i] > 0 or close[i] > ema20_1d_aligned[i]:
+            # Exit: price closes above EMA55 OR RSI becomes oversold (<30)
+            if close[i] > ema55[i] or rsi_aligned[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: TRIX positive AND price above EMA20 with volume confirmation
-            if (trix_aligned[i] > 0 and 
-                close[i] > ema20_1d_aligned[i] and 
-                vol_ok):
-                position = 1
-                signals[i] = 0.25
-            # Enter short: TRIX negative AND price below EMA20 with volume confirmation
-            elif (trix_aligned[i] < 0 and 
-                  close[i] < ema20_1d_aligned[i] and 
-                  vol_ok):
-                position = -1
-                signals[i] = -0.25
+            # Determine market regime based on EMA relationship
+            bull_market = ema21[i] > ema55[i]
+            bear_market = ema21[i] < ema55[i]
+            
+            # Enter long in bull market: price pulls back to EMA21 with RSI oversold
+            if bull_market and vol_ok:
+                if close[i] <= ema21[i] * 1.01 and rsi_aligned[i] < 35:
+                    position = 1
+                    signals[i] = 0.25
+            # Enter short in bear market: price bounces to EMA55 with RSI overbought
+            elif bear_market and vol_ok:
+                if close[i] >= ema55[i] * 0.99 and rsi_aligned[i] > 65:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
