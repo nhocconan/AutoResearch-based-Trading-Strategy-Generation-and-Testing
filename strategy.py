@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume spike confirmation.
-# Long: Price breaks above H4 pivot with volume > 2.2x 30-period average (tighter filter)
-# Short: Price breaks below L4 pivot with volume > 2.2x 30-period average (tighter filter)
+# 4h_daily_camarilla_pivot_volume_spike_v8
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume spike confirmation.
+# Long: Price breaks above H4 pivot with volume > 2.0x 20-period average and close > open (bullish candle)
+# Short: Price breaks below L4 pivot with volume > 2.0x 20-period average and close < open (bearish candle)
 # Exit: Price returns to H3/L3 levels
-# Uses 12h primary timeframe with 1d HTF for Camarilla pivot calculation.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation.
+# Target: 75-150 total trades over 4 years (19-38/year) to reduce fee drag.
+# Added bullish/bearish candle confirmation to reduce false breakouts and trade frequency.
 # Works in both bull and bear markets by capturing institutional breakouts with confirmation.
-# 12h timeframe reduces noise and trade frequency vs lower timeframes.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_spike_v8"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,10 +26,11 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_prices = prices['open'].values
     
-    # Calculate volume average for confirmation (30-period)
+    # Calculate volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=30, min_periods=30).mean().values
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -51,7 +52,7 @@ def generate_signals(prices):
     h4_1d = pivot_1d + (range_1d * 1.1 / 2)
     l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
@@ -60,16 +61,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(40, n):  # Start after warmup period for all indicators
+    for i in range(30, n):  # Start after warmup period for all indicators
         # Skip if any required data is NaN
         if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
             np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(open_prices[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.2x 30-period average (tighter filter)
-        volume_confirmed = volume[i] > 2.2 * volume_ma[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Bullish candle: close > open
+        bullish_candle = close[i] > open_prices[i]
+        # Bearish candle: close < open
+        bearish_candle = close[i] < open_prices[i]
         
         if position == 1:  # Long position
             # Exit: Price returns to H3 level
@@ -87,12 +93,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above H4 with volume confirmation
-            if close[i] > h4_1d_aligned[i] and volume_confirmed:
+            # Long entry: Price breaks above H4 with volume confirmation and bullish candle
+            if close[i] > h4_1d_aligned[i] and volume_confirmed and bullish_candle:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L4 with volume confirmation
-            elif close[i] < l4_1d_aligned[i] and volume_confirmed:
+            # Short entry: Price breaks below L4 with volume confirmation and bearish candle
+            elif close[i] < l4_1d_aligned[i] and volume_confirmed and bearish_candle:
                 position = -1
                 signals[i] = -0.25
     
