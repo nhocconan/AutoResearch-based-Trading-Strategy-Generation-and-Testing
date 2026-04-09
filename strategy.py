@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-# 6h_donchian_breakout_1w_pivot_volume_v1
-# Hypothesis: 6h Donchian(20) breakouts in direction of 1w Camarilla pivot bias (above/below pivot) with volume confirmation.
-# Works in bull/bear: 1w pivot defines regime (bull/bear/range), Donchian captures breakouts, volume filters false signals.
-# Target: 12-37 trades/year (~50-150 total over 4 years).
+# 12h_donchian_breakout_volume_atr_v1
+# Hypothesis: 12h Donchian(20) breakouts with volume confirmation and ATR-based trend filter.
+# Long when price breaks above 20-bar high with volume > 1.5x average and ATR(14) rising.
+# Short when price breaks below 20-bar low with volume > 1.5x average and ATR(14) rising.
+# Exits on opposite Donchian breakout or ATR mean reversion (ATR < ATR_ma).
+# Works in bull/bear: ATR filter ensures volatility expansion, volume confirms validity.
+# Target: 12-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_breakout_1w_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,56 +25,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for 1w Camarilla pivot calculation (using 1d to build 1w)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # 1w HTF data for ATR trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot points from prior week's OHLC
-    # We need to resample 1d to weekly manually since we only have daily data
-    # Build weekly OHLC from daily data
-    df_1d = df_1d.copy()
-    df_1d['open_time'] = pd.to_datetime(df_1d['open_time'])
-    df_1d.set_index('open_time', inplace=True)
-    # Resample to weekly: Friday end of week
-    df_weekly = df_1d.resample('W-FRI').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).dropna()
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    if len(df_weekly) < 1:
-        return np.zeros(n)
+    # 1w ATR(14)
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1w = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Calculate Camarilla levels for each weekly bar
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    # 1w ATR(14) moving average for trend filter
+    atr_ma_1w = pd.Series(atr_1w_aligned).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla formulas:
-    # Pivot = (High + Low + Close) / 3
-    # R4 = Close + ((High - Low) * 1.1 / 2)
-    # R3 = Close + ((High - Low) * 1.1 / 4)
-    # S3 = Close - ((High - Low) * 1.1 / 4)
-    # S4 = Close - ((High - Low) * 1.1 / 2)
-    pivot_weekly = (high_weekly + low_weekly + close_weekly) / 3.0
-    r4 = close_weekly + ((high_weekly - low_weekly) * 1.1 / 2.0)
-    r3 = close_weekly + ((high_weekly - low_weekly) * 1.1 / 4.0)
-    s3 = close_weekly - ((high_weekly - low_weekly) * 1.1 / 4.0)
-    s4 = close_weekly - ((high_weekly - low_weekly) * 1.1 / 2.0)
-    
-    # Align weekly Camarilla levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_weekly)
-    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
-    
-    # 6h Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 12h Donchian channels (20-period)
+    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -79,26 +55,24 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(atr_1w_aligned[i]) or np.isnan(atr_ma_1w[i]) or 
+            np.isnan(high_ma[i]) or np.isnan(low_ma[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below S3 (mean reversion) or breaks above R4 (take profit)
-            if close[i] < s3_aligned[i] or close[i] > r4_aligned[i]:
+            # Exit: price breaks below 12h Donchian low OR ATR mean reverts (ATR < ATR_ma)
+            if low[i] < low_ma[i] or atr_1w_aligned[i] < atr_ma_1w[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above R3 (mean reversion) or breaks below S4 (take profit)
-            if close[i] > r3_aligned[i] or close[i] < s4_aligned[i]:
+            # Exit: price breaks above 12h Donchian high OR ATR mean reverts (ATR < ATR_ma)
+            if high[i] > high_ma[i] or atr_1w_aligned[i] < atr_ma_1w[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -108,12 +82,12 @@ def generate_signals(prices):
             volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long breakout: price breaks above R4 with bullish bias (above weekly pivot)
-                if close[i] > highest_high[i] and close[i] > r4_aligned[i] and close[i] > pivot_aligned[i]:
+                # Long entry: price breaks above 12h Donchian high with rising ATR
+                if high[i] > high_ma[i] and atr_1w_aligned[i] > atr_ma_1w[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price breaks below S4 with bearish bias (below weekly pivot)
-                elif close[i] < lowest_low[i] and close[i] < s4_aligned[i] and close[i] < pivot_aligned[i]:
+                # Short entry: price breaks below 12h Donchian low with rising ATR
+                elif low[i] < low_ma[i] and atr_1w_aligned[i] > atr_ma_1w[i]:
                     position = -1
                     signals[i] = -0.25
     
