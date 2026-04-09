@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v9
-# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
-# Uses 1d HTF for signal direction (Camarilla H3/L3 levels + EMA50 trend), 4h only for execution.
-# Discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 20-50 trades/year.
-# Designed to work in both bull and bear markets via trend filter (EMA50) and volatility filter.
+# 1d_weekly_donchian_volume_regime_v1
+# Hypothesis: 1d timeframe strategy using weekly Donchian breakouts with volume confirmation and choppiness regime filter.
+# Long when price breaks above weekly Donchian high with volume > 1.5x average and chop < 61.8 (trending).
+# Short when price breaks below weekly Donchian low with volume > 1.5x average and chop < 61.8.
+# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 15-25 trades/year.
+# Designed to work in both bull and bear markets via regime filter (avoid ranging markets) and volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v9"
-timeframe = "4h"
+name = "1d_weekly_donchian_volume_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,47 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots and EMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly HTF data for Donchian channels and choppiness
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly Donchian channels (20-period)
+    highest_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # 1d ATR for volatility filter (ATR14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Align weekly Donchian levels to daily timeframe
+    highest_20_aligned = align_htf_to_ltf(prices, df_1w, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1w, lowest_20)
+    
+    # Weekly ATR for choppiness calculation (ATR14)
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    atr14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1d Camarilla pivot levels (based on previous day's range)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # Weekly true range sum for denominator (sum of TR over 14 periods)
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    range_1d = prev_high_1d - prev_low_1d
+    # Weekly choppiness index: CHOP = 100 * log10(TR_sum / (ATR * 14)) / log10(14)
+    # Avoid division by zero and log of zero
+    atr_times_14 = atr14_1w * 14
+    chop_ratio = np.where((tr_sum > 0) & (atr_times_14 > 0), tr_sum / atr_times_14, np.nan)
+    chop_1w = np.where((chop_ratio > 0) & ~np.isnan(chop_ratio), 100 * np.log10(chop_ratio) / np.log10(14), 50.0)
+    chop_1w = np.nan_to_num(chop_1w, nan=50.0)
     
-    # Camarilla levels: H3, L3 (strongest intraday support/resistance)
-    h3 = pivot_point + (range_1d * 1.1 / 4)
-    l3 = pivot_point - (range_1d * 1.1 / 4)
+    # Align weekly choppiness to daily timeframe
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -71,43 +69,37 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(atr14_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Volatility filter: avoid low volatility conditions that cause whipsaws
-        atr_ma = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=50).mean().values
-        if np.isnan(atr_ma[i]) or atr14_1d_aligned[i] < 0.4 * atr_ma[i]:
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
+            np.isnan(chop_1w_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below H3 OR trend turns bearish
-            if close[i] < h3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: price closes below weekly Donchian low OR chop > 61.8 (ranging market)
+            if close[i] < lowest_20_aligned[i] or chop_1w_aligned[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above L3 OR trend turns bullish
-            if close[i] > l3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: price closes above weekly Donchian high OR chop > 61.8 (ranging market)
+            if close[i] > highest_20_aligned[i] or chop_1w_aligned[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price breaks above H3 with bullish trend
-                if close[i] > h3_aligned[i] and close[i] > ema50_1d_aligned[i]:
+                # Long: price breaks above weekly Donchian high with trending market (chop < 61.8)
+                if close[i] > highest_20_aligned[i] and chop_1w_aligned[i] < 61.8:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below L3 with bearish trend
-                elif close[i] < l3_aligned[i] and close[i] < ema50_1d_aligned[i]:
+                # Short: price breaks below weekly Donchian low with trending market (chop < 61.8)
+                elif close[i] < lowest_20_aligned[i] and chop_1w_aligned[i] < 61.8:
                     position = -1
                     signals[i] = -0.25
     
