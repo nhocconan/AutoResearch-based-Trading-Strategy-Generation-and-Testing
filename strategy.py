@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_volume_v6
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and ATR filter.
+# 4h_1d_camarilla_pivot_v10
+# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation and ATR filter.
 # Enters long when price breaks above H3 level with volume spike and ATR > 0, short when breaks below L3 level.
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 50-150 trades over 4 years.
+# Uses discrete sizing (±0.30) to minimize fee churn. Target: 75-200 trades over 4 years.
 # Works in bull/bear by using Camarilla levels as dynamic support/resistance from higher timeframe.
 # ATR filter ensures volatility is sufficient for breakout validity, reducing false signals.
 # Added volume spike requirement to reduce false breakouts and lower trade frequency.
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_volume_v6"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_v10"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,17 +44,17 @@ def generate_signals(prices):
     h4 = pivot + (range_1d * 1.1 / 2)
     l4 = pivot - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe (completed 1d candle only)
+    # Align Camarilla levels to 4h timeframe (completed 1d candle only)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Volume spike detection (20-period volume average on 12h)
+    # Volume spike detection (20-period volume average on 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma_20 * 2.0)  # Volume at least 2x average
     
-    # ATR filter for volatility (14-period ATR on 12h)
+    # ATR filter for volatility (14-period ATR on 4h)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -80,7 +80,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit: price rises above H3 level
@@ -88,15 +88,15 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
             # Enter long: price breaks above H3 level with volume spike and ATR filter
             if (close[i] > h3_aligned[i]) and vol_spike[i] and atr_filter[i]:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Enter short: price breaks below L3 level with volume spike and ATR filter
             elif (close[i] < l3_aligned[i]) and vol_spike[i] and atr_filter[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
