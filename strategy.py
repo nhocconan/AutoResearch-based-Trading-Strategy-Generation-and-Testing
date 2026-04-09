@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume regime and choppiness filter
-# - Uses 12h Donchian(20) breakout from prior 20-bar structure
-# - Volume regime filter: 1d volume > 20-period median volume to ensure participation
-# - Choppiness regime: 1d Choppiness Index > 61.8 (range) enables mean reversion at Donchian levels
-# - In trending markets (CHOP < 38.2), only trade breakouts in direction of 1d EMA21 trend
+# Hypothesis: 4h Donchian(20) breakout with 1d volume regime and ADX trend filter
+# - Uses 4h Donchian breakout from prior 20-bar structure for entries
+# - Volume regime: 1d volume > 20-period median volume to ensure institutional participation
+# - ADX trend filter: ADX(14) > 25 on 1d timeframe to confirm trending market
+# - In trending markets (ADX > 25), only trade breakouts in direction of 1d EMA50 trend
+# - In ranging markets (ADX <= 25), trade breakouts in either direction (mean reversion at extremes)
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Donchian captures structure, regime filter adapts to market state
+# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - Works in bull/bear: Donchian captures breakouts, ADX filter avoids whipsaws in ranging markets
 
-name = "12h_1d_donchian_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_vol_adx_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +24,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Pre-compute 1d indicators
@@ -32,47 +33,62 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR for true range (needed for CHOP)
+    # Calculate 1d True Range for ADX
     tr1_1d = high_1d - low_1d
     tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
     tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
     tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    tr_1d[0] = tr_1d[0]  # First value
     
-    # 1d Choppiness Index (CHOP) - measures trend vs range
-    # CHOP = 100 * log10(sum(atr14) / (n * (max(high)n - min(low)n))) / log10(n)
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = 14 * (max_high_14 - min_low_14)
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)  # avoid div by zero
-    chop_raw = 100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14)
-    chop_1d = np.where(np.isnan(chop_raw), 50.0, chop_raw)  # neutral when undefined
+    # Calculate 1d ADX components
+    plus_dm_1d = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                          np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm_1d = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                           np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     
-    # Choppiness regimes: >61.8 = range, <38.2 = trend
-    chop_range = chop_1d > 61.8
-    chop_trend = chop_1d < 38.2
+    # Handle first values
+    plus_dm_1d[0] = 0
+    minus_dm_1d[0] = 0
     
-    # 1d volume regime: volume > 20-period median volume (avoid low participation)
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(values[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    atr_1d = wilders_smoothing(tr_1d, 14)
+    plus_di_1d = 100 * wilders_smoothing(plus_dm_1d, 14) / atr_1d
+    minus_di_1d = 100 * wilders_smoothing(minus_dm_1d, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilders_smoothing(dx_1d, 14)
+    
+    # Handle division by zero and invalid values
+    adx_1d = np.where(np.isnan(adx_1d) | (plus_di_1d + minus_di_1d == 0), 0, adx_1d)
+    
+    # 1d EMA50 for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # 1d volume regime: volume > 20-period median volume
     median_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).median().values
     volume_regime = volume_1d > median_volume_20
     
-    # 1d EMA21 for trend direction in trending regimes
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align all 1d indicators to 12h timeframe (completed 1d bar only)
-    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
-    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend)
+    # Align all 1d indicators to 4h timeframe (completed 1d bar only)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
-    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    # 12h price data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -83,26 +99,25 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or
-            np.isnan(chop_range_aligned[i]) or
-            np.isnan(chop_trend_aligned[i]) or
-            np.isnan(volume_regime_aligned[i]) or
-            np.isnan(ema_21_aligned[i])):
+            np.isnan(adx_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or
+            np.isnan(volume_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price closes below Donchian lower band OR 
-            #         in trend regime, price closes below EMA21
-            if chop_range_aligned[i]:
-                # In range: exit at opposite Donchian level
-                if close[i] <= lowest_low[i]:
+            #         in trending market (ADX > 25), price closes below EMA50
+            if adx_aligned[i] > 25:
+                # In trending market: exit if trend reverses
+                if close[i] < ema_50_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:
-                # In trend: exit if trend reverses
-                if close[i] < ema_21_aligned[i]:
+                # In ranging market: exit at opposite Donchian level
+                if close[i] <= lowest_low[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -110,17 +125,17 @@ def generate_signals(prices):
                     
         elif position == -1:  # Short position
             # Exit: price closes above Donchian upper band OR
-            #         in trend regime, price closes above EMA21
-            if chop_range_aligned[i]:
-                # In range: exit at opposite Donchian level
-                if close[i] >= highest_high[i]:
+            #         in trending market (ADX > 25), price closes above EMA50
+            if adx_aligned[i] > 25:
+                # In trending market: exit if trend reverses
+                if close[i] > ema_50_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
             else:
-                # In trend: exit if trend reverses
-                if close[i] > ema_21_aligned[i]:
+                # In ranging market: exit at opposite Donchian level
+                if close[i] >= highest_high[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -129,16 +144,24 @@ def generate_signals(prices):
             # Look for Donchian breakout with volume confirmation
             # Long: price breaks above Donchian upper band AND volume regime
             if high[i] >= highest_high[i] and volume_regime_aligned[i]:
-                # In chop regime (>61.8): only long if also in range (mean reversion setup)
-                # In trend regime (<38.2): only long if price above EMA21 (trend continuation)
-                if chop_range_aligned[i] or close[i] > ema_21_aligned[i]:
+                # In trending market (ADX > 25): only long if price above EMA50 (trend continuation)
+                # In ranging market (ADX <= 25): long if breakout occurs (mean reversion at extreme)
+                if adx_aligned[i] > 25:
+                    if close[i] > ema_50_aligned[i]:
+                        position = 1
+                        signals[i] = 0.25
+                else:
                     position = 1
                     signals[i] = 0.25
             # Short: price breaks below Donchian lower band AND volume regime
             elif low[i] <= lowest_low[i] and volume_regime_aligned[i]:
-                # In chop regime (>61.8): only short if also in range (mean reversion setup)
-                # In trend regime (<38.2): only short if price below EMA21 (trend continuation)
-                if chop_range_aligned[i] or close[i] < ema_21_aligned[i]:
+                # In trending market (ADX > 25): only short if price below EMA50 (trend continuation)
+                # In ranging market (ADX <= 25): short if breakout occurs (mean reversion at extreme)
+                if adx_aligned[i] > 25:
+                    if close[i] < ema_50_aligned[i]:
+                        position = -1
+                        signals[i] = -0.25
+                else:
                     position = -1
                     signals[i] = -0.25
     
