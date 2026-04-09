@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_volume_chop_regime_v1
-# Hypothesis: 12h strategy using Donchian(20) breakouts for entry, volume confirmation (>1.5x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
+# 4h_donchian_breakout_volume_chop_regime_v2
+# Hypothesis: 4h strategy using Donchian(20) breakouts with volume confirmation (>1.5x 20-bar avg volume) and chop regime filter (CHOP<61.8 = trending). Uses 12h HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year (75-200 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_chop_regime_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_chop_regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,12 +46,12 @@ def generate_signals(prices):
     denominator = np.where(denominator == 0, np.nan, denominator)
     chop = 100 * np.log10(atr_sum / denominator)
     
-    # Multi-timeframe: 1d EMA(50) trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Multi-timeframe: 12h EMA(50) trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    close_12h_s = pd.Series(close_12h)
+    ema_50_12h = close_12h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -61,7 +61,7 @@ def generate_signals(prices):
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
             np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -69,9 +69,9 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 1d EMA(50)
-        htf_uptrend = close[i] > ema_50_1d_aligned[i]
-        htf_downtrend = close[i] < ema_50_1d_aligned[i]
+        # HTF trend filter: price above/below 12h EMA(50)
+        htf_uptrend = close[i] > ema_50_12h_aligned[i]
+        htf_downtrend = close[i] < ema_50_12h_aligned[i]
         
         if position == 1:  # Long position
             # Exit: price closes below Donchian low (20)
