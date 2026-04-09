@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Hypothesis: 4-hour breakouts at daily Camarilla pivot levels (H3/L3) with volume confirmation (>1.5x 20-bar average volume).
-# Daily Camarilla levels act as strong support/resistance; breaks signal momentum continuation.
-# Designed for 4h timeframe to capture medium-term moves with lower trade frequency (target: 20-50/year) and avoid fee drag.
+# 1d_1w_camarilla_breakout_v1
+# Hypothesis: Daily breakouts at weekly Camarilla pivot levels (H3/L3) with volume confirmation (>1.5x 20-bar average volume).
+# Weekly Camarilla levels act as strong support/resistance; breaks signal momentum continuation.
+# Designed for daily timeframe to capture long-term moves with low trade frequency (target: 10-30/year) and avoid fee drag.
 # Works in bull markets (upward breaks above resistance) and bear markets (downward breaks below support).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,23 +23,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily close for Camarilla levels
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate weekly close for Camarilla levels
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
     # Camarilla levels: H3/L3 = C ± (H-L)*1.1/2
-    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 2
-    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 2
+    camarilla_h3 = weekly_close + (weekly_high - weekly_low) * 1.1 / 2
+    camarilla_l3 = weekly_close - (weekly_high - weekly_low) * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Camarilla levels to daily timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
