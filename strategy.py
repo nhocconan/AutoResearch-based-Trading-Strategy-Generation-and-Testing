@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 12h_hma_camarilla_volume_v1
-# Hypothesis: 12h Hull Moving Average (HMA) crossover with 1d Camarilla H3/L3 filter and volume confirmation.
-# Uses 12h timeframe to minimize trade frequency and fee drag while capturing medium-term trends.
-# HMA provides smooth trend signals with reduced lag, Camarilla H3/L3 acts as strong bias filter from daily pivot structure,
-# volume spike confirms institutional participation. Target: 12-37 trades/year (50-150 over 4 years).
-# Works in bull/bear markets: HMA captures trends with less whipsaw, Camarilla filter avoids counter-trend fakes during ranging.
+# 4h_donchian_12h_volume_chop_v1
+# Hypothesis: 4h Donchian channel breakout with 12h trend filter, volume confirmation, and choppiness regime filter.
+# Donchian(20) provides clear breakout levels, 12h HMA(50) filters trend direction (only trade with 12h trend),
+# volume spike confirms institutional participation, choppiness index avoids whipsaw in ranging markets.
+# Designed for 20-50 trades/year (80-200 over 4 years) to minimize fee drag.
+# Works in bull/bear markets: trend filter avoids counter-trend trades, volume confirms validity, chop filter avoids ranging whipsaw.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_hma_camarilla_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_12h_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(series, period):
@@ -31,9 +31,32 @@ def calculate_hma(series, period):
     hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
     return hma
 
+def calculate_choppiness(high, low, close, period):
+    """Calculate Choppiness Index"""
+    if len(close) < period:
+        return np.full_like(close, np.nan, dtype=float)
+    
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Sum of True Range over period
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    
+    # Highest high and lowest low over period
+    hh = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    ll = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    # Choppiness Index formula
+    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(period)
+    return chop
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,38 +64,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HMA calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 55:  # Need enough for HMA(55)
+    # Get 4h data for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:  # Need enough for Donchian(20)
         return np.zeros(n)
     
-    # Calculate 12h HMA(55) for trend
-    close_12h = df_12h['close'].values
-    hma_12h = calculate_hma(close_12h, 55)
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Align 12h HMA to 12h timeframe (completed 12h candle only)
+    upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 4h timeframe (completed 4h candle only)
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    
+    # Get 12h HTF data ONCE before loop for HMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:  # Need enough for HMA(50)
+        return np.zeros(n)
+    
+    # Calculate 12h HMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    hma_12h = calculate_hma(close_12h, 50)
+    
+    # Align 12h HMA to 4h timeframe (completed 12h candle only)
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Get 1d HTF data ONCE before loop for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivot levels for daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla H3/L3 levels (stronger bias filter than H4/L4)
-    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    
-    # Align Camarilla levels to 12h timeframe (completed daily candle only)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # Calculate choppiness index on 4h data
+    chop = calculate_choppiness(high, low, close, 14)
     
     # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -81,35 +102,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(hma_12h_aligned[i]) or np.isnan(h3_1d_aligned[i]) or 
-            np.isnan(l3_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(hma_12h_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 12h HMA
-            if close[i] < hma_12h_aligned[i]:
+            # Exit: price closes below 4h Donchian lower band OR chop > 61.8 (ranging market)
+            if close[i] < lower_4h_aligned[i] or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 12h HMA
-            if close[i] > hma_12h_aligned[i]:
+            # Exit: price closes above 4h Donchian upper band OR chop > 61.8 (ranging market)
+            if close[i] > upper_4h_aligned[i] or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 12h HMA, above 1d H3, with volume spike
-            if (close[i] > hma_12h_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
+            # Enter long: price closes above 4h Donchian upper band, above 12h HMA (uptrend), with volume spike, chop < 61.8
+            if (close[i] > upper_4h_aligned[i]) and (close[i] > hma_12h_aligned[i]) and vol_spike[i] and (chop[i] < 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 12h HMA, below 1d L3, with volume spike
-            elif (close[i] < hma_12h_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
+            # Enter short: price closes below 4h Donchian lower band, below 12h HMA (downtrend), with volume spike, chop < 61.8
+            elif (close[i] < lower_4h_aligned[i]) and (close[i] < hma_12h_aligned[i]) and vol_spike[i] and (chop[i] < 61.8):
                 position = -1
                 signals[i] = -0.25
     
