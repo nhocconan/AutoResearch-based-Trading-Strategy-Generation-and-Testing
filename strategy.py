@@ -1,16 +1,15 @@
-#!/usr/bin/env python3
-# 12h_rsi_volume_trend_v1
-# Hypothesis: On 12h timeframe, RSI extreme levels with volume confirmation and 1d trend filter capture mean reversion in both bull and bear markets.
-# Uses RSI(14) < 30 for long and > 70 for short with volume > 1.5x 20-period average.
-# 1d EMA50 trend filter ensures alignment with higher timeframe trend.
-# Target: 15-25 trades/year (60-100 over 4 years) with controlled risk.
+# 4h_donchian_20_volume_regime_v1
+# Hypothesis: Breakouts of 20-period Donchian channels on 4h timeframe, 
+# filtered by volume spikes and regime filter (ADX > 25 for trending, < 20 for ranging)
+# work in both bull and bear markets due to volatility expansion during trends.
+# Target: 20-30 trades/year (80-120 over 4 years) with controlled risk.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_rsi_volume_trend_v1"
-timeframe = "12h"
+name = "4h_donchian_20_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,57 +22,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI (14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma_20 * 1.5
     
-    # 1d trend filter: EMA50 on daily data
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # ADX (14-period) for regime filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0  # First value has no previous close
+    
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_ma)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 (mean reversion complete) or daily trend turns bearish
-            if rsi[i] > 50 or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price breaks below lower Donchian or ADX drops below 20 (trend weakening)
+            if close[i] < lower_channel[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 (mean reversion complete) or daily trend turns bullish
-            if rsi[i] < 50 or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price breaks above upper Donchian or ADX drops below 20
+            if close[i] > upper_channel[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: RSI < 30 (oversold) with volume confirmation and daily uptrend
-            if rsi[i] < 30 and volume[i] > vol_threshold[i] and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: price breaks above upper Donchian with volume confirmation and trending regime (ADX > 25)
+            if close[i] > upper_channel[i] and volume[i] > vol_threshold[i] and adx[i] > 25:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: RSI > 70 (overbought) with volume confirmation and daily downtrend
-            elif rsi[i] > 70 and volume[i] > vol_threshold[i] and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: price breaks below lower Donchian with volume confirmation and trending regime
+            elif close[i] < lower_channel[i] and volume[i] > vol_threshold[i] and adx[i] > 25:
                 position = -1
                 signals[i] = -0.25
     
