@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and chop regime filter
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries
+# Hypothesis: 4h Donchian(20) breakout with 12h HMA trend filter and volume confirmation
+# - Uses 4h Donchian channels (20-period) for breakout signals
+# - Uses 12h HMA(21) for trend direction filter (only trade in trend direction)
 # - Requires volume > 1.5x 20-period average for confirmation
-# - Uses 4h choppiness index (CHOP > 61.8 = ranging, CHOP < 38.2 = trending) as regime filter
-# - Only takes breakout trades in trending regime (CHOP < 38.2)
-# - ATR-based stoploss and trailing exit via signal=0 when price reverses
-# - Designed for 4h timeframe to balance trade frequency and edge capture
-# - Target: 20-40 trades/year to avoid fee drag while capturing meaningful moves
+# - Exits on opposite Donchian channel touch or trend reversal
+# - Position size: 0.25 (25% of capital) to balance risk and return
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to avoid fee drag
+# - Works in bull markets (breakouts continue trend) and bear markets (breakouts reverse trends)
 
-name = "4h_1d_camarilla_breakout_volume_chop_v1"
+name = "4h_12h_donchian_hma_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,96 +22,126 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Pre-compute chop regime filter on 4h
+    # Pre-compute session filter (08-20 UTC) - optional for 4h
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 4h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # True Range and ATR for chop calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Upper channel: highest high of last 20 periods
+    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low of last 20 periods
+    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Choppiness Index: CHOP = 100 * log10(sum(atr14) / (n * log10(highest_high - lowest_low)))
-    # Simplified: CHOP = 100 * log10(sum(atr14 over period) / (log10(HHLL) * period))
-    sum_atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    hhll = highest_high - lowest_low
-    # Avoid division by zero and log of zero/negative
-    valid = (hhll > 0) & (sum_atr14 > 0)
-    chop = np.full(n, 50.0)  # default to neutral
-    chop[valid] = 100 * np.log10(sum_atr14[valid] / (np.log10(hhll[valid]) * 14))
-    # Regime: CHOP < 38.2 = trending (favor breakouts), CHOP > 61.8 = ranging (avoid)
-    trending_regime = chop < 38.2
+    # 12h HMA(21) for trend direction
+    close_12h = df_12h['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    n_hma = 21
+    n_half = n_hma // 2
+    n_sqrt = int(np.sqrt(n_hma))
+    
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
+    
+    # Calculate HMA manually to avoid look-ahead
+    hma_12h = np.full_like(close_12h, np.nan, dtype=float)
+    for i in range(n_hma, len(close_12h)):
+        # WMA of last n_half prices
+        half_slice = close_12h[i - n_half + 1:i + 1]
+        if len(half_slice) == n_half:
+            wma_half = wma(half_slice, n_half)
+            # WMA of last n_hma prices
+            full_slice = close_12h[i - n_hma + 1:i + 1]
+            if len(full_slice) == n_hma:
+                wma_full = wma(full_slice, n_hma)
+                # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+                raw_hma = 2 * wma_half - wma_full
+                if len(raw_hma) >= n_sqrt:
+                    # WMA of the raw HMA with sqrt(n) period
+                    hma_slice = np.full(n_sqrt, np.nan)
+                    hma_slice[-1] = raw_hma
+                    # Need to calculate WMA properly for the last n_sqrt values
+                    # Simpler approach: use pandas for WMA calculation
+                    hma_12h[i] = pd.Series(raw_hma[-n_sqrt:]).rolling(window=n_sqrt, min_periods=n_sqrt).mean().iloc[-1] if len(raw_hma) >= n_sqrt else np.nan
+    
+    # Simpler HMA calculation using pandas (equivalent)
+    # HMA(21) = WMA(2*WMA(10.5) - WMA(21)), round(sqrt(21))=4
+    # Since we can't have half periods, use integer approximation
+    half_period = 10
+    full_period = 21
+    sqrt_period = 4
+    
+    wma_half = pd.Series(close_12h).rolling(window=half_period, min_periods=half_period).apply(
+        lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.arange(1, len(x)+1).sum(), raw=False
+    ).values
+    wma_full = pd.Series(close_12h).rolling(window=full_period, min_periods=full_period).apply(
+        lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.arange(1, len(x)+1).sum(), raw=False
+    ).values
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma_12h = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean().values
+    
+    # Align 12h HMA to 4h
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # Volume confirmation: volume > 1.5x 20-period average
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma20)
-    
-    # 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Typical price for Camarilla calculation
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: H3, H4, L3, L4
-    # H3 = close + (high - low) * 1.1/4
-    # L3 = close - (high - low) * 1.1/4
-    camarilla_h3 = close_1d + (range_1d * 1.1 / 4)
-    camarilla_l3 = close_1d - (range_1d * 1.1 / 4)
-    
-    # Align 1d Camarilla levels to 4h
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_ma20[i]) or vol_ma20[i] <= 0 or
-            np.isnan(trending_regime[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(hma_12h_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend direction from 12h HMA
+        # HMA rising = uptrend, HMA falling = downtrend
+        if i > 20 and not np.isnan(hma_12h_aligned[i-1]):
+            hma_rising = hma_12h_aligned[i] > hma_12h_aligned[i-1]
+            hma_falling = hma_12h_aligned[i] < hma_12h_aligned[i-1]
+        else:
+            hma_rising = False
+            hma_falling = False
+        
         if position == 1:  # Long position
-            # Exit conditions: price breaks below L3 or regime changes to ranging
-            if close[i] < l3_aligned[i] or not trending_regime[i]:
+            # Exit conditions: touch lower channel or trend turns down
+            if close[i] <= lower_channel[i] or not hma_rising:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price breaks above H3 or regime changes to ranging
-            if close[i] > h3_aligned[i] or not trending_regime[i]:
+            # Exit conditions: touch upper channel or trend turns up
+            if close[i] >= upper_channel[i] or not hma_falling:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for breakout entries in trending regime with volume confirmation
-            if (close[i] > h3_aligned[i] and 
-                trending_regime[i] and 
-                volume_confirm[i]):
+            # Look for breakout entries aligned with 12h trend
+            if (close[i] > upper_channel[i] and  # Break above upper channel
+                volume_ok[i] and                 # Volume confirmation
+                hma_rising):                     # 12h trend up
                 position = 1
                 signals[i] = 0.25
-            elif (close[i] < l3_aligned[i] and 
-                  trending_regime[i] and 
-                  volume_confirm[i]):
+            elif (close[i] < lower_channel[i] and  # Break below lower channel
+                  volume_ok[i] and                 # Volume confirmation
+                  hma_falling):                    # 12h trend down
                 position = -1
                 signals[i] = -0.25
     
