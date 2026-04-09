@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume and volatility regime filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR-based volatility filter
 # - Uses 4h Donchian channel (20-period high/low) derived from 1d data for breakout signals
-# - Confirms with 1d volume > 1.8x its 20-period average (strong institutional participation)
-# - Confirms with 1d ATR(14) > 1.3x its 50-period average (high volatility regime)
-# - Uses ATR(14) trailing stop: exits when price retraces 2.5x ATR from extreme
+# - Confirms with 1d volume > 2.0x its 20-period average (strong institutional participation, stricter)
+# - Confirms with 1d ATR(14) > 1.5x its 50-period average (high volatility regime, stricter)
+# - Uses ATR(14) trailing stop: exits when price retraces 3.0x ATR from extreme (wider stop to reduce whipsaw)
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to minimize fee drag
+# - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to minimize fee drag
 # - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
 # - Donchian channels adapt to volatility and provide objective breakout levels
+# - Stricter filters reduce trade frequency while maintaining edge
 
-name = "4h_1d_donchian_atr_volume_v2"
+name = "4h_1d_donchian_atr_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -46,9 +47,9 @@ def generate_signals(prices):
     # 1d ATR(50) average for volatility regime filter
     atr_50_avg = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
     
-    # 1d Volume > 1.8x 20-period average (stricter for fewer trades)
+    # 1d Volume > 2.0x 20-period average (stricter for fewer trades)
     avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (1.8 * avg_volume_20)
+    volume_spike_1d = volume_1d > (2.0 * avg_volume_20)
     
     # Align 1d indicators to 4h
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
@@ -79,8 +80,8 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.5x ATR from high (wider stop)
-            if low[i] <= highest_since_entry - (2.5 * atr_1d_aligned[i]):
+            # Exit conditions: price retraces 3.0x ATR from high (wider stop)
+            if low[i] <= highest_since_entry - (3.0 * atr_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,8 +92,8 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.5x ATR from low (wider stop)
-            if high[i] >= lowest_since_entry + (2.5 * atr_1d_aligned[i]):
+            # Exit conditions: price retraces 3.0x ATR from low (wider stop)
+            if high[i] >= lowest_since_entry + (3.0 * atr_1d_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -119,8 +120,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 continue
             
-            # Volatility regime filter: only trade when current ATR > 1.3x its 50-day average (stricter)
-            volatility_filter = atr_1d_aligned[i] > (1.3 * atr_50_avg_aligned[i])
+            # Volatility regime filter: only trade when current ATR > 1.5x its 50-day average (stricter)
+            volatility_filter = atr_1d_aligned[i] > (1.5 * atr_50_avg_aligned[i])
             
             # Look for Donchian breakout with volume and volatility confirmation
             if (high[i] >= donchian_high_aligned[i] and    # Break above upper band
