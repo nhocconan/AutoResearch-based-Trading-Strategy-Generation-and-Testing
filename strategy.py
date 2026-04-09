@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian channel breakout with volume confirmation and ATR filter
-# Donchian(20) on 1d acts as major support/resistance that works in both bull and bear markets
-# Breakout above upper band = long, breakdown below lower band = short
-# Volume confirmation (current 12h volume > 1.5x 20-period average) filters false signals
-# ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
+# Hypothesis: 6h strategy using 12h Donchian channel breakout with 1d ADX trend filter and volume confirmation
+# Donchian(20) breakouts capture strong momentum moves in both bull and bear markets
+# 1d ADX > 25 ensures we only trade in trending regimes, avoiding choppy losses
+# Volume confirmation (current 6h volume > 1.5x 20-period average) filters false breakouts
 # Fixed position size 0.25 to balance return and drawdown
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "12h_1d_donchian_volume_atr_v3"
-timeframe = "12h"
+name = "6h_12h_1d_donchian_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,36 +25,57 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Load 1d data ONCE before loop
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_12h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channel (20-period)
+    highest_20_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_20_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ATR (14-period) for volatility filtering
+    # Calculate 1d ADX (14-period) for trend strength
+    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr1[0]
     
-    # Align all HTF data to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Smoothed TR, +DM, -DM
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
+    
+    # DX and ADX
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
+    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align all HTF data to 6h timeframe
+    highest_20_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_20_12h)
+    lowest_20_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_20_12h)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute session filter (08-20 UTC)
+    # Pre-compute session filter (08-20 UTC) - optional but helpful
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -64,62 +84,48 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or not in_session[i] or
-            atr_1d_aligned[i] <= 0):
+        if (np.isnan(highest_20_12h_aligned[i]) or np.isnan(lowest_20_12h_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 12h volume
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Volatility filter: only trade when 1d ATR is above its 50-period average
-        atr_ma_50_1d = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).mean()
-        if len(atr_ma_50_1d) > i:
-            vol_filter = atr_1d_aligned[i] > atr_ma_50_1d.iloc[i]
-        else:
-            vol_filter = True  # Not enough data for MA, allow trading
-            
-        if not vol_filter:
+        # Trend filter: only trade when 1d ADX > 25 (trending market)
+        trend_filter = adx_1d_aligned[i] > 25
+        
+        if not (volume_confirmed and trend_filter):
             signals[i] = 0.0
             continue
         
-        # Fixed position size to minimize fee churn
+        # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit on retracement to middle of channel or stop at lower band breakdown
-            middle = (upper_20_aligned[i] + lower_20_aligned[i]) / 2.0
-            if close[i] < middle:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] < lower_20_aligned[i]:  # Stop loss at lower band breakdown
+            # Exit on retracement to midpoint of Donchian channel
+            midpoint = (highest_20_12h_aligned[i] + lowest_20_12h_aligned[i]) / 2
+            if close[i] < midpoint:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit on retracement to middle of channel or stop at upper band breakout
-            middle = (upper_20_aligned[i] + lower_20_aligned[i]) / 2.0
-            if close[i] > middle:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] > upper_20_aligned[i]:  # Stop loss at upper band breakout
+            # Exit on retracement to midpoint of Donchian channel
+            midpoint = (highest_20_12h_aligned[i] + lowest_20_12h_aligned[i]) / 2
+            if close[i] > midpoint:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
         else:  # Flat
-            # Donchian breakout trading with volume and volatility confirmation
-            if volume_confirmed:
-                # Breakout above upper band (buy break above resistance)
-                if close[i] > upper_20_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Breakdown below lower band (sell break below support)
-                elif close[i] < lower_20_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
+            # Donchian breakout with volume and trend confirmation
+            if close[i] > highest_20_12h_aligned[i]:  # Break above upper band -> long
+                position = 1
+                signals[i] = position_size
+            elif close[i] < lowest_20_12h_aligned[i]:  # Break below lower band -> short
+                position = -1
+                signals[i] = -position_size
     
     return signals
