@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-# 6h_market_regime_pivot_volume_v1
-# Hypothesis: 6h strategy combining market regime detection (via ADX) with daily pivot levels and volume confirmation.
-# In trending regimes (ADX > 25): trade breakouts of R1/S1 in trend direction.
-# In ranging regimes (ADX <= 25): fade extreme levels (R3/S3) with volume exhaustion signals.
-# Uses 1d EMA50 for additional trend filter to avoid weak trends.
-# Volume confirmation ensures participation. Target: 12-37 trades/year (50-150 total over 4 years).
+# 12h_camarilla_pivot_volume_regime_v1
+# Hypothesis: 12h strategy using Camarilla pivot levels from 1d timeframe with volume confirmation and chop regime filter.
+# Long: Price touches S3 support, volume > 1.5x 20-period average, CHOP > 61.8 (ranging market).
+# Short: Price touches R3 resistance, volume > 1.5x 20-period average, CHOP > 61.8 (ranging market).
+# Exit: Opposite pivot touch or CHOP < 38.2 (trending market).
+# Uses 1d Camarilla levels for higher timeframe structure and 1d CHOP for regime detection.
+# Volume confirmation filters weak breakouts. CHOP filter ensures mean-reversion logic only in ranging markets.
+# Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_market_regime_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,142 +26,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA50 for trend filter (6h)
-    close_s = pd.Series(close)
-    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Volume average for confirmation (20-period)
+    # Calculate 1d Camarilla pivot levels
+    # Camarilla: Based on previous day's OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Typical price for pivot calculation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels (based on previous day)
+    # S3 = close - (high - low) * 1.1/4
+    # S2 = close - (high - low) * 1.1/6
+    # S1 = close - (high - low) * 1.1/12
+    # R1 = close + (high - low) * 1.1/12
+    # R2 = close + (high - low) * 1.1/6
+    # R3 = close + (high - low) * 1.1/4
+    s3_1d = close_1d - (range_1d * 1.1 / 4)
+    s2_1d = close_1d - (range_1d * 1.1 / 6)
+    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    r1_1d = close_1d + (range_1d * 1.1 / 12)
+    r2_1d = close_1d + (range_1d * 1.1 / 6)
+    r3_1d = close_1d + (range_1d * 1.1 / 4)
+    
+    # Align 1d Camarilla levels to 12h timeframe (completed 1d bar only)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    
+    # Calculate 1d Choppiness Index (CHOP) for regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(n) * (highest_high - lowest_low))
+    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    atr_period = 14
+    high_low_1d = np.maximum(high_1d, np.concatenate([[high_1d[0]], high_1d[:-1]])) - np.minimum(low_1d, np.concatenate([[low_1d[0]], low_1d[:-1]]))
+    high_low_1d = np.maximum(high_1d - low_1d, high_low_1d)
+    atr_1d = pd.Series(high_low_1d).rolling(window=atr_period, min_periods=atr_period).mean().values
+    highest_high_1d = pd.Series(high_1d).rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=atr_period, min_periods=atr_period).min().values
+    
+    # Avoid division by zero
+    true_range_sum = atr_1d * atr_period
+    price_range = highest_high_1d - lowest_low_1d
+    chop_1d = np.where(price_range > 0, 100 * np.log10(true_range_sum / price_range) / np.log10(atr_period), 50)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Volume average for confirmation (20-period on 12h)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # ADX for regime detection (14-period)
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    # Smoothed values
-    tr_s = pd.Series(tr)
-    atr = tr_s.ewm(span=14, min_periods=14, adjust=False).mean().values
-    dm_plus_s = pd.Series(dm_plus)
-    dm_minus_s = pd.Series(dm_minus)
-    di_plus = 100 * dm_plus_s.ewm(span=14, min_periods=14, adjust=False).mean().values / atr
-    di_minus = 100 * dm_minus_s.ewm(span=14, min_periods=14, adjust=False).mean().values / atr
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx_s = pd.Series(dx)
-    adx = dx_s.ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # Get daily data for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
-        return np.zeros(n)
-    
-    # Calculate daily pivot points (standard formula)
-    # Using previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    pp = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pp - prev_low
-    s1 = 2 * pp - prev_high
-    r2 = pp + (prev_high - prev_low)
-    s2 = pp - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pp - prev_low)
-    s3 = prev_low - 2 * (prev_high - pp)
-    
-    # Align pivot levels to 6h timeframe (completed 1d bar)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema50[i]) or np.isnan(adx[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+        if (np.isnan(s3_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_ma[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Regime detection
-        is_trending = adx[i] > 25
+        # CHOP regime filter: only trade in ranging markets (CHOP > 61.8)
+        chop_filter = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit conditions
-            exit_signal = False
-            if is_trending:
-                # In trend: exit if price crosses below S1 or ADX weakens
-                if close[i] < s1_aligned[i] or adx[i] < 20:
-                    exit_signal = True
-            else:
-                # In range: exit if price reaches R3 or shows weakness
-                if close[i] >= r3_aligned[i] or (close[i] < close[i-1] and volume[i] < volume[i-1]):
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit: Price touches R3 (opposite pivot) OR CHOP < 38.2 (trending market)
+            if close[i] >= r3_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions
-            exit_signal = False
-            if is_trending:
-                # In trend: exit if price crosses above R1 or ADX weakens
-                if close[i] > r1_aligned[i] or adx[i] < 20:
-                    exit_signal = True
-            else:
-                # In range: exit if price reaches S3 or shows weakness
-                if close[i] <= s3_aligned[i] or (close[i] > close[i-1] and volume[i] < volume[i-1]):
-                    exit_signal = True
-            
-            if exit_signal:
+            # Exit: Price touches S3 (opposite pivot) OR CHOP < 38.2 (trending market)
+            if close[i] <= s3_1d_aligned[i] or chop_1d_aligned[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic based on regime
-            if is_trending:
-                # Trending regime: breakout of R1/S1 with volume and EMA50 filter
-                if (close[i] > r1_aligned[i] and close[i] > ema50[i] and volume_confirmed):
-                    position = 1
-                    signals[i] = 0.25
-                elif (close[i] < s1_aligned[i] and close[i] < ema50[i] and volume_confirmed):
-                    position = -1
-                    signals[i] = -0.25
-            else:
-                # Ranging regime: fade extreme levels (R3/S3) with volume exhaustion
-                # Long near S3 with selling exhaustion (price down but volume down)
-                if (close[i] <= s3_aligned[i] * 1.005 and  # Allow small buffer
-                    close[i] < close[i-1] and 
-                    volume[i] < volume[i-1] and
-                    volume_confirmed):
-                    position = 1
-                    signals[i] = 0.25
-                # Short near R3 with buying exhaustion (price up but volume down)
-                elif (close[i] >= r3_aligned[i] * 0.995 and  # Allow small buffer
-                      close[i] > close[i-1] and
-                      volume[i] < volume[i-1] and
-                      volume_confirmed):
-                    position = -1
-                    signals[i] = -0.25
+            # Long entry: Price touches S3 support, volume confirmed, chop filter (ranging)
+            if (close[i] <= s3_1d_aligned[i] and volume_confirmed and chop_filter):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: Price touches R3 resistance, volume confirmed, chop filter (ranging)
+            elif (close[i] >= r3_1d_aligned[i] and volume_confirmed and chop_filter):
+                position = -1
+                signals[i] = -0.25
     
     return signals
