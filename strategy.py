@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and ATR stoploss
-# - Uses 1d HTF to calculate Camarilla pivot levels (H3, L3) from prior day
-# - Long when price closes above H3 with volume > 2.0x 20-period average
-# - Short when price closes below L3 with volume > 2.0x 20-period average
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and ATR stoploss
+# - Uses 1d HTF to calculate Camarilla pivot levels (H3, L3, H4, L4) from prior day
+# - Long when price closes above H3 with volume > 1.8x 20-period average
+# - Short when price closes below L3 with volume > 1.8x 20-period average
 # - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry
 # - Fixed position size 0.25 to control drawdown
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in both bull/bear via volume-confirmed breakouts and ATR trailing stops
+# - Camarilla levels provide institutional support/resistance, volume filters false breakouts
+# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
 
-name = "12h_1d_camarilla_breakout_volume_atr_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,15 +36,21 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate prior day's Camarilla levels
+    # H4 = close + 1.5 * (high - low)
     # H3 = close + 1.0 * (high - low)
     # L3 = close - 1.0 * (high - low)
+    # L4 = close - 1.5 * (high - low)
     high_low_diff = high_1d - low_1d
     H3 = close_1d + 1.0 * high_low_diff
     L3 = close_1d - 1.0 * high_low_diff
+    H4 = close_1d + 1.5 * high_low_diff
+    L4 = close_1d - 1.5 * high_low_diff
     
-    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
     # Pre-compute volume confirmation (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,8 +76,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 2.0x average
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 1.8x average
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
