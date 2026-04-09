@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-# - Uses 4h EMA(50) for trend direction (long when price > EMA, short when price < EMA)
-# - Uses 1h Camarilla pivot levels (H3/L3) for breakout entries
-# - Requires volume > 1.5 * 20-period volume average for confirmation
-# - Fixed position size 0.20 to manage drawdown and reduce fee churn
-# - Session filter: only trade 08-20 UTC to avoid low-volume periods
-# - Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
-# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
-# - Uses discrete position sizes to minimize fee churn from small fluctuations
+# Hypothesis: 6h Williams %R mean reversion with weekly trend filter
+# - Uses 1w EMA(34) for trend direction (long when price > EMA, short when price < EMA)
+# - Uses 6h Williams %R(14) for mean reversion entries (long when %R < -80, short when %R > -20)
+# - Requires volume > 1.3 * 50-period volume average for confirmation
+# - Fixed position size 0.25 to manage drawdown and reduce fee churn
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in bull markets via mean reversion in uptrend, in bear via mean reversion in downtrend
 
-name = "1h_4h_camarilla_breakout_volume_v1"
-timeframe = "1h"
+name = "6h_1w_williamsr_meanrev_trend_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,110 +21,77 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # 1w EMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1h Camarilla pivot levels
+    # Pre-compute 6h Williams %R(14)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Typical price for pivot calculation
-    typical_price = (high + low + close) / 3.0
-    range_1h = high - low
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Camarilla levels
-    camarilla_h3 = typical_price + (range_1h * 1.1 / 4)
-    camarilla_l3 = typical_price - (range_1h * 1.1 / 4)
-    camarilla_h4 = typical_price + (range_1h * 1.1 / 2)
-    camarilla_l4 = typical_price - (range_1h * 1.1 / 2)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close) / (highest_high - lowest_low)) * -100,
+        -50.0  # neutral when range is zero
+    )
     
-    # Pre-compute 1h ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Pre-compute volume confirmation: volume > 1.5 * 20-period average
+    # Pre-compute volume confirmation: volume > 1.3 * 50-period average
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_confirm = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     for i in range(100, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or
-            np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or np.isnan(atr[i]) or atr[i] <= 0 or
-            np.isnan(volume_confirm[i]) or not session_filter[i]):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 4h EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Determine trend direction from 1w EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            
-            # Exit conditions: stoploss or mean reversion
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: mean reversion or trend change
+            if williams_r[i] > -20:  # Overbought exit
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < camarilla_l3[i]:  # Mean reversion exit
+            elif not uptrend:  # Trend changed to downtrend or sideways
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            
-            # Exit conditions: stoploss or mean reversion
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: mean reversion or trend change
+            if williams_r[i] < -80:  # Oversold exit
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > camarilla_h3[i]:  # Mean reversion exit
+            elif not downtrend:  # Trend changed to uptrend or sideways
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Look for breakout entries in direction of 4h trend with volume confirmation
-            if uptrend and close[i] > camarilla_h4[i] and volume_confirm[i]:  # Break above H4 in uptrend
+            # Look for mean reversion entries in direction of 1w trend with volume confirmation
+            if uptrend and williams_r[i] < -80 and volume_confirm[i]:  # Oversold in uptrend
                 position = 1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
-                signals[i] = 0.20
-            elif downtrend and close[i] < camarilla_l4[i] and volume_confirm[i]:  # Break below L4 in downtrend
+                signals[i] = 0.25
+            elif downtrend and williams_r[i] > -20 and volume_confirm[i]:  # Overbought in downtrend
                 position = -1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
