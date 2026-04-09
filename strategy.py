@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel breakouts with volume confirmation and ATR trailing stop
-# Donchian(20) from 1w provides clear weekly trend structure with proven edge across market regimes
-# Volume confirmation (current 1d volume > 2.0x 20-period average) filters false breakouts
-# ATR trailing stop (2.5x ATR) manages risk and adapts to volatility
-# Designed for 1d timeframe targeting 15-25 trades/year (60-100 over 4 years)
-# Works in bull/bear: price reacts to weekly structure, volume confirms validity, ATR stop controls drawdown
+# Hypothesis: 6h strategy using 1d Camarilla pivot levels with breakout continuation logic
+# Fade at R3/S3 (mean reversion) and breakout continuation at R4/S4 (trend following)
+# Volume confirmation filters false signals
+# Designed for 6h timeframe targeting 12-37 trades/year (50-150 over 4 years)
+# Works in bull/bear: Camarilla pivots adapt to volatility, volume confirms validity
 
-name = "1d_1w_donchian_volume_atr_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_fade_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,86 +23,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 25:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Donchian channels (20-period)
-    # Upper band = highest high of last 20 weeks
-    # Lower band = lowest low of last 20 weeks
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate previous day's Camarilla pivot levels
+    # R4 = Close + 1.5 * (High - Low)
+    # R3 = Close + 1.0 * (High - Low)
+    # S3 = Close - 1.0 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    hl_range = high_1d - low_1d
+    r4 = close_1d + 1.5 * hl_range
+    r3 = close_1d + 1.0 * hl_range
+    s3 = close_1d - 1.0 * hl_range
+    s4 = close_1d - 1.5 * hl_range
     
-    # Align 1w Donchian channels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    # Shift by 1 to use previous day's levels (no look-ahead)
+    r4 = np.roll(r4, 1)
+    r3 = np.roll(r3, 1)
+    s3 = np.roll(s3, 1)
+    s4 = np.roll(s4, 1)
+    r4[0] = np.nan
+    r3[0] = np.nan
+    s3[0] = np.nan
+    s4[0] = np.nan
     
-    # Pre-compute ATR(14) for 1d timeframe
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align 1d Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Pre-compute volume confirmation (20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Pre-compute volume confirmation (24-period average for 6d equivalent)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_since_long = 0.0
-    lowest_since_short = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x average 1d volume
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_24[i]
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            if close[i] > highest_since_long:
-                highest_since_long = close[i]
-            # ATR trailing stop: exit if price drops 2.5x ATR from highest
-            if close[i] < highest_since_long - 2.5 * atr[i]:
+            # Exit long if price crosses below R3 (take profit) or reverses below entry
+            if close[i] < r3_aligned[i]:
                 position = 0
-                highest_since_long = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if close[i] < lowest_since_short:
-                lowest_since_short = close[i]
-            # ATR trailing stop: exit if price rises 2.5x ATR from lowest
-            if close[i] > lowest_since_short + 2.5 * atr[i]:
+            # Exit short if price crosses above S3 (take profit) or reverses above entry
+            if close[i] > s3_aligned[i]:
                 position = 0
-                lowest_since_short = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
-            # Breakout trading with volume confirmation
-            # Long on Donchian high breakout, Short on Donchian low breakout
+            # Camarilla breakout/fade logic with volume confirmation
             if volume_confirmed:
-                if close[i] > donchian_high_aligned[i]:
+                # Breakout continuation: go long on break above R4, short on break below S4
+                if close[i] > r4_aligned[i]:
                     position = 1
-                    highest_since_long = close[i]
-                    signals[i] = 0.30
-                elif close[i] < donchian_low_aligned[i]:
+                    signals[i] = 0.25
+                elif close[i] < s4_aligned[i]:
                     position = -1
-                    lowest_since_short = close[i]
-                    signals[i] = -0.30
+                    signals[i] = -0.25
+                # Fade logic: go short at R3, long at S3 (mean reversion)
+                elif close[i] > r3_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
+                elif close[i] < s3_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
     
     return signals
