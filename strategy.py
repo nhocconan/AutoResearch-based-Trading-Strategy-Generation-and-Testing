@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-# 6h_keltner_donchian_breakout_v1
-# Hypothesis: 6h strategy combining Donchian breakout direction with Keltner channel mean reversion
-# for filtering false breakouts. Long when price breaks above Donchian(20) AND closes above
-# Keltner upper band (strong momentum). Short when price breaks below Donchian(20) AND closes
-# below Keltner lower band (strong downside momentum). Uses volume confirmation (>1.3x average)
-# to ensure breakout validity. Daily HTF trend filter: only trade in direction of daily EMA(50).
-# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 25-35 trades/year.
-# Works in bull markets via breakout continuation and in bear markets via strong downside breaks.
+# 4h_donchian_breakout_volume_chop_v2
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.8x 20-period average) and chop regime filter (CHOP(14) > 61.8 = ranging). 
+# Long when price breaks above upper band in ranging market with volume spike. Short when breaks below lower band in ranging market with volume spike.
+# Uses discrete sizing (±0.25) to minimize fee churn. Target: 25-40 trades/year (~100-160 total over 4 years).
+# Donchian provides structure, volume confirms conviction, chop filter avoids whipsaws in strong trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_donchian_breakout_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,92 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily HTF data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need enough for daily EMA(50)
-        return np.zeros(n)
-    
-    close_d = df_1d['close'].values
-    # Daily EMA(50) for trend filter
-    ema_50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_d)
-    
-    # 6h Donchian(20) channels
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    donch_high = high_s.rolling(window=20, min_periods=20).max().values
-    donch_low = low_s.rolling(window=20, min_periods=20).min().values
-    
-    # 6h Keltner Channel (20, 2.0)
-    # Typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    tp_s = pd.Series(typical_price)
-    ema_tp = tp_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # ATR(20) for Keltner width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_s = pd.Series(tr)
-    atr = atr_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    keltner_upper = ema_tp + 2.0 * atr
-    keltner_lower = ema_tp - 2.0 * atr
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
+    # Choppiness Index (14-period) - ranging market filter
+    # CHOP = 100 * log10(sum(ATR(1)) / (log10(n) * (max(high,n) - min(low,n))))
+    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar TR
+    atr1 = pd.Series(tr).rolling(window=1, min_periods=1).sum().values  # ATR(1) = TR
+    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr1 / (np.log10(14) * (max_high - min_low)))
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(ema_50_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.8x 20-period average
+        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
         
-        # Daily trend filter: only trade long if price > daily EMA(50), short if price < daily EMA(50)
-        trend_filter_long = close[i] > ema_50_aligned[i]
-        trend_filter_short = close[i] < ema_50_aligned[i]
+        # Chop regime filter: only trade in ranging markets (CHOP > 61.8)
+        in_ranging_market = chop[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: price falls below Donchian low OR loses volume confirmation
-            if close[i] < donch_low[i] or not volume_confirmed:
+            # Exit: price falls below lower Donchian band OR volume drops
+            if close[i] < lowest_low[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian high OR loses volume confirmation
-            if close[i] > donch_high[i] or not volume_confirmed:
+            # Exit: price rises above upper Donchian band OR volume drops
+            if close[i] > highest_high[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed:
-                # Long entry: price breaks above Donchian high AND closes above Keltner upper
-                # AND daily trend supports long (price > daily EMA50)
-                if (close[i] > donch_high[i] and 
-                    close[i] > keltner_upper[i] and 
-                    trend_filter_long):
+            if volume_confirmed and in_ranging_market:
+                # Long entry: price breaks above upper Donchian band with volume spike
+                if close[i] > highest_high[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price breaks below Donchian low AND closes below Keltner lower
-                # AND daily trend supports short (price < daily EMA50)
-                elif (close[i] < donch_low[i] and 
-                      close[i] < keltner_lower[i] and 
-                      trend_filter_short):
+                # Short entry: price breaks below lower Donchian band with volume spike
+                elif close[i] < lowest_low[i]:
                     position = -1
                     signals[i] = -0.25
     
