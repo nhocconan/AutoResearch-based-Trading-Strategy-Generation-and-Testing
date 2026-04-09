@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
-# Donchian captures breakouts in both directions; 1d HMA confirms daily trend
-# Volume ensures breakout authenticity; discrete sizing 0.25 limits drawdown
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(50) trend + volume spike filter
+# Donchian breakouts capture momentum; 1d HMA ensures higher timeframe alignment
+# Volume spike (>2x avg) confirms institutional participation; discrete sizing 0.25
 # Works in bull/bear: trend filter adapts, breakouts work in both directions
 # Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing
 
-name = "4h_1d_donchian_hma_volume_v3"
+name = "4h_1d_donchian_hma_volume_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,13 +25,13 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop for HMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1d HMA(21)
+    # Calculate 1d HMA(50)
     close_1d = df_1d['close'].values
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    half_len = 50 // 2
+    sqrt_len = int(np.sqrt(50))
     
     # WMA function
     def wma(values, window):
@@ -44,7 +44,7 @@ def generate_signals(prices):
         return wma_vals
     
     wma_half = wma(close_1d, half_len)
-    wma_full = wma(close_1d, 21)
+    wma_full = wma(close_1d, 50)
     hma_1d = 2 * wma_half - wma_full
     hma_1d = wma(hma_1d, sqrt_len)
     
@@ -63,7 +63,7 @@ def generate_signals(prices):
             donchian_high[i] = np.max(high[i-20:i])
             donchian_low[i] = np.min(low[i-20:i])
     
-    # Calculate 20-period average volume for volume confirmation
+    # Calculate 20-period average volume for volume spike filter
     avg_volume = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
@@ -81,8 +81,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
+        # Volume spike: current volume > 2.0x 20-period average
+        volume_spike = volume[i] > 2.0 * avg_volume[i]
         
         if position == 1:  # Long position
             # Exit: price < Donchian low OR price < 1d HMA (trend change)
@@ -100,8 +100,8 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Donchian breakout + 1d HMA filter
-            if volume_confirmed:
+            # Entry logic with volume spike and Donchian breakout + 1d HMA filter
+            if volume_spike:
                 # Long entry: price > Donchian high AND price > 1d HMA (bullish alignment)
                 if close[i] > donchian_high[i] and close[i] > hma_1d_aligned[i]:
                     position = 1
