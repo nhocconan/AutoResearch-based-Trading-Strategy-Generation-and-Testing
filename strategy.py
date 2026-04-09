@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-# 12h_russell_bull_bear_power_v1
-# Hypothesis: Combines daily Russell Bull/Bear Power with 12-hour price action to capture trend continuation in both bull and bear markets. Uses 1d EMA13 of (Close-EMA13) for bull power and (EMA13-Close) for bear power. Enters on 12h pullbacks to EMA21 with volume confirmation. Designed for low trade frequency (15-25/year) to avoid fee drag.
+# 4h_camarilla_volume_breakout_v1
+# Hypothesis: Uses daily Camarilla pivot levels (from 1d) with 4h breakouts and volume confirmation.
+# In bull markets: buy breakout above H3; in bear markets: sell breakdown below L3.
+# Volume > 1.5x 20-period average confirms breakout strength.
+# Works in both bull and bear by trading breakouts in direction of higher timeframe trend.
+# Target: 20-40 trades/year (80-160 over 4 years) with controlled risk.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_russell_bull_bear_power_v1"
-timeframe = "12h"
+name = "4h_camarilla_volume_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,55 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13 on 12h for reference
-    alpha13 = 2 / (13 + 1)
-    ema13 = np.zeros(n)
-    ema13[0] = close[0]
-    for i in range(1, n):
-        ema13[i] = alpha13 * close[i] + (1 - alpha13) * ema13[i-1]
-    
-    # Calculate EMA21 on 12h for pullback entries
-    alpha21 = 2 / (21 + 1)
-    ema21 = np.zeros(n)
-    ema21[0] = close[0]
-    for i in range(1, n):
-        ema21[i] = alpha21 * close[i] + (1 - alpha21) * ema21[i-1]
-    
-    # Get daily data for Russell Bull/Bear Power
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 on daily
-    alpha13d = 2 / (13 + 1)
-    ema13_1d = np.zeros(len(df_1d))
-    ema13_1d[0] = close_1d[0]
-    for i in range(1, len(df_1d)):
-        ema13_1d[i] = alpha13d * close_1d[i] + (1 - alpha13d) * ema13_1d[i-1]
+    # Calculate Camarilla levels for each daily bar
+    # H3 = C + (H-L)*1.1/2, L3 = C - (H-L)*1.1/2
+    H3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    L3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Russell Bull Power = Close - EMA13
-    bull_power = close_1d - ema13_1d
-    # Russell Bear Power = EMA13 - Close
-    bear_power = ema13_1d - close_1d
-    
-    # Smooth with EMA13
-    def ema(arr, alpha):
-        res = np.zeros_like(arr)
-        res[0] = arr[0]
-        for i in range(1, len(arr)):
-            res[i] = alpha * arr[i] + (1 - alpha) * res[i-1]
-        return res
-    
-    bull_power_smooth = ema(bull_power, alpha13d)
-    bear_power_smooth = ema(bear_power, alpha13d)
-    
-    # Combine: positive = bullish, negative = bearish
-    russell_osc = bull_power_smooth - bear_power_smooth  # equivalent to 2*(Close-EMA13)
-    
-    # Align to 12h
-    russell_osc_12h = align_htf_to_ltf(prices, df_1d, russell_osc)
+    # Align Camarilla levels to 4h timeframe
+    H3_4h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_4h = align_htf_to_ltf(prices, df_1d, L3)
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.zeros(n)
@@ -85,7 +57,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(ema21[i]) or np.isnan(russell_osc_12h[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(H3_4h[i]) or np.isnan(L3_4h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -93,33 +65,27 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 1:  # Long position
-            # Exit: Russell turns bearish or price breaks below EMA21
-            if russell_osc_12h[i] < 0 or close[i] < ema21[i]:
+            # Exit: price breaks below L3 or volume fails
+            if close[i] < L3_4h[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Russell turns bullish or price breaks above EMA21
-            if russell_osc_12h[i] > 0 or close[i] > ema21[i]:
+            # Exit: price breaks above H3 or volume fails
+            if close[i] > H3_4h[i] or not vol_ok:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: bullish Russell + pullback to EMA21 + volume
-            if (russell_osc_12h[i] > 0 and 
-                low[i] <= ema21[i] * 1.005 and  # Allow small tolerance
-                close[i] > ema21[i] and
-                vol_ok):
+            # Enter long: price breaks above H3 with volume
+            if close[i] > H3_4h[i] and vol_ok:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: bearish Russell + pullback to EMA21 + volume
-            elif (russell_osc_12h[i] < 0 and 
-                  high[i] >= ema21[i] * 0.995 and  # Allow small tolerance
-                  close[i] < ema21[i] and
-                  vol_ok):
+            # Enter short: price breaks below L3 with volume
+            elif close[i] < L3_4h[i] and vol_ok:
                 position = -1
                 signals[i] = -0.25
     
