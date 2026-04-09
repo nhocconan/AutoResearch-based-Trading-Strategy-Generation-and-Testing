@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Williams %R with 12h regime filter
-# - Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA
-# - Williams %R identifies overbought/oversold conditions
-# - 12h ADX regime filter: only trade when ADX > 25 (trending) for Elder Ray signals
-# - In ranging markets (ADX <= 25), fade Williams %R extremes at 12h pivot levels
-# - Position size: 0.25 to manage drawdown in volatile 6h timeframe
-# - Target: 12-30 trades/year (50-120 total over 4 years)
-# - Works in both bull/bear: trend following in trends, mean reversion in ranges
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ATR trailing stop
+# - Uses 4h Donchian(20) breakout for entry signals (structure-based)
+# - Confirms with 1d volume > 2.0x its 20-period average (strong institutional participation)
+# - Uses ATR(14) trailing stop: exits when price retraces 3.0x ATR from extreme
+# - Position size: 0.25 (25% of capital) to balance return and drawdown
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Donchian breakouts capture sustained moves, volume filter reduces false breakouts
+# - Using 1d HTF for volume confirmation reduces noise and increases reliability
+# - Works in both bull and bear markets by capturing breakouts in direction of trend
 
-name = "6h_12h_elderray_williamsr_regime_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,138 +23,98 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Pre-compute 12h indicators
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 12h EMA(21) for Elder Ray
-    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 1d True Range for ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr_1d[0]
     
-    # 12h True Range for ATR (used in ADX)
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_12h[0] = tr_12h[0]
+    # 1d ATR(14) for volatility and stoploss
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # 12h ATR(14) for ADX calculation
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # 1d volume > 2.0x 20-period average (volume confirmation)
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * avg_volume_20_1d)
     
-    # 12h ADX calculation
-    # +DM and -DM
-    up_move = high_12h - np.roll(high_12h, 1)
-    down_move = np.roll(low_12h, 1) - low_12h
-    up_move = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    down_move = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align 1d indicators to 4h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
     
-    # Smoothed +DM, -DM, ATR
-    plus_dm = pd.Series(up_move).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm = pd.Series(down_move).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm / np.where(atr_ma == 0, 1, atr_ma)
-    minus_di = 100 * minus_dm / np.where(atr_ma == 0, 1, atr_ma)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-    adx_12h = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # 12h Pivot Points (for mean reversion in ranging markets)
-    pp_12h = (high_12h + low_12h + close_12h) / 3
-    r1_12h = 2 * pp_12h - low_12h
-    s1_12h = 2 * pp_12h - high_12h
-    
-    # Align 12h indicators to 6h
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    
-    # 6h data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # 6h Williams %R (14-period)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / np.where((highest_high_14 - lowest_low_14) == 0, 1, (highest_high_14 - lowest_low_14))
-    
-    # 6h Elder Ray (Bull/Bear Power)
-    bull_power = high - ema_21_12h_aligned  # Using 12h EMA for multi-timeframe
-    bear_power = low - ema_21_12h_aligned
+    # 4h Donchian channel (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(williams_r[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(pp_12h_aligned[i]) or
-            np.isnan(r1_12h_aligned[i]) or
-            np.isnan(s1_12h_aligned[i])):
+        if (np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(volume_spike_1d_aligned[i]) or
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX > 25 = trending, ADX <= 25 = ranging
-        is_trending = adx_12h_aligned[i] > 25
-        
-        if position == 0:  # Flat - look for entry
-            if is_trending:
-                # Trending market: Elder Ray signals
-                if bull_power[i] > 0 and bear_power[i] < 0:  # Strong bullish
-                    signals[i] = 0.25
-                    position = 1
-                elif bear_power[i] < 0 and bull_power[i] < 0:  # Strong bearish
-                    signals[i] = -0.25
-                    position = -1
+        if position == 1:  # Long position
+            # Update highest high since entry
+            if high[i] > highest_since_entry:
+                highest_since_entry = high[i]
+            
+            # Exit conditions: price retraces 3.0x ATR from high
+            if low[i] <= highest_since_entry - (3.0 * atr_1d_aligned[i]):
+                position = 0
+                signals[i] = 0.0
             else:
-                # Ranging market: Williams %R mean reversion at pivot levels
-                if williams_r[i] <= -80 and low[i] <= s1_12h_aligned[i]:  # Oversold + at S1
-                    signals[i] = 0.25
-                    position = 1
-                elif williams_r[i] >= -20 and high[i] >= r1_12h_aligned[i]:  # Overbought + at R1
-                    signals[i] = -0.25
-                    position = -1
-        elif position == 1:  # Long position - look for exit
-            if is_trending:
-                # Exit on bearish Elder Ray divergence
-                if bear_power[i] > 0:  # Bears taking over
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
+                
+        elif position == -1:  # Short position
+            # Update lowest low since entry
+            if low[i] < lowest_since_entry:
+                lowest_since_entry = low[i]
+            
+            # Exit conditions: price retraces 3.0x ATR from low
+            if high[i] >= lowest_since_entry + (3.0 * atr_1d_aligned[i]):
+                position = 0
+                signals[i] = 0.0
             else:
-                # Exit at pivot or opposite extreme
-                if williams_r[i] >= -20 or high[i] >= r1_12h_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-        elif position == -1:  # Short position - look for exit
-            if is_trending:
-                # Exit on bullish Elder Ray divergence
-                if bull_power[i] < 0:  # Bulls taking over
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:
-                # Exit at pivot or opposite extreme
-                if williams_r[i] <= -80 or low[i] <= s1_12h_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
+        else:  # Flat
+            # Look for Donchian breakout with volume confirmation
+            if (high[i] >= highest_high[i] and    # Break above upper Donchian
+                volume_spike_1d_aligned[i]):      # Volume confirmation
+                position = 1
+                entry_price = high[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = high[i]  # Initialize for shorts
+                signals[i] = 0.25
+            elif (low[i] <= lowest_low[i] and     # Break below lower Donchian
+                  volume_spike_1d_aligned[i]):    # Volume confirmation
+                position = -1
+                entry_price = low[i]
+                highest_since_entry = low[i]  # Initialize for longs
+                lowest_since_entry = low[i]
+                signals[i] = -0.25
     
     return signals
