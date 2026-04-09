@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation.
-# Long: Close above H3 pivot level + volume > 1.5x 20-period average.
-# Short: Close below L3 pivot level + volume > 1.5x 20-period average.
-# Exit: Opposite pivot level touch (H4/L4) or volume divergence.
-# Uses 1d pivot levels calculated from prior 1d OHLC for structure.
-# Volume confirmation filters weak breakouts. Target: 12-37 trades/year (50-150 total over 4 years).
+# 1h_htf_ema_crossover_volume_v1
+# Hypothesis: 1h strategy using 4h EMA crossover for trend direction, 1d EMA for regime filter, and volume spike for entry timing.
+# Long: 4h EMA21 > EMA50, 1d close > EMA200, 1h volume > 2x 20-period average.
+# Short: 4h EMA21 < EMA50, 1d close < EMA200, 1h volume > 2x 20-period average.
+# Exit: Opposite 4h EMA crossover or volume drops below average.
+# Uses discrete position sizing (0.20) to limit fee drag and control drawdown.
+# Target: 15-37 trades/year (60-150 total over 4 years) by requiring confluence of HTF trend, regime, and volume.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "1h_htf_ema_crossover_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +25,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Load 4h data ONCE for EMA crossover (trend direction)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    close_4h_s = pd.Series(close_4h)
+    ema21_4h = close_4h_s.ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema50_4h = close_4h_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_crossover_4h = align_htf_to_ltf(prices, df_4h, ema21_4h - ema50_4h)  # >0 = bullish, <0 = bearish
+    
+    # Load 1d data ONCE for regime filter (EMA200)
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    close_1d_s = pd.Series(close_1d)
+    ema200_1d = close_1d_s.ewm(span=200, min_periods=200, adjust=False).mean().values
+    close_gt_ema200_1d = align_htf_to_ltf(prices, df_1d, close_1d > ema200_1d)  # Boolean: True if above
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # H4 = Pivot + Range * 1.1/2
-    # H3 = Pivot + Range * 1.1/4
-    # L3 = Pivot - Range * 1.1/4
-    # L4 = Pivot - Range * 1.1/2
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    pivot = typical_price.values
-    df_range = df_1d['high'] - df_1d['low']
-    range_val = df_range.values
-    
-    h4 = pivot + range_val * 1.1 / 2
-    h3 = pivot + range_val * 1.1 / 4
-    l3 = pivot - range_val * 1.1 / 4
-    l4 = pivot - range_val * 1.1 / 2
-    
-    # Align 1d pivot levels to 12h timeframe (wait for completed 1d bar)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Volume average for confirmation (20-period)
+    # 1h volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
@@ -60,38 +49,37 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(l4_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(close[i]) or
-            np.isnan(volume[i])):
+        if (np.isnan(ema_crossover_4h[i]) or np.isnan(close_gt_ema200_1d[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 2x 20-period average
+        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Close below L3 (mean reversion) OR volume divergence (price up but volume down)
-            if close[i] < l3_aligned[i] or (close[i] > close[i-1] and volume[i] < volume[i-1]):
+            # Exit: 4h EMA crossover turns bearish OR volume drops below average
+            if ema_crossover_4h[i] <= 0 or volume[i] <= volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: Close above H3 (mean reversion) OR volume divergence (price down but volume down)
-            if close[i] > h3_aligned[i] or (close[i] < close[i-1] and volume[i] < volume[i-1]):
+            # Exit: 4h EMA crossover turns bullish OR volume drops below average
+            if ema_crossover_4h[i] >= 0 or volume[i] <= volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Long entry: Close above H3 with volume confirmation
-            if (close[i] > h3_aligned[i] and volume_confirmed):
+            # Long entry: 4h bullish, 1d above EMA200, volume confirmed
+            if (ema_crossover_4h[i] > 0 and close_gt_ema200_1d[i] and volume_confirmed):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Close below L3 with volume confirmation
-            elif (close[i] < l3_aligned[i] and volume_confirmed):
+                signals[i] = 0.20
+            # Short entry: 4h bearish, 1d below EMA200, volume confirmed
+            elif (ema_crossover_4h[i] < 0 and not close_gt_ema200_1d[i] and volume_confirmed):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
