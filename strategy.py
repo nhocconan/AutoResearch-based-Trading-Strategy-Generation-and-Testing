@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v25
-# Hypothesis: 4-hour breakout of daily Camarilla levels with daily EMA50 trend filter and volume confirmation.
+# 12h_1d_camarilla_breakout_v1
+# Hypothesis: 12-hour breakout of daily Camarilla levels with daily EMA50 trend filter and volume confirmation.
 # Long when price breaks above H4 resistance with price > daily EMA50 and volume > 2.0x 20-bar average.
 # Short when price breaks below L4 support with price < daily EMA50 and volume > 2.0x 20-bar average.
 # Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 75-200 total trades over 4 years (19-50/year).
+# Position size fixed at 0.25 to limit drawdown. Target: 50-150 total trades over 4 years (12-37/year).
 # Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
 # Improved: Added stricter volume filter (2.0x) and trend filter confirmation to reduce trades.
 
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v25"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,7 +42,7 @@ def generate_signals(prices):
             ema = (close_1d[i] - ema) * multiplier + ema
             ema_50_1d[i] = ema
     
-    # Align 1d EMA50 to 4h timeframe
+    # Align 1d EMA50 to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate Camarilla levels from 1d OHLC
@@ -56,7 +56,7 @@ def generate_signals(prices):
         camarilla_h4[i] = c + 1.1 * (h - l) / 2
         camarilla_l4[i] = c - 1.1 * (h - l) / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
