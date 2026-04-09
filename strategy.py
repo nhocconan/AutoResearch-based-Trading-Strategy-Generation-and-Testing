@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v2
-# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and tighter entry conditions.
-# Uses breakout of H4/L4 levels for higher probability moves. Exit when price returns to the daily pivot point (PP).
-# Works in both bull and bear markets as pivot levels adapt to volatility.
-# Added volume filter (volume > 2x average) and stricter breakout criteria to reduce trade frequency.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# 1d_1w_rsi_engulfing_v1
+# Hypothesis: Daily RSI(2) extremes with weekly trend filter and bullish/bearish engulfing candle confirmation.
+# Long: RSI(2) < 10 + weekly close > weekly open + bullish engulfing candle.
+# Short: RSI(2) > 90 + weekly close < weekly open + bearish engulfing candle.
+# Exit: RSI(2) crosses above 50 (long) or below 50 (short).
+# Works in both bull and bear markets as RSI extremes capture overextended moves.
+# Target: 30-100 total trades over 4 years (7-25/year) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "1d_1w_rsi_engulfing_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,72 +23,69 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly trend: bullish if close > open
+    weekly_bullish = df_1w['close'].values > df_1w['open'].values
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
     
-    # Camarilla formulas
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate daily RSI(2)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # H4 and L4 levels (stronger breakout levels)
-    h4_1d = close_1d + (range_1d * 1.1 / 2)  # Same as R4
-    l4_1d = close_1d - (range_1d * 1.1 / 2)  # Same as S4
+    # Wilder's smoothing
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[1] = gain[1]
+    avg_loss[1] = loss[1]
+    for i in range(2, n):
+        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
+        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
     
-    # Align 1d levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation - 50 period average with stricter threshold
-    vol_ma_50 = np.full(n, np.nan)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 50:
-            vol_sum -= volume[i-50]
-        if i >= 49:
-            vol_ma_50[i] = vol_sum / 50
+    # Calculate engulfing candles
+    bullish_engulfing = (close > open_) & (open_ > np.roll(close, 1)) & (close > np.roll(open_, 1))
+    bearish_engulfing = (close < open_) & (open_ < np.roll(close, 1)) & (close < np.roll(open_, 1))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_50[i]):
+        if np.isnan(rsi[i]) or np.isnan(weekly_bullish_aligned[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below Pivot Point
-            if close[i] <= pp_aligned[i]:
+            # Exit: RSI crosses above 50
+            if rsi[i] >= 50 and rsi[i-1] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above Pivot Point
-            if close[i] >= pp_aligned[i]:
+            # Exit: RSI crosses below 50
+            if rsi[i] <= 50 and rsi[i-1] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 level with volume confirmation (volume > 2x average)
-            if close[i] > h4_aligned[i] and volume[i] > vol_ma_50[i] * 2.0:
+            # Enter long: RSI(2) < 10 + weekly bullish + bullish engulfing
+            if rsi[i] < 10 and weekly_bullish_aligned[i] > 0.5 and bullish_engulfing[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 level with volume confirmation (volume > 2x average)
-            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_50[i] * 2.0:
+            # Enter short: RSI(2) > 90 + weekly bearish + bearish engulfing
+            elif rsi[i] > 90 and weekly_bullish_aligned[i] < 0.5 and bearish_engulfing[i]:
                 position = -1
                 signals[i] = -0.25
     
