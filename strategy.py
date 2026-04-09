@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camarilla_breakout_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla levels
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 2:
+    # Load 12h data ONCE before loop for daily-based Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    r4 = np.full(len(df_d), np.nan)
-    s4 = np.full(len(df_d), np.nan)
-    prev_high = np.full(len(df_d), np.nan)
-    prev_low = np.full(len(df_d), np.nan)
-    for i in range(1, len(df_d)):
-        ph = float(df_d['high'].iloc[i-1])
-        pl = float(df_d['low'].iloc[i-1])
-        pc = float(df_d['close'].iloc[i-1])
+    # We use 12h bars as proxy for daily (2x per day)
+    r4 = np.full(len(df_12h), np.nan)
+    s4 = np.full(len(df_12h), np.nan)
+    prev_high = np.full(len(df_12h), np.nan)
+    prev_low = np.full(len(df_12h), np.nan)
+    
+    for i in range(1, len(df_12h)):
+        ph = float(df_12h['high'].iloc[i-1])
+        pl = float(df_12h['low'].iloc[i-1])
+        pc = float(df_12h['close'].iloc[i-1])
         r4[i] = pc + (ph - pl) * 1.1 / 2
         s4[i] = pc - (ph - pl) * 1.1 / 2
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_d, s4)
-    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
+    # Align 12h values to 4h timeframe
+    r4_4h = align_htf_to_ltf(prices, df_12h, r4)
+    s4_4h = align_htf_to_ltf(prices, df_12h, s4)
+    prev_high_4h = align_htf_to_ltf(prices, df_12h, prev_high)
+    prev_low_4h = align_htf_to_ltf(prices, df_12h, prev_low)
     
-    # Volume confirmation: 4-period average (24h)
+    # Volume confirmation: 4-period average (16h)
     vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -72,10 +74,10 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(prev_high_aligned[i]) or 
-            np.isnan(prev_low_aligned[i]) or 
+        if (np.isnan(r4_4h[i]) or 
+            np.isnan(s4_4h[i]) or 
+            np.isnan(prev_high_4h[i]) or 
+            np.isnan(prev_low_4h[i]) or 
             np.isnan(vol_ma_4[i]) or 
             np.isnan(chop[i])):
             signals[i] = 0.0
@@ -83,7 +85,7 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
-            if (close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]) or chop[i] > 61.8:
+            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -91,7 +93,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price closes back inside previous day's range OR chop > 61.8
-            if (close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]) or chop[i] > 61.8:
+            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,13 +101,13 @@ def generate_signals(prices):
         else:  # Flat
             # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
             vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
-            if (close[i] > r4_aligned[i] and 
+            if (close[i] > r4_4h[i] and 
                 vol_ratio > 2.0 and 
                 chop[i] < 61.8):
                 position = 1
                 signals[i] = 0.25
             # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
-            elif (close[i] < s4_aligned[i] and 
+            elif (close[i] < s4_4h[i] and 
                   vol_ratio > 2.0 and 
                   chop[i] < 61.8):
                 position = -1
