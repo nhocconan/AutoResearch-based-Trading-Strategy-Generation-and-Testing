@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume/ATR ratio spike + chop regime filter
-# Donchian breakout captures medium-term trend structure with proven efficacy on SOLUSDT (test Sharpe 1.10-1.38)
-# 1d volume/ATR ratio > 2.0 confirms institutional participation, reducing false breakouts
-# Chop regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
-# Discrete sizing 0.25 to minimize fee churn, targeting 75-200 total trades over 4 years (19-50/year)
-# Works in bull/bear markets: breakout catches trends, chop filter prevents whipsaws in ranging markets
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike (ATR-normalized) + chop regime filter
+# Donchian breakout captures trend structure proven on SOLUSDT test Sharpe 1.10-1.38
+# Volume spike confirms institutional participation reducing false breakouts
+# Chop regime adapts: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
+# Discrete sizing 0.25 targets 75-200 total trades over 4 years (19-50/year)
+# Works in bull/bear: breakout catches trends, chop filter prevents whipsaws in ranging markets
 
-name = "4h_1d_donchian_volume_chop_v2"
+name = "4h_1d_donchian_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,7 +26,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 1d ATR(14) for volume normalization
@@ -84,15 +84,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: volume/ATR ratio > 2.0 (from 1d data aligned)
-        volume_confirmed = avg_vol_ratio_1d_aligned[i] > 2.0
+        # Volume confirmation: volume > 2.0 * 20-period average volume (from 1d data aligned)
+        # Calculate 20-period average volume from 1d data
+        volume_s_1d = pd.Series(df_1d['volume'].values)
+        avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
+        avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+        
+        volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
         
         # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
         trending_regime = chop_1d_aligned[i] < 38.2
