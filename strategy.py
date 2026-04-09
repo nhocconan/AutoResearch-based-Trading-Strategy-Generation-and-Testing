@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_camarilla_breakout_v1
-# Hypothesis: 6-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
+# 4h_1d_camarilla_breakout_v12
+# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
 # Uses breakout of H4/L4 levels (stronger breakout than H3/L3) for higher probability moves.
 # Exit when price returns to the daily pivot point (PP).
 # Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# This version reduces trade frequency by tightening volume and volatility filters, and adding a volume spike filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camarilla_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v12"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -57,7 +58,7 @@ def generate_signals(prices):
     h4_1d = close_1d + (range_1d * 1.1 / 2)  # Same as R4
     l4_1d = close_1d - (range_1d * 1.1 / 2)  # Same as S4
     
-    # Align 1d levels to 6h timeframe
+    # Align 1d levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
