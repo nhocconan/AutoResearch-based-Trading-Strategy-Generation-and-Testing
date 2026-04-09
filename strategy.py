@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
-# Breakouts above/below 20-period Donchian channel with volume > 1.5x average and 12h HMA trend alignment
-# Works in bull/bear markets: breakouts capture momentum, volume filter reduces false signals, HMA trend avoids counter-trend trades
-# Designed for ~30-50 trades/year to minimize fee drag
+# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and 1d choppiness regime filter
+# In trending regimes (CHOP < 38.2): breakout above/below 4h Donchian channels with volume confirmation
+# In ranging regimes (CHOP > 61.8): mean reversion at 4h Donchian mid-channel with volume confirmation
+# Uses discrete position sizing 0.20 to limit trades to 15-37/year and reduce fee drag
+# Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
 
-name = "4h_12h_donchian_breakout_volume_hma_v1"
-timeframe = "4h"
+name = "1h_4h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,104 +23,153 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate 12h HMA(21)
-    def wma(values, window):
-        if len(values) < window:
-            return np.full(len(values), np.nan)
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
+    # Calculate 4h ATR(14) for volatility normalization
+    tr1 = np.abs(high_4h[1:] - low_4h[:-1])
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    def hull_moving_average(values, window):
-        half_window = window // 2
-        sqrt_window = int(np.sqrt(window))
-        
-        wma_half = wma(values, half_window)
-        wma_full = wma(values, window)
-        
-        if len(wma_half) == 0 or len(wma_full) == 0:
+    def wilders_smoothing(values, period):
+        if len(values) < period:
             return np.full(len(values), np.nan)
-        
-        # Align arrays: wma_half starts at index half_window-1, wma_full at index window-1
-        # We need to align them to the same index for subtraction
-        diff = 2 * wma_half[-len(wma_full):] - wma_full
-        hma = wma(diff, sqrt_window)
-        
-        # Pad with NaN at the beginning
+        alpha = 1.0 / period
         result = np.full(len(values), np.nan)
-        start_idx = len(values) - len(hma)
-        if start_idx >= 0:
-            result[start_idx:] = hma
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    hma_12h = hull_moving_average(close_12h, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    atr_4h = wilders_smoothing(tr, 14)
     
-    # Calculate Donchian(20) channels
-    def donchian_channels(high, low, window):
-        upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    # Calculate 4h average volume (20-period) normalized by ATR
+    volume_s_4h = pd.Series(volume_4h)
+    avg_volume_4h = volume_s_4h.rolling(window=20, min_periods=20).mean().values
+    vol_ratio_4h = np.where(atr_4h > 0, avg_volume_4h / atr_4h, np.nan)
+    avg_vol_ratio_4h = pd.Series(vol_ratio_4h).rolling(window=20, min_periods=20).mean().values
     
-    upper_20, lower_20 = donchian_channels(high, low, 20)
+    # Calculate 4h Donchian channels (20-period)
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    mid_channel = (highest_20 + lowest_20) / 2.0
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > 1.5 * avg_volume
+    # Calculate 1d Choppiness Index (CHOP) for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d ATR(14)
+    tr1_1d = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = wilders_smoothing(tr_1d, 14)
+    
+    # Calculate 1d Choppiness Index
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    range_14 = hh_1d - ll_1d
+    chop_1d = np.where(range_14 != 0, 
+                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
+                       50)
+    
+    # Align 4h indicators to 1h timeframe
+    highest_20_aligned = align_htf_to_ltf(prices, df_4h, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, df_4h, lowest_20)
+    mid_channel_aligned = align_htf_to_ltf(prices, df_4h, mid_channel)
+    avg_vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, avg_vol_ratio_4h)
+    
+    # Align 1d chop to 1h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Pre-compute volume confirmation array
+    avg_volume_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    avg_volume_4h_aligned = align_htf_to_ltf(prices, df_4h, avg_volume_4h)
+    volume_confirmed = volume > 2.0 * avg_volume_4h_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(hma_12h_aligned[i]) or np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
-            np.isnan(volume_confirmed[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
+            np.isnan(mid_channel_aligned[i]) or np.isnan(avg_vol_ratio_4h_aligned[i]) or
+            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price breaks above upper Donchian with volume confirmation and 12h HMA uptrend
-        long_breakout = close[i] > upper_20[i]
-        long_volume = volume_confirmed[i]
-        long_trend = close[i] > hma_12h_aligned[i]  # Price above 12h HMA = uptrend
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
         
-        # Short conditions: price breaks below lower Donchian with volume confirmation and 12h HMA downtrend
-        short_breakout = close[i] < lower_20[i]
-        short_volume = volume_confirmed[i]
-        short_trend = close[i] < hma_12h_aligned[i]  # Price below 12h HMA = downtrend
+        # Regime filter
+        trending_regime = chop_1d_aligned[i] < 38.2
+        ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit long if price closes below midpoint of Donchian channel or trend reverses
-            midpoint = (upper_20[i] + lower_20[i]) / 2
-            if close[i] < midpoint or not long_trend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
+            if trending_regime:
+                # Exit long if price breaks below mid-channel or we enter ranging regime
+                if close[i] < mid_channel_aligned[i] or ranging_regime:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.20
+            elif ranging_regime:
+                # Exit long if price rises above upper channel or drops below lower channel
+                if close[i] > highest_20_aligned[i] or close[i] < lowest_20_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit short if price closes above midpoint of Donchian channel or trend reverses
-            midpoint = (upper_20[i] + lower_20[i]) / 2
-            if close[i] > midpoint or not short_trend:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+            if trending_regime:
+                # Exit short if price breaks above mid-channel or we enter ranging regime
+                if close[i] > mid_channel_aligned[i] or ranging_regime:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.20
+            elif ranging_regime:
+                # Exit short if price drops below lower channel or rises above upper channel
+                if close[i] < lowest_20_aligned[i] or close[i] > highest_20_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.20
         else:  # Flat
-            # Enter long on breakout above upper Donchian with volume and trend confirmation
-            if long_breakout and long_volume and long_trend:
-                position = 1
-                signals[i] = 0.25
-            # Enter short on breakout below lower Donchian with volume and trend confirmation
-            elif short_breakout and short_volume and short_trend:
-                position = -1
-                signals[i] = -0.25
+            if trending_regime:
+                # Enter long on breakout above upper channel with volume confirmation
+                if close[i] > highest_20_aligned[i] and volume_confirmed[i]:
+                    position = 1
+                    signals[i] = 0.20
+                # Enter short on breakout below lower channel with volume confirmation
+                elif close[i] < lowest_20_aligned[i] and volume_confirmed[i]:
+                    position = -1
+                    signals[i] = -0.20
+            elif ranging_regime:
+                # Mean reversion: buy near lower channel, sell near upper channel
+                if close[i] <= lowest_20_aligned[i] and volume_confirmed[i]:
+                    position = 1
+                    signals[i] = 0.20
+                elif close[i] >= highest_20_aligned[i] and volume_confirmed[i]:
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
