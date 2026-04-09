@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_htftrend_v1
-# Hypothesis: 4h Donchian breakout with volume confirmation, chop regime filter (trending: CHOP<61.8), and 1d EMA(50) HTF trend alignment. Uses discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year (75-200 total). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop avoids whipsaws in ranging markets, 1d EMA ensures alignment with higher timeframe trend.
+# 1d_donchian_breakout_volume_regime_v1
+# Hypothesis: Daily Donchian(20) breakout with volume confirmation (>1.5x 20-day avg) and weekly EMA(50) trend filter. Long when price breaks above Donchian high with volume and weekly uptrend; short when breaks below Donchian low with volume and weekly downtrend. Uses discrete position sizing (0.25) to minimize fee drag. Target: 7-25 trades/year (30-100 total over 4 years). Works in bull/bear markets: Donchian captures breakouts, volume confirms conviction, weekly EMA ensures alignment with higher timeframe trend, reducing whipsaws.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_htftrend_v1"
-timeframe = "4h"
+name = "1d_donchian_breakout_volume_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,28 +30,12 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index regime filter (14-period)
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr_series = pd.Series(tr)
-    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
-    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
-    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
-    denominator = np.log10(atr_period) * (highest_high - lowest_low)
-    denominator = np.where(denominator == 0, np.nan, denominator)
-    chop = 100 * np.log10(atr_sum / denominator)
-    
-    # Multi-timeframe: 1d EMA(50) trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    ema_50_1d = close_1d_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Multi-timeframe: 1w EMA(50) trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    close_1w_s = pd.Series(close_1w)
+    ema_50_1w = close_1w_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -59,19 +43,16 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: chop < 61.8 indicates trending market
-        trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 1d EMA(50)
-        htf_uptrend = close[i] > ema_50_1d_aligned[i]
-        htf_downtrend = close[i] < ema_50_1d_aligned[i]
+        # HTF trend filter: price above/below 1w EMA(50)
+        htf_uptrend = close[i] > ema_50_1w_aligned[i]
+        htf_downtrend = close[i] < ema_50_1w_aligned[i]
         
         if position == 1:  # Long position
             # Exit: price closes below Donchian low (20)
@@ -89,9 +70,9 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for Donchian breakout with volume, regime, and HTF confirmation
-            bullish_breakout = (close[i] > donchian_high[i-1]) and volume_confirmed and trending_market and htf_uptrend
-            bearish_breakout = (close[i] < donchian_low[i-1]) and volume_confirmed and trending_market and htf_downtrend
+            # Check for Donchian breakout with volume and HTF confirmation
+            bullish_breakout = (close[i] > donchian_high[i-1]) and volume_confirmed and htf_uptrend
+            bearish_breakout = (close[i] < donchian_low[i-1]) and volume_confirmed and htf_downtrend
             
             if bullish_breakout:
                 position = 1
