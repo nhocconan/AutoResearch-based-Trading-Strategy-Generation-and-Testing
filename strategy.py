@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Uses 1w EMA(34) for trend direction (long when price > EMA, short when price < EMA)
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries
-# - Requires volume > 1.3 * 20-period volume average for confirmation
+# Hypothesis: 6h Williams Alligator + 12h trend filter + volume confirmation
+# - Uses 12h EMA(13,8,5) smoothed for trend direction (long when jaw < teeth < lips)
+# - Uses 6h Williams Alligator (jaw=13, teeth=8, lips=5) for entry signals
+# - Requires volume > 1.3 * 24-period volume average for confirmation
 # - Fixed position size 0.25 to manage drawdown and reduce fee churn
-# - Target: 20-50 trades/year on 1d timeframe (80-200 total over 4 years)
-# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in bull markets via Alligator alignment + breakouts, in bear via proper trend filtering
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_12h_alligator_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,45 +21,31 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1w EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 12h EMA(13,8,5) for trend filter (Alligator components)
+    close_12h = df_12h['close'].values
+    jaw_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth_12h = pd.Series(close_12h).ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips_12h = pd.Series(close_12h).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    # 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
+    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
+    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Typical price for pivot calculation
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    camarilla_h3 = typical_price + (range_1d * 1.1 / 4)
-    camarilla_l3 = typical_price - (range_1d * 1.1 / 4)
-    camarilla_h4 = typical_price + (range_1d * 1.1 / 2)
-    camarilla_l4 = typical_price - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 1d timeframe (no additional delay needed)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Pre-compute ATR(14) for stoploss
+    # Pre-compute 6h Williams Alligator
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    typical = (high + low + close) / 3.0
     
+    jaw = pd.Series(typical).ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth = pd.Series(typical).ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips = pd.Series(typical).ewm(span=5, adjust=False, min_periods=5).mean().values
+    
+    # Pre-compute ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -67,9 +53,9 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume confirmation: volume > 1.3 * 20-period average
+    # Pre-compute volume confirmation: volume > 1.3 * 24-period average
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_confirm = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
@@ -79,27 +65,31 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(atr[i]) or atr[i] <= 0 or
+        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or np.isnan(lips_12h_aligned[i]) or
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(atr[i]) or atr[i] <= 0 or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 1w EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Determine 12h trend direction from Alligator alignment
+        uptrend_12h = jaw_12h_aligned[i] < teeth_12h_aligned[i] < lips_12h_aligned[i]
+        downtrend_12h = jaw_12h_aligned[i] > teeth_12h_aligned[i] > lips_12h_aligned[i]
+        
+        # Determine 6h Alligator alignment
+        alligator_long = jaw[i] < teeth[i] < lips[i]
+        alligator_short = jaw[i] > teeth[i] > lips[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # Exit conditions: stoploss or mean reversion
+            # Exit conditions: stoploss or trend reversal
             if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < l3_aligned[i]:  # Mean reversion exit
+            elif not (uptrend_12h and alligator_long):  # Exit if trend or Alligator fails
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -111,13 +101,13 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # Exit conditions: stoploss or mean reversion
+            # Exit conditions: stoploss or trend reversal
             if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > h3_aligned[i]:  # Mean reversion exit
+            elif not (downtrend_12h and alligator_short):  # Exit if trend or Alligator fails
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -125,13 +115,13 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for breakout entries in direction of 1w trend with volume confirmation
-            if uptrend and close[i] > h4_aligned[i] and volume_confirm[i]:  # Break above H4 in uptrend
+            # Look for entries in direction of 12h trend with 6h Alligator alignment and volume confirmation
+            if uptrend_12h and alligator_long and volume_confirm[i]:
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif downtrend and close[i] < l4_aligned[i] and volume_confirm[i]:  # Break below L4 in downtrend
+            elif downtrend_12h and alligator_short and volume_confirm[i]:
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
