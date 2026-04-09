@@ -68,8 +68,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1h volume > 1.5x average 4h volume (scaled)
-        # Scale 4h avg volume to 1h equivalent (approximate: 4h has ~4x bars of 1h)
+        # Volume confirmation: current 1h volume > 1.5x average 1h volume (20-period)
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
         
