@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_regime_v2
-# Hypothesis: 4h strategy using Donchian channel breakout with volume confirmation and chop regime filter.
-# Long when price breaks above upper Donchian(20) with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Short when price breaks below lower Donchian(20) with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Exit when price crosses back through the Donchian midpoint.
+# 12h_donchian_breakout_volume_regime_v1
+# Hypothesis: 12h Donchian channel breakout strategy with volume confirmation and chop regime filter.
+# Long when price breaks above Donchian(20) upper band with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Short when price breaks below Donchian(20) lower band with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Exit when price returns to Donchian midpoint or opposite breakout occurs.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
 # Works in both bull and bear markets: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_regime_v2"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,9 +33,9 @@ def generate_signals(prices):
     # Donchian Channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
     # Choppiness Index regime filter (14-period)
     atr_period = 14
@@ -48,17 +48,14 @@ def generate_signals(prices):
     highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
     lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
     atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
-    denominator = highest_high - lowest_low
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / denominator)
+    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
             np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
@@ -70,26 +67,24 @@ def generate_signals(prices):
         trending_market = chop[i] < 61.8
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian midpoint
-            if close[i] < donchian_mid[i]:
+            # Exit: price returns to Donchian middle or breaks below lower band
+            if close[i] <= donchian_middle[i] or close[i] < donchian_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian midpoint
-            if close[i] > donchian_mid[i]:
+            # Exit: price returns to Donchian middle or breaks above upper band
+            if close[i] >= donchian_middle[i] or close[i] > donchian_upper[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Check for Donchian breakout with volume and regime confirmation
-            bullish_breakout = (close[i] > donchian_high[i] and 
-                               volume_confirmed and trending_market)
-            bearish_breakout = (close[i] < donchian_low[i] and 
-                               volume_confirmed and trending_market)
+            bullish_breakout = (close[i] > donchian_upper[i]) and volume_confirmed and trending_market
+            bearish_breakout = (close[i] < donchian_lower[i]) and volume_confirmed and trending_market
             
             if bullish_breakout:
                 position = 1
