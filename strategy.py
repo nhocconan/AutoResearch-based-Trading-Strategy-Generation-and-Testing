@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v2
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and chop regime filter (>50 = ranging).
-# In ranging markets (2025+), price tends to revert from Donchian extremes. Volume filters false breakouts.
-# Discrete sizing (0.0, ±0.30) minimizes fee churn. Target: 20-50 trades/year.
+# 12h_donchian_breakout_volume_chop_v1
+# Hypothesis: 12h strategy using Donchian(20) breakouts with volume confirmation and chop regime filter.
+# In ranging markets (2025+), price tends to revert from Donchian channel extremes.
+# Volume confirmation filters false breakouts. Chop filter ensures ranging conditions.
+# Discrete sizing (0.0, ±0.30) minimizes fee churn. Target: 12-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_v2"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,7 +46,7 @@ def generate_signals(prices):
     chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
     chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
     
-    # Align chop to 4h timeframe
+    # Align chop to 12h timeframe
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # Volume average for confirmation (20-period)
