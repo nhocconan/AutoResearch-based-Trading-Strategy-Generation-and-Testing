@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 6h_funding_rate_mean_reversion_v1
-# Hypothesis: Funding rate mean reversion works on BTC/ETH/SOL perpetuals. 
-# Extreme funding rates (>0.05% or <-0.05%) predict mean reversion in next funding period.
-# Uses 8h funding rate data as HTF proxy, combined with 6h price action for entry timing.
-# Works in both bull and bear markets as funding extremes occur in all regimes.
-# Target: 60-120 trades over 4 years (15-30/year) with 0.25 position size.
+# 12h_pullback_to_vwap_with_trend_filter_v1
+# Hypothesis: In strong trends (identified by 1d EMA50 direction), price pulls back to VWAP on 12h timeframe before continuing the trend.
+# Uses 1d EMA50 for trend filter, 12h VWAP for mean reversion entries, and volume confirmation.
+# Works in both bull and bear markets by following the higher timeframe trend.
+# Target: 15-30 trades per year (60-120 over 4 years) with low frequency to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_funding_rate_mean_reversion_v1"
-timeframe = "6h"
+name = "12h_pullback_to_vwap_with_trend_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,99 +21,109 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h RSI for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate VWAP on 12h (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
     
-    # Wilder's smoothing
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Cumulative sums for VWAP
+    pv_cumsum = np.zeros(n)
+    vol_cumsum = np.zeros(n)
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    pv_sum = 0.0
+    vol_sum = 0.0
+    for i in range(n):
+        pv_sum += pv[i]
+        vol_sum += volume[i]
+        pv_cumsum[i] = pv_sum
+        vol_cumsum[i] = vol_sum
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # VWAP = cumulative PV / cumulative volume
+    vwap = np.full(n, np.nan)
+    for i in range(n):
+        if vol_cumsum[i] > 0:
+            vwap[i] = pv_cumsum[i] / vol_cumsum[i]
     
-    # Get funding rate data (using 8h as proxy since we don't have direct funding)
-    # We'll simulate funding based on price deviation from 8h VWAP
-    df_8h = get_htf_data(prices, '8h')
-    if len(df_8h) < 20:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 8h VWAP approximation
-    typical_price_8h = (df_8h['high'].values + df_8h['low'].values + df_8h['close'].values) / 3
-    volume_8h = df_8h['volume'].values
+    close_1d = df_1d['close'].values
     
-    vwap_sum = np.cumsum(typical_price_8h * volume_8h)
-    vol_sum = np.cumsum(volume_8h)
-    vwap_8h = np.where(vol_sum > 0, vwap_sum / vol_sum, typical_price_8h)
+    # Calculate EMA50 on daily for trend filter
+    alpha = 2 / (50 + 1)
+    ema50_1d = np.zeros(len(df_1d))
+    ema50_1d[0] = close_1d[0]
+    for i in range(1, len(df_1d)):
+        ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # Calculate funding rate proxy: deviation from VWAP
-    # Positive when price > VWAP (longs pay shorts)
-    funding_proxy = (typical_price_8h - vwap_8h) / vwap_8h
+    # Trend: 1 if close > EMA50, -1 if close < EMA50
+    trend_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if close_1d[i] > ema50_1d[i]:
+            trend_1d[i] = 1
+        elif close_1d[i] < ema50_1d[i]:
+            trend_1d[i] = -1
+        else:
+            trend_1d[i] = 0  # rare case of exact equality
     
-    # Smooth funding proxy to reduce noise
-    funding_smooth = np.zeros_like(funding_proxy)
-    alpha = 2 / (8 + 1)  # 8-period EMA
-    funding_smooth[0] = funding_proxy[0]
-    for i in range(1, len(funding_proxy)):
-        funding_smooth[i] = alpha * funding_proxy[i] + (1 - alpha) * funding_smooth[i-1]
+    # Align trend to 12h timeframe
+    trend_12h = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Align funding rate to 6h timeframe
-    funding_6h = align_htf_to_ltf(prices, df_8h, funding_smooth)
-    
-    # Bollinger Bands on 6h for volatility context
-    sma_20 = np.zeros(n)
-    std_20 = np.zeros(n)
-    for i in range(20, n):
-        sma_20[i] = np.mean(close[i-20:i])
-        std_20[i] = np.std(close[i-20:i])
-    
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Volume confirmation: 20-period average
+    vol_ma_20 = np.zeros(n)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Skip if any required data is invalid
-        if (np.isnan(rsi[i]) or np.isnan(funding_6h[i]) or 
-            np.isnan(sma_20[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
+        # Skip if any required data is NaN
+        if np.isnan(vwap[i]) or np.isnan(trend_12h[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation
+        vol_ok = volume[i] > vol_ma_20[i] * 1.5
+        
         if position == 1:  # Long position
-            # Exit: funding becomes extremely negative or RSI overbought
-            if funding_6h[i] < -0.0005 or rsi[i] > 70:
+            # Exit: trend changes to downtrend or price moves above VWAP (take profit)
+            if trend_12h[i] == -1 or close[i] > vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: funding becomes extremely positive or RSI oversold
-            if funding_6h[i] > 0.0005 or rsi[i] < 30:
+            # Exit: trend changes to uptrend or price moves below VWAP (take profit)
+            if trend_12h[i] == 1 or close[i] < vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: extremely negative funding + price near lower BB + RSI oversold
-            if (funding_6h[i] < -0.0003 and 
-                close[i] <= lower_bb[i] * 1.01 and  # Near lower BB
-                rsi[i] < 35):
+            # Enter long: uptrend + pullback to VWAP + volume
+            if (trend_12h[i] == 1 and 
+                high[i] >= vwap[i] * 0.995 and  # Allow small tolerance for touching VWAP
+                low[i] <= vwap[i] * 1.005 and
+                close[i] < vwap[i] and  # Close below VWAP for pullback entry
+                vol_ok):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: extremely positive funding + price near upper BB + RSI overbought
-            elif (funding_6h[i] > 0.0003 and 
-                  close[i] >= upper_bb[i] * 0.99 and  # Near upper BB
-                  rsi[i] > 65):
+            # Enter short: downtrend + pullback to VWAP + volume
+            elif (trend_12h[i] == -1 and 
+                  low[i] <= vwap[i] * 1.005 and  # Allow small tolerance for touching VWAP
+                  high[i] >= vwap[i] * 0.995 and
+                  close[i] > vwap[i] and  # Close above VWAP for pullback entry
+                  vol_ok):
                 position = -1
                 signals[i] = -0.25
     
