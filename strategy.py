@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel breakouts with volume confirmation and ATR trailing stop
-# Donchian(20) from 1w provides clear multi-week trend structure effective in both bull and bear markets
-# Volume confirmation (current 1d volume > 2.0x 20-period average) filters false breakouts
+# Hypothesis: 12h strategy using 1d Donchian channel breakouts with volume confirmation and ATR trailing stop
+# Donchian(20) from 1d provides clear trend structure with proven edge across market regimes
+# Volume confirmation (current 12h volume > 2.0x 20-period average) filters false breakouts
 # ATR trailing stop (2.5x ATR) manages risk and adapts to volatility
-# Designed for 1d timeframe targeting 15-25 trades/year (60-100 over 4 years)
-# Works in bull/bear: price reacts to 1w structure, volume confirms validity, ATR stop controls drawdown
+# Designed for 12h timeframe targeting 12-30 trades/year (48-120 over 4 years)
+# Works in bull/bear: price reacts to 1d structure, volume confirms validity, ATR stop controls drawdown
 
-name = "1d_1w_donchian_volume_atr_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,25 +24,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 25:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1w Donchian channels (20-period)
-    # Upper band = highest high of last 20 weeks
-    # Lower band = lowest low of last 20 weeks
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Donchian channels (20-period)
+    # Upper band = highest high of last 20 days
+    # Lower band = lowest low of last 20 days
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1w Donchian channels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    # Align 1d Donchian channels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Pre-compute ATR(14) for 1d timeframe
+    # Pre-compute ATR(14) for 12h timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -67,7 +67,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x average 1d volume
+        # Volume confirmation: current 12h volume > 2.0x average 12h volume
         volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
