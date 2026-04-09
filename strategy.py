@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R + 1d ADX regime filter
-# Williams %R(14): overbought > -20, oversold < -80
-# ADX > 25 indicates trending market (use 1d ADX for regime)
-# In trending regime (ADX > 25): trade pullbacks - long when %R crosses above -80 from below, short when crosses below -20 from above
-# In ranging regime (ADX <= 25): mean reversion - long when %R < -80 and turning up, short when %R > -20 and turning down
-# Uses 1d ADX(14) for regime detection, 12h for Williams %R and entries
-# Position size 0.25 to limit drawdown
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and chop regime filter
+# Donchian(20) breakout captures momentum in both bull/bear markets
+# 1d volume spike (>1.5x 20-period average) confirms institutional participation
+# Choppiness Index (14) > 61.8 = ranging (fade breakouts), < 38.2 = trending (follow breakouts)
+# Position size 0.25 to limit drawdown (BTC 2022 drawdown manageable)
+# Target: 100-180 total trades over 4 years (25-45/year) for optimal fee/alpha balance
+# Works in bull via breakout continuation, in bear via chop-filtered mean reversion at extremes
 
-name = "12h_1d_williams_r_adx_regime_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,114 +23,87 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX
+    # Load 1d data ONCE before loop for volume and chop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for regime detection
+    # Calculate 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = np.full(len(df_1d), np.nan)
+    for i in range(20, len(df_1d)):
+        vol_ma_20[i] = np.mean(vol_1d[i-20:i])
+    
+    # Calculate 1d Choppiness Index (14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
+    tr_1d = np.zeros(len(df_1d))
+    tr_1d[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
         tr0 = high_1d[i] - low_1d[i]
         tr1 = abs(high_1d[i] - close_1d[i-1])
         tr2 = abs(low_1d[i] - close_1d[i-1])
-        tr[i] = max(tr0, tr1, tr2)
+        tr_1d[i] = max(tr0, tr1, tr2)
     
-    # Directional Movement
-    plus_dm = np.zeros(len(df_1d))
-    minus_dm = np.zeros(len(df_1d))
-    for i in range(1, len(df_1d)):
-        up_move = high_1d[i] - high_1d[i-1]
-        down_move = low_1d[i-1] - low_1d[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        else:
-            plus_dm[i] = 0
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-        else:
-            minus_dm[i] = 0
-    
-    # Smoothed DM and TR (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full(len(data), np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    # Calculate smoothed values
-    tr_14 = wilders_smoothing(tr, 14)
-    plus_dm_14 = wilders_smoothing(plus_dm, 14)
-    minus_dm_14 = wilders_smoothing(minus_dm, 14)
-    
-    # Calculate DI and DX
-    plus_di_14 = np.full(len(df_1d), np.nan)
-    minus_di_14 = np.full(len(df_1d), np.nan)
-    dx_14 = np.full(len(df_1d), np.nan)
-    
+    # Sum of TR over 14 periods
+    tr_sum_14 = np.full(len(df_1d), np.nan)
     for i in range(14, len(df_1d)):
-        if tr_14[i] != 0:
-            plus_di_14[i] = (plus_dm_14[i] / tr_14[i]) * 100
-            minus_di_14[i] = (minus_dm_14[i] / tr_14[i]) * 100
-            if (plus_di_14[i] + minus_di_14[i]) != 0:
-                dx_14[i] = (abs(plus_di_14[i] - minus_di_14[i]) / (plus_di_14[i] + minus_di_14[i])) * 100
+        tr_sum_14[i] = np.sum(tr_1d[i-14:i])
     
-    # Calculate ADX (smoothed DX)
-    adx_14 = wilders_smoothing(dx_14, 14)
+    # Highest high and lowest low over 14 periods
+    hh_14 = np.full(len(df_1d), np.nan)
+    ll_14 = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        hh_14[i] = np.max(high_1d[i-14:i])
+        ll_14[i] = np.min(low_1d[i-14:i])
     
-    # Align 1d ADX to 12h timeframe
-    adx_14_12h = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Chop = 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
+    chop_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        if hh_14[i] > ll_14[i]:
+            chop_1d[i] = 100 * np.log10(tr_sum_14[i] / (hh_14[i] - ll_14[i])) / np.log10(14)
     
-    # Calculate Williams %R on 12h
-    def calculate_williams_r(high, low, close, period):
-        highest_high = np.full(len(high), np.nan)
-        lowest_low = np.full(len(low), np.nan)
-        for i in range(period-1, len(high)):
-            highest_high[i] = np.max(high[i-(period-1):i+1])
-            lowest_low[i] = np.min(low[i-(period-1):i+1])
-        wr = np.full(len(high), np.nan)
-        for i in range(period-1, len(high)):
-            if highest_high[i] - lowest_low[i] != 0:
-                wr[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        return wr
+    # Align 1d data to 4h timeframe
+    vol_ma_20_4h = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    chop_1d_4h = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    wr = calculate_williams_r(high, low, close, 14)
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(adx_14_12h[i]) or 
-            np.isnan(wr[i])):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma_20_4h[i]) or 
+            np.isnan(chop_1d_4h[i])):
             signals[i] = 0.0
             continue
         
-        adx = adx_14_12h[i]
-        wr_val = wr[i]
+        vol_ma = vol_ma_20_4h[i]
+        chop = chop_1d_4h[i]
         
         if position == 1:  # Long position
             # Exit conditions
-            if adx > 25:  # Trending regime
-                # Exit when Williams %R crosses below -50 (momentum loss)
-                if wr_val < -50:
+            if chop > 61.8:  # Ranging regime - exit at mean reversion
+                if close[i] <= (highest_high[i] + lowest_low[i]) / 2:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            else:  # Ranging regime
-                # Exit when Williams %R returns to mean (-50)
-                if wr_val > -50:
+            else:  # Trending regime - exit on Donchian reversal
+                if close[i] < lowest_low[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -139,41 +111,34 @@ def generate_signals(prices):
                     
         elif position == -1:  # Short position
             # Exit conditions
-            if adx > 25:  # Trending regime
-                # Exit when Williams %R crosses above -50 (momentum loss)
-                if wr_val > -50:
+            if chop > 61.8:  # Ranging regime - exit at mean reversion
+                if close[i] >= (highest_high[i] + lowest_low[i]) / 2:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            else:  # Ranging regime
-                # Exit when Williams %R returns to mean (-50)
-                if wr_val < -50:
+            else:  # Trending regime - exit on Donchian reversal
+                if close[i] > highest_high[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
             # Entry logic based on regime
-            if adx > 25:  # Trending regime - trade pullbacks
-                # Go long when Williams %R crosses above -80 from below (oversold bounce)
-                # Go short when Williams %R crosses below -20 from above (overbought rejection)
-                if i > 30:
-                    wr_prev = wr[i-1]
-                    if wr_val > -80 and wr_prev <= -80:
+            if vol_ma > 0 and volume[i] > 1.5 * vol_ma:  # Volume confirmation
+                if chop < 38.2:  # Trending regime - follow breakout
+                    if close[i] > highest_high[i]:
                         position = 1
                         signals[i] = 0.25
-                    elif wr_val < -20 and wr_prev >= -20:
+                    elif close[i] < lowest_low[i]:
                         position = -1
                         signals[i] = -0.25
-            else:  # Ranging regime - mean reversion
-                # Go long when Williams %R is deeply oversold (< -80)
-                # Go short when Williams %R is deeply overbought (> -20)
-                if wr_val < -80:
-                    position = 1
-                    signals[i] = 0.25
-                elif wr_val > -20:
-                    position = -1
-                    signals[i] = -0.25
+                elif chop > 61.8:  # Ranging regime - fade extremes
+                    if close[i] < lowest_low[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    elif close[i] > highest_high[i]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
