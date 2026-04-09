@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_weekly_camarilla_pivot_breakout_volume_v1
-# Hypothesis: 1d Camarilla pivot breakout with volume confirmation (>1.3x 20-period average) and 1w HTF trend filter (price > 50-period EMA on weekly). Enters long when price breaks above H3 level with volume confirmation and bullish weekly trend; short when price breaks below L3 level with volume confirmation and bearish weekly trend. Exits on opposite Camarilla level touch (L3 for long, H3 for short). Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 7-25 trades/year) to work in both bull and bear markets by following institutional volume-driven breakouts in alignment with higher timeframe trend.
+# 12h_camarilla_pivot_volume_trend_v3
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation (>1.5x 20-period average) and 1d HTF trend filter (price > 20-period EMA). Enters long when price breaks above H3 with volume and bullish trend; short when breaks below L3 with volume and bearish trend. Uses tighter volume filter (1.5x) and shorter EMA (20) to reduce trades and improve edge. Discrete sizing 0.25. Target: 12-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_camarilla_pivot_breakout_volume_v1"
-timeframe = "1d"
+name = "12h_camarilla_pivot_volume_trend_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,37 +24,30 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Previous week's OHLC for Camarilla calculation (using 1w data)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Previous day's OHLC for Camarilla calculation (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous week's OHLC
-    # H4 = C + 1.5*(H-L), H3 = C + 1.0*(H-L), H2 = C + 0.5*(H-L), H1 = C + 0.25*(H-L)
-    # L1 = C - 0.25*(H-L), L2 = C - 0.5*(H-L), L3 = C - 1.0*(H-L), L4 = C - 1.5*(H-L)
-    prev_close = df_1w['close'].values
-    prev_high = df_1w['high'].values
-    prev_low = df_1w['low'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    # True range for the week
-    week_range = prev_high - prev_low
+    # True range for the day
+    day_range = prev_high - prev_low
     
-    # Camarilla levels
-    H3 = prev_close + 1.0 * week_range
-    L3 = prev_close - 1.0 * week_range
-    H4 = prev_close + 1.5 * week_range
-    L4 = prev_close - 1.5 * week_range
+    # Camarilla levels: H3 and L3 are key breakout levels
+    H3 = prev_close + 1.0 * day_range
+    L3 = prev_close - 1.0 * day_range
     
-    # Align Camarilla levels to 1d timeframe (using previous week's close as anchor)
-    # The Camarilla levels are valid for the entire week following the previous week's close
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1w, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1w, L4)
+    # Align Camarilla levels to 12h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # 1w HTF trend filter: 50-period EMA on 1w timeframe
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d HTF trend filter: 20-period EMA on 1d timeframe (shorter for faster adaptation)
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -63,15 +56,15 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
             np.isnan(volume[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average (tighter filter)
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price touches or breaks L3 level (or stoploss at L4)
+            # Exit: price touches or breaks L3 level
             if close[i] <= L3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -79,25 +72,25 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches or breaks H3 level (or stoploss at H4)
+            # Exit: price touches or breaks H3 level
             if close[i] >= H3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter only with volume confirmation and 1w trend alignment
+            # Enter only with volume confirmation and 1d trend alignment
             if volume_confirmed:
-                # Bullish 1w trend: price above 50-period EMA
-                bullish_trend = close[i] > ema_50_1w_aligned[i]
-                # Bearish 1w trend: price below 50-period EMA
-                bearish_trend = close[i] < ema_50_1w_aligned[i]
+                # Bullish 1d trend: price above 20-period EMA
+                bullish_trend = close[i] > ema_20_1d_aligned[i]
+                # Bearish 1d trend: price below 20-period EMA
+                bearish_trend = close[i] < ema_20_1d_aligned[i]
                 
-                # Long: price breaks above H3 level with volume and bullish 1w trend
+                # Long: price breaks above H3 level with volume and bullish 1d trend
                 if close[i] > H3_aligned[i] and bullish_trend:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below L3 level with volume and bearish 1w trend
+                # Short: price breaks below L3 level with volume and bearish 1d trend
                 elif close[i] < L3_aligned[i] and bearish_trend:
                     position = -1
                     signals[i] = -0.25
