@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume spike
-# - Uses Williams %R(14) on 6h for oversold/overbought entries (long < -80, short > -20)
-# - Trend filter: 12h EMA(50) slope - only long when EMA rising, short when falling
-# - Volume confirmation: volume > 2.0 * 20-period average to avoid false signals
-# - Works in bull markets via pullbacks to rising EMA, in bear via bounces off falling EMA
-# - Target: 12-25 trades/year on 6h timeframe (48-100 total over 4 years) to avoid fee drag
-# - Williams %R is effective for mean reversion in ranging markets which dominate 2025+
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ATR trailing stop
+# - Uses Donchian(20) channels on 4h for breakout entries (long above upper channel, short below lower)
+# - Requires 1d volume > 1.5 * 20-day volume average for confirmation (reduces false breakouts)
+# - Uses ATR(14) for dynamic trailing stoploss (2.5 * ATR from extreme) and position sizing (0.25)
+# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
+# - Target: 20-35 trades/year on 4h timeframe (80-140 total over 4 years) to avoid fee drag
+# - Donchian channels provide objective volatility-based support/resistance levels
 
-name = "6h_12h_williamsr_meanrev_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,69 +21,93 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_slope_12h = np.diff(ema_50_12h, prepend=ema_50_12h[0])  # slope = current - previous
-    ema_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_12h)
+    # 1d volume confirmation: volume > 1.5 * 20-day average
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1d = volume_1d > (1.5 * vol_ma_1d)
+    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d)
     
-    # Williams %R(14) on 6h
+    # Pre-compute 4h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Upper channel: highest high over last 20 periods
+    dc_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low over last 20 periods
+    dc_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 2.0 * 20-period average
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    # Pre-compute 4h ATR(14) for stoploss and sizing
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema_slope_12h_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or
+            np.isnan(atr[i]) or atr[i] <= 0 or
+            np.isnan(volume_confirm_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: Williams %R mean reversion or trend change
-            if williams_r[i] > -20:  # Overbought exit
+            # Update highest high since entry for trailing stop
+            highest_high_since_entry = max(highest_high_since_entry, high[i])
+            
+            # Exit conditions: ATR trailing stop or mean reversion to midpoint
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR trailing stop
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif ema_slope_12h_aligned[i] <= 0:  # Trend turned down
+            elif close[i] < (dc_upper[i] + dc_lower[i]) / 2:  # Mean reversion exit to midpoint
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: Williams %R mean reversion or trend change
-            if williams_r[i] < -80:  # Oversold exit
+            # Update lowest low since entry for trailing stop
+            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+            
+            # Exit conditions: ATR trailing stop or mean reversion to midpoint
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR trailing stop
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif ema_slope_12h_aligned[i] >= 0:  # Trend turned up
+            elif close[i] > (dc_upper[i] + dc_lower[i]) / 2:  # Mean reversion exit to midpoint
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for mean reversion entries with volume confirmation and trend alignment
-            if williams_r[i] < -80 and ema_slope_12h_aligned[i] > 0 and volume_confirm[i]:  # Oversold + rising trend
+            # Look for breakout entries with volume confirmation
+            if close[i] > dc_upper[i] and volume_confirm_1d_aligned[i]:  # Break above upper channel
                 position = 1
+                highest_high_since_entry = high[i]
+                lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif williams_r[i] > -20 and ema_slope_12h_aligned[i] < 0 and volume_confirm[i]:  # Overbought + falling trend
+            elif close[i] < dc_lower[i] and volume_confirm_1d_aligned[i]:  # Break below lower channel
                 position = -1
+                highest_high_since_entry = high[i]
+                lowest_low_since_entry = low[i]
                 signals[i] = -0.25
     
     return signals
