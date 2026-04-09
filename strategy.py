@@ -4,13 +4,14 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and chop regime filter
-# Uses tighter volume confirmation (2.0x avg volume) and stricter chop thresholds to reduce trades
-# In trending regime (low chop): breakout strategy at H3/L3 levels
-# In ranging regime (high chop): mean reversion at H4/L4 levels
-# Discrete position sizing 0.25 to target ~20-50 trades/year and minimize fee drag
+# Camarilla pivots provide structured support/resistance levels based on previous day's range
+# Long when price breaks above H3 with volume confirmation in low chop (trending) regime
+# Short when price breaks below L3 with volume confirmation in low chop regime
+# In high chop (ranging) regime, fade extremes: long at L3, short at H3
+# Uses discrete position sizing 0.25 to target ~20-50 trades/year and minimize fee drag
 # Works in bull/bear markets: breakout follows trends in trending regimes, mean reversion at pivots in ranging regimes
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v27"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,13 +36,15 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.zeros_like(close_1d)
     
     # Calculate 1d Camarilla pivot levels
+    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), 
+    #            L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
     range_1d = high_1d - low_1d
     camarilla_h3 = close_1d + 1.1 * range_1d
     camarilla_l3 = close_1d - 1.1 * range_1d
     camarilla_h4 = close_1d + 1.5 * range_1d
     camarilla_l4 = close_1d - 1.5 * range_1d
     
-    # Calculate 1d ATR(10) for volume avg reference
+    # Calculate 1d ATR(10) for volatility filter
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -87,17 +90,19 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(avg_vol_1d_aligned[i]) or np.isnan(bb_width_1d_aligned[i])):
+            np.isnan(avg_vol_1d_aligned[i]) or np.isnan(bb_width_1d_aligned[i]) or
+            np.isnan(atr_10_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter)
+        # Volume confirmation: current 4h volume > 1.5x 20-period MA
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
+        volume_confirmed = not np.isnan(vol_ma_20[i]) and volume[i] > 1.5 * vol_ma_20[i]
         
-        # Chop regime: stricter thresholds to reduce trades
-        trending_regime = bb_width_1d_aligned[i] < 0.03  # Very low volatility = trending
-        ranging_regime = bb_width_1d_aligned[i] > 0.08   # High volatility = ranging
+        # Chop regime: low BB width = trending, high BB width = ranging
+        # Using 1d BB width aligned to 4h
+        trending_regime = bb_width_1d_aligned[i] < 0.05  # Low volatility = trending
+        ranging_regime = bb_width_1d_aligned[i] > 0.10   # High volatility = ranging
         
         if position == 1:  # Long position
             if trending_regime and volume_confirmed:
@@ -108,8 +113,8 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price moves back above L4 (mean reversion exit)
-                if close[i] > camarilla_l4_aligned[i]:
+                # Exit long if price moves back above L3 (mean reversion exit)
+                if close[i] > camarilla_l3_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -124,8 +129,8 @@ def generate_signals(prices):
                 else:
                     signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price moves back below H4 (mean reversion exit)
-                if close[i] < camarilla_h4_aligned[i]:
+                # Exit short if price moves back below H3 (mean reversion exit)
+                if close[i] < camarilla_h3_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -141,10 +146,10 @@ def generate_signals(prices):
                     signals[i] = -0.25
             elif ranging_regime:
                 # Mean reversion at extremes in ranging market
-                if close[i] < camarilla_l4_aligned[i]:
+                if close[i] < camarilla_l3_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] > camarilla_h4_aligned[i]:
+                elif close[i] > camarilla_h3_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
