@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d HTF for signal direction and 1h for entry timing.
-# - 4h trend: EMA50 > EMA200 = uptrend, < = downtrend
-# - 1d regime: Choppiness Index (CHOP) > 61.8 = range (mean revert), < 38.2 = trending (trend follow)
-# - 1h entry: In uptrend + trending regime, buy pullback to 20 EMA; in downtrend + trending regime, sell pullback to 20 EMA
-# - In range regime (CHOP between 38.2 and 61.8), fade extremes: buy near 20-period low, sell near 20-period high
-# - Volume confirmation: current 1h volume > 1.5x 20-period average
-# - Session filter: 08-20 UTC only
-# - Fixed position size 0.20 to control drawdown and minimize fee churn
-# - Target: 15-37 trades/year (60-150 total over 4 years)
+# Hypothesis: 6h Elder Ray + 1d regime filter
+# - Uses 1d HTF for regime: ADX>25 = trending, ADX<20 = ranging
+# - 6h Elder Ray: Bull Power = Close - EMA13, Bear Power = EMA13 - Close
+# - Long when Bull Power > 0 and Bear Power < 0 in trending up (ADX rising)
+# - Short when Bear Power > 0 and Bull Power < 0 in trending down (ADX rising)
+# - In ranging market (ADX<20): fade extremes - long when Bull Power < -0.5*ATR, short when Bear Power < -0.5*ATR
+# - Volume confirmation: current volume > 1.2x 20-period average
+# - Fixed position size 0.25 to control drawdown
+# - Target: 12-30 trades/year on 6h timeframe (48-120 total over 4 years)
 
-name = "1h_4h_1d_chop_trend_meanrev_v1"
-timeframe = "1h"
+name = "6h_1d_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,28 +26,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h EMAs for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 4h EMAs to 1h timeframe (wait for completed 4h bar)
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -58,102 +36,108 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Choppiness Index (CHOP)
-    def calculate_chop(high, low, close, window=14):
-        atr = np.zeros_like(close)
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First TR is just high-low
-        atr = pd.Series(tr).rolling(window=window, min_periods=window).mean().values
-        
-        hh = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        ll = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        
-        chop = np.zeros_like(close)
-        for i in range(len(close)):
-            if atr[i] > 0 and hh[i] > ll[i]:
-                log_sum = np.log(atr[i] * window / (hh[i] - ll[i])) / np.log(2)
-                chop[i] = 100 * log_sum / np.log(window)
-            else:
-                chop[i] = 50.0  # Neutral when invalid
-        return chop
+    # Calculate 1d ADX for regime filter (14-period)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, window=14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Pre-compute 1h indicators for entry timing
+    # Smoothed values (14-period)
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h indicators
+    # EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = close - ema_13
+    bear_power = ema_13 - close
+    
+    # ATR for volatility (14-period)
+    tr_6h = np.maximum(np.abs(high[1:] - low[1:]), 
+                       np.maximum(np.abs(high[1:] - close[:-1]), 
+                                  np.abs(low[1:] - close[:-1])))
+    tr_6h = np.concatenate([[np.nan], tr_6h])
+    atr_14 = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Volume confirmation (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    ema_20_1h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    position_size = 0.20
     
     for i in range(100, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_4h_aligned[i]) or
-            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(ema_20_1h[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(highest_high_20[i]) or vol_ma_20[i] <= 0):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation
+        volume_confirmed = volume[i] > 1.2 * vol_ma_20[i]
         
-        # 4h trend filter
-        uptrend_4h = ema_50_4h_aligned[i] > ema_200_4h_aligned[i]
-        downtrend_4h = ema_50_4h_aligned[i] < ema_200_4h_aligned[i]
+        # Regime filters
+        trending_market = adx_aligned[i] > 25
+        ranging_market = adx_aligned[i] < 20
         
-        # 1d regime filter
-        chop_val = chop_1d_aligned[i]
-        trending_regime = chop_val < 38.2
-        range_regime = chop_val > 61.8
+        # Fixed position size
+        position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit when price closes below 1h 20 EMA (trend/momentum loss)
-            if close[i] < ema_20_1h[i]:
+            # Exit when Elder Ray turns bearish or trend changes
+            if bull_power[i] <= 0 and bear_power[i] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit when price closes above 1h 20 EMA (trend/momentum loss)
-            if close[i] > ema_20_1h[i]:
+            # Exit when Elder Ray turns bullish or trend changes
+            if bear_power[i] <= 0 and bull_power[i] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
         else:  # Flat
             if volume_confirmed:
-                # Trending regime: trade with 4h trend using 1h pullbacks
-                if trending_regime:
-                    # Long: uptrend + pullback to 20 EMA
-                    if uptrend_4h and close[i] <= ema_20_1h[i] * 1.001:  # Allow small overshoot
+                if trending_market:
+                    # Trending: follow Elder Ray direction
+                    if bull_power[i] > 0 and bear_power[i] < 0:
                         position = 1
                         signals[i] = position_size
-                    # Short: downtrend + pullback to 20 EMA
-                    elif downtrend_4h and close[i] >= ema_20_1h[i] * 0.999:  # Allow small overshoot
+                    elif bear_power[i] > 0 and bull_power[i] < 0:
                         position = -1
                         signals[i] = -position_size
-                # Range regime: mean reversion at extremes
-                elif range_regime:
-                    # Long: near 20-period low
-                    if low[i] <= lowest_low_20[i] * 1.002:  # Allow small overshoot
+                elif ranging_market:
+                    # Ranging: mean reversion at extremes
+                    if bull_power[i] < -0.5 * atr_14[i]:
                         position = 1
                         signals[i] = position_size
-                    # Short: near 20-period high
-                    elif high[i] >= highest_high_20[i] * 0.998:  # Allow small overshoot
+                    elif bear_power[i] < -0.5 * atr_14[i]:
                         position = -1
                         signals[i] = -position_size
     
