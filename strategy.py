@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v2
-# Hypothesis: 12h strategy using daily Camarilla H3/L3 levels with 1d trend filter (price above/below daily EMA200) and volume confirmation (>1.5x 20-period average).
-# In bull markets: long when price touches L3 support in uptrend (price > EMA200) with volume spike.
-# In bear markets: short when price touches H3 resistance in downtrend (price < EMA200) with volume spike.
-# Uses discrete position sizing (±0.25) to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year).
+# 4h_donchian_20_volume_chop_regime_v2
+# Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and choppiness regime filter.
+# Long when price breaks above Donchian high in trending market (CHOP < 38.2) with volume > 1.5x average.
+# Short when price breaks below Donchian low in trending market (CHOP < 38.2) with volume > 1.5x average.
+# Uses 1d HTF for choppiness calculation to avoid look-ahead and ensure proper alignment.
+# Discrete position sizing (±0.25) to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_20_volume_chop_regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,38 +24,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots and EMA200 trend filter
+    # 1d HTF data for choppiness regime (to avoid look-ahead and ensure proper alignment)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily EMA200 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate True Range for 1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan  # First value has no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # 1d Camarilla pivot levels (based on previous day's range)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # Calculate +DM and -DM for 1d
+    up_move = np.diff(high_1d, prepend=np.nan)
+    down_move = -np.diff(low_1d, prepend=np.nan)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    range_1d = prev_high_1d - prev_low_1d
+    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
     
-    # Camarilla levels: H3, L3 (strongest intraday support/resistance)
-    h3 = pivot_point + (range_1d * 1.1 / 4)
-    l3 = pivot_point - (range_1d * 1.1 / 4)
+    period = 14
+    tr_smoothed = wilder_smooth(tr, period)
+    plus_dm_smoothed = wilder_smooth(plus_dm, period)
+    minus_dm_smoothed = wilder_smooth(minus_dm, period)
     
-    # Align 1d data to 12h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, period)
+    
+    # Choppiness Index: CHOP = 100 * log10(sum(TR) / (ATR * period)) / log10(period)
+    # Using ATR from smoothed TR
+    atr = tr_smoothed  # This is already the smoothed TR (ATR)
+    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    chop = 100 * np.log10(sum_tr / (atr * period)) / np.log10(period)
+    
+    # Align choppiness to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 4h Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,37 +92,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below L3 OR below daily EMA200 (trend fails)
-            if close[i] < l3_aligned[i] or close[i] < ema200_1d_aligned[i]:
+            # Exit: price closes below Donchian low OR choppiness becomes too high (range market)
+            if close[i] < lowest_low_20[i] or chop_aligned[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H3 OR above daily EMA200 (trend fails)
-            if close[i] > h3_aligned[i] or close[i] > ema200_1d_aligned[i]:
+            # Exit: price closes above Donchian high OR choppiness becomes too high (range market)
+            if close[i] > highest_high_20[i] or chop_aligned[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Need volume confirmation
+            # Need volume confirmation and trending market (CHOP < 38.2)
             volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            trending_market = chop_aligned[i] < 38.2
             
-            if volume_confirmed:
-                # Long: price touches L3 support in uptrend (price > EMA200)
-                if abs(close[i] - l3_aligned[i]) < (h3_aligned[i] - l3_aligned[i]) * 0.02 and close[i] > ema200_1d_aligned[i]:
+            if volume_confirmed and trending_market:
+                # Long: price breaks above Donchian high
+                if close[i] > highest_high_20[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price touches H3 resistance in downtrend (price < EMA200)
-                elif abs(close[i] - h3_aligned[i]) < (h3_aligned[i] - l3_aligned[i]) * 0.02 and close[i] < ema200_1d_aligned[i]:
+                # Short: price breaks below Donchian low
+                elif close[i] < lowest_low_20[i]:
                     position = -1
                     signals[i] = -0.25
     
