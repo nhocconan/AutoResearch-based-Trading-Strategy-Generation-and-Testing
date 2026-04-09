@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "12h_1d_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -36,13 +36,13 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to 1h timeframe
+    # Align daily values to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_d, s4)
     prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Volume confirmation: 3-period average (3h)
+    # Volume confirmation: 3-period average (36h)
     vol_ma_3 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -71,7 +71,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit: price closes back inside previous day's range
@@ -79,16 +79,16 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
             # Enter long: price closes above R4 with volume confirmation
             vol_ratio = volume[i] / vol_ma_3[i] if vol_ma_3[i] > 0 else 0
             if close[i] > r4_aligned[i] and vol_ratio > 2.0:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             # Enter short: price closes below S4 with volume confirmation
             elif close[i] < s4_aligned[i] and vol_ratio > 2.0:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
