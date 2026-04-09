@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d/1w Camarilla pivot confluence with volume confirmation and ATR trailing stop
-# Combines 1d Camarilla levels (short-term structure) with 1w Camarilla levels (long-term structure)
-# Requires price to be near BOTH 1d and 1w key levels (R3/R4/S3/S4) for high-probability entries
-# Volume confirmation (current 4h volume > 1.5x 20-period average) filters false breakouts
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation and ATR trailing stop
+# Camarilla pivots from 1w provide strong support/resistance levels proven in ranging and trending markets
+# Volume confirmation (current 1d volume > 1.5x 20-period average) filters false breakouts
 # ATR trailing stop (2.0x ATR) manages risk and adapts to volatility
-# Designed for 4h timeframe targeting 20-30 trades/year (80-120 over 4 years)
-# Works in bull/bear: price reacts to multi-timeframe structure, volume confirms validity, ATR stop controls drawdown
+# Designed for 1d timeframe targeting 15-25 trades/year (60-100 over 4 years)
+# Works in bull/bear: price reacts to 1w structure, volume confirms validity, ATR stop controls drawdown
 
-name = "4h_1d1w_camarilla_confluence_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,50 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 25 or len(df_1w) < 10:
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    camarilla_r3_1d = close_1d + range_1d * 1.1 / 4.0
-    camarilla_r4_1d = close_1d + range_1d * 1.1 / 2.0
-    camarilla_s3_1d = close_1d - range_1d * 1.1 / 4.0
-    camarilla_s4_1d = close_1d - range_1d * 1.1 / 2.0
-    
-    # Calculate 1w Camarilla pivot levels
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
+    # Calculate 1w Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # Resistance levels: R1 = C + Range * 1.1/12, R2 = C + Range * 1.1/6, R3 = C + Range * 1.1/4, R4 = C + Range * 1.1/2
+    # Support levels: S1 = C - Range * 1.1/12, S2 = C - Range * 1.1/6, S3 = C - Range * 1.1/4, S4 = C - Range * 1.1/2
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     range_1w = high_1w - low_1w
     
-    camarilla_r3_1w = close_1w + range_1w * 1.1 / 4.0
-    camarilla_r4_1w = close_1w + range_1w * 1.1 / 2.0
-    camarilla_s3_1w = close_1w - range_1w * 1.1 / 4.0
-    camarilla_s4_1w = close_1w - range_1w * 1.1 / 2.0
+    # Key levels for trading: R3, R4, S3, S4 (stronger levels)
+    camarilla_r3 = close_1w + range_1w * 1.1 / 4.0
+    camarilla_r4 = close_1w + range_1w * 1.1 / 2.0
+    camarilla_s3 = close_1w - range_1w * 1.1 / 4.0
+    camarilla_s4 = close_1w - range_1w * 1.1 / 2.0
     
-    # Align Camarilla levels to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
+    # Align Camarilla levels to 1d timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4_1w)
-    
-    # Pre-compute ATR(14) for 4h timeframe
+    # Pre-compute ATR(14) for 1d timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -88,15 +73,13 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(r3_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or
-            np.isnan(s3_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume
+        # Volume confirmation: current 1d volume > 1.5x average 1d volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
@@ -123,15 +106,14 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout trading with volume confirmation and multi-timeframe confluence
-            # Long when price breaks above BOTH 1d R4 and 1w R4
-            # Short when price breaks below BOTH 1d S4 and 1w S4
+            # Breakout trading with volume confirmation
+            # Long on Camarilla R4 breakout, Short on Camarilla S4 breakout
             if volume_confirmed:
-                if close[i] > r4_1d_aligned[i] and close[i] > r4_1w_aligned[i]:
+                if close[i] > r4_aligned[i]:
                     position = 1
                     highest_since_long = close[i]
                     signals[i] = 0.25
-                elif close[i] < s4_1d_aligned[i] and close[i] < s4_1w_aligned[i]:
+                elif close[i] < s4_aligned[i]:
                     position = -1
                     lowest_since_short = close[i]
                     signals[i] = -0.25
