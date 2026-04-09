@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation
-# Weekly Camarilla levels (R3/S3, R4/S4) act as major support/resistance in both bull and bear markets
-# Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation (current 1d volume > 1.5x 20-period average) filters false signals
-# ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
-# Position size fixed at 0.25 to minimize fee churn
-# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# Hypothesis: 6h strategy using 1d Williams %R with EMA trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions that work in both bull and bear markets
+# EMA(50) on 1d timeframe provides trend filter: only take long signals in uptrend, short in downtrend
+# Volume confirmation (current 6h volume > 1.5x 20-period average) filters low-quality signals
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "1d_1w_camarilla_atr_volume_v1"
-timeframe = "1d"
+name = "6h_1d_williamsr_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,45 +23,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Camarilla pivot levels
-    # Pivot point = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (H-L) * 1.1/2
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    # S4 = C - (H-L) * 1.1/2
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r4_1w = close_1w + range_1w * 1.1 / 2.0
-    r3_1w = close_1w + range_1w * 1.1 / 4.0
-    s3_1w = close_1w - range_1w * 1.1 / 4.0
-    s4_1w = close_1w - range_1w * 1.1 / 2.0
+    # Calculate 1d Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1w ATR (14-period) for volatility filtering
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d EMA(50) for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Camarilla levels and ATR to 1d timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
-    atr_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
+    # Align Williams %R and EMA to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Pre-compute volume confirmation (20-period average for 1d)
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -71,70 +55,59 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            atr_aligned[i] <= 0):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x average 1d volume
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Volatility filter: only trade when ATR is above its 50-period average (avoid low-vol chop)
-        atr_ma_50 = pd.Series(atr_aligned).rolling(window=50, min_periods=50).mean()
-        if len(atr_ma_50) > i:
-            vol_filter = atr_aligned[i] > atr_ma_50.iloc[i]
-        else:
-            vol_filter = True  # Not enough data for MA, allow trading
-            
-        if not vol_filter:
+        if not volume_confirmed:
             signals[i] = 0.0
             continue
         
-        # Fixed position size to minimize fee churn
+        # Trend filter: determine market direction from 1d EMA
+        # Uptrend: price above EMA50, Downtrend: price below EMA50
+        is_uptrend = close_1d[-1] > ema_50[-1] if len(close_1d) > 0 else True  # Simplified: use current trend
+        
+        # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit on retracement to S3 or stop at S4 breakdown
-            if close[i] < s3_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] < s4_aligned[i]:  # Stop loss at S4 breakdown
+            # Exit when Williams %R rises above -20 (overbought) or reverse signal
+            if williams_r_aligned[i] > -20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit on retracement to R3 or stop at R4 breakout
-            if close[i] > r3_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] > r4_aligned[i]:  # Stop loss at R4 breakout
+            # Exit when Williams %R falls below -80 (oversold) or reverse signal
+            if williams_r_aligned[i] < -80:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
         else:  # Flat
-            # Camarilla pivot trading with volume and volatility confirmation
-            # Fade at R3/S3 (mean reversion), breakout at R4/S4 (trend following)
-            if volume_confirmed:
-                # Fade at R3 (sell at resistance, expect reversion to pivot)
-                if close[i] > r3_aligned[i] and close[i] < r4_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
-                # Fade at S3 (buy at support, expect reversion to pivot)
-                elif close[i] < s3_aligned[i] and close[i] > s4_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Breakout continuation at R4 (buy break above resistance)
-                elif close[i] > r4_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Breakout continuation at S4 (sell break below support)
-                elif close[i] < s4_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
+            # Williams %R signals with volume confirmation and trend filter
+            # Long: Williams %R crosses below -80 (oversold) in uptrend
+            # Short: Williams %R crosses above -20 (overbought) in downtrend
+            if i > 0:
+                prev_williams = williams_r_aligned[i-1]
+                curr_williams = williams_r_aligned[i]
+                
+                # Long signal: Williams %R crosses above -80 from below (exit oversold)
+                if prev_williams <= -80 and curr_williams > -80:
+                    # Only take long in uptrend
+                    if close[i] > ema_50_aligned[i]:
+                        position = 1
+                        signals[i] = position_size
+                # Short signal: Williams %R crosses below -20 from above (exit overbought)
+                elif prev_williams >= -20 and curr_williams < -20:
+                    # Only take short in downtrend
+                    if close[i] < ema_50_aligned[i]:
+                        position = -1
+                        signals[i] = -position_size
     
     return signals
