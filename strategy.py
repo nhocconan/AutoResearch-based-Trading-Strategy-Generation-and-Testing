@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and 12h volume spike confirmation
-# - Uses 12h Donchian channel breakout (20-period) for trend-following entries
-# - Filters by 1d EMA(50) direction: only long when price > EMA50, short when price < EMA50
-# - Requires 12h volume > 2.0x its 20-period average for confirmation (reduces false breakouts)
-# - Uses ATR(14) trailing stop: exits when price retraces 3.0x ATR from extreme
-# - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Donchian breakouts capture strong trends, volume filter improves quality, EMA50 avoids counter-trend trades
-# - Works in both bull (breakouts with volume) and bear (short breakdowns) markets
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(34) trend filter and volume spike confirmation
+# - Uses 4h Donchian channel breakout (20-period) for entries in direction of 12h EMA trend
+# - Requires volume > 1.8x 20-period average to confirm breakout strength
+# - ATR(14) trailing stop at 2.5x ATR from extreme to manage risk
+# - Position size: 0.25 (25% of capital) for balanced risk/return
+# - Target: ~30 trades/year (120 total over 4 years) to minimize fee drag
+# - Donchian breakouts capture strong trends, EMA filter avoids counter-trend trades, volume confirmation improves quality
+# - Works in bull markets (long breakouts) and bear markets (short breakdowns)
 
-name = "12h_donchian_ema_volume_atr_v1"
-timeframe = "12h"
+name = "4h_donchian_ema12h_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,32 +22,32 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 40:
         return np.zeros(n)
     
-    # Pre-compute 1d indicators
-    close_1d = df_1d['close'].values
+    # Pre-compute 12h indicators
+    close_12h = df_12h['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # 12h price data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channel (20-period)
+    # 4h Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12h volume > 2.0x 20-period average (volume confirmation)
+    # 4h volume > 1.8x 20-period average (volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume_20)
+    volume_spike = volume > (1.8 * avg_volume_20)
     
-    # 12h ATR(14) for trailing stop
+    # 4h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -63,7 +62,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_34_12h_aligned[i]) or 
             np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or
             np.isnan(volume_spike[i]) or
@@ -77,8 +76,8 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 3.0x ATR from high
-            if low[i] <= highest_since_entry - (3.0 * atr[i]):
+            # Exit conditions: price retraces 2.5x ATR from high
+            if low[i] <= highest_since_entry - (2.5 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -89,25 +88,25 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 3.0x ATR from low
-            if high[i] >= lowest_since_entry + (3.0 * atr[i]):
+            # Exit conditions: price retraces 2.5x ATR from low
+            if high[i] >= lowest_since_entry + (2.5 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with volume confirmation and EMA trend filter
-            # Long: price breaks above Donchian high AND price > 1d EMA50 AND volume spike
+            # Look for Donchian breakout with volume confirmation and 12h EMA trend filter
+            # Long: price breaks above Donchian high AND price > 12h EMA34 AND volume spike
             if (high[i] >= donchian_high[i] and 
-                close[i] > ema_50_1d_aligned[i] and
+                close[i] > ema_34_12h_aligned[i] and
                 volume_spike[i]):
                 position = 1
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]  # Initialize for shorts
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low AND price < 1d EMA50 AND volume spike
+            # Short: price breaks below Donchian low AND price < 12h EMA34 AND volume spike
             elif (low[i] <= donchian_low[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
+                  close[i] < ema_34_12h_aligned[i] and
                   volume_spike[i]):
                 position = -1
                 highest_since_entry = low[i]  # Initialize for longs
