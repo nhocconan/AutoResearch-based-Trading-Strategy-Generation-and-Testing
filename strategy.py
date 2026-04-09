@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_donchian_1d_camarilla_volume_v3
-# Hypothesis: Further tighten entry by requiring Donchian breakout + volume spike + price closing beyond Camarilla H4/L4 (stronger than H3/L3) to reduce false signals. Target 75-150 trades over 4 years. Works in bull/bear via Donchian breakouts with stronger pivot bias.
+# 12h_donchian_1d_camarilla_volume_v1
+# Hypothesis: 12h Donchian breakout with 1d Camarilla H4/L4 filter and volume confirmation. Targets 50-150 trades over 4 years. Works in bull/bear via breakouts with stronger daily pivot bias to reduce false signals.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_1d_camarilla_volume_v3"
-timeframe = "4h"
+name = "12h_donchian_1d_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,21 +20,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian channels (primary timeframe)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data for Donchian channels (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align 4h Donchian levels to 4h timeframe (no additional delay needed for price channels)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
+    # Align 12h Donchian levels to 12h timeframe (no additional delay needed for price channels)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper_12h)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower_12h)
     
     # Get 1d HTF data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -53,13 +53,13 @@ def generate_signals(prices):
     h4_1d = pivot_1d + (range_1d * 1.1 / 2)
     l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe (completed daily candle only)
+    # Align Camarilla levels to 12h timeframe (completed daily candle only)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 2.0)  # Further increased threshold to reduce trades
+    vol_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -73,7 +73,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 4h Donchian lower band
+            # Exit: price closes below 12h Donchian lower band
             if close[i] < donchian_lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -81,18 +81,18 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h Donchian upper band
+            # Exit: price closes above 12h Donchian upper band
             if close[i] > donchian_upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 4h Donchian upper, above 1d H4, with volume spike
+            # Enter long: price closes above 12h Donchian upper, above 1d H4, with volume spike
             if (close[i] > donchian_upper_aligned[i]) and (close[i] > h4_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 4h Donchian lower, below 1d L4, with volume spike
+            # Enter short: price closes below 12h Donchian lower, below 1d L4, with volume spike
             elif (close[i] < donchian_lower_aligned[i]) and (close[i] < l4_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
