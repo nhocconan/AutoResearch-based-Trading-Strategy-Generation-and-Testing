@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and chop regime filter
-# In trending regimes (CHOP < 38.2): breakout above H3 (long) or below L3 (short) with volume confirmation
-# In ranging regimes (CHOP > 61.8): mean reversion at H1/L1 with volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR volume spike and chop regime filter
+# In trending regimes (CHOP < 38.2): breakout above/below Donchian(20) with volume confirmation
+# In ranging regimes (CHOP > 61.8): mean reversion at Donchian mid-point with volume confirmation
 # Uses discrete position sizing 0.25 to limit trades to ~20-50/year and reduce fee drag
 # Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_donchian_breakout_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -70,37 +70,17 @@ def generate_signals(prices):
     avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate Camarilla levels from prior 1d bar (shifted by 1 to avoid look-ahead)
-    prior_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
-    prior_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
-    prior_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
-    
-    rng = prior_high_1d - prior_low_1d
-    H1 = prior_close_1d + 1.1 * rng / 12
-    L1 = prior_close_1d - 1.1 * rng / 12
-    H2 = prior_close_1d + 1.1 * rng / 6
-    L2 = prior_close_1d - 1.1 * rng / 6
-    H3 = prior_close_1d + 1.1 * rng / 4
-    L3 = prior_close_1d - 1.1 * rng / 4
-    H4 = prior_close_1d + 1.1 * rng / 2
-    L4 = prior_close_1d - 1.1 * rng / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Calculate 4h Donchian channels (20-period) from prior bar to avoid look-ahead
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    donchian_mid = (highest_high + lowest_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -115,31 +95,31 @@ def generate_signals(prices):
         ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            if close[i] < L3_aligned[i] or ranging_regime:
+            if close[i] < donchian_mid[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if close[i] > H3_aligned[i] or ranging_regime:
+            if close[i] > donchian_mid[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             if trending_regime:
-                if close[i] > H3_aligned[i] and volume_confirmed:
+                if close[i] > highest_high[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < L3_aligned[i] and volume_confirmed:
+                elif close[i] < lowest_low[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
             elif ranging_regime:
-                if close[i] <= L1_aligned[i] and volume_confirmed:
+                if close[i] <= donchian_mid[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] >= H1_aligned[i] and volume_confirmed:
+                elif close[i] >= donchian_mid[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
     
