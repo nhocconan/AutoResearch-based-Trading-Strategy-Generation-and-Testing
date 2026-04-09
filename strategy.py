@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v1
-# Hypothesis: 12h Camarilla pivot breakout with 1d EMA50 trend filter and volume confirmation.
-# Works in bull/bear: 1d EMA50 defines institutional trend; Camarilla R3/S3/R4/S4 levels provide
-# precise entry/exit levels; volume confirms institutional participation. Target: 12-37 trades/year.
+# 4h_camarilla_1d_trend_volume_v3
+# Hypothesis: 4h Camarilla pivot breakout with 1d EMA50 trend filter and volume confirmation.
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
+# Works in bull/bear: 1d EMA50 defines institutional trend; Camarilla R3/S3/R4/S4 levels
+# provide precise entry/exit; volume confirms institutional participation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_1d_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,7 +51,7 @@ def generate_signals(prices):
     s3_1d = pivot_1d - range_1d * 1.1 / 4
     s4_1d = pivot_1d - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
