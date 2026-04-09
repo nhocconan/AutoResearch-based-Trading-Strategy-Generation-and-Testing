@@ -1,102 +1,89 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v3
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and choppiness regime filter.
-# Works in bull/bear: Donchian captures breakouts, volume confirms validity, chop filter avoids whipsaws in ranging markets.
-# Target: 20-50 trades/year (80-200 total over 4 years).
+# 1d_funding_rate_mean_reversion_v1
+# Hypothesis: Funding rate mean reversion on 1d timeframe with 1w trend filter.
+# Extreme negative funding (oversold shorts) → long, extreme positive funding (oversold longs) → short.
+# Uses 1w EMA trend filter to avoid counter-trend trades. Works in bull/bear markets as funding extremes occur in all regimes.
+# Target: 30-100 total trades over 4 years (7-25/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_v3"
-timeframe = "4h"
+name = "1d_funding_rate_mean_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    # Load funding rate data (assuming it's available as a column or external data)
+    # Since funding rate isn't in prices DataFrame, we'll use price action proxy:
+    # RSI extreme + volume spike as funding extreme proxy
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for choppiness index
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range for 1d
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # First period has no prior close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Choppiness Index (14-period)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    # Handle division by zero or invalid cases
-    chop = np.where((hh - ll) == 0, 50, chop)  # Neutral when no range
-    chop = np.where(np.isnan(chop), 50, chop)   # Neutral when NaN
-    
-    # Align choppiness to 4h timeframe (completed 1d bar only)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Donchian Channel (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d RSI(14) as proxy for funding rate extreme
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # 1w HTF trend filter: EMA(50) on weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(volume_ma[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when market is trending (chop < 61.8)
-        is_trending = chop_aligned[i] < 61.8
-        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low OR chop becomes too high (ranging)
-            if close[i] < donchian_low[i] or chop_aligned[i] > 61.8:
+            # Exit: RSI returns to neutral (50) or volume drops
+            if rsi[i] >= 50 or volume[i] < volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high OR chop becomes too high (ranging)
-            if close[i] > donchian_high[i] or chop_aligned[i] > 61.8:
+            # Exit: RSI returns to neutral (50) or volume drops
+            if rsi[i] <= 50 or volume[i] < volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if is_trending and not np.isnan(volume_ma[i]):
-                volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-                
-                if volume_confirmed:
-                    # Long: price breaks above Donchian high
-                    if close[i] > donchian_high[i]:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short: price breaks below Donchian low
-                    elif close[i] < donchian_low[i]:
-                        position = -1
-                        signals[i] = -0.25
+            # Need volume confirmation
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            
+            if volume_confirmed:
+                # Long: RSI < 30 (oversold) + price above 1w EMA (uptrend filter)
+                if rsi[i] < 30 and close[i] > ema_50_1w_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: RSI > 70 (overbought) + price below 1w EMA (downtrend filter)
+                elif rsi[i] > 70 and close[i] < ema_50_1w_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
