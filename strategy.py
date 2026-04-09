@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 4h_camarilla_volume_breakout_v2
-# Hypothesis: Camarilla pivot levels on 1d with volume spike and ADX trend filter capture breakouts in both bull and bear markets.
-# Uses L3/L3 and H3/H3 levels for entry, volume > 2x 20-period average, and ADX > 20 to avoid chop.
-# Target: 20-40 trades/year (80-160 over 4 years) with controlled risk.
+# 12h_donchian_20_volume_regime_v1
+# Hypothesis: Donchian(20) breakout on 12h with volume confirmation (>2x average) and trend filter (ADX>20) captures breakouts in both bull and bear markets. Uses 1d for trend context and ATR-based stoploss. Target: 12-37 trades/year (50-150 over 4 years) with controlled risk.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_volume_breakout_v2"
-timeframe = "4h"
+name = "12h_donchian_20_volume_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -65,72 +63,65 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
-    # Get daily Camarilla levels
+    # Get daily trend context (EMA50)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    camarilla_h3 = np.zeros(len(df_1d))
-    camarilla_l3 = np.zeros(len(df_1d))
-    camarilla_h4 = np.zeros(len(df_1d))
-    camarilla_l4 = np.zeros(len(df_1d))
-    
+    ema_50_1d = np.zeros(len(df_1d))
+    ema_50_1d[0] = close_1d[0]
     for i in range(1, len(df_1d)):
-        range_ = high_1d[i-1] - low_1d[i-1]
-        close_prev = close_1d[i-1]
-        camarilla_h4[i] = close_prev + range_ * 1.1 / 2
-        camarilla_l4[i] = close_prev - range_ * 1.1 / 2
-        camarilla_h3[i] = close_prev + range_ * 1.1 / 4
-        camarilla_l3[i] = close_prev - range_ * 1.1 / 4
+        ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Align to 4h timeframe
-    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Donchian channels (20-period)
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
+    for i in range(n):
+        start_idx = max(0, i-19)
+        donchian_high[i] = np.max(high[start_idx:i+1])
+        donchian_low[i] = np.min(low[start_idx:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if np.isnan(adx[i]) or np.isnan(vol_ma_20[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]):
+        if np.isnan(adx[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_12h[i]):
             signals[i] = 0.0
             continue
         
         # Volume spike condition
         vol_spike = volume[i] > vol_ma_20[i] * 2.0
         
-        # ADX trend filter
-        trending = adx[i] > 20
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema_50_12h[i]
+        downtrend = close[i] < ema_50_12h[i]
         
         if position == 1:  # Long position
-            # Exit: price below L3 or ADX drops
-            if close[i] < l3_4h[i] or adx[i] < 15:
+            # Exit: price breaks below Donchian low or trend changes
+            if close[i] < donchian_low[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above H3 or ADX drops
-            if close[i] > h3_4h[i] or adx[i] < 15:
+            # Exit: price breaks above Donchian high or trend changes
+            if close[i] > donchian_high[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H3 with volume and trend
-            if close[i] > h3_4h[i] and vol_spike and trending:
+            # Enter long: price breaks above Donchian high with volume and uptrend
+            if close[i] > donchian_high[i] and vol_spike and uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L3 with volume and trend
-            elif close[i] < l3_4h[i] and vol_spike and trending:
+            # Enter short: price breaks below Donchian low with volume and downtrend
+            elif close[i] < donchian_low[i] and vol_spike and downtrend:
                 position = -1
                 signals[i] = -0.25
     
