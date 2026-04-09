@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_camarilla_pivot_volume_v1
-# Hypothesis: 6h strategy using 12h and 1d Camarilla pivot levels with volume confirmation.
-# Long: Price breaks above 1d H4 with volume > 1.8x 20-period average and 12h close > 12h open.
-# Short: Price breaks below 1d L4 with volume > 1.8x 20-period average and 12h close < 12h open.
-# Exit: Price returns to opposite Camarilla level (H3 for longs, L3 for shorts).
+# 6h_12h_1d_ichimoku_cloud_v2
+# Hypothesis: 6h strategy using 12h trend filter and 1d Ichimoku cloud for entries.
+# Long: Price breaks above 1d Senkou Span A with volume > 1.8x 20-period average and 12h close > 12h open.
+# Short: Price breaks below 1d Senkou Span B with volume > 1.8x 20-period average and 12h close < 12h open.
+# Exit: Price returns to opposite Senkou Span (long exits below Span A, short exits above Span B).
 # Uses 12h trend filter: only long when 12h close > 12h EMA20, only short when 12h close < 12h EMA20.
 # Target: 12-30 trades/year to minimize fee drag while maintaining edge.
-# Works in bull markets via breakouts and bear markets via fade-from-extremes logic.
+# Ichimoku cloud provides dynamic support/resistance that adapts to volatility, working in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_camarilla_pivot_volume_v1"
+name = "6h_12h_1d_ichimoku_cloud_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -31,30 +31,39 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Camarilla levels
+    # Get 1d data for Ichimoku cloud
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily pivot and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    # Camarilla levels
-    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2.0
     
-    # Align 1d Camarilla levels to 6h
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = ((period52_high + period52_low) / 2.0)
+    
+    # Align Ichimoku components to 6h (they are already shifted in calculation)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
     
     # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
@@ -76,10 +85,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if any required data is NaN
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+        if (np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(close[i]) or
             np.isnan(volume[i]) or np.isnan(open_prices[i]) or
             np.isnan(ema_20_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or
@@ -98,33 +106,33 @@ def generate_signals(prices):
         trend_12h_down = close_12h_aligned[i] < ema_20_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: Price returns to H3
-            if close[i] <= h3_1d_aligned[i]:
+            # Exit: Price returns to Senkou Span A
+            if close[i] <= senkou_span_a_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to L3
-            if close[i] >= l3_1d_aligned[i]:
+            # Exit: Price returns to Senkou Span B
+            if close[i] >= senkou_span_b_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above H4 with volume, 12h bullish candle, and uptrend
-            if (close[i] > h4_1d_aligned[i] and    # Break above H4
-                volume_confirmed and               # Volume spike
-                candle_12h_bullish and             # 12h bullish candle
-                trend_12h_up):                     # 12h uptrend
+            # Long entry: Price breaks above Senkou Span A with volume, 12h bullish candle, and uptrend
+            if (close[i] > senkou_span_a_aligned[i] and    # Break above Senkou Span A
+                volume_confirmed and                       # Volume spike
+                candle_12h_bullish and                     # 12h bullish candle
+                trend_12h_up):                             # 12h uptrend
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L4 with volume, 12h bearish candle, and downtrend
-            elif (close[i] < l4_1d_aligned[i] and  # Break below L4
-                  volume_confirmed and             # Volume spike
-                  candle_12h_bearish and           # 12h bearish candle
-                  trend_12h_down):                 # 12h downtrend
+            # Short entry: Price breaks below Senkou Span B with volume, 12h bearish candle, and downtrend
+            elif (close[i] < senkou_span_b_aligned[i] and  # Break below Senkou Span B
+                  volume_confirmed and                     # Volume spike
+                  candle_12h_bearish and                   # 12h bearish candle
+                  trend_12h_down):                         # 12h downtrend
                 position = -1
                 signals[i] = -0.25
     
