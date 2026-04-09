@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d chop regime filter
-# Donchian breakouts capture momentum in trending markets (bull/bear)
-# Volume confirmation ensures breakout validity
-# Chop regime filter (CHOP > 61.8 = range, CHOP < 38.2 = trend) adapts to market conditions
-# In trending regime (CHOP < 38.2): trade Donchian breakouts
-# In ranging regime (CHOP > 61.8): fade Donchian touches (mean reversion)
-# Position size 0.25 to limit drawdown
-# Target: 100-200 total trades over 4 years (25-50/year) for optimal fee balance
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d choppiness regime filter
+# In choppy markets (CHOP > 61.8): mean reversion at Donchian bands (fade extremes)
+# In trending markets (CHOP < 38.2): breakout continuation (trade with trend)
+# Uses 12h for entry timing and 1d for regime detection via Choppiness Index
+# Position size 0.25 to limit drawdown and enable discrete levels
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Works in both bull/bear: adapts to regime via chop filter
 
-name = "4h_1d_donchian_chop_vol_v4"
-timeframe = "4h"
+name = "12h_1d_donchian_chop_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,12 +25,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for chop regime
+    # Load 1d data ONCE before loop for chop calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Chopiness Index (CHOP)
+    # Calculate 1d Choppiness Index (CHOP)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -49,52 +48,51 @@ def generate_signals(prices):
     atr_1d = np.zeros(len(df_1d))
     for i in range(len(df_1d)):
         if i < 14:
-            atr_1d[i] = np.nan
+            if i == 0:
+                atr_1d[i] = tr_1d[i]
+            else:
+                atr_1d[i] = (atr_1d[i-1] * i + tr_1d[i]) / (i + 1)
         else:
-            atr_1d[i] = np.nansum(tr_1d[i-13:i+1])
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
     
     # Highest high and lowest low over 14 periods
     hh_1d = np.zeros(len(df_1d))
     ll_1d = np.zeros(len(df_1d))
     for i in range(len(df_1d)):
         if i < 14:
-            hh_1d[i] = np.nan
-            ll_1d[i] = np.nan
+            hh_1d[i] = np.max(high_1d[:i+1])
+            ll_1d[i] = np.min(low_1d[:i+1])
         else:
-            hh_1d[i] = np.nanmax(high_1d[i-13:i+1])
-            ll_1d[i] = np.nanmin(low_1d[i-13:i+1])
+            hh_1d[i] = np.max(high_1d[i-13:i+1])
+            ll_1d[i] = np.min(low_1d[i-13:i+1])
     
-    # Chopiness Index: CHOP = 100 * log10(ATR(14) / (HH(14) - LL(14))) / log10(14)
-    chop_1d = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if i < 14 or np.isnan(hh_1d[i]) or np.isnan(ll_1d[i]) or hh_1d[i] == ll_1d[i]:
-            chop_1d[i] = np.nan
-        else:
+    # Chop calculation: 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    chop_1d = np.full(len(df_1d), 50.0)  # default to neutral
+    for i in range(14, len(df_1d)):
+        if hh_1d[i] != ll_1d[i]:
             chop_1d[i] = 100 * np.log10(atr_1d[i] / (hh_1d[i] - ll_1d[i])) / np.log10(14)
     
-    # Align 1d chop to 4h timeframe
-    chop_1d_4h = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Align 1d chop to 12h timeframe
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate Donchian channels on 4h (20-period)
+    # Calculate 12h Donchian channels (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
-    
     for i in range(n):
         if i < 20:
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
+            highest_high[i] = np.max(high[:i+1])
+            lowest_low[i] = np.min(low[:i+1])
         else:
-            highest_high[i] = np.nanmax(high[i-19:i+1])
-            lowest_low[i] = np.nanmin(low[i-19:i+1])
+            highest_high[i] = np.max(high[i-19:i+1])
+            lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
+    # Calculate 12h volume SMA(20) for confirmation
+    volume_sma = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
-            vol_ma[i] = np.nan
+            volume_sma[i] = np.mean(volume[:i+1])
         else:
-            vol_ma[i] = np.nanmean(volume[i-19:i+1])
-    volume_confirm = volume > (vol_ma * 1.5)
+            volume_sma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -103,83 +101,67 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or 
-            np.isnan(chop_1d_4h[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(volume_sma[i]) or 
+            np.isnan(chop_12h[i])):
             signals[i] = 0.0
             continue
         
-        chop = chop_1d_4h[i]
-        vol_conf = volume_confirm[i]
+        chop = chop_12h[i]
+        vol = volume[i]
+        vol_ma = volume_sma[i]
         
         if position == 1:  # Long position
             # Exit conditions
-            if chop < 38.2:  # Trending regime
-                # Exit when price touches or crosses below Donchian lower
-                if close[i] <= lowest_low[i]:
+            if chop > 61.8:  # Choppy regime - mean reversion
+                # Exit when price returns to middle of channel
+                if close[i] <= (highest_high[i] + lowest_low[i]) / 2:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            elif chop > 61.8:  # Ranging regime
-                # Exit when price returns to midpoint (mean reversion)
-                midpoint = (highest_high[i] + lowest_low[i]) / 2
-                if close[i] >= midpoint:
+            else:  # Trending regime - breakout continuation
+                # Exit when price breaks below lowest low (stoploss)
+                if close[i] < lowest_low[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            else:  # Transition regime
-                # Hold position
-                signals[i] = 0.25
                     
         elif position == -1:  # Short position
             # Exit conditions
-            if chop < 38.2:  # Trending regime
-                # Exit when price touches or crosses above Donchian upper
-                if close[i] >= highest_high[i]:
+            if chop > 61.8:  # Choppy regime - mean reversion
+                # Exit when price returns to middle of channel
+                if close[i] >= (highest_high[i] + lowest_low[i]) / 2:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            elif chop > 61.8:  # Ranging regime
-                # Exit when price returns to midpoint (mean reversion)
-                midpoint = (highest_high[i] + lowest_low[i]) / 2
-                if close[i] <= midpoint:
+            else:  # Trending regime - breakout continuation
+                # Exit when price breaks above highest high (stoploss)
+                if close[i] > highest_high[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            else:  # Transition regime
-                # Hold position
-                signals[i] = -0.25
         else:  # Flat
             # Entry logic based on regime
-            if not vol_conf:
-                signals[i] = 0.0
-                continue
-                
-            if chop < 38.2:  # Trending regime - trade breakouts
-                # Go long when price breaks above Donchian upper
-                # Go short when price breaks below Donchian lower
-                if close[i] > highest_high[i]:
+            if chop > 61.8:  # Choppy regime - mean reversion
+                # Go long when price touches lower band with volume confirmation
+                # Go short when price touches upper band with volume confirmation
+                if close[i] <= lowest_low[i] and vol > vol_ma * 1.5:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < lowest_low[i]:
+                elif close[i] >= highest_high[i] and vol > vol_ma * 1.5:
                     position = -1
                     signals[i] = -0.25
-            elif chop > 61.8:  # Ranging regime - fade extremes (mean reversion)
-                # Go long when price touches Donchian lower and shows rejection
-                # Go short when price touches Donchian upper and shows rejection
-                if i > 30:
-                    # Long: price near lower band and closing higher (bullish rejection)
-                    if close[i] <= lowest_low[i] * 1.001 and close[i] > close[i-1]:
-                        position = 1
-                        signals[i] = 0.25
-                    # Short: price near upper band and closing lower (bearish rejection)
-                    elif close[i] >= highest_high[i] * 0.999 and close[i] < close[i-1]:
-                        position = -1
-                        signals[i] = -0.25
-            else:  # Transition regime - no clear signal
-                signals[i] = 0.0
+            else:  # Trending regime - breakout continuation
+                # Go long when price breaks above highest high with volume
+                # Go short when price breaks below lowest low with volume
+                if close[i] > highest_high[i] and vol > vol_ma * 1.5:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < lowest_low[i] and vol > vol_ma * 1.5:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
