@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation.
-# Long: Price breaks above H4 with volume > 2.0x 20-period average and close > open.
-# Short: Price breaks below L4 with volume > 2.0x 20-period average and close < open.
-# Exit: Price returns to opposite Camarilla level (H3 for longs, L3 for shorts).
-# Uses 12h primary timeframe with 1d HTF for Camarilla levels.
-# Designed for low trade frequency (~12-37/year) to minimize fee drag in bear markets.
-# Works in bull markets via breakouts and bear markets via fade-from-extremes logic.
+# 1h_mtf_volume_pullback_4h1d_v1
+# Hypothesis: 1h strategy using 4h trend direction and 1d volume spike for entry timing.
+# Long: 4h close > 4h EMA20 (uptrend) + 1h close pulls back to 1h VWAP + 1d volume > 1.5x 20-day average.
+# Short: 4h close < 4h EMA20 (downtrend) + 1h close pulls back to 1h VWAP + 1d volume > 1.5x 20-day average.
+# Exit: Position held for max 6 hours or opposite signal.
+# Uses 4h for trend filter, 1d for volume regime, 1h for precise entry.
+# Designed for low frequency (15-35 trades/year) to minimize fee drag in choppy 1h timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "12h"
+name = "1h_mtf_volume_pullback_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,81 +26,89 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_prices = prices['open'].values
     
-    # Volume average for confirmation (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # 1h VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    tp_vol = typical_price * volume
+    cum_tp_vol = np.nancumsum(tp_vol)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_tp_vol, cum_vol, out=np.full_like(cum_tp_vol, np.nan), where=cum_vol!=0)
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 4h EMA20 for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d volume MA20 for volume regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # Daily pivot and range
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
-    
-    # Align 1d Camarilla levels to 12h
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour  # already datetime64[ns]
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    bars_since_entry = 0
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(open_prices[i])):
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(vwap[i]) or
+            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(volume[i]) or
+            np.isnan(close[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
-        # Bullish candle: close > open
-        bullish_candle = close[i] > open_prices[i]
-        # Bearish candle: close < open
-        bearish_candle = close[i] < open_prices[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-day average
+        volume_confirmed = volume[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        
+        # Pullback to VWAP: close within 0.5% of VWAP
+        vwap_distance = abs(close[i] - vwap[i]) / vwap[i]
+        near_vwap = vwap_distance < 0.005
         
         if position == 1:  # Long position
-            # Exit: Price returns to H3
-            if close[i] <= h3_1d_aligned[i]:
+            bars_since_entry += 1
+            # Exit: 6 hours max hold or reverse signal
+            if bars_since_entry >= 6 or close[i] < ema_20_4h_aligned[i]:
                 position = 0
+                bars_since_entry = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to L3
-            if close[i] >= l3_1d_aligned[i]:
+            bars_since_entry += 1
+            # Exit: 6 hours max hold or reverse signal
+            if bars_since_entry >= 6 or close[i] > ema_20_4h_aligned[i]:
                 position = 0
+                bars_since_entry = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Long entry: Price breaks above H4 with volume and bullish candle
-            if (close[i] > h4_1d_aligned[i] and    # Break above H4
-                volume_confirmed and               # Volume spike
-                bullish_candle):                   # Bullish candle
+            # Reset timer
+            bars_since_entry = 0
+            
+            # Long entry: 4h uptrend + pullback to VWAP + volume spike + in session
+            if (close[i] > ema_20_4h_aligned[i] and    # 4h uptrend
+                near_vwap and                          # Pullback to VWAP
+                volume_confirmed and                   # Volume spike
+                in_session[i]):                        # Active session
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Price breaks below L4 with volume and bearish candle
-            elif (close[i] < l4_1d_aligned[i] and  # Break below L4
-                  volume_confirmed and             # Volume spike
-                  bearish_candle):                 # Bearish candle
+                signals[i] = 0.20
+            # Short entry: 4h downtrend + pullback to VWAP + volume spike + in session
+            elif (close[i] < ema_20_4h_aligned[i] and   # 4h downtrend
+                  near_vwap and                         # Pullback to VWAP
+                  volume_confirmed and                  # Volume spike
+                  in_session[i]):                       # Active session
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
