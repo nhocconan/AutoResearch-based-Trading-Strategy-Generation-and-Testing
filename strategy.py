@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian channel breakout with 1w EMA trend filter and volume confirmation
-# Uses 1w EMA(50) for trend direction to avoid counter-trend trades
-# Enters on breakout of 20-period 1d Donchian channels with volume > 2x 20-day average
-# Exits on opposite Donchian channel touch or close below/above EMA
-# Position size 0.25 to manage drawdown
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag
-# Works in bull/bear: trend filter ensures we trade with higher timeframe momentum
+# Hypothesis: 6h Donchian(20) breakout with 12h volume confirmation and ATR regime filter
+# Uses 20-period Donchian channels on 6h for breakout signals
+# Volume confirmation: 12h volume > 1.3x 24-period average (~12 days) to ensure institutional participation
+# ATR regime filter: Only trade when 12h ATR(14) is between 30th-70th percentile (avoid extremes)
+# Position size 0.25 to balance profit potential and drawdown control
+# Target: 12-30 trades/year per symbol (48-120 total over 4 years) to minimize fee drag
+# Works in bull/bear: Donchian provides structure, volume confirms strength, ATR filter avoids chop
 
-name = "1d_1w_donchian_ema_vol_v2"
-timeframe = "1d"
+name = "6h_12h_donchian_vol_atr_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,80 +25,110 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop for volume and ATR
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA(50) for trend
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full(len(df_1w), np.nan)
-    if len(close_1w) >= 50:
-        multiplier = 2 / (50 + 1)
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (close_1w[i] * multiplier) + (ema_50_1w[i-1] * (1 - multiplier))
+    vol_12h = df_12h['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align 1w EMA to 1d timeframe
-    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 12h ATR (14-period)
+    tr_12h = np.zeros(len(df_12h))
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    for i in range(1, len(df_12h)):
+        tr0 = high_12h[i] - low_12h[i]
+        tr1 = abs(high_12h[i] - close_12h[i-1])
+        tr2 = abs(low_12h[i] - close_12h[i-1])
+        tr_12h[i] = max(tr0, tr1, tr2)
     
-    # Calculate 1d Donchian channels (20-period)
+    atr_12h = np.zeros(len(df_12h))
+    atr_12h[0] = tr_12h[0]
+    for i in range(1, len(df_12h)):
+        atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
+    
+    # ATR percentile rank (100-period lookback ~ 50 days)
+    atr_rank_12h = np.zeros(len(df_12h))
+    for i in range(100, len(df_12h)):
+        window = atr_12h[i-100:i]
+        atr_rank_12h[i] = np.sum(window < atr_12h[i]) / len(window) * 100
+    
+    # Calculate 24-period volume average on 12h (~12 days)
+    vol_ma_24 = np.full(len(df_12h), np.nan)
+    vol_sum = 0.0
+    for i in range(len(df_12h)):
+        vol_sum += vol_12h[i]
+        if i >= 24:
+            vol_sum -= vol_12h[i-24]
+        if i >= 23:
+            vol_ma_24[i] = vol_sum / 24
+    
+    # Align 12h data to 6h timeframe (only use completed 12h bars)
+    vol_ma_24_6h = align_htf_to_ltf(prices, df_12h, vol_ma_24)
+    atr_rank_12h_6h = align_htf_to_ltf(prices, df_12h, atr_rank_12h)
+    
+    # Calculate 6h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Volume confirmation: 20-day average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0.0
     for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
         if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+            start_idx = i - 19
+            donchian_high[i] = np.max(high[start_idx:i+1])
+            donchian_low[i] = np.min(low[start_idx:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):  # Start after warmup periods
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_24_6h[i]) or 
+            np.isnan(atr_rank_12h_6h[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in moderate volatility regime (ATR rank between 30-70)
+        if atr_rank_12h_6h[i] < 30 or atr_rank_12h_6h[i] > 70:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: price touches lower Donchian or closes below EMA
-            if low[i] <= donchian_low[i] or close[i] < ema_50_1d[i]:
+            # Exit: price closes below 6h Donchian low
+            if close[i] <= donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches upper Donchian or closes above EMA
-            if high[i] >= donchian_high[i] or close[i] > ema_50_1d[i]:
+            # Exit: price closes above 6h Donchian high
+            if close[i] >= donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above upper Donchian with volume confirmation and uptrend
-            vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (high[i] > donchian_high[i] and 
-                close[i] > ema_50_1d[i] and 
-                vol_ratio > 2.0):
+            # Volume confirmation: current 12h volume > 1.3x 24-period average
+            # Need to get current 12h volume - approximate using 6h volume scaled
+            # More accurate: use the last completed 12h bar's volume
+            vol_ratio = volume[i] / vol_ma_24_6h[i] if vol_ma_24_6h[i] > 0 else 0
+            
+            # Enter long: price closes above 6h Donchian high with volume confirmation
+            if (close[i] > donchian_high[i] and 
+                vol_ratio > 1.3):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower Donchian with volume confirmation and downtrend
-            elif (low[i] < donchian_low[i] and 
-                  close[i] < ema_50_1d[i] and 
-                  vol_ratio > 2.0):
+            # Enter short: price closes below 6h Donchian low with volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  vol_ratio > 1.3):
                 position = -1
                 signals[i] = -0.25
     
