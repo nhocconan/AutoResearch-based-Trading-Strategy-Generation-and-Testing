@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Camarilla pivot levels with volume confirmation and ATR trailing stop
-# Camarilla pivots from 12h provide intraday support/resistance levels with proven edge in ranging markets
-# Volume confirmation (current 4h volume > 1.5x 20-period average) filters false breakouts
-# ATR trailing stop (2.5x ATR) manages risk and adapts to volatility
-# Designed for 4h timeframe targeting 25-50 trades/year (100-200 over 4 years)
-# Works in bull/bear: price reacts to 12h pivot structure, volume confirms validity, ATR stop controls drawdown
+# Hypothesis: 1h strategy using 4h Donchian channel breakouts with volume confirmation and ATR trailing stop
+# 4h Donchian(20) provides clear trend structure, proven across market regimes
+# Volume confirmation (current 1h volume > 1.8x 20-period average) filters false breakouts
+# ATR trailing stop (2.0x ATR) manages risk and adapts to volatility
+# Session filter (08-20 UTC) reduces noise trades
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h
+# Works in bull/bear: price reacts to 4h structure, volume confirms validity, ATR stop controls drawdown
 
-name = "4h_12h_camarilla_volume_atr_v1"
-timeframe = "4h"
+name = "1h_4h_donchian_volume_atr_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,54 +25,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Session filter: 08-20 UTC (precomputed)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 25:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    # Camarilla formulas for intraday trading
-    # H4 = Close + 1.1 * (High - Low) / 2
-    # L4 = Close - 1.1 * (High - Low) / 2
-    # H3 = Close + 1.1 * (High - Low) / 4
-    # L3 = Close - 1.1 * (High - Low) / 4
-    # H2 = Close + 1.1 * (High - Low) / 6
-    # L2 = Close - 1.1 * (High - Low) / 6
-    # H1 = Close + 1.1 * (High - Low) / 12
-    # L1 = Close - 1.1 * (High - Low) / 12
+    # Calculate 4h Donchian channels (20-period)
+    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Use previous 12h bar's high/low/close for current levels (no look-ahead)
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    prev_close_12h = np.roll(close_12h, 1)
-    prev_high_12h[0] = np.nan
-    prev_low_12h[0] = np.nan
-    prev_close_12h[0] = np.nan
+    # Align 4h Donchian channels to 1h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, low_20)
     
-    camarilla_h4 = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 2
-    camarilla_l4 = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 2
-    camarilla_h3 = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 4
-    camarilla_l3 = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 4
-    camarilla_h2 = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 6
-    camarilla_l2 = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 6
-    camarilla_h1 = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 12
-    camarilla_l1 = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 12
-    
-    # Align 12h Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
-    h2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h2)
-    l2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l2)
-    h1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h1)
-    l1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l1)
-    
-    # Pre-compute ATR(14) for 4h timeframe
+    # Pre-compute ATR(14) for 1h timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -90,50 +64,49 @@ def generate_signals(prices):
     lowest_since_short = 0.0
     
     for i in range(100, n):
-        # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 1h volume > 1.8x average 1h volume
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             if close[i] > highest_since_long:
                 highest_since_long = close[i]
-            # ATR trailing stop: exit if price drops 2.5x ATR from highest
-            if close[i] < highest_since_long - 2.5 * atr[i]:
+            # ATR trailing stop: exit if price drops 2.0x ATR from highest
+            if close[i] < highest_since_long - 2.0 * atr[i]:
                 position = 0
                 highest_since_long = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Update lowest low since entry
             if close[i] < lowest_since_short:
                 lowest_since_short = close[i]
-            # ATR trailing stop: exit if price rises 2.5x ATR from lowest
-            if close[i] > lowest_since_short + 2.5 * atr[i]:
+            # ATR trailing stop: exit if price rises 2.0x ATR from lowest
+            if close[i] > lowest_since_short + 2.0 * atr[i]:
                 position = 0
                 lowest_since_short = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Mean reversion trading at Camarilla extremes with volume confirmation
-            # Short at H4 resistance, Long at L4 support
+            # Breakout trading with volume confirmation
+            # Long on Donchian high breakout, Short on Donchian low breakout
             if volume_confirmed:
-                if close[i] > h4_aligned[i]:
-                    position = -1
-                    lowest_since_short = close[i]
-                    signals[i] = -0.25
-                elif close[i] < l4_aligned[i]:
+                if close[i] > donchian_high_aligned[i]:
                     position = 1
                     highest_since_long = close[i]
-                    signals[i] = 0.25
+                    signals[i] = 0.20
+                elif close[i] < donchian_low_aligned[i]:
+                    position = -1
+                    lowest_since_short = close[i]
+                    signals[i] = -0.20
     
     return signals
