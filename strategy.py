@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ADX(14) > 25 trend filter
-# Uses 12h timeframe to reduce trade frequency and avoid fee drag. 
-# Donchian breakouts capture breakouts in both bull and bear markets.
-# Volume > 2x 20-period average confirms institutional participation.
-# ADX > 25 filters for trending conditions to avoid false breakouts in ranging markets.
-# Fixed position size 0.25 to limit drawdown and control risk.
-# Designed for ~15-25 trades per year (~60-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d Donchian channel breakout with weekly trend filter and volume confirmation
+# Uses weekly ADX to filter trend direction, daily Donchian(20) breakout for entry
+# Volume > 1.5x 20-period average confirms breakout strength
+# Fixed position size 0.25 to limit drawdown and control risk
+# Designed for ~15-25 trades/year (~60-100 total over 4 years) to minimize fee drag
+# Works in bull markets (breakouts continuation) and bear markets (false breakouts filtered by weekly trend)
 
-name = "12h_donchian_volume_trend_v1"
-timeframe = "12h"
+name = "1d_donchian_weekly_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,84 +24,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate ADX(14) on daily timeframe
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate weekly ADX(14) for trend strength
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
+    wn = len(wh)
     
-    # True Range and Directional Movement
-    tr = np.full(len(d_high), np.nan)
-    dm_plus = np.full(len(d_high), np.nan)
-    dm_minus = np.full(len(d_high), np.nan)
+    # True Range
+    wtr = np.full(wn, np.nan)
+    wdm_plus = np.full(wn, np.nan)
+    wdm_minus = np.full(wn, np.nan)
     
-    for i in range(1, len(d_high)):
-        # True Range
-        tr0 = d_high[i] - d_low[i]
-        tr1 = abs(d_high[i] - d_close[i-1])
-        tr2 = abs(d_low[i] - d_close[i-1])
-        tr[i] = max(tr0, tr1, tr2)
+    for i in range(1, wn):
+        wtr0 = wh[i] - wl[i]
+        wtr1 = abs(wh[i] - wc[i-1])
+        wtr2 = abs(wl[i] - wc[i-1])
+        wtr[i] = max(wtr0, wtr1, wtr2)
         
-        # Directional Movement
-        up_move = d_high[i] - d_high[i-1]
-        down_move = d_low[i-1] - d_low[i]
-        if up_move > down_move and up_move > 0:
-            dm_plus[i] = up_move
+        wup = wh[i] - wh[i-1]
+        wdown = wl[i-1] - wl[i]
+        if wup > wdown and wup > 0:
+            wdm_plus[i] = wup
         else:
-            dm_plus[i] = 0.0
-        if down_move > up_move and down_move > 0:
-            dm_minus[i] = down_move
+            wdm_plus[i] = 0.0
+        if wdown > wup and wdown > 0:
+            wdm_minus[i] = wdown
         else:
-            dm_minus[i] = 0.0
+            wdm_minus[i] = 0.0
     
-    # Smoothed averages with Wilder's smoothing
-    tr14 = np.full(len(d_high), np.nan)
-    dm_plus_14 = np.full(len(d_high), np.nan)
-    dm_minus_14 = np.full(len(d_high), np.nan)
+    # Smoothed averages (Wilder smoothing)
+    wtr14 = np.full(wn, np.nan)
+    wdm_plus_14 = np.full(wn, np.nan)
+    wdm_minus_14 = np.full(wn, np.nan)
     
-    if len(d_high) >= 14:
-        tr14[13] = np.nansum(tr[1:14])
-        dm_plus_14[13] = np.nansum(dm_plus[1:14])
-        dm_minus_14[13] = np.nansum(dm_minus[1:14])
+    if wn >= 14:
+        wtr14[13] = np.nansum(wtr[1:14])
+        wdm_plus_14[13] = np.nansum(wdm_plus[1:14])
+        wdm_minus_14[13] = np.nansum(wdm_minus[1:14])
         
-        for i in range(14, len(d_high)):
-            tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i]
-            dm_plus_14[i] = dm_plus_14[i-1] - (dm_plus_14[i-1] / 14) + dm_plus[i]
-            dm_minus_14[i] = dm_minus_14[i-1] - (dm_minus_14[i-1] / 14) + dm_minus[i]
+        for i in range(14, wn):
+            wtr14[i] = wtr14[i-1] - (wtr14[i-1] / 14) + wtr[i]
+            wdm_plus_14[i] = wdm_plus_14[i-1] - (wdm_plus_14[i-1] / 14) + wdm_plus[i]
+            wdm_minus_14[i] = wdm_minus_14[i-1] - (wdm_minus_14[i-1] / 14) + wdm_minus[i]
     
     # DI and DX
-    di_plus = np.full(len(d_high), np.nan)
-    di_minus = np.full(len(d_high), np.nan)
-    dx = np.full(len(d_high), np.nan)
+    wdi_plus = np.full(wn, np.nan)
+    wdi_minus = np.full(wn, np.nan)
+    wdx = np.full(wn, np.nan)
     
-    for i in range(14, len(d_high)):
-        if tr14[i] > 0:
-            di_plus[i] = 100 * dm_plus_14[i] / tr14[i]
-            di_minus[i] = 100 * dm_minus_14[i] / tr14[i]
-            dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+    for i in range(14, wn):
+        if wtr14[i] > 0:
+            wdi_plus[i] = 100 * wdm_plus_14[i] / wtr14[i]
+            wdi_minus[i] = 100 * wdm_minus_14[i] / wtr14[i]
+            wdx[i] = 100 * abs(wdi_plus[i] - wdi_minus[i]) / (wdi_plus[i] + wdi_minus[i])
     
     # ADX (smoothed DX)
-    adx_1d = np.full(len(d_high), np.nan)
-    if len(d_high) >= 28:
-        adx_1d[27] = np.nansum(dx[14:28]) / 14
-        for i in range(28, len(d_high)):
-            adx_1d[i] = (adx_1d[i-1] * 13 + dx[i]) / 14
+    wadx = np.full(wn, np.nan)
+    if wn >= 28:
+        wadx[27] = np.nansum(wdx[14:28]) / 14
+        for i in range(28, wn):
+            wadx[i] = (wadx[i-1] * 13 + wdx[i]) / 14
     
-    # Align daily ADX to 12h timeframe
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align weekly ADX to daily timeframe
+    wadx_daily = align_htf_to_ltf(prices, df_1w, wadx)
     
-    # Calculate Donchian channels (20-period) on 12h data
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Daily Donchian channel (20-period)
+    dcm = np.full(n, np.nan)  # upper band
+    dcl = np.full(n, np.nan)  # lower band
     
     for i in range(n):
         if i >= 19:
-            donchian_high[i] = np.max(high[i-19:i+1])
-            donchian_low[i] = np.min(low[i-19:i+1])
+            dcm[i] = np.max(high[i-19:i+1])
+            dcl[i] = np.min(low[i-19:i+1])
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -119,40 +117,40 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(dcm[i]) or 
+            np.isnan(dcl[i]) or 
             np.isnan(vol_ma_20[i]) or 
-            np.isnan(adx_12h[i])):
+            np.isnan(wadx_daily[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low OR ADX drops below 20 (trend weakening)
-            if close[i] <= donchian_low[i] or adx_12h[i] < 20:
+            # Exit: price closes below Donchian lower band OR weekly ADX < 20 (weak trend)
+            if close[i] < dcl[i] or wadx_daily[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high OR ADX drops below 20
-            if close[i] >= donchian_high[i] or adx_12h[i] < 20:
+            # Exit: price closes above Donchian upper band OR weekly ADX < 20
+            if close[i] > dcm[i] or wadx_daily[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above Donchian high with volume confirmation AND ADX > 25
+            # Enter long: price closes above Donchian upper band with volume confirmation AND weekly ADX > 25
             vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (close[i] > donchian_high[i] and 
-                vol_ratio > 2.0 and 
-                adx_12h[i] > 25):
+            if (close[i] > dcm[i] and 
+                vol_ratio > 1.5 and 
+                wadx_daily[i] > 25):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below Donchian low with volume confirmation AND ADX > 25
-            elif (close[i] < donchian_low[i] and 
-                  vol_ratio > 2.0 and 
-                  adx_12h[i] > 25):
+            # Enter short: price closes below Donchian lower band with volume confirmation AND weekly ADX > 25
+            elif (close[i] < dcl[i] and 
+                  vol_ratio > 1.5 and 
+                  wadx_daily[i] > 25):
                 position = -1
                 signals[i] = -0.25
     
