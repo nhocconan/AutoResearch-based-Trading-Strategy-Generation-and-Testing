@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d Williams %R + volume confirmation
-# Donchian breakouts capture momentum in both bull and bear markets
-# 1d Williams %R identifies overbought/oversold conditions on higher timeframe
-# Volume confirmation ensures breakout authenticity
+# Hypothesis: 4h Donchian(20) breakout + 1d Williams %R + volume confirmation
+# Donchian breakouts capture momentum; 1d Williams %R identifies overbought/oversold extremes
+# Volume confirmation ensures breakout authenticity with conviction
+# Works in bull/bear: Williams %R adapts to higher timeframe momentum extremes
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "12h_1d_williamsr_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_williamsr_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,27 +28,24 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period Williams %R on 1d
+    # Calculate 14-period Williams %R
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     williams_r = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if i < 13:  # Need 14 periods (0-13 inclusive)
-            williams_r[i] = np.nan
+    for i in range(13, len(close_1d)):  # 14-period lookback
+        highest_high = np.max(high_1d[i-13:i+1])
+        lowest_low = np.min(low_1d[i-13:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = -100 * (highest_high - close_1d[i]) / (highest_high - lowest_low)
         else:
-            highest_high = np.max(high_1d[i-13:i+1])
-            lowest_low = np.min(low_1d[i-13:i+1])
-            if highest_high == lowest_low:
-                williams_r[i] = -50.0  # Avoid division by zero
-            else:
-                williams_r[i] = -100 * (highest_high - close_1d[i]) / (highest_high - lowest_low)
+            williams_r[i] = -50  # Neutral when range is zero
     
-    # Align Williams %R to 12h timeframe (wait for daily close)
+    # Align Williams %R data to 4h timeframe (wait for daily close)
     williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -99,12 +96,12 @@ def generate_signals(prices):
         else:  # Flat
             # Entry logic with volume confirmation and Donchian breakout + Williams %R filter
             if volume_confirmed:
-                # Long entry: price > Donchian high AND Williams %R < -80 (oversold -> bullish reversal)
-                if close[i] > donchian_high[i] and williams_r_aligned[i] < -80:
+                # Long entry: price > Donchian high AND Williams %R < -50 (not overbought)
+                if close[i] > donchian_high[i] and williams_r_aligned[i] < -50:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Donchian low AND Williams %R > -20 (overbought -> bearish reversal)
-                elif close[i] < donchian_low[i] and williams_r_aligned[i] > -20:
+                # Short entry: price < Donchian low AND Williams %R > -50 (not oversold)
+                elif close[i] < donchian_low[i] and williams_r_aligned[i] > -50:
                     position = -1
                     signals[i] = -0.25
     
