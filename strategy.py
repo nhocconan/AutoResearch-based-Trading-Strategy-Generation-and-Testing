@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 1h_volume_regime_breakout_v1
-# Hypothesis: 1h strategy using 4h/1d trend filter with volume breakout entry timing.
-# In bull markets: price above 4h EMA20 + 1d EMA50 + volume > 2.0x 20-period average → long
-# In bear markets: price below 4h EMA20 + 1d EMA50 + volume > 2.0x 20-period average → short
-# Uses volume spikes to capture momentum bursts while avoiding choppy regimes.
-# Discrete sizing (±0.20) minimizes fee churn. Target: 60-150 total trades over 4 years (15-37/year).
+# 6h_volatility_breakout_volume_v2
+# Hypothesis: 6h strategy using 1d ATR-based volatility breakout with volume confirmation.
+# In high volatility regimes: price breaks above/below ATR(20) bands from open + volume spike → enter direction of breakout.
+# In low volatility: wait for expansion. Uses discrete sizing (±0.25) to minimize fee churn.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in bull/bear via volatility regime filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_regime_breakout_v1"
-timeframe = "1h"
+name = "6h_volatility_breakout_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,82 +19,74 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h HTF data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    # 4h EMA20 for trend
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # 1d HTF data for stronger trend filter
+    # 1d HTF data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1d EMA50 for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Calculate ATR(20) on 1d
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d)
+    tr2 = pd.Series(close_1d).shift(1) - pd.Series(high_1d)
+    tr3 = pd.Series(close_1d).shift(1) - pd.Series(low_1d)
+    tr = pd.concat([tr1.abs(), tr2.abs(), tr3.abs()], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Align ATR to 6h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
+        # Calculate breakout levels: open ± 0.5 * ATR(1d)
+        upper_break = open_[i] + 0.5 * atr_1d_aligned[i]
+        lower_break = open_[i] - 0.5 * atr_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below 4h EMA20 OR volume drops below average
-            if close[i] < ema_20_4h_aligned[i] or volume[i] < volume_ma[i]:
+            # Exit: price closes below open (mean reversion)
+            if close[i] < open_[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h EMA20 OR volume drops below average
-            if close[i] > ema_20_4h_aligned[i] or volume[i] < volume_ma[i]:
+            # Exit: price closes above open (mean reversion)
+            if close[i] > open_[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            if in_session:
-                # Volume breakout condition
-                volume_breakout = volume[i] > 2.0 * volume_ma[i]
-                
-                if volume_breakout:
-                    # Long: price above both 4h and 1d EMAs
-                    if close[i] > ema_20_4h_aligned[i] and close[i] > ema_50_1d_aligned[i]:
-                        position = 1
-                        signals[i] = 0.20
-                    # Short: price below both 4h and 1d EMAs
-                    elif close[i] < ema_20_4h_aligned[i] and close[i] < ema_50_1d_aligned[i]:
-                        position = -1
-                        signals[i] = -0.20
+            # Need volume confirmation and volatility expansion
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            volatility_expanding = atr_1d_aligned[i] > pd.Series(atr_1d_aligned).rolling(window=10, min_periods=10).mean().iloc[i] if i >= 10 else False
+            
+            if volume_confirmed and volatility_expanding:
+                # Long: price breaks above upper band
+                if close[i] > upper_break:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price breaks below lower band
+                elif close[i] < lower_break:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
