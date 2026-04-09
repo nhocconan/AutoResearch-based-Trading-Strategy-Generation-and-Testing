@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_volume_v2
-# Hypothesis: 1d strategy using weekly Camarilla pivot levels with volume confirmation and ATR filter.
-# Long: Price breaks above weekly R4 level with volume > 1.5x 20-period average AND ATR(14) > 0.5 * ATR(50).
-# Short: Price breaks below weekly S4 level with volume > 1.5x 20-period average AND ATR(14) > 0.5 * ATR(50).
-# Exit: Price returns to weekly pivot point (PP) or breaks opposite S4/R4 level.
-# Uses weekly Camarilla for key support/resistance, 1d for execution, volume and volatility for confirmation.
-# Target: 30-100 trades over 4 years (7-25/year) on BTC/ETH/SOL.
+# 12h_daily_ema_trend_volume_v1
+# Hypothesis: 12h strategy using daily EMA trend with volume confirmation. Long when price > daily EMA50 with volume > 1.5x 20-period average. Short when price < daily EMA50 with volume > 1.5x 20-period average. Exit on opposite cross. Uses daily trend for direction, 12h for execution, volume for confirmation. Target: 15-30 trades/year (60-120 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume_v2"
-timeframe = "1d"
+name = "12h_daily_ema_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,79 +24,53 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility filter
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    tr1 = high_s - low_s
-    tr2 = abs(high_s - close_s.shift(1))
-    tr3 = abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
-    atr_50 = tr.rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr_14 > (0.5 * atr_50)  # Only trade when volatility is above half of long-term average
-    
-    # Get 1w data for Camarilla pivot levels (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 1d data for EMA trend (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    
-    # Camarilla levels
-    r4 = close_1w + range_1w * 1.1 / 2.0
-    s4 = close_1w - range_1w * 1.1 / 2.0
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Calculate daily EMA50
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma[i]) or 
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Volatility filter: only trade when short-term ATR > 50% of long-term ATR
-        vol_filter = volatility_filter[i]
-        
         if position == 1:  # Long position
-            # Exit: Price returns to weekly pivot or breaks below S4
-            if close[i] <= pivot_aligned[i] or close[i] < s4_aligned[i]:
+            # Exit: Price crosses below daily EMA50
+            if close[i] < ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to weekly pivot or breaks above R4
-            if close[i] >= pivot_aligned[i] or close[i] > r4_aligned[i]:
+            # Exit: Price crosses above daily EMA50
+            if close[i] > ema_50_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation and volatility filter
-            bullish_breakout = (close[i] > r4_aligned[i]) and volume_confirmed and vol_filter
-            bearish_breakout = (close[i] < s4_aligned[i]) and volume_confirmed and vol_filter
+            # Check for EMA cross with volume confirmation
+            bullish_cross = (close[i] > ema_50_aligned[i]) and volume_confirmed
+            bearish_cross = (close[i] < ema_50_aligned[i]) and volume_confirmed
             
-            if bullish_breakout:
+            if bullish_cross:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_cross:
                 position = -1
                 signals[i] = -0.25
     
