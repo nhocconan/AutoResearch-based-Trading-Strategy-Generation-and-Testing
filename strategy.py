@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout + 1d EMA200 trend + volume confirmation
-# Camarilla levels from daily chart provide institutional support/resistance
-# Breakouts beyond H3/L3 indicate strong momentum with institutional participation
+# Hypothesis: 4h Camarilla pivot (L3/H3) breakout + 1d EMA200 trend + volume confirmation
+# Camarilla levels provide mean-reversion structure; breakouts beyond L3/H3 indicate strong momentum
 # 1d EMA200 ensures we trade with higher timeframe trend to avoid counter-trend whipsaws
-# Volume confirmation (>1.5x 20-period avg) filters weak breakouts
-# Works in bull/bear markets: EMA200 trend filter adapts to long-term direction
+# Volume confirmation (1.5x 20-period avg) filters weak breakouts
+# Works in bull/bear: EMA200 trend filter avoids ranging market failures
 # Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
 
-name = "4h_1d_camarilla_ema200_volume_v1"
+name = "4h_1d_camarilla_ema200_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA200 trend filter and Camarilla levels
+    # Load 1d data ONCE before loop for EMA200 trend filter and Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 200:
         return np.zeros(n)
