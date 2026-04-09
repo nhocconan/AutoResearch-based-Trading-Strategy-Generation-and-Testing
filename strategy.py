@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 6h_williams_alligator_adx_regime_v1
-# Hypothesis: 6h strategy combining Williams Alligator (trend direction) with ADX regime filter.
-# Long when price > Alligator Jaw (13-period SMMA) and ADX > 25 (strong trend).
-# Short when price < Alligator Jaw and ADX > 25.
-# Exit when price crosses Alligator Jaw or ADX < 20 (weak trend/ranging).
+# 4h_donchian_breakout_volume_chop_regime_v1
+# Hypothesis: 4h strategy using Donchian(20) breakout for trend capture, volume confirmation for conviction, and Choppiness Index regime filter to avoid whipsaws.
+# Long when price breaks above Donchian upper band with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Short when price breaks below Donchian lower band with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Exit when price crosses back through the Donchian midpoint (mean reversion within the channel).
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 15-30 trades/year (60-120 total over 4 years) on BTC/ETH/SOL.
-# Works in both bull and bear markets: Alligator identifies trend direction, ADX filters whipsaws in ranging markets.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
+# Works in both bull and bear markets: Donchian captures breakouts, volume confirms conviction, chop filter avoids false signals in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_williams_alligator_adx_regime_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_chop_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,98 +24,82 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: three smoothed moving averages
-    # Jaw (Blue): 13-period SMMA, shifted 8 bars ahead
-    # Teeth (Red): 8-period SMMA, shifted 5 bars ahead
-    # Lips (Green): 5-period SMMA, shifted 3 bars ahead
-    close_s = pd.Series(close)
+    # Volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    def smma(series, period):
-        """Smoothed Moving Average"""
-        sma = series.rolling(window=period, min_periods=period).mean()
-        # Initialize first value as SMA
-        result = np.full(len(series), np.nan)
-        result[period-1] = sma.iloc[period-1]
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
-        for i in range(period, len(series)):
-            if not np.isnan(sma.iloc[i]):
-                result[i] = (result[i-1] * (period-1) + series.iloc[i]) / period
-        return result
+    # Donchian Channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    jaw = smma(close_s, 13)  # Jaw: 13-period
-    teeth = smma(close_s, 8)  # Teeth: 8-period
-    lips = smma(close_s, 5)   # Lips: 5-period
-    
-    # Shift as per Alligator specification
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # ADX calculation (14-period)
-    # True Range
+    # Choppiness Index regime filter (14-period)
+    atr_period = 14
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr_series = pd.Series(tr)
+    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
+    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
+    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
+    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
     
-    # Directional Movement
-    up_move = pd.Series(high - np.roll(high, 1))
-    down_move = pd.Series(np.roll(low, 1) - low)
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    atr_period = 14
-    tr_s = pd.Series(tr)
-    plus_dm_s = pd.Series(plus_dm)
-    minus_dm_s = pd.Series(minus_dm)
-    
-    atr = tr_s.ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
-    plus_dm_smooth = plus_dm_s.ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
-    minus_dm_smooth = minus_dm_s.ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / np.where(atr != 0, atr, 1e-10)
-    minus_di = 100 * minus_dm_smooth / np.where(atr != 0, atr, 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
+    # Multi-timeframe: 1d trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(jaw_shifted[i]) or np.isnan(adx[i]) or 
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Regime filter: chop < 61.8 indicates trending market
+        trending_market = chop[i] < 61.8
+        # 1d trend filter: price above/below 50 EMA for bias
+        bullish_bias = close[i] > ema50_1d_aligned[i]
+        bearish_bias = close[i] < ema50_1d_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price crosses below Jaw OR ADX < 20 (weakening trend)
-            if close[i] < jaw_shifted[i] or adx[i] < 20:
+            # Exit: price crosses below Donchian midpoint
+            if close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Jaw OR ADX < 20 (weakening trend)
-            if close[i] > jaw_shifted[i] or adx[i] < 20:
+            # Exit: price crosses above Donchian midpoint
+            if close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter: price > Jaw AND ADX > 25 (strong trend) for long
-            #          price < Jaw AND ADX > 25 (strong trend) for short
-            if close[i] > jaw_shifted[i] and adx[i] > 25:
+            # Check for Donchian breakout with volume, regime, and trend confirmation
+            bullish_breakout = (close[i] > donchian_upper[i]) and volume_confirmed and trending_market and bullish_bias
+            bearish_breakout = (close[i] < donchian_lower[i]) and volume_confirmed and trending_market and bearish_bias
+            
+            if bullish_breakout:
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < jaw_shifted[i] and adx[i] > 25:
+            elif bearish_breakout:
                 position = -1
                 signals[i] = -0.25
     
