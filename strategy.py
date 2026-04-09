@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v11
-# Hypothesis: 4h strategy using 1d HTF Camarilla pivot levels (H3/L3) + volume confirmation + 1d EMA50 trend filter.
-# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-# Uses discrete position sizing (±0.25) to minimize fee churn. Works in both bull and bear markets via trend filter.
+# 1d_higher_low_higher_high_v1
+# Hypothesis: 1d strategy using higher lows (for longs) and lower highs (for shorts) with 1w EMA200 trend filter and volume confirmation.
+# Works in bull markets via higher low breakouts and in bear markets via lower high breakdowns.
+# Discrete position sizing (±0.25) to minimize fee churn. Target: 30-100 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v11"
-timeframe = "4h"
+name = "1d_higher_low_higher_high_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,47 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots and EMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w HTF data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate higher lows and lower highs
+    # Higher low: today's low > yesterday's low
+    # Lower high: today's high < yesterday's high
+    prev_low = np.roll(low, 1)
+    prev_high = np.roll(high, 1)
+    prev_low[0] = np.nan
+    prev_high[0] = np.nan
     
-    # 1d ATR for volatility filter (ATR14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    higher_low = low > prev_low
+    lower_high = high < prev_high
     
-    # 1d Camarilla pivot levels (based on previous day's range)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    
-    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    range_1d = prev_high_1d - prev_low_1d
-    
-    # Camarilla levels: H3, L3 (strongest intraday support/resistance)
-    h3 = pivot_point + (range_1d * 1.1 / 4)
-    l3 = pivot_point - (range_1d * 1.1 / 4)
-    
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -70,43 +50,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(atr14_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Volatility filter: avoid low volatility conditions that cause whipsaws
-        atr_ma = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=50).mean().values
-        if np.isnan(atr_ma[i]) or atr14_1d_aligned[i] < 0.4 * atr_ma[i]:
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below H3 OR trend turns bearish
-            if close[i] < h3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: trend turns bearish OR higher low breaks
+            if close[i] < ema200_1w_aligned[i] or not higher_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above L3 OR trend turns bullish
-            if close[i] > l3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: trend turns bullish OR lower high breaks
+            if close[i] > ema200_1w_aligned[i] or not lower_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price breaks above H3 with bullish trend
-                if close[i] > h3_aligned[i] and close[i] > ema50_1d_aligned[i]:
+                # Long: higher low with bullish trend
+                if higher_low[i] and close[i] > ema200_1w_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below L3 with bearish trend
-                elif close[i] < l3_aligned[i] and close[i] < ema50_1d_aligned[i]:
+                # Short: lower high with bearish trend
+                elif lower_high[i] and close[i] < ema200_1w_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
