@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Williams Fractal breakout + volume confirmation + chop regime filter
-# Williams Fractals identify key swing highs/lows from 1d timeframe
-# Long when price breaks above recent bullish fractal with volume expansion and chop < 61.8 (trending)
-# Short when price breaks below recent bearish fractal with volume expansion and chop < 61.8
-# Uses discrete position sizing 0.25 to target ~20-40 trades/year and minimize fee drag
-# Works in bull/bear markets: breakout follows trends, chop filter avoids whipsaws in ranging markets
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and chop regime filter
+# Uses 1d Camarilla levels (L3, H3) for breakout entries in direction of 1w HMA trend
+# Volume confirmation: 4h volume > 1.5x 20-period average
+# Chop regime filter: only trade when CHOP(14) > 61.8 (ranging market) for mean reversion at pivots
+# Discrete position sizing 0.25 to target ~20-40 trades/year
+# Works in bull/bear: pivots act as support/resistance in ranging markets, trend filter avoids counter-trend
 
-name = "6h_1d_williams_fractal_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_1w_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,110 +26,115 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Fractals on 1d
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
-    n_1d = len(high_1d)
-    bearish_fractal = np.full(n_1d, np.nan)
-    bullish_fractal = np.full(n_1d, np.nan)
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
     
-    for i in range(2, n_1d - 2):
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i] < high_1d[i-1] and
-            high_1d[i-1] > high_1d[i-3] and
-            high_1d[i-1] > high_1d[i+1]):
-            bearish_fractal[i-1] = high_1d[i-1]  # Value at the fractal point
-            
-        if (low_1d[i-2] > low_1d[i-1] and 
-            low_1d[i] > low_1d[i-1] and
-            low_1d[i-1] < low_1d[i-3] and
-            low_1d[i-1] < low_1d[i+1]):
-            bullish_fractal[i-1] = low_1d[i-1]  # Value at the fractal point
+    # Calculate 1d Camarilla levels (based on previous day)
+    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), etc.
+    # We use H3 (resistance) and L3 (support) for breakouts
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Calculate 1d chopiness index (14-period) for regime filter
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    camarilla_h3 = prev_close_1d + 1.0 * (prev_high_1d - prev_low_1d)
+    camarilla_l3 = prev_close_1d - 1.0 * (prev_high_1d - prev_low_1d)
     
-    tr_1d = np.full(n_1d, np.nan)
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    for i in range(1, n_1d):
-        tr_1d[i] = true_range(high_1d[i], low_1d[i], close_1d[i-1])
+    # Calculate 1w HMA(20) for trend filter
+    def hull_moving_average(arr, window):
+        if len(arr) < window:
+            return np.full_like(arr, np.nan)
+        half = window // 2
+        sqrt = int(np.sqrt(window))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
+        wma1 = pd.Series(arr).ewm(span=window, adjust=False).mean().values
+        raw = 2 * wma2 - wma1
+        hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
+        return hma
     
-    def rolling_sum(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).sum().values
+    hma_20_1w = hull_moving_average(close_1w, 20)
     
-    def rolling_max(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    # Calculate 4h Chopiness Index (CHOP) for regime filter
+    def chopiness_index(high_arr, low_arr, close_arr, window):
+        if len(high_arr) < window:
+            return np.full_like(high_arr, np.nan)
+        atr = np.maximum(np.abs(high_arr - low_arr),
+                         np.maximum(np.abs(high_arr - np.roll(close_arr, 1)),
+                                    np.abs(low_arr - np.roll(close_arr, 1))))
+        atr[0] = np.nan
+        tr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
+        hh = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
+        ll = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
+        denominator = hh - ll
+        chop = 100 * np.log10(tr_sum / denominator) / np.log10(window)
+        return chop
     
-    def rolling_min(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
+    chop_14 = chopiness_index(high, low, close, 14)
     
-    sum_tr_14 = rolling_sum(tr_1d, 14)
-    max_high_14 = rolling_max(high_1d, 14)
-    min_low_14 = rolling_min(low_1d, 14)
+    # Calculate 4h average volume (20-period)
+    vol_s = pd.Series(volume)
+    avg_vol_20 = vol_s.rolling(window=20, min_periods=20).mean().values
     
-    chop_1d = 100 * np.log10(sum_tr_14 / (max_high_14 - min_low_14)) / np.log10(14)
+    # Align 1d indicators to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Calculate 1d average volume (20-period)
-    vol_s_1d = pd.Series(df_1d['volume'].values)
-    avg_vol_1d = vol_s_1d.rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators to 6h timeframe
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Align 1w HMA to 4h timeframe
+    hma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(chop_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(hma_20_1w_aligned[i]) or np.isnan(chop_14[i]) or np.isnan(avg_vol_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x average 6h volume (20-period)
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
+        # Volume confirmation: current 4h volume > 1.5x average volume
+        volume_confirmed = volume[i] > 1.5 * avg_vol_20[i]
         
-        # Chop regime filter: only trade when trending (chop < 61.8)
-        chop_filter = chop_1d_aligned[i] < 61.8
+        # Chop regime filter: only trade in ranging market (CHOP > 61.8)
+        in_chop_regime = chop_14[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit long if price falls below recent bullish fractal
-            if close[i] < bullish_fractal_aligned[i]:
+            # Exit long if price falls below Camarilla L3
+            if close[i] < camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short if price rises above recent bearish fractal
-            if close[i] > bearish_fractal_aligned[i]:
+            # Exit short if price rises above Camarilla H3
+            if close[i] > camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout strategy: enter on fractal breakout with volume confirmation and chop filter
-            if (close[i] > bullish_fractal_aligned[i] and 
-                volume_confirmed and 
-                chop_filter):
-                position = 1
-                signals[i] = 0.25
-            elif (close[i] < bearish_fractal_aligned[i] and 
-                  volume_confirmed and 
-                  chop_filter):
-                position = -1
-                signals[i] = -0.25
+            # Mean reversion at Camarilla levels in ranging market
+            if volume_confirmed and in_chop_regime:
+                if close[i] > camarilla_h3_aligned[i]:
+                    # Short at H3 resistance (expect reversion to mean)
+                    position = -1
+                    signals[i] = -0.25
+                elif close[i] < camarilla_l3_aligned[i]:
+                    # Long at L3 support (expect reversion to mean)
+                    position = 1
+                    signals[i] = 0.25
     
     return signals
