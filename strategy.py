@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter (HMA21) and volume confirmation
-# Uses Camarilla levels from 1d data: breakout above H3 = long, below L3 = short
-# 1d HMA21 filter ensures trades align with higher timeframe trend
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (HMA50) and volume confirmation
+# Uses Donchian channels from 1d data: breakout above upper band = long, below lower band = short
+# 1d HMA50 filter ensures trades align with higher timeframe trend
 # Volume confirmation reduces false breakouts
-# Designed for 12h timeframe to target 12-37 trades/year (50-150 over 4 years)
-# Works in bull/bear: HMA21 adapts to trend, Camarilla provides structure
+# Designed for 4h timeframe to target 20-50 trades/year (75-200 over 4 years)
+# Works in bull/bear: HMA50 adapts to trend, Donchian provides robust structure
 
-name = "12h_1d_camarilla_hma_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_hma_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,34 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla levels
+    # Load daily data ONCE before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
+    # Calculate Donchian channels (20-period) from 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    
+    # Upper band: highest high of last 20 days
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 days
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align 1d Donchian bands to 4h timeframe
+    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
+    
+    # Load daily data ONCE before loop for HMA50 trend filter
     close_1d = df_1d['close'].values
-    
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
-    
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Load 1d data ONCE before loop for HMA21 trend filter
-    # Calculate 1d HMA21 with proper min_periods
     close_1d_series = pd.Series(close_1d)
-    half_n = int(21/2 + 0.5)
+    half_n = int(50/2 + 0.5)
     wma_half = close_1d_series.rolling(window=half_n, min_periods=half_n).mean()
-    wma_full = close_1d_series.rolling(window=21, min_periods=21).mean()
-    hma_21_1d = (2 * wma_half - wma_full).values
+    wma_full = close_1d_series.rolling(window=50, min_periods=50).mean()
+    hma_50_1d = (2 * wma_half - wma_full).values
     
-    # Align 1d HMA21 to 12h timeframe
-    hma_21_12h = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    # Align 1d HMA50 to 4h timeframe
+    hma_50_4h = align_htf_to_ltf(prices, df_1d, hma_50_1d)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -66,8 +66,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_12h[i]) or np.isnan(camarilla_l3_12h[i]) or
-            np.isnan(hma_21_12h[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or
+            np.isnan(hma_50_4h[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -75,16 +75,16 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Camarilla L3 OR trend turns bearish
-            if close[i] < camarilla_l3_12h[i] or close[i] < hma_21_12h[i]:
+            # Exit: price closes below Donchian lower band OR trend turns bearish
+            if close[i] < lower_20_4h[i] or close[i] < hma_50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Camarilla H3 OR trend turns bullish
-            if close[i] > camarilla_h3_12h[i] or close[i] > hma_21_12h[i]:
+            # Exit: price closes above Donchian upper band OR trend turns bullish
+            if close[i] > upper_20_4h[i] or close[i] > hma_50_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,12 +92,12 @@ def generate_signals(prices):
         else:  # Flat
             # Entry logic with volume confirmation
             if volume_confirm:
-                # Long breakout: price closes above Camarilla H3 AND price > 1d HMA21 (bullish trend)
-                if close[i] > camarilla_h3_12h[i] and close[i] > hma_21_12h[i]:
+                # Long breakout: price closes above Donchian upper band AND price > 1d HMA50 (bullish trend)
+                if close[i] > upper_20_4h[i] and close[i] > hma_50_4h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below Camarilla L3 AND price < 1d HMA21 (bearish trend)
-                elif close[i] < camarilla_l3_12h[i] and close[i] < hma_21_12h[i]:
+                # Short breakout: price closes below Donchian lower band AND price < 1d HMA50 (bearish trend)
+                elif close[i] < lower_20_4h[i] and close[i] < hma_50_4h[i]:
                     position = -1
                     signals[i] = -0.25
     
