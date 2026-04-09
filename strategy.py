@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 1d_kama_rsi_chop_regime_v1
-# Hypothesis: 1d strategy using KAMA (Kaufman Adaptive Moving Average) for trend direction, RSI for momentum confirmation, and Choppiness Index regime filter.
-# Long when KAMA is rising, RSI > 50, and chop > 61.8 (ranging market) for mean reversion longs.
-# Short when KAMA is falling, RSI < 50, and chop > 61.8 (ranging market) for mean reversion shorts.
-# Uses weekly trend filter (1w KAMA direction) to avoid counter-trend trades.
-# Exit when RSI crosses back to neutral (50) or chop < 38.2 (strong trend) to avoid whipsaws.
-# Designed for low trade frequency (7-25/year) to minimize fee drag on 1d timeframe.
-# Works in both bull and bear markets: KAMA adapts to changing volatility, RSI captures momentum extremes, chop filter identifies mean-reversion regimes.
+# 6h_williams_alligator_adx_regime_v1
+# Hypothesis: 6h strategy combining Williams Alligator (trend direction) with ADX regime filter.
+# Long when price > Alligator Jaw (13-period SMMA) and ADX > 25 (strong trend).
+# Short when price < Alligator Jaw and ADX > 25.
+# Exit when price crosses Alligator Jaw or ADX < 20 (weak trend/ranging).
+# Uses discrete position sizing (0.25) to minimize fee churn.
+# Target: 15-30 trades/year (60-120 total over 4 years) on BTC/ETH/SOL.
+# Works in both bull and bear markets: Alligator identifies trend direction, ADX filters whipsaws in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_regime_v1"
-timeframe = "1d"
+name = "6h_williams_alligator_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,124 +24,98 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # KAMA calculation (Kaufman Adaptive Moving Average)
+    # Williams Alligator: three smoothed moving averages
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars ahead
+    # Teeth (Red): 8-period SMMA, shifted 5 bars ahead
+    # Lips (Green): 5-period SMMA, shifted 3 bars ahead
     close_s = pd.Series(close)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(close_s.diff(periods=10))
-    volatility = close_s.diff().abs().rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    fastest = 2 / (2 + 1)  # EMA(2)
-    slowest = 2 / (30 + 1) # EMA(30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close, dtype=float)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # RSI (14-period)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    def smma(series, period):
+        """Smoothed Moving Average"""
+        sma = series.rolling(window=period, min_periods=period).mean()
+        # Initialize first value as SMA
+        result = np.full(len(series), np.nan)
+        result[period-1] = sma.iloc[period-1]
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
+        for i in range(period, len(series)):
+            if not np.isnan(sma.iloc[i]):
+                result[i] = (result[i-1] * (period-1) + series.iloc[i]) / period
+        return result
     
-    # Choppiness Index (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / np.log10(14) / (highest_high - lowest_low))
+    jaw = smma(close_s, 13)  # Jaw: 13-period
+    teeth = smma(close_s, 8)  # Teeth: 8-period
+    lips = smma(close_s, 5)   # Lips: 5-period
     
-    # Weekly HTF trend filter (1w KAMA direction)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_s = pd.Series(close_1w)
-    # Calculate 1w KAMA (same parameters)
-    change_1w = np.abs(close_1w_s.diff(periods=10))
-    volatility_1w = close_1w_s.diff().abs().rolling(window=10, min_periods=10).sum()
-    er_1w = change_1w / volatility_1w.replace(0, np.nan)
-    sc_1w = (er_1w * (fastest - slowest) + slowest) ** 2
-    kama_1w = np.zeros_like(close_1w, dtype=float)
-    kama_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        if np.isnan(sc_1w[i]):
-            kama_1w[i] = kama_1w[i-1]
-        else:
-            kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
-    # Align 1w KAMA to 1d timeframe (completed weekly bars only)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
-    # Weekly trend: rising if current > previous, falling if current < previous
-    kama_1w_rising = np.zeros(n, dtype=bool)
-    kama_1w_falling = np.zeros(n, dtype=bool)
-    for i in range(n):
-        if not np.isnan(kama_1w_aligned[i]) and i > 0:
-            kama_1w_rising[i] = kama_1w_aligned[i] > kama_1w_aligned[i-1]
-            kama_1w_falling[i] = kama_1w_aligned[i] < kama_1w_aligned[i-1]
+    # Shift as per Alligator specification
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # ADX calculation (14-period)
+    # True Range
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    up_move = pd.Series(high - np.roll(high, 1))
+    down_move = pd.Series(np.roll(low, 1) - low)
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    atr_period = 14
+    tr_s = pd.Series(tr)
+    plus_dm_s = pd.Series(plus_dm)
+    minus_dm_s = pd.Series(minus_dm)
+    
+    atr = tr_s.ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
+    plus_dm_smooth = plus_dm_s.ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
+    minus_dm_smooth = minus_dm_s.ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / np.where(atr != 0, atr, 1e-10)
+    minus_di = 100 * minus_dm_smooth / np.where(atr != 0, atr, 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/atr_period, min_periods=atr_period, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi_values[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(kama_1w_aligned[i])):
+        if (np.isnan(jaw_shifted[i]) or np.isnan(adx[i]) or 
+            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: chop > 61.8 indicates ranging market (good for mean reversion)
-        ranging_market = chop[i] > 61.8
-        # Strong trend filter: chop < 38.2 indicates strong trend (avoid mean reversion)
-        strong_trend = chop[i] < 38.2
-        
         if position == 1:  # Long position
-            # Exit: RSI crosses below 50 OR strong trend develops
-            if rsi_values[i] < 50 and rsi_values[i-1] >= 50:
-                position = 0
-                signals[i] = 0.0
-            elif strong_trend:
+            # Exit: price crosses below Jaw OR ADX < 20 (weakening trend)
+            if close[i] < jaw_shifted[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses above 50 OR strong trend develops
-            if rsi_values[i] > 50 and rsi_values[i-1] <= 50:
-                position = 0
-                signals[i] = 0.0
-            elif strong_trend:
+            # Exit: price crosses above Jaw OR ADX < 20 (weakening trend)
+            if close[i] > jaw_shifted[i] or adx[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for entry conditions with weekly trend filter
-            kama_rising = kama[i] > kama[i-1]
-            kama_falling = kama[i] < kama[i-1]
-            rsi_above_50 = rsi_values[i] > 50
-            rsi_below_50 = rsi_values[i] < 50
-            
-            # Long: KAMA rising, RSI > 50, ranging market, and weekly KAMA rising
-            if (kama_rising and rsi_above_50 and ranging_market and 
-                kama_1w_rising[i]):
+            # Enter: price > Jaw AND ADX > 25 (strong trend) for long
+            #          price < Jaw AND ADX > 25 (strong trend) for short
+            if close[i] > jaw_shifted[i] and adx[i] > 25:
                 position = 1
                 signals[i] = 0.25
-            # Short: KAMA falling, RSI < 50, ranging market, and weekly KAMA falling
-            elif (kama_falling and rsi_below_50 and ranging_market and 
-                  kama_1w_falling[i]):
+            elif close[i] < jaw_shifted[i] and adx[i] > 25:
                 position = -1
                 signals[i] = -0.25
     
