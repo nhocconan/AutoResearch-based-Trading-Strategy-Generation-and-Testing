@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_volume_chop_regime_v1
-# Hypothesis: 12h strategy using Donchian(20) breakouts for entry, volume confirmation (>1.5x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
+# 12h_donchian_breakout_volume_chop_regime_v2
+# Hypothesis: 12h Donchian breakout strategy with volume confirmation (>1.8x 20-bar avg volume) and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Adjusted volume threshold to reduce trade frequency and target 12-37 trades/year. Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws, HTF EMA ensures alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_chop_regime_v1"
+name = "12h_donchian_breakout_volume_chop_regime_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -65,8 +65,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.8x 20-period average (stricter)
+        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
         # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
         # HTF trend filter: price above/below 1d EMA(50)
