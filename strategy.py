@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h HTF Camarilla pivot levels with volume confirmation and ATR trailing stop
-# - Uses 12h HTF for Camarilla pivot calculation (based on completed 12h candles)
-# - Long when price breaks above Camarilla R4 level with volume > 2.0x 20-period average
-# - Short when price breaks below Camarilla S4 level with volume > 2.0x 20-period average
-# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry, exit short at 2.5x ATR above lowest low since entry
+# Hypothesis: 4h strategy using 1d Williams %R extremes with volume confirmation and ATR trailing stop
+# - Uses 1d HTF for Williams %R(14) to identify overbought/oversold conditions on completed daily candles
+# - Long when Williams %R < -80 (oversold) with volume > 1.5x 20-period average and price > EMA(50)
+# - Short when Williams %R > -20 (overbought) with volume > 1.5x 20-period average and price < EMA(50)
+# - ATR(14) trailing stop: exit long at 2.0x ATR below highest high since entry, exit short at 2.0x ATR above lowest low since entry
 # - Fixed position size 0.25 to control drawdown
-# - Works in bull/bear: Camarilla levels adapt to volatility, volume confirmation filters false breakouts
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Williams %R works in ranging markets (common in 2025 BTC/ETH) and catches reversals
+# - Volume confirmation filters false signals, EMA(50) ensures alignment with intermediate trend
+# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
 
-name = "6h_12h_camarilla_volume_atr_v1"
-timeframe = "6h"
+name = "4h_1d_williamsr_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,46 +27,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    # Camarilla formulas: 
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.1 * (high - low)
-    # R2 = close + 0.7 * (high - low)
-    # R1 = close + 0.5 * (high - low)
-    # PP = (high + low + close) / 3
-    # S1 = close - 0.5 * (high - low)
-    # S2 = close - 0.7 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # S4 = close - 1.5 * (high - low)
+    # Calculate 1d Williams %R (14-period) - based on completed daily candles
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high_14 - lowest_low_14) != 0,
+        ((highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)) * -100,
+        -50.0  # neutral when range is zero
+    )
     
-    # Use previous bar's high/low/close for pivot calculation (no look-ahead)
-    prev_high = np.roll(high_12h, 1)
-    prev_low = np.roll(low_12h, 1)
-    prev_close = np.roll(close_12h, 1)
+    # Align Williams %R to 4h timeframe (wait for completed 1d bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # First bar has no previous bar, set to 0
-    prev_high[0] = 0
-    prev_low[0] = 0
-    prev_close[0] = 0
+    # Pre-compute EMA(50) for 4h trend filter
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Calculate pivot levels
-    camarilla_r4 = prev_close + 1.5 * (prev_high - prev_low)
-    camarilla_s4 = prev_close - 1.5 * (prev_high - prev_low)
-    
-    # Align Camarilla levels to 6h timeframe (wait for completed 12h bar)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
-    
-    # Pre-compute volume confirmation (20-period average for 6h)
+    # Pre-compute volume confirmation (20-period average for 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute ATR (14-period) for stoploss
@@ -83,21 +71,21 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50[i]) or
             np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
             vol_ma_20[i] <= 0 or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 2.0x average
-        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -109,8 +97,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -118,16 +106,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Camarilla breakout with volume confirmation
+            # Entry logic: Williams %R extremes with volume confirmation and EMA filter
             if volume_confirmed:
-                # Long entry: price breaks above Camarilla R4 level
-                if close[i] > camarilla_r4_aligned[i]:
+                # Long entry: Williams %R oversold (< -80) and price above EMA(50)
+                if williams_r_aligned[i] < -80 and close[i] > ema_50[i]:
                     position = 1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: price breaks below Camarilla S4 level
-                elif close[i] < camarilla_s4_aligned[i]:
+                # Short entry: Williams %R overbought (> -20) and price below EMA(50)
+                elif williams_r_aligned[i] > -20 and close[i] < ema_50[i]:
                     position = -1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
