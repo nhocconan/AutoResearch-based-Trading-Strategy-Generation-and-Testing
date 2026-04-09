@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w volume confirmation + chop regime filter
-# Donchian breakout captures momentum in both bull and bear markets
-# 1w volume spike confirms breakout authenticity (avoids false breakouts)
-# Choppiness index regime filter: CHOP > 61.8 = range (mean revert at bands), CHOP < 38.2 = trending (follow breakout)
-# Works in bull/bear: regime filter adapts, breakout captures strong moves
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1w HMA trend filter
+# Donchian breakout captures strong momentum moves in both bull/bear markets
+# 1d volume > 2.0x 20-period average confirms institutional participation
+# 1w HMA(21) trend filter: only trade in direction of weekly trend to avoid counter-trend whipsaws
+# Uses discrete sizing 0.25 to minimize fee churn
+# Target: 75-200 trades over 4 years (19-50/year) with Sharpe > 0.5 on BTC/ETH
 
-name = "12h_1w_donchian_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_1w_donchian_volume_hma_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,109 +24,105 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for volume and chop calculation
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    
+    if len(df_1d) < 30 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w average volume (20-period)
-    volume_1w = df_1w['volume'].values
-    volume_s_1w = pd.Series(volume_1w)
-    avg_volume_1w = volume_s_1w.rolling(window=20, min_periods=20).mean().values
+    # 1d volume confirmation: 20-period average volume
+    volume_1d = df_1d['volume'].values
+    volume_s_1d = pd.Series(volume_1d)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1w Choppiness Index (CHOP)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 1w HMA(21) for trend filter
     close_1w = df_1w['close'].values
+    hma_21_1w = calculate_hma(close_1w, 21)
     
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Align HTF indicators to 4h timeframe (wait for bar close)
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
     
-    # ATR(14) - smoothed TR
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        # First value is simple average
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_1w = wilders_smoothing(tr, 14)
-    
-    # Highest high and lowest low over 14 periods
-    hh_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    # Chop calculation: 100 * log10(sum(atr14) / (hh14 - ll14)) / log10(14)
-    sum_atr_14 = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
-    range_14 = hh_1w - ll_1w
-    chop_1w = np.where(range_14 != 0, 
-                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
-                       50)  # neutral when range is zero
-    
-    # Align 1w indicators to 12h timeframe (wait for 1w bar close)
-    avg_volume_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_volume_1w)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
-    
-    # Calculate 12h Donchian channels (20-period)
+    # 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(avg_volume_1w_aligned[i]) or np.isnan(chop_1w_aligned[i])):
+            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(hma_21_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 1w average volume
-        volume_confirmed = volume[i] > 1.5 * avg_volume_1w_aligned[i]
+        # Volume confirmation: current 4h volume > 2.0x 1d average volume
+        volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
         
-        # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
-        trending_regime = chop_1w_aligned[i] < 38.2
-        ranging_regime = chop_1w_aligned[i] > 61.8
+        # Trend filter: HMA slope > 0 = uptrend, < 0 = downtrend
+        if i >= 101:  # Need previous value for slope
+            hma_now = hma_21_1w_aligned[i]
+            hma_prev = hma_21_1w_aligned[i-1]
+            trend_up = hma_now > hma_prev
+            trend_down = hma_now < hma_prev
+        else:
+            trend_up = False
+            trend_down = False
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR regime shifts to ranging
-            if close[i] < lowest_low[i] or ranging_regime:
+            # Exit: price closes below Donchian lower band
+            if close[i] < lowest_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR regime shifts to ranging
-            if close[i] > highest_high[i] or ranging_regime:
+            # Exit: price closes above Donchian upper band
+            if close[i] > highest_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic
-            if trending_regime:
-                # Follow breakout in trending regime
-                if close[i] > highest_high[i] and volume_confirmed:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < lowest_low[i] and volume_confirmed:
-                    position = -1
-                    signals[i] = -0.25
-            elif ranging_regime:
-                # Mean revert at Donchian bands in ranging regime
-                if close[i] < lowest_low[i] and volume_confirmed:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] > highest_high[i] and volume_confirmed:
-                    position = -1
-                    signals[i] = -0.25
+            # Entry logic: breakout with volume confirmation in trend direction
+            if close[i] > highest_high[i] and volume_confirmed and trend_up:
+                position = 1
+                signals[i] = 0.25
+            elif close[i] < lowest_low[i] and volume_confirmed and trend_down:
+                position = -1
+                signals[i] = -0.25
     
     return signals
+
+def calculate_hma(values, period):
+    """Calculate Hull Moving Average"""
+    if len(values) < period:
+        return np.full(len(values), np.nan)
+    
+    def wma(data, window):
+        if len(data) < window:
+            return np.full(len(data), np.nan)
+        weights = np.arange(1, window + 1)
+        return np.convolve(data, weights, mode='valid') / weights.sum()
+    
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma_half = wma(values, half_period)
+    wma_full = wma(values, period)
+    
+    # Handle NaN values from WMA
+    raw_hma = 2 * wma_half - wma_full
+    hma = wma(raw_hma, sqrt_period)
+    
+    # Pad with NaN to match original length
+    result = np.full(len(values), np.nan)
+    start_idx = period - 1
+    end_idx = start_idx + len(hma)
+    if end_idx <= len(values):
+        result[start_idx:end_idx] = hma
+    
+    return result
