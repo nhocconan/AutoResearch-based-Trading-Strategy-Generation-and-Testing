@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,69 +17,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-week high/low)
-    high_20w = np.full(len(df_1w), np.nan)
-    low_20w = np.full(len(df_1w), np.nan)
-    for i in range(len(df_1w)):
-        if i >= 19:
-            high_20w[i] = np.max(df_1w['high'].iloc[i-19:i+1])
-            low_20w[i] = np.min(df_1w['low'].iloc[i-19:i+1])
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    r4 = np.full(len(df_1d), np.nan)
+    s4 = np.full(len(df_1d), np.nan)
+    prev_high = np.full(len(df_1d), np.nan)
+    prev_low = np.full(len(df_1d), np.nan)
     
-    # Align weekly Donchian to 6h timeframe
-    high_20w_6h = align_htf_to_ltf(prices, df_1w, high_20w)
-    low_20w_6h = align_htf_to_ltf(prices, df_1w, low_20w)
+    for i in range(1, len(df_1d)):
+        ph = float(df_1d['high'].iloc[i-1])
+        pl = float(df_1d['low'].iloc[i-1])
+        pc = float(df_1d['close'].iloc[i-1])
+        r4[i] = pc + (ph - pl) * 1.1 / 2
+        s4[i] = pc - (ph - pl) * 1.1 / 2
+        prev_high[i] = ph
+        prev_low[i] = pl
     
-    # Volume confirmation: 4-period average (24h)
-    vol_ma_4 = np.full(n, np.nan)
+    # Align 1d values to 12h timeframe
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
+    prev_high_12h = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_12h = align_htf_to_ltf(prices, df_1d, prev_low)
+    
+    # Volume confirmation: 2-period average (24h)
+    vol_ma_2 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 4:
-            vol_sum -= volume[i-4]
-        if i >= 3:
-            vol_ma_4[i] = vol_sum / 4
+        if i >= 2:
+            vol_sum -= volume[i-2]
+        if i >= 1:
+            vol_ma_2[i] = vol_sum / 2
+    
+    # Choppiness regime filter (14-period)
+    chop = np.full(n, np.nan)
+    for i in range(13, n):
+        high_max = np.max(high[i-13:i+1])
+        low_min = np.min(low[i-13:i+1])
+        sum_true_range = 0.0
+        for j in range(14):
+            idx = i - j
+            tr = max(high[idx] - low[idx],
+                     abs(high[idx] - close[idx-1]) if idx-1 >= 0 else high[idx] - low[idx],
+                     abs(low[idx] - close[idx-1]) if idx-1 >= 0 else high[idx] - low[idx])
+            sum_true_range += tr
+        if sum_true_range > 0 and high_max > low_min:
+            chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(high_20w_6h[i]) or 
-            np.isnan(low_20w_6h[i]) or 
-            np.isnan(vol_ma_4[i])):
+        if (np.isnan(r4_12h[i]) or 
+            np.isnan(s4_12h[i]) or 
+            np.isnan(prev_high_12h[i]) or 
+            np.isnan(prev_low_12h[i]) or 
+            np.isnan(vol_ma_2[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below weekly Donchian low
-            if close[i] < low_20w_6h[i]:
+            # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
+            if (close[i] <= prev_high_12h[i] and close[i] >= prev_low_12h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly Donchian high
-            if close[i] > high_20w_6h[i]:
+            # Exit: price closes back inside previous day's range OR chop > 61.8
+            if (close[i] <= prev_high_12h[i] and close[i] >= prev_low_12h[i]) or chop[i] > 61.8:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above weekly Donchian high with volume confirmation
-            vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
-            if (close[i] > high_20w_6h[i] and 
-                vol_ratio > 2.0):
+            # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
+            vol_ratio = volume[i] / vol_ma_2[i] if vol_ma_2[i] > 0 else 0
+            if (close[i] > r4_12h[i] and 
+                vol_ratio > 2.0 and 
+                chop[i] < 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below weekly Donchian low with volume confirmation
-            elif (close[i] < low_20w_6h[i] and 
-                  vol_ratio > 2.0):
+            # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
+            elif (close[i] < s4_12h[i] and 
+                  vol_ratio > 2.0 and 
+                  chop[i] < 61.8):
                 position = -1
                 signals[i] = -0.25
     
