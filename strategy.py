@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v6
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels for structure, volume confirmation, and ATR-based trend filter.
-# Long: price above daily pivot + volume spike + close > H3 + ATR(14) rising
-# Short: price below daily pivot + volume spike + close < L3 + ATR(14) falling
-# Uses discrete sizing (±0.30) to minimize fee churn. Target: 75-200 total trades over 4 years.
+# 1d_ema_cross_1w_volume_v1
+# Hypothesis: 1d strategy using EMA crossover (21/55) for trend, volume confirmation (>1.5x 20-day avg), and 1w HTF trend filter (price > 1w EMA50). 
+# Long: EMA21 > EMA55 + volume confirmed + close > 1w EMA50
+# Short: EMA21 < EMA55 + volume confirmed + close < 1w EMA50
+# Uses discrete sizing (±0.25) to minimize fee churn. Target: 50-100 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v6"
-timeframe = "4h"
+name = "1d_ema_cross_1w_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,99 +23,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1w HTF data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First bar: use same day's data (no look-ahead)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # EMA21 and EMA55 on 1d
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # Camarilla pivot levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
-    
-    # Resistance levels
-    H3 = pivot + (range_ * 1.1 / 4)
-    H4 = pivot + (range_ * 1.1 / 2)
-    # Support levels
-    L3 = pivot - (range_ * 1.1 / 4)
-    L4 = pivot - (range_ * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(14) for trend filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # first bar
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR slope: rising if current > previous
-    atr_rising = atr > np.roll(atr, 1)
-    atr_falling = atr < np.roll(atr, 1)
-    atr_rising[0] = False
-    atr_falling[0] = False
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(H3_aligned[i]) or np.isnan(H4_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_21[i]) or np.isnan(ema_55[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below L3 (trend reversal)
-            if close[i] < L3_aligned[i]:
+            # Exit: EMA crossover down OR price below 1w EMA50
+            if ema_21[i] < ema_55[i] or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H3 (trend reversal)
-            if close[i] > H3_aligned[i]:
+            # Exit: EMA crossover up OR price above 1w EMA50
+            if ema_21[i] > ema_55[i] or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
-            # Need volume confirmation and ATR trend filter
-            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+            # Need volume confirmation
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price above pivot + close > H3 + ATR rising
-                if close[i] > pivot_aligned[i] and close[i] > H3_aligned[i] and atr_rising[i]:
+                # Long: EMA21 > EMA55 + price above 1w EMA50
+                if ema_21[i] > ema_55[i] and close[i] > ema_50_1w_aligned[i]:
                     position = 1
-                    signals[i] = 0.30
-                # Short: price below pivot + close < L3 + ATR falling
-                elif close[i] < pivot_aligned[i] and close[i] < L3_aligned[i] and atr_falling[i]:
+                    signals[i] = 0.25
+                # Short: EMA21 < EMA55 + price below 1w EMA50
+                elif ema_21[i] < ema_55[i] and close[i] < ema_50_1w_aligned[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
