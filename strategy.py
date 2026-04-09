@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility filter and volume spike
-# - Uses 4h Donchian channels for breakout signals (long above 20-period high, short below 20-period low)
-# - Filters by 1d ATR ratio: ATR(7)/ATR(30) > 1.5 to ensure sufficient volatility for breakouts
-# - Requires 1d volume > 2.0x 20-period average for institutional confirmation
-# - Uses opposite Donchian touch for exit (mean reversion within the channel)
-# - Position size: 0.25 (25% of capital) to balance risk and minimize fee drag
-# - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to avoid overtrading
-# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
-# - Volatility filter prevents trading in choppy low-volume environments
+# Hypothesis: 6h Williams %R mean reversion with 1d ADX trend filter
+# - Uses 6h Williams %R(14) for extreme oversold/overbought conditions
+# - Enters long when Williams %R < -80 (oversold) and 1d ADX < 25 (low trend/range market)
+# - Enters short when Williams %R > -20 (overbought) and 1d ADX < 25
+# - Exits when Williams %R returns to -50 (mean reversion target) or opposite extreme
+# - Position size: 0.25 (25% of capital) to limit drawdown in volatile regimes
+# - Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years) to minimize fee drag
+# - Works in bull markets (mean reversion in pullbacks) and bear markets (mean reversion in rallies)
+# - Williams %R identifies exhaustion points; ADX filter avoids strong trends where mean reversion fails
 
-name = "4h_1d_donchian_vol_vol_v1"
-timeframe = "4h"
+name = "6h_1d_williamsr_adx_meanrev_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,88 +24,81 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute HTF indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 1d True Range for ATR calculations
+    # 1d True Range for ADX
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # 1d ATR(7) and ATR(30) for volatility filter
-    atr_7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    # 1d Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # 1d ATR ratio: ATR(7)/ATR(30) > 1.5 indicates expanding volatility
-    atr_ratio = np.where(atr_30 > 0, atr_7 / atr_30, 0)
-    volatility_expanding = atr_ratio > 1.5
+    # 1d ADX(14)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / np.where(atr_1d != 0, atr_1d, 1e-10)
+    minus_di_1d = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / np.where(atr_1d != 0, atr_1d, 1e-10)
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / np.where((plus_di_1d + minus_di_1d) != 0, (plus_di_1d + minus_di_1d), 1e-10)
+    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     
-    # 1d Volume > 2.0x 20-period average (strict for fewer trades)
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (2.0 * avg_volume_20)
+    # Align 1d ADX to 6h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 1d Donchian channels (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align all 1d indicators to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
-    volatility_expanding_aligned = align_htf_to_ltf(prices, df_1d, volatility_expanding.astype(float))
-    
-    # 4h price data
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # 6h Williams %R(14)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / np.where((highest_high_14 - lowest_low_14) != 0, (highest_high_14 - lowest_low_14), 1e-10)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
-    for i in range(40, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(volatility_expanding_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or
+            adx_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit when price touches lower Donchian band (mean reversion)
-            if low[i] <= donchian_low_aligned[i]:
+            # Exit: Williams %R returns to -50 (mean reversion) or goes above -20 (overbought)
+            if williams_r[i] >= -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price touches upper Donchian band (mean reversion)
-            if high[i] >= donchian_high_aligned[i]:
+            # Exit: Williams %R returns to -50 (mean reversion) or goes below -80 (oversold)
+            if williams_r[i] <= -50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with volume confirmation and volatility filter
-            if (high[i] >= donchian_high_aligned[i] and  # Break above upper band
-                volume_spike_aligned[i] and         # Volume confirmation
-                volatility_expanding_aligned[i]):   # Expanding volatility
+            # Look for Williams %R extremes with low ADX (range/low trend market)
+            if (williams_r[i] <= -80 and  # Oversold
+                adx_1d_aligned[i] < 25):   # Low trend/range market
                 position = 1
-                entry_price = high[i]
                 signals[i] = 0.25
-            elif (low[i] <= donchian_low_aligned[i] and   # Break below lower band
-                  volume_spike_aligned[i] and         # Volume confirmation
-                  volatility_expanding_aligned[i]):   # Expanding volatility
+            elif (williams_r[i] >= -20 and   # Overbought
+                  adx_1d_aligned[i] < 25):   # Low trend/range market
                 position = -1
-                entry_price = low[i]
                 signals[i] = -0.25
     
     return signals
