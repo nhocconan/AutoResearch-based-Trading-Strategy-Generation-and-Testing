@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 1d_1w_rsi_reversal_v1
-# Hypothesis: On daily timeframe, buy when weekly RSI is oversold (<30) and daily RSI crosses above 30,
-# sell when weekly RSI is overbought (>70) and daily RSI crosses below 70.
-# Uses weekly trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag.
-# Works in both bull and bear markets as RSI captures reversals and weekly filter ensures trend alignment.
+# 12h_1d_camarilla_breakout_v1
+# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
+# Uses breakout of H4/L4 levels (stronger breakout than H3/L3) for higher probability moves.
+# Exit when price returns to the daily pivot point (PP).
+# Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_reversal_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,89 +19,99 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate ATR(20) for volatility filter
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        hl = high[i] - low[i]
+        hc = abs(high[i] - close[i-1])
+        lc = abs(low[i] - close[i-1])
+        tr[i] = max(hl, hc, lc)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, np.nan)
+    atr = np.full(n, np.nan)
+    if n >= 20:
+        atr[19] = np.mean(tr[:20])
+        for i in range(20, n):
+            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
     
-    # Wilder's smoothing
-    if n >= 14:
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, n):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-            rs[i] = avg_gain[i] / avg_loss[i] if avg_loss[i] != 0 else np.inf
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-    
-    # Load weekly data ONCE before loop for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta_1w = np.diff(close_1w, prepend=close_1w[0])
-    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
-    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
+    # Calculate Camarilla pivot levels for each 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain_1w = np.full(len(df_1w), np.nan)
-    avg_loss_1w = np.full(len(df_1w), np.nan)
-    rs_1w = np.full(len(df_1w), np.nan)
-    rsi_1w = np.full(len(df_1w), np.nan)
+    # Camarilla formulas
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    if len(df_1w) >= 14:
-        avg_gain_1w[13] = np.mean(gain_1w[1:14])
-        avg_loss_1w[13] = np.mean(loss_1w[1:14])
-        for i in range(14, len(df_1w)):
-            avg_gain_1w[i] = (avg_gain_1w[i-1] * 13 + gain_1w[i]) / 14
-            avg_loss_1w[i] = (avg_loss_1w[i-1] * 13 + loss_1w[i]) / 14
-            rs_1w[i] = avg_gain_1w[i] / avg_loss_1w[i] if avg_loss_1w[i] != 0 else np.inf
-            rsi_1w[i] = 100 - (100 / (1 + rs_1w[i]))
+    # H4 and L4 levels (stronger breakout levels)
+    h4_1d = close_1d + (range_1d * 1.1 / 2)  # Same as R4
+    l4_1d = close_1d - (range_1d * 1.1 / 2)  # Same as S4
     
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align 1d levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Volume confirmation - 20 period average
+    vol_ma_20 = np.full(n, np.nan)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_spike = volume > vol_ma_20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(rsi[i]) or np.isnan(rsi_1w_aligned[i]):
+        if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
+        # Volatility filter: avoid extremely high volatility (more restrictive)
+        vol_filter = atr[i] < 0.025 * close[i]  # ATR less than 2.5% of price (was 4%)
+        
+        # Volume confirmation: current volume > 1.8x 20-period average (more restrictive)
+        vol_ok = volume[i] > vol_ma_20[i] * 1.8  # Was 1.3
+        
         if position == 1:  # Long position
-            # Exit: daily RSI crosses below 50 (momentum fade)
-            if rsi[i] < 50:
+            # Exit: price returns to or below Pivot Point
+            if close[i] <= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: daily RSI crosses above 50 (momentum fade)
-            if rsi[i] > 50:
+            # Exit: price returns to or above Pivot Point
+            if close[i] >= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: weekly RSI oversold AND daily RSI crosses above 30
-            if rsi_1w_aligned[i] < 30 and rsi[i] > 30 and rsi[i-1] <= 30:
+            # Enter long: price breaks above H4 level with volume confirmation and volatility filter
+            if close[i] > h4_aligned[i] and vol_ok and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: weekly RSI overbought AND daily RSI crosses below 70
-            elif rsi_1w_aligned[i] > 70 and rsi[i] < 70 and rsi[i-1] >= 70:
+            # Enter short: price breaks below L4 level with volume confirmation and volatility filter
+            elif close[i] < l4_aligned[i] and vol_ok and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
