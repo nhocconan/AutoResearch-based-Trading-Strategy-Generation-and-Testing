@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v2
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels for structure, volume confirmation, and trend filter.
+# 6h_camarilla_1d_trend_volume_v1
+# Hypothesis: 6h strategy using 1d Camarilla pivot levels for structure, volume confirmation, and trend filter.
 # Uses discrete position sizing (±0.30) to minimize fee churn. Volume > 1.8x 20-period average filters weak moves.
 # Long: price above daily pivot + volume spike + close > H3
 # Short: price below daily pivot + volume spike + close < L3
@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v2"
-timeframe = "4h"
+name = "6h_camarilla_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,7 +53,7 @@ def generate_signals(prices):
     L3 = pivot - (range_ * 1.1 / 4)
     L4 = pivot - (range_ * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
