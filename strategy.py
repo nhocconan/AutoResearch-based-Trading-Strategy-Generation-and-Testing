@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian channel breakout with ATR-based volatility filter and volume confirmation
-# 1w Donchian channels provide major structural support/resistance levels that work across market regimes
-# Volume confirmation ensures breakouts have conviction
-# ATR filter avoids trading in excessively choppy conditions
-# Designed for low trade frequency (<25/year) to minimize fee drag while capturing major trend moves
-# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation)
+# Hypothesis: 12h strategy using 1d ATR-based volatility breakout with volume confirmation
+# ATR(14) expansion on 1d indicates regime shift, traded on 12h breakouts of prior 12h high/low
+# Volume confirmation (current 12h volume > 1.5x 20-period average) filters false signals
+# Works in bull/bear: volatility expansion precedes sustained moves in both directions
+# Discrete position sizing: 0.0, ±0.25 to minimize fee churn
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "1d_1w_donchian_volume_atr_v1"
-timeframe = "1d"
+name = "12h_1d_atr_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,82 +24,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Donchian channels (20-period)
-    # Upper channel = highest high over 20 periods
-    # Lower channel = lowest low over 20 periods
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d ATR(14) for volatility regime filter
+    # True Range = max(high-low, abs(high-previous_close), abs(low-previous_close))
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = np.nan
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - prev_close_1d)
+    tr3 = np.abs(low_1d - prev_close_1d)
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Align Donchian levels to 1d timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1w, high_20)
-    donchian_low = align_htf_to_ltf(prices, df_1w, low_20)
+    # ATR expansion signal: current ATR > 1.2x 20-period ATR average
+    atr_ma_20_1d = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).mean().values
+    atr_expansion = atr_14_1d > 1.2 * atr_ma_20_1d
     
-    # Calculate ATR for volatility filter (using 1d data)
-    # ATR(14) = average true range over 14 periods
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align ATR expansion to 12h timeframe
+    atr_expansion_aligned = align_htf_to_ltf(prices, df_1d, atr_expansion)
     
-    # Calculate 20-period average volume for confirmation
+    # Calculate 12h rolling high/low for breakout levels (20-period)
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute volume confirmation (20-period average for 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(atr_expansion_aligned[i]) or
+            np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x average 1d volume
+        # Volume confirmation: current 12h volume > 1.5x average 12h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # ATR filter: only trade when volatility is reasonable (not too high, not too low)
-        # Avoid extremely high volatility (panic conditions) and extremely low volatility (chop)
-        atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-        if not np.isnan(atr_ma_50[i]) and atr_ma_50[i] > 0:
-            atr_ratio = atr[i] / atr_ma_50[i]
-            volatility_filter = (atr_ratio > 0.5) & (atr_ratio < 2.0)
-        else:
-            volatility_filter = True
-        
         if position == 1:  # Long position
-            # Exit when price closes below Donchian lower channel (trend reversal)
-            if close[i] < donchian_low[i]:
+            # Exit on retracement to 12h VWAP approximation (midpoint of range)
+            exit_level = (high_ma_20[i] + low_ma_20[i]) / 2.0
+            if close[i] < exit_level:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when price closes above Donchian upper channel (trend reversal)
-            if close[i] > donchian_high[i]:
+            # Exit on retracement to 12h VWAP approximation
+            exit_level = (high_ma_20[i] + low_ma_20[i]) / 2.0
+            if close[i] > exit_level:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout trading with volume and volatility filters
-            # Long on Donchian upper channel breakout
-            # Short on Donchian lower channel breakdown
-            if volume_confirmed and volatility_filter:
-                if close[i] > donchian_high[i]:
+            # Breakout trading with volatility and volume confirmation
+            # Long on break above 12h 20-period high, Short on break below 12h 20-period low
+            if atr_expansion_aligned[i] and volume_confirmed:
+                if close[i] > high_ma_20[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < donchian_low[i]:
+                elif close[i] < low_ma_20[i]:
                     position = -1
                     signals[i] = -0.25
     
