@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d ATR-based volatility breakout with 1w RSI regime filter
-# - Uses 1d HTF for ATR breakout: price breaks above/below ATR(14) multiplier from open
-# - Uses 1w HTF for RSI regime: RSI(14) > 50 for bullish bias, < 50 for bearish bias
-# - In bullish regime (weekly RSI > 50): look for long breakouts above open + k*ATR
-# - In bearish regime (weekly RSI < 50): look for short breakdowns below open - k*ATR
-# - Volume confirmation: current 12h volume > 1.5x 20-period average to filter low-quality breakouts
-# - Fixed position size 0.25 to control drawdown and enable discrete sizing
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Hypothesis: 6h strategy using 1d ADX for trend strength and 1w RSI for mean reversion
+# - Uses 1d HTF for ADX: ADX > 25 indicates strong trend (bullish/bearish)
+# - Uses 1w HTF for RSI: extreme readings (>70 or <30) signal mean reversion opportunities
+# - In strong bullish trend (ADX>25 + DI+ > DI-): look for long entries when weekly RSI < 30 (oversold pullback)
+# - In strong bearish trend (ADX>25 + DI- > DI+): look for short entries when weekly RSI > 70 (overbought bounce)
+# - Volume confirmation: current 6h volume > 1.2x 20-period average to filter low-quality signals
+# - Fixed position size 0.25 to control drawdown
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "12h_1d_1w_atr_breakout_rsi_v1"
-timeframe = "12h"
+name = "6h_1d_1w_adx_rsi_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,7 +21,6 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -41,31 +40,48 @@ def generate_signals(prices):
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR(14) for volatility measurement
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
+    # Calculate 1d ADX (14 periods)
+    # True Range
+    tr1 = pd.Series(high_1d).rolling(window=2).max().values - pd.Series(low_1d).rolling(window=2).min().values
+    tr2 = np.abs(pd.Series(high_1d).rolling(window=2).shift(1).values - pd.Series(close_1d).rolling(window=2).shift(1).values)
+    tr3 = np.abs(pd.Series(low_1d).rolling(window=2).shift(1).values - pd.Series(close_1d).rolling(window=2).shift(1).values)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1w RSI(14) for regime filter
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff().values
+    down_move = -pd.Series(low_1d).diff().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1w RSI (14 periods)
     delta = pd.Series(close_1w).diff().values
-    delta[0] = 0
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
     avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align all HTF data to 12h timeframe (wait for completed HTF bar)
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1w, rsi_14)
+    # Align all HTF data to 6h timeframe (wait for completed HTF bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
     
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -73,50 +89,62 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_14_aligned[i]) or np.isnan(rsi_14_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
+        if (np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]) or
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.2x average
+        volume_confirmed = volume[i] > 1.2 * vol_ma_20[i]
         
-        # Regime filter: weekly RSI > 50 = bullish bias, < 50 = bearish bias
-        bullish_regime = rsi_14_aligned[i] > 50
-        bearish_regime = rsi_14_aligned[i] < 50
+        # Trend strength and direction
+        strong_trend = adx_aligned[i] > 25
+        bullish_trend = strong_trend and (plus_di_aligned[i] > minus_di_aligned[i])
+        bearish_trend = strong_trend and (minus_di_aligned[i] > plus_di_aligned[i])
         
-        # ATR breakout levels from current bar's open
-        atr_mult = 1.5  # ATR multiplier for breakout threshold
-        upper_break = open_price[i] + atr_mult * atr_14_aligned[i]
-        lower_break = open_price[i] - atr_mult * atr_14_aligned[i]
+        # RSI extremes: <30 = oversold, >70 = overbought
+        oversold = rsi_aligned[i] < 30
+        overbought = rsi_aligned[i] > 70
         
         # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit conditions: close below open (mean reversion) or regime change
-            if close[i] < open_price[i] or not bullish_regime:
+            # Exit conditions
+            if bullish_trend:
+                # In bullish trend: exit when overbought or trend weakens/reverses
+                if overbought or not bullish_trend:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+            else:
+                # Not in bullish trend: exit
                 position = 0
                 signals[i] = 0.0
-            else:
-                signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit conditions: close above open (mean reversion) or regime change
-            if close[i] > open_price[i] or not bearish_regime:
+            # Exit conditions
+            if bearish_trend:
+                # In bearish trend: exit when oversold or trend weakens/reverses
+                if oversold or not bearish_trend:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -position_size
+            else:
+                # Not in bearish trend: exit
                 position = 0
                 signals[i] = 0.0
-            else:
-                signals[i] = -position_size
         else:  # Flat
-            # Entry logic based on regime and ATR breakout
+            # Entry logic based on trend and RSI extremes
             if volume_confirmed:
-                if bullish_regime and high[i] > upper_break:
-                    # Bullish regime + upward breakout: long
+                if bullish_trend and oversold:
+                    # In strong bullish trend, weekly oversold: long mean reversion
                     position = 1
                     signals[i] = position_size
-                elif bearish_regime and low[i] < lower_break:
-                    # Bearish regime + downward breakout: short
+                elif bearish_trend and overbought:
+                    # In strong bearish trend, weekly overbought: short mean reversion
                     position = -1
                     signals[i] = -position_size
     
