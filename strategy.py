@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and chop regime filter
-# - Uses 12h Donchian channels for breakout signals (long above 20-period high, short below 20-period low)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
+# - Uses 4h Donchian channels for breakout signals (long above 20-period high, short below 20-period low)
 # - Confirms with 1d volume > 1.8x 20-period average (strong institutional participation)
 # - Filters by 1d choppiness index: trade only when CHOP > 61.8 (range) OR CHOP < 38.2 (trend)
 # - Exits when price touches opposite Donchian level or ATR-based stoploss (2.5x ATR)
-# - Position size: 0.25 (25% of capital) to balance risk and minimize fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag
+# - Position size: 0.30 (30% of capital) for balanced risk/return
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to minimize fee drag
 # - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
 # - Donchian channels provide robust structure that adapts to volatility regimes
 
-name = "12h_1d_donchian_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -60,7 +60,7 @@ def generate_signals(prices):
     chop_range = chop > 61.8  # range-bound market
     chop_trend = chop < 38.2  # trending market
     
-    # Align all 1d indicators to 12h
+    # Align all 1d indicators to 4h
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
@@ -68,7 +68,7 @@ def generate_signals(prices):
     chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend.astype(float))
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 12h price data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -96,7 +96,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Exit conditions: opposite Donchian touch (high) or ATR stoploss
@@ -107,7 +107,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
             # Look for Donchian breakout with volume confirmation and regime filter
             if (high[i] >= donchian_high_aligned[i] and  # Break above upper band
@@ -116,13 +116,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = high[i]
                 atr_stop = atr_1d_aligned[i]
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif (low[i] <= donchian_low_aligned[i] and   # Break below lower band
                   volume_spike_aligned[i] and         # Volume confirmation
                   (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = -1
                 entry_price = low[i]
                 atr_stop = atr_1d_aligned[i]
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
