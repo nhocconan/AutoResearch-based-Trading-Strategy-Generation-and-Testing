@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and volatility filter
-# Uses 1d Camarilla pivot levels (H3/L3) from previous day for breakout signals
-# Enters only when 1d ATR rank < 30 (low volatility) to avoid whipsaws in choppy markets
-# Volume confirmation: 4h volume > 1.5x 20-period average (~5 days)
-# Exits when price closes opposite Camarilla level (H4/L4)
-# Position size 0.25 to limit drawdown
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag
-# Works in both bull/bear: Camarilla provides structure, low vol filter avoids false breakouts
+# Hypothesis: 1d Donchian channel breakout with 1w EMA trend filter and volume confirmation
+# Uses 1w EMA(50) for trend direction to avoid counter-trend trades
+# Enters on breakout of 20-period 1d Donchian channels with volume > 2x 20-day average
+# Exits on opposite Donchian channel touch or close below/above EMA
+# Position size 0.25 to manage drawdown
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag
+# Works in bull/bear: trend filter ensures we trade with higher timeframe momentum
 
-name = "4h_1d_camarilla_vol_filter_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_ema_vol_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,71 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1w data ONCE before loop for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA(50) for trend
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full(len(df_1w), np.nan)
+    if len(close_1w) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (close_1w[i] * multiplier) + (ema_50_1w[i-1] * (1 - multiplier))
     
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    camarilla_h5 = np.full(len(df_1d), np.nan)
-    camarilla_l5 = np.full(len(df_1d), np.nan)
-    camarilla_h6 = np.full(len(df_1d), np.nan)
-    camarilla_l6 = np.full(len(df_1d), np.nan)
+    # Align 1w EMA to 1d timeframe
+    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    for i in range(1, len(df_1d)):
-        # Previous day's OHLC
-        phigh = high_1d[i-1]
-        plow = low_1d[i-1]
-        pclose = close_1d[i-1]
-        
-        pivot = (phigh + plow + pclose) / 3
-        range_val = phigh - plow
-        
-        camarilla_h3[i] = pclose + range_val * 1.1 / 4
-        camarilla_l3[i] = pclose - range_val * 1.1 / 4
-        camarilla_h4[i] = pclose + range_val * 1.1 / 2
-        camarilla_l4[i] = pclose - range_val * 1.1 / 2
-        camarilla_h5[i] = pclose + range_val * 1.1
-        camarilla_l5[i] = pclose - range_val * 1.1
-        camarilla_h6[i] = pclose + range_val * 1.1 * 1.166
-        camarilla_l6[i] = pclose - range_val * 1.1 * 1.166
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Calculate 1d ATR (14-period)
-    tr_1d = np.zeros(len(df_1d))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr0 = high_1d[i] - low_1d[i]
-        tr1 = abs(high_1d[i] - close_1d[i-1])
-        tr2 = abs(low_1d[i] - close_1d[i-1])
-        tr_1d[i] = max(tr0, tr1, tr2)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    atr_1d = np.zeros(len(df_1d))
-    atr_1d[0] = tr_1d[0]
-    for i in range(1, len(df_1d)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
-    
-    # ATR percentile rank (100-day lookback ~ 3 months)
-    atr_rank_1d = np.zeros(len(df_1d))
-    for i in range(100, len(df_1d)):
-        window = atr_1d[i-100:i]
-        atr_rank_1d[i] = np.sum(window < atr_1d[i]) / len(window) * 100
-    
-    # Align 1d data to 4h timeframe (only use completed daily bars)
-    camarilla_h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    atr_rank_4h = align_htf_to_ltf(prices, df_1d, atr_rank_1d)
-    
-    # Volume confirmation: 20-period average on 4h (~5 days)
+    # Volume confirmation: 20-day average
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -103,51 +63,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after ATR rank warmup
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_4h[i]) or 
-            np.isnan(camarilla_l3_4h[i]) or 
-            np.isnan(camarilla_h4_4h[i]) or 
-            np.isnan(camarilla_l4_4h[i]) or 
-            np.isnan(atr_rank_4h[i]) or 
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in low volatility environment (ATR rank < 30 = bottom 30% volatility)
-        if atr_rank_4h[i] >= 30:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price closes below 1d Camarilla L4
-            if close[i] <= camarilla_l4_4h[i]:
+            # Exit: price touches lower Donchian or closes below EMA
+            if low[i] <= donchian_low[i] or close[i] < ema_50_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 1d Camarilla H4
-            if close[i] >= camarilla_h4_4h[i]:
+            # Exit: price touches upper Donchian or closes above EMA
+            if high[i] >= donchian_high[i] or close[i] > ema_50_1d[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 1d Camarilla H3 with volume confirmation
+            # Enter long: price breaks above upper Donchian with volume confirmation and uptrend
             vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (close[i] > camarilla_h3_4h[i] and 
-                vol_ratio > 1.5):
+            if (high[i] > donchian_high[i] and 
+                close[i] > ema_50_1d[i] and 
+                vol_ratio > 2.0):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 1d Camarilla L3 with volume confirmation
-            elif (close[i] < camarilla_l3_4h[i] and 
-                  vol_ratio > 1.5):
+            # Enter short: price breaks below lower Donchian with volume confirmation and downtrend
+            elif (low[i] < donchian_low[i] and 
+                  close[i] < ema_50_1d[i] and 
+                  vol_ratio > 2.0):
                 position = -1
                 signals[i] = -0.25
     
