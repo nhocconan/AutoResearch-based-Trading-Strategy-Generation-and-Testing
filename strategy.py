@@ -91,9 +91,9 @@ def generate_signals(prices):
         # Volume confirmation: current 4h volume > 1.5x 1d average volume
         volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
         
-        # Regime filter: CHOP < 50 = trending (follow breakout), CHOP > 50 = range (mean revert)
-        trending_regime = chop_1d_aligned[i] < 50
-        ranging_regime = chop_1d_aligned[i] > 50
+        # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
+        trending_regime = chop_1d_aligned[i] < 38.2
+        ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
             # Exit: price closes below Donchian lower band OR regime shifts to ranging
