@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_ichimoku_trend_v1
-# Hypothesis: 6-hour Ichimoku trend following with daily cloud filter and volume confirmation.
-# Long when price > Kumo (cloud), Tenkan > Kijun, and volume > 1.5x average.
-# Short when price < Kumo, Tenkan < Kijun, and volume > 1.5x average.
-# Exit when price crosses back into Kumo or Tenkan/Kijun cross reverses.
-# Uses daily Ichimoku for major trend, 6h for entry timing. Works in bull/bear via cloud filter.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 12h_1w_camarilla_breakout_v1
+# Hypothesis: 12-hour breakout of weekly Camarilla levels with trend filter (EMA50) and volume confirmation.
+# Long when price breaks above H3 resistance with price > weekly EMA50 and volume > 1.5x average.
+# Short when price breaks below L3 support with price < weekly EMA50 and volume > 1.5x average.
+# Exit when price returns to opposite Camarilla level (L3 for longs, H3 for shorts).
+# Uses weekly Camarilla levels for key support/resistance, EMA50 for trend alignment, volume filter to avoid false breakouts.
+# Position size fixed at 0.25 to limit drawdown. Target: 50-150 total trades over 4 years (12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_trend_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,50 +25,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema = close_1w[49]  # Initialize with first 50-period average
+        multiplier = 2 / (50 + 1)
+        ema_50_1w[49] = ema
+        for i in range(50, len(close_1w)):
+            ema = (close_1w[i] - ema) * multiplier + ema
+            ema_50_1w[i] = ema
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period_tenkan = 9
-    tenkan = np.full(len(high_1d), np.nan)
-    for i in range(len(high_1d)):
-        if i >= period_tenkan - 1:
-            tenkan[i] = (np.max(high_1d[i-period_tenkan+1:i+1]) + np.min(low_1d[i-period_tenkan+1:i+1])) / 2
+    # Align 1w EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period_kijun = 26
-    kijun = np.full(len(high_1d), np.nan)
-    for i in range(len(high_1d)):
-        if i >= period_kijun - 1:
-            kijun[i] = (np.max(high_1d[i-period_kijun+1:i+1]) + np.min(low_1d[i-period_kijun+1:i+1])) / 2
+    # Calculate Camarilla levels from 1w OHLC
+    # Camarilla: H3 = C + 1.1*(H-L)/2, L3 = C - 1.1*(H-L)/2
+    camarilla_h3 = np.full(len(df_1w), np.nan)
+    camarilla_l3 = np.full(len(df_1w), np.nan)
+    for i in range(len(df_1w)):
+        c = df_1w['close'].iloc[i]
+        h = df_1w['high'].iloc[i]
+        l = df_1w['low'].iloc[i]
+        camarilla_h3[i] = c + 1.1 * (h - l) / 2
+        camarilla_l3[i] = c - 1.1 * (h - l) / 2
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period_senkou_b = 52
-    senkou_b = np.full(len(high_1d), np.nan)
-    for i in range(len(high_1d)):
-        if i >= period_senkou_b - 1:
-            senkou_b[i] = (np.max(high_1d[i-period_senkou_b+1:i+1]) + np.min(low_1d[i-period_senkou_b+1:i+1])) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Kumo (cloud) boundaries: Senkou Span A and B
-    # Kumo top = max(Senkou A, Senkou B), Kumo bottom = min(Senkou A, Senkou B)
-    kumo_top = np.maximum(senkou_a_6h, senkou_b_6h)
-    kumo_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -85,37 +74,38 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price enters Kumo OR Tenkan/Kijun cross reverses (Tenkan < Kijun)
-            if (low[i] <= kumo_top[i] and high[i] >= kumo_bottom[i]) or tenkan_6h[i] < kijun_6h[i]:
+            # Exit: price returns to or below L3 level
+            if close[i] <= camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price enters Kumo OR Tenkan/Kijun cross reverses (Tenkan > Kijun)
-            if (low[i] <= kumo_top[i] and high[i] >= kumo_bottom[i]) or tenkan_6h[i] > kijun_6h[i]:
+            # Exit: price returns to or above H3 level
+            if close[i] >= camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price > Kumo, Tenkan > Kijun, volume confirmation
-            if (low[i] > kumo_top[i] and 
-                tenkan_6h[i] > kijun_6h[i] and 
+            # Enter long: price breaks above H3 with trend and volume filters
+            if (close[i] > camarilla_h3_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume[i] > vol_ma_20[i] * 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price < Kumo, Tenkan < Kijun, volume confirmation
-            elif (high[i] < kumo_bottom[i] and 
-                  tenkan_6h[i] < kijun_6h[i] and 
+            # Enter short: price breaks below L3 with trend and volume filters
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume[i] > vol_ma_20[i] * 1.5):
                 position = -1
                 signals[i] = -0.25
