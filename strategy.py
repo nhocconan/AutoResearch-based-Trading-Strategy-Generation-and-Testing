@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
+# Hypothesis: 6h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
 # - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries
 # - Trend filter: 1d EMA(50) to align with daily trend and avoid counter-trend trades
 # - Volume confirmation: volume > 2.0x 20-period average to ensure breakout strength
 # - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~20-30 trades/year (80-120 total over 4 years) to stay under fee drag threshold
+# - Target: ~12-37 trades/year (50-150 total over 4 years) to stay under fee drag threshold
 # - Works in BOTH bull markets (long breakouts at H3/H4) and bear markets (short breakdowns at L3/L4)
 # - Daily EMA filter reduces whipsaws during counter-trend bounces
+# - 6h timeframe balances trade frequency and signal quality for BTC/ETH
 
-name = "4h_1d_camarilla_ema_volume_v1"
-timeframe = "4h"
+name = "6h_1d_camarilla_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,21 +42,21 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 6h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 4h price data
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h volume > 2.0x 20-period average (strict volume confirmation)
+    # 6h volume > 2.0x 20-period average (strict volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * avg_volume_20)
     
-    # 4h ATR(14) for trailing stop
+    # 6h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
