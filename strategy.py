@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
+# Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + chop regime filter
 # Donchian breakout captures momentum in both bull and bear markets
 # 1d volume spike confirms breakout authenticity (avoids false breakouts)
 # Choppiness index regime filter: CHOP > 61.8 = range (mean revert), CHOP < 38.2 = trending (follow breakout)
 # Works in bull/bear: regime filter adapts, breakout captures strong moves
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "4h_1d_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -70,11 +70,11 @@ def generate_signals(prices):
                        100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
                        50)  # neutral when range is zero
     
-    # Align 1d indicators to 4h timeframe (wait for 1d bar close)
+    # Align 1d indicators to 12h timeframe (wait for 1d bar close)
     avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -88,7 +88,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 1d average volume
+        # Volume confirmation: current 12h volume > 1.5x 1d average volume
         volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
         
         # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
