@@ -3,112 +3,123 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w Williams %R + 1d EMA trend filter + volume spike confirmation
-# - Uses 1w HTF for Williams %R(14) to identify extreme oversold/overbought conditions
-# - Uses 1d HTF for EMA(50) trend filter: only long when price > EMA50, short when price < EMA50
-# - Entry on 6h timeframe when Williams %R shows reversal from extreme levels with volume confirmation
-# - Williams %R long signal: %R crosses above -80 from below (oversold bounce)
-# - Williams %R short signal: %R crosses below -20 from above (overbought rejection)
-# - Volume confirmation: current 6h volume > 2.0x 24-period average (4 days of 6h bars)
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and ATR stoploss
+# - Uses 1d HTF for Camarilla pivot levels (H3/L3) from prior completed daily candle
+# - Long when price touches L3 level with volume > 1.5x 20-period average AND close > open (bullish candle)
+# - Short when price touches H3 level with volume > 1.5x 20-period average AND close < open (bearish candle)
+# - ATR(14) trailing stop: exit long at 2.0x ATR below highest high since entry, exit short at 2.0x ATR above lowest low since entry
 # - Fixed position size 0.25 to control drawdown
-# - Works in bull/bear: Williams %R captures mean reversion in ranging markets, EMA filter avoids counter-trend trades
-# - Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years)
+# - Works in bull/bear: Camarilla levels adapt to volatility, volume/price action filters false touches
+# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years)
 
-name = "6h_1w_1d_williams_r_ema_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_priceaction_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Load 1w data ONCE before loop for Williams %R
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w < 30):
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w Williams %R(14)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high_14 - lowest_low_14) != 0,
-        ((highest_high_14 - close_1w) / (highest_high_14 - lowest_low_14)) * -100,
-        -50.0  # neutral when no range
-    )
-    
-    # Align Williams %R to 6h timeframe (wait for completed 1w bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
-    
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50)
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d Camarilla pivot levels (H3, L3) from prior completed daily candle
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # H3 = Pivot + Range * 1.1 / 2
+    # L3 = Pivot - Range * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    h3_1d = pivot_1d + range_1d * 1.1 / 2.0
+    l3_1d = pivot_1d - range_1d * 1.1 / 2.0
     
-    # Align EMA50 to 6h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # Pre-compute volume confirmation (24-period average for 6h = 4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Pre-compute volume confirmation (20-period average for 12h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute ATR (14-period) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(vol_ma_24[i]) or
-            vol_ma_24[i] <= 0):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
+            vol_ma_20[i] <= 0 or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 2.0x average
-        volume_confirmed = volume[i] > 2.0 * vol_ma_24[i]
+        # Volume confirmation: current 12h volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        
+        # Price action confirmation: bullish/bearish candle
+        bullish_candle = close[i] > open_price[i]
+        bearish_candle = close[i] < open_price[i]
         
         if position == 1:  # Long position
-            # Exit long: Williams %R crosses below -50 (momentum fading) OR price crosses below EMA50
-            if williams_r_aligned[i] < -50.0 or close[i] < ema_50_aligned[i]:
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, high[i])
+            
+            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short: Williams %R crosses above -50 (momentum fading) OR price crosses above EMA50
-            if williams_r_aligned[i] > -50.0 or close[i] > ema_50_aligned[i]:
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+            
+            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Williams %R reversal from extreme with volume confirmation and EMA filter
+            # Entry logic: Camarilla level touch with volume and price action confirmation
             if volume_confirmed:
-                # Long entry: Williams %R crosses above -80 from below AND price > EMA50
-                if (williams_r_aligned[i] > -80.0 and 
-                    i > 100 and williams_r_aligned[i-1] <= -80.0 and
-                    close[i] > ema_50_aligned[i]):
+                # Long entry: price touches L3 level with bullish candle
+                if low[i] <= l3_aligned[i] and bullish_candle:
                     position = 1
+                    highest_high_since_entry = high[i]
+                    lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: Williams %R crosses below -20 from above AND price < EMA50
-                elif (williams_r_aligned[i] < -20.0 and 
-                      i > 100 and williams_r_aligned[i-1] >= -20.0 and
-                      close[i] < ema_50_aligned[i]):
+                # Short entry: price touches H3 level with bearish candle
+                elif high[i] >= h3_aligned[i] and bearish_candle:
                     position = -1
+                    highest_high_since_entry = high[i]
+                    lowest_low_since_entry = low[i]
                     signals[i] = -0.25
     
     return signals
