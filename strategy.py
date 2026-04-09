@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 6h_1d_obv_momentum_v1
-# Hypothesis: On-Balance Volume (OBV) momentum divergence on daily chart with price breakout on 6h.
-# Long when price breaks above 6h Donchian high and daily OBV makes higher high (bullish divergence).
-# Short when price breaks below 6h Donchian low and daily OBV makes lower low (bearish divergence).
-# Exit when price returns to opposite Donchian band or OBV momentum reverses.
-# Works in bull markets via breakout confirmation and in bear via divergence at extremes.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 4h_1d_camarilla_breakout_v23
+# Hypothesis: 4-hour breakout of daily Camarilla levels with daily EMA50 trend filter and volume confirmation.
+# Long when price breaks above H4 resistance with price > daily EMA50 and volume > 2.0x 20-bar average.
+# Short when price breaks below L4 support with price < daily EMA50 and volume > 2.0x 20-bar average.
+# Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
+# Position size fixed at 0.25 to limit drawdown. Target: 75-200 total trades over 4 years (19-50/year).
+# Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
+# Improved: Added stricter volume filter (2.0x) and trend filter confirmation to reduce trades.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_obv_momentum_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v23"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,79 +28,86 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate On-Balance Volume (OBV) on daily
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    obv = np.zeros(len(close_1d))
-    obv[0] = volume_1d[0]
-    for i in range(1, len(close_1d)):
-        if close_1d[i] > close_1d[i-1]:
-            obv[i] = obv[i-1] + volume_1d[i]
-        elif close_1d[i] < close_1d[i-1]:
-            obv[i] = obv[i-1] - volume_1d[i]
-        else:
-            obv[i] = obv[i-1]
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema = np.mean(close_1d[:50])  # Initialize with first 50-period average
+        multiplier = 2 / (50 + 1)
+        ema_50_1d[49] = ema
+        for i in range(50, len(close_1d)):
+            ema = (close_1d[i] - ema) * multiplier + ema
+            ema_50_1d[i] = ema
     
-    # Align OBV to 6h timeframe
-    obv_aligned = align_htf_to_ltf(prices, df_1d, obv)
+    # Align 1d EMA50 to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 6-period OBV slope (momentum) on 1d
-    obv_slope = np.full(len(obv), np.nan)
-    for i in range(6, len(obv)):
-        obv_slope[i] = obv[i] - obv[i-6]
-    obv_slope_aligned = align_htf_to_ltf(prices, df_1d, obv_slope)
+    # Calculate Camarilla levels from 1d OHLC
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        c = df_1d['close'].iloc[i]
+        h = df_1d['high'].iloc[i]
+        l = df_1d['low'].iloc[i]
+        camarilla_h4[i] = c + 1.1 * (h - l) / 2
+        camarilla_l4[i] = c - 1.1 * (h - l) / 2
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    high_max = np.full(n, np.nan)
-    low_min = np.full(n, np.nan)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Volume confirmation: 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    vol_sum = 0
     for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
         if i >= 19:
-            high_max[i] = np.max(high[i-19:i+1])
-            low_min[i] = np.min(low[i-19:i+1])
-            donchian_high[i] = high_max[i]
-            donchian_low[i] = low_min[i]
+            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(obv_aligned[i]) or 
-            np.isnan(obv_slope_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below Donchian low OR OBV momentum turns negative
-            if close[i] <= donchian_low[i] or obv_slope_aligned[i] < 0:
+            # Exit: price returns to or below L4 level
+            if close[i] <= camarilla_l4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above Donchian high OR OBV momentum turns positive
-            if close[i] >= donchian_high[i] or obv_slope_aligned[i] > 0:
+            # Exit: price returns to or above H4 level
+            if close[i] >= camarilla_h4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with bullish OBV momentum
-            if (close[i] > donchian_high[i] and 
-                obv_slope_aligned[i] > 0):
+            # Enter long: price breaks above H4 with trend and volume filters
+            if (close[i] > camarilla_h4_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume[i] > vol_ma_20[i] * 2.0):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with bearish OBV momentum
-            elif (close[i] < donchian_low[i] and 
-                  obv_slope_aligned[i] < 0):
+            # Enter short: price breaks below L4 with trend and volume filters
+            elif (close[i] < camarilla_l4_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume[i] > vol_ma_20[i] * 2.0):
                 position = -1
                 signals[i] = -0.25
     
