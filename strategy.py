@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_volume_v1
-# Hypothesis: 1d strategy using weekly Camarilla pivot levels (H3/L3) with volume confirmation and ATR stoploss.
-# Long: Price breaks above weekly H3, volume > 1.5x 20-period average, and ATR(14) > 0.01*close (volatility filter).
-# Short: Price breaks below weekly L3, volume > 1.5x 20-period average, and ATR(14) > 0.01*close.
-# Exit: Opposite pivot break (L3 for long, H3 for short) or ATR trailing stop (2.0x ATR from extreme).
-# Uses weekly Camarilla for structure, volume to confirm conviction, ATR for dynamic stops.
-# Target: 10-30 trades/year (40-120 total over 4 years) on BTC/ETH/SOL.
+# 6h_1d_camarilla_pivot_breakout_v1
+# Hypothesis: 6h strategy using daily Camarilla pivot levels (H4/L4) with volume confirmation.
+# Long: Price breaks above daily H4, volume > 1.5x 20-period average, and ATR(14) > 0.01*close.
+# Short: Price breaks below daily L4, volume > 1.5x 20-period average, and ATR(14) > 0.01*close.
+# Exit: Opposite pivot break (L4 for long, H4 for short) or ATR trailing stop (2.0x ATR from extreme).
+# Uses daily Camarilla H4/L4 for breakout structure, volume to filter weak moves, ATR for dynamic stops.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,23 +39,23 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for Camarilla pivots (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 1d data for Camarilla pivots (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate Camarilla pivots from 1w OHLC
-    # Camarilla: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivots from 1d OHLC
+    # Camarilla: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w)
-    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w)
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Align HTF Camarilla levels to 1d timeframe (wait for completed 1w bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Align HTF Camarilla levels to 6h timeframe (wait for completed 1d bar)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -64,7 +64,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
             np.isnan(volume[i])):
             signals[i] = 0.0
@@ -84,8 +84,8 @@ def generate_signals(prices):
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
-            # Exit: Price breaks below L3 (opposite pivot)
-            elif low[i] < camarilla_l3_aligned[i]:
+            # Exit: Price breaks below L4 (opposite pivot)
+            elif low[i] < camarilla_l4_aligned[i]:
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
@@ -100,21 +100,21 @@ def generate_signals(prices):
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
-            # Exit: Price breaks above H3 (opposite pivot)
-            elif high[i] > camarilla_h3_aligned[i]:
+            # Exit: Price breaks above H4 (opposite pivot)
+            elif high[i] > camarilla_h4_aligned[i]:
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above H3, volume confirmed, and sufficient volatility
-            if (high[i] > camarilla_h3_aligned[i] and volume_confirmed and vol_filter):
+            # Long entry: Price breaks above H4, volume confirmed, and sufficient volatility
+            if (high[i] > camarilla_h4_aligned[i] and volume_confirmed and vol_filter):
                 position = 1
                 long_high = high[i]
                 signals[i] = 0.25
-            # Short entry: Price breaks below L3, volume confirmed, and sufficient volatility
-            elif (low[i] < camarilla_l3_aligned[i] and volume_confirmed and vol_filter):
+            # Short entry: Price breaks below L4, volume confirmed, and sufficient volatility
+            elif (low[i] < camarilla_l4_aligned[i] and volume_confirmed and vol_filter):
                 position = -1
                 short_low = low[i]
                 signals[i] = -0.25
