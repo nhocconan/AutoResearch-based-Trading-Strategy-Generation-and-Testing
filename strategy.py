@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and ATR filter
+# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation and ATR filter
 # Daily Camarilla levels (R3/S3, R4/S4) act as major support/resistance that work in both bull and bear markets
 # Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation (current 12h volume > 1.5x 30-period average) filters false signals
+# Volume confirmation (current 4h volume > 1.3x 20-period average) filters false signals
 # ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
 # Position size fixed at 0.25 to balance return and drawdown
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "12h_1d_camarilla_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +28,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -51,15 +51,15 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period has no previous close
     atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align all HTF data to 12h timeframe
+    # Align all HTF data to 4h timeframe
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Pre-compute volume confirmation (30-period average for 12h)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Pre-compute volume confirmation (20-period average for 4h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
@@ -72,13 +72,13 @@ def generate_signals(prices):
         # Skip if any required data is invalid or outside session
         if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
             np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_30[i]) or not in_session[i] or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or not in_session[i] or
             atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 12h volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_30[i]
+        # Volume confirmation: current 4h volume > 1.3x average 4h volume
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
         # Volatility filter: only trade when 1d ATR is above its 50-period average
         atr_ma_50_1d = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).mean()
