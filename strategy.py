@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with volume confirmation and ATR trailing stop
-# - Uses 1d HTF for Donchian(20) channels based on daily high/low
-# - Long when price closes above upper Donchian with volume > 1.5x 20-period average
-# - Short when price closes below lower Donchian with volume > 1.5x 20-period average
-# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR trailing stop using 12h HTF
+# - Uses 12h HTF for prior period's high/low to calculate Donchian(10) channels (shorter for more signals)
+# - Long when price closes above upper Donchian with volume > 1.3x 20-period average
+# - Short when price closes below lower Donchian with volume > 1.3x 20-period average
+# - ATR(10) trailing stop: exit long at 2.0x ATR below highest high since entry
 # - Fixed position size 0.25 to control drawdown
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Volume filter and ATR stop reduce false breakouts
+# - Target: 30-60 trades/year on 4h timeframe (120-240 total over 4 years)
+# - Volume filter reduces false breakouts, ATR stop manages risk
 # - Works in both bull and bear markets by capturing breakouts in trending phases
 
-name = "12h_1d_donchian_breakout_volume_atr_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,34 +27,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 20-period Donchian channels on daily data
-    # Upper band: highest high of last 20 days
-    # Lower band: lowest low of last 20 days
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 10-period Donchian channels on 12h data
+    # Upper band: highest high of last 10 periods
+    # Lower band: lowest low of last 10 periods
+    upper_10 = pd.Series(high_12h).rolling(window=10, min_periods=10).max().values
+    lower_10 = pd.Series(low_12h).rolling(window=10, min_periods=10).min().values
     
-    # Align Donchian levels to 12h timeframe (wait for completed 1d bar)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # Align Donchian levels to 4h timeframe (wait for completed 12h bar)
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_10)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_10)
     
     # Pre-compute volume confirmation (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute ATR (14-period) for stoploss
+    # Pre-compute ATR (10-period) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -69,15 +69,15 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 1.3x average
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -89,8 +89,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
