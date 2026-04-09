@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Donchian channel breakout with volume confirmation and ATR-based stoploss
-# Primary edge: Donchian(20) on 1w captures major trend breaks that work in both bull and bear markets
-# Volume confirmation filters false breakouts, ATR stoploss manages risk
-# Discrete position sizing 0.25 targets ~12-37 trades/year to minimize fee drag
-# Uses 1w HTF for structure, 12h for execution - proven pattern with good generalization
+# Hypothesis: 4h strategy using 1w Williams %R extreme readings with 1d trend filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions on weekly timeframe
+# Extreme readings (>80 for oversold, <20 for overbought) combined with 1d EMA trend direction
+# Volume confirmation ensures breakout validity
+# Discrete sizing 0.25 to target ~20-50 trades/year and minimize fee drag
+# Works in bull/bear markets: mean reversion at extremes in ranging markets, trend continuation in trending markets
 
-name = "12h_1w_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1w_williamsr_1d_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,90 +24,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    
+    if len(df_1d) < 50 or len(df_1w) < 10:
         return np.zeros(n)
     
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1w Williams %R(14)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values if 'volume' in df_1w.columns else np.zeros_like(close_1w)
     
-    # Calculate 1w Donchian channels (20-period)
-    def rolling_max(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close_1w) / (highest_high - lowest_low)) * -100,
+        -50  # neutral when no range
+    )
     
-    def rolling_min(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
+    # Align 1w Williams %R to 4h timeframe with 1-bar delay (wait for weekly close)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
     
-    donchian_high = rolling_max(high_1w, 20)
-    donchian_low = rolling_min(low_1w, 20)
-    
-    # Calculate 1w ATR(14) for stoploss and volume filter
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_1w = wilders_smoothing(tr, 14)
-    atr_10_1w = wilders_smoothing(tr, 10)  # For volatility filter
-    
-    # Calculate 1w average volume (20-period)
-    vol_s_1w = pd.Series(volume_1w)
-    avg_vol_1w = vol_s_1w.rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1w indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    avg_vol_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_vol_1w)
-    atr_10_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_10_1w)
+    # 4h volume confirmation: current volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(avg_vol_1w_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1w volume
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
+        williams_r_val = williams_r_aligned[i]
+        ema_trend = close[i] > ema_50_1d_aligned[i]  # Price above 1d EMA50 = uptrend
+        vol_conf = volume_confirmed[i] if not np.isnan(vol_ma_20[i]) else False
         
         if position == 1:  # Long position
-            # Exit long if price falls below Donchian low or 2*ATR stop from entry
-            if close[i] < donchian_low_aligned[i]:
+            # Exit long if Williams %R returns from oversold or trend turns down
+            if williams_r_val > -80 or not ema_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short if price rises above Donchian high or 2*ATR stop from entry
-            if close[i] > donchian_high_aligned[i]:
+            # Exit short if Williams %R returns from overbought or trend turns up
+            if williams_r_val < -20 or ema_trend:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout strategy: enter on Donchian break with volume confirmation
-            if close[i] > donchian_high_aligned[i] and volume_confirmed:
+            # Enter long when Williams %R shows extreme oversold (<-80) in uptrend with volume
+            if williams_r_val < -80 and ema_trend and vol_conf:
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donchian_low_aligned[i] and volume_confirmed:
+            # Enter short when Williams %R shows extreme overbought (>-20) in downtrend with volume
+            elif williams_r_val > -20 and not ema_trend and vol_conf:
                 position = -1
                 signals[i] = -0.25
     
