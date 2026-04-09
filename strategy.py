@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 1h_ema_rsi_trend_4h1d_v1
-# Hypothesis: 1h EMA trend aligned with 4h EMA and 1d regime filter (chop). Uses volume confirmation for entries.
-# In bull/bear markets, price respects EMA alignment; in ranging markets (2025+), chop filter avoids false signals.
-# Volume confirmation ensures momentum validity. Discrete sizing (0.0, ±0.20) minimizes fee churn.
-# Target: 60-150 total trades over 4 years by requiring EMA alignment + volume + chop regime filter.
-# Primary timeframe: 1h, HTF: 4h for trend, 1d for chop regime.
+# 6h_adaptive_donchian_volume_regime_v1
+# Hypothesis: 6h strategy using Donchian breakouts with volume confirmation and volatility regime filter.
+# In ranging markets (2025+), price tends to revert from Donchian channels; in trending markets, breakouts continue.
+# Volume confirmation filters false breakouts. Uses ATR-based regime detection to adapt parameters.
+# Primary timeframe: 6h, HTF: 1d for regime filter and 1w for longer-term bias.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_ema_rsi_trend_4h1d_v1"
-timeframe = "1h"
+name = "6h_adaptive_donchian_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,103 +23,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h HTF data for EMA trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    # 4h EMA(21) for trend
-    close_4h = pd.Series(df_4h['close'].values)
-    ema_4h = close_4h.ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d HTF data for chop regime
+    # 1d HTF data for volatility regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d Chopiness Index (14-period)
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
-    atr_1d = high_1d - low_1d
-    high_14 = high_1d.rolling(window=14, min_periods=14).max().values
-    low_14 = low_1d.rolling(window=14, min_periods=14).min().values
-    atr_sum = atr_1d.rolling(window=14, min_periods=14).sum().values
+    # Calculate ATR-based volatility regime (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Avoid division by zero and log(0)
-    chop_denom = np.log10(atr_sum) * np.log10(14)
-    chop_denom = np.where(chop_denom <= 0, 1e-10, chop_denom)
-    chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    # 1h RSI(14) for momentum
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rs = np.where(avg_loss == 0, 100, rs)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1h volume average for confirmation (20-period)
+    # Volatility percentile (252-period ~ 1 year) for regime detection
+    atr_series = pd.Series(atr_14)
+    atr_percentile = atr_series.rolling(window=252, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    atr_percentile = np.where(np.isnan(atr_percentile), 50.0, atr_percentile)  # Default to median
+    
+    # Align volatility regime to 6h timeframe
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    
+    # 1w HTF data for longer-term bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Weekly EMA(21) for trend bias
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Donchian channels (20-period) on 6h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
+    # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr_percentile_aligned[i]) or
+            np.isnan(ema_21_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        in_session = (8 <= hours[i] <= 20)
-        volume_confirmed = volume[i] > 1.2 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        
+        # Regime-based parameters
+        vol_regime = atr_percentile_aligned[i]  # 0-100 percentile
+        
+        # Adaptive Donchian breakout thresholds based on volatility regime
+        if vol_regime > 70:  # High volatility regime
+            breakout_multiplier = 0.002  # 0.2% buffer
+            volume_threshold = 1.5
+        elif vol_regime < 30:  # Low volatility regime
+            breakout_multiplier = 0.001  # 0.1% buffer
+            volume_threshold = 1.2
+        else:  # Medium volatility regime
+            breakout_multiplier = 0.0015  # 0.15% buffer
+            volume_threshold = 1.3
+        
+        # Adaptive volume threshold
+        volume_confirmed = volume[i] > volume_threshold * volume_ma[i]
+        
+        # Weekly trend bias
+        weekly_bias_up = close[i] > ema_21_1w_aligned[i]
+        weekly_bias_down = close[i] < ema_21_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: EMA trend turns bearish OR RSI overbought OR volume dries up OR out of session
-            if (close[i] < ema_4h_aligned[i] or 
-                rsi_values[i] > 70 or 
-                not volume_confirmed or 
-                not in_session):
+            # Exit: price moves below Donchian mid or volume dries up
+            if close[i] < donchian_mid[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: EMA trend turns bullish OR RSI oversold OR volume dries up OR out of session
-            if (close[i] > ema_4h_aligned[i] or 
-                rsi_values[i] < 30 or 
-                not volume_confirmed or 
-                not in_session):
+            # Exit: price moves above Donchian mid or volume dries up
+            if close[i] > donchian_mid[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            if in_session and volume_confirmed:
-                # Long entry: price above 4h EMA AND RSI bullish AND chop > 50 (ranging/transition)
-                if (close[i] > ema_4h_aligned[i] and 
-                    rsi_values[i] > 50 and 
-                    rsi_values[i] < 70 and 
-                    chop_aligned[i] > 50):
+            if volume_confirmed:
+                # Long entry: price breaks above Donchian high with weekly bias up
+                if (close[i] > donchian_high[i] * (1 + breakout_multiplier) and 
+                    weekly_bias_up and 
+                    high[i] > donchian_high[i]):
                     position = 1
-                    signals[i] = 0.20
-                # Short entry: price below 4h EMA AND RSI bearish AND chop > 50
-                elif (close[i] < ema_4h_aligned[i] and 
-                      rsi_values[i] < 50 and 
-                      rsi_values[i] > 30 and 
-                      chop_aligned[i] > 50):
+                    signals[i] = 0.25
+                # Short entry: price breaks below Donchian low with weekly bias down
+                elif (close[i] < donchian_low[i] * (1 - breakout_multiplier) and 
+                      weekly_bias_down and 
+                      low[i] < donchian_low[i]):
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
