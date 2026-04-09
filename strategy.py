@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and choppiness regime filter
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout signals (long above H3, short below L3)
-# - Confirms with 1d volume > 1.6x 20-period average (strong participation)
-# - Filters by 1d choppiness index: trade only when CHOP > 61.8 (range) OR CHOP < 38.2 (trend)
-# - Exits when price touches opposite Camarilla level (L3 for long, H3 for short) or ATR-based stoploss (2.0x ATR)
+# Hypothesis: 4h Camarilla pivot long/short with 1d volume confirmation and chop regime filter
+# - Uses 1d Camarilla pivot levels (H3/L3) for mean reversion entries in ranging markets
+# - Confirms with 1d volume > 1.5x 20-period average (institutional participation)
+# - Filters by 1d choppiness index: trade only when CHOP > 61.8 (range-bound market)
+# - Exits when price touches opposite Camarilla level (H3/L3) or ATR-based stoploss (2.0x ATR)
 # - Position size: 0.25 (25% of capital) for balanced risk/return
-# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years) to minimize fee drag
-# - Works in bull markets (breakouts continue) and bear markets (breakdowns continue)
-# - Camarilla levels provide adaptive support/resistance that respects volatility
+# - Target: 15-35 trades/year on 4h timeframe (60-140 total over 4 years) to minimize fee drag
+# - Works in bull markets (mean reversion in ranges) and bear markets (mean reversion in ranges)
+# - Camarilla levels provide robust support/resistance that adapts to volatility regimes
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,14 +44,13 @@ def generate_signals(prices):
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # 1d Camarilla levels (based on previous day)
-    # H3 = close + 1.1 * (high - low) / 2
-    # L3 = close - 1.1 * (high - low) / 2
+    # H3 = close + 1.1*(high - low)/2, L3 = close - 1.1*(high - low)/2
     camarilla_h3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
     camarilla_l3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
     
-    # 1d Volume > 1.6x 20-period average (stricter for fewer trades)
+    # 1d Volume > 1.5x 20-period average (stricter for fewer trades)
     avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.6 * avg_volume_20)
+    volume_spike = volume_1d > (1.5 * avg_volume_20)
     
     # 1d Choppiness Index(14)
     sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
@@ -60,17 +59,15 @@ def generate_signals(prices):
     chop_denom = np.where((highest_14 - lowest_14) > 0, highest_14 - lowest_14, 1e-10)
     chop = 100 * np.log10(sum_tr_14 / chop_denom) / np.log10(14)
     chop_range = chop > 61.8  # range-bound market
-    chop_trend = chop < 38.2  # trending market
     
-    # Align all 1d indicators to 12h
+    # Align all 1d indicators to 4h
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range.astype(float))
-    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend.astype(float))
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 12h price data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -84,14 +81,13 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
             np.isnan(volume_spike_aligned[i]) or np.isnan(chop_range_aligned[i]) or
-            np.isnan(chop_trend_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            atr_1d_aligned[i] <= 0):
+            np.isnan(atr_1d_aligned[i]) or atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit conditions: opposite Camarilla touch (L3) or ATR stoploss
-            if low[i] <= camarilla_l3_aligned[i]:  # Touch opposite band
+            if low[i] <= camarilla_l3_aligned[i]:  # Touch opposite level
                 position = 0
                 signals[i] = 0.0
             elif high[i] >= entry_price + (2.0 * atr_stop):  # ATR stoploss
@@ -102,7 +98,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions: opposite Camarilla touch (H3) or ATR stoploss
-            if high[i] >= camarilla_h3_aligned[i]:  # Touch opposite band
+            if high[i] >= camarilla_h3_aligned[i]:  # Touch opposite level
                 position = 0
                 signals[i] = 0.0
             elif low[i] <= entry_price - (2.0 * atr_stop):  # ATR stoploss
@@ -111,19 +107,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with volume confirmation and regime filter
-            if (high[i] >= camarilla_h3_aligned[i] and  # Break above H3
+            # Look for Camarilla level touch with volume confirmation and range regime
+            if (low[i] <= camarilla_l3_aligned[i] and    # Touch L3 (long entry)
                 volume_spike_aligned[i] and         # Volume confirmation
-                (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
+                chop_range_aligned[i]):             # Range-bound market
                 position = 1
-                entry_price = high[i]
+                entry_price = low[i]
                 atr_stop = atr_1d_aligned[i]
                 signals[i] = 0.25
-            elif (low[i] <= camarilla_l3_aligned[i] and   # Break below L3
+            elif (high[i] >= camarilla_h3_aligned[i] and   # Touch H3 (short entry)
                   volume_spike_aligned[i] and         # Volume confirmation
-                  (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
+                  chop_range_aligned[i]):             # Range-bound market
                 position = -1
-                entry_price = low[i]
+                entry_price = high[i]
                 atr_stop = atr_1d_aligned[i]
                 signals[i] = -0.25
     
