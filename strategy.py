@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation
-# Uses daily Donchian channels for breakout signals, confirmed by volume spike (>1.5x 20-period avg volume)
-# Only takes breakouts in direction of weekly EMA50 trend to avoid counter-trend whipsaws
-# Position size 0.25 to manage drawdown in bear markets
-# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag
-# Works in both bull/bear: weekly EMA filter ensures we only trade with the dominant trend
+# Hypothesis: 12h Camarilla pivot breakout + volume confirmation + 1d ATR regime filter
+# Uses 1d Camarilla pivot levels (H3/L3) for breakout signals, confirmed by volume spike (>2.0x 20-period avg volume)
+# Only takes breakouts when 1d ATR(14) is below its 50-period MA (low volatility regime) to avoid false breakouts in high volatility
+# Position size 0.25 to manage drawdown and enable multiple concurrent positions
+# Target: 100-180 total trades over 4 years (25-45/year) to balance edge and fee drag
+# Works in both bull/bear: 1d ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
 
-name = "1d_1w_donchian_volume_trend_v3"
-timeframe = "1d"
+name = "12h_1d_camarilla_vol_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,74 +24,128 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for Camarilla pivots and ATR regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = np.full(len(df_1w), np.nan)
-    multiplier = 2 / (50 + 1)
-    ema_50[0] = close_1w[0]
-    for i in range(1, len(df_1w)):
-        ema_50[i] = (close_1w[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
+    # Calculate 1d Camarilla pivot levels (H3, L3, H4, L4)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA50 to 1d timeframe
-    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50)
+    pivots_h3 = np.full(len(df_1d), np.nan)
+    pivots_l3 = np.full(len(df_1d), np.nan)
+    pivots_h4 = np.full(len(df_1d), np.nan)
+    pivots_l4 = np.full(len(df_1d), np.nan)
     
-    # Calculate Donchian channels (20-period) on 1d data
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    for i in range(len(df_1d)):
+        if i == 0:
+            pivots_h3[i] = np.nan
+            pivots_l3[i] = np.nan
+            pivots_h4[i] = np.nan
+            pivots_l4[i] = np.nan
+        else:
+            # Calculate pivot point (PP) = (H + L + C) / 3
+            pp = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+            # Calculate range = H - L
+            rng = high_1d[i] - low_1d[i]
+            # Camarilla levels
+            pivots_h3[i] = pp + rng * 1.1 / 4
+            pivots_l3[i] = pp - rng * 1.1 / 4
+            pivots_h4[i] = pp + rng * 1.1 / 2
+            pivots_l4[i] = pp - rng * 1.1 / 2
     
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
+    # Calculate 1d ATR(14) for regime filter
+    tr_1d = np.full(len(df_1d), np.nan)
+    atr_1d = np.full(len(df_1d), np.nan)
+    
+    for i in range(1, len(df_1d)):
+        tr = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+        tr_1d[i] = tr
+    
+    # Calculate ATR with Wilder's smoothing
+    for i in range(len(df_1d)):
+        if i < 14:
+            atr_1d[i] = np.nan
+        elif i == 14:
+            atr_1d[i] = np.nanmean(tr_1d[1:15])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+    
+    # Calculate 50-period MA of ATR for regime filter
+    atr_ma_50 = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if i < 50:
+            atr_ma_50[i] = np.nan
+        else:
+            atr_ma_50[i] = np.mean(atr_1d[i-50:i])
+    
+    # Align 1d indicators to 12h timeframe
+    pivots_h3_12h = align_htf_to_ltf(prices, df_1d, pivots_h3)
+    pivots_l3_12h = align_htf_to_ltf(prices, df_1d, pivots_l3)
+    pivots_h4_12h = align_htf_to_ltf(prices, df_1d, pivots_h4)
+    pivots_l4_12h = align_htf_to_ltf(prices, df_1d, pivots_l4)
+    atr_ma_50_12h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
-    for i in range(20, n):
-        avg_volume[i] = np.mean(volume[i-20:i])
+    for i in range(n):
+        if i < 20:
+            avg_volume[i] = np.nan
+        else:
+            avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d[i]) or 
+        if (np.isnan(pivots_h3_12h[i]) or 
+            np.isnan(pivots_l3_12h[i]) or 
+            np.isnan(pivots_h4_12h[i]) or 
+            np.isnan(pivots_l4_12h[i]) or 
+            np.isnan(atr_ma_50_12h[i]) or 
+            np.isnan(atr_12h[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * avg_volume[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirm = volume[i] > 2.0 * avg_volume[i]
+        
+        # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
+        atr_regime = atr_12h[i] < atr_ma_50_12h[i]
         
         if position == 1:  # Long position
-            # Exit conditions: price closes below Donchian lower band OR trend turns bearish
-            if close[i] < lowest_low[i] or close[i] < ema_50_1d[i]:
+            # Exit conditions: price closes below Camarilla L3 OR ATR regime turns unfavorable
+            if close[i] < pivots_l3_12h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: price closes above Donchian upper band OR trend turns bullish
-            if close[i] > highest_high[i] or close[i] > ema_50_1d[i]:
+            # Exit conditions: price closes above Camarilla H3 OR ATR regime turns unfavorable
+            if close[i] > pivots_h3_12h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Donchian breakout with volume confirmation and trend filter
-            if volume_confirm:
-                # Long breakout: price closes above upper Donchian band AND 1w trend is bullish
-                if close[i] > highest_high[i] and close[i] > ema_50_1d[i]:
+            # Entry logic: Camarilla breakout with volume confirmation and ATR regime filter
+            if volume_confirm and atr_regime:
+                # Long breakout: price closes above Camarilla H3
+                if close[i] > pivots_h3_12h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below lower Donchian band AND 1w trend is bearish
-                elif close[i] < lowest_low[i] and close[i] < ema_50_1d[i]:
+                # Short breakout: price closes below Camarilla L3
+                elif close[i] < pivots_l3_12h[i]:
                     position = -1
                     signals[i] = -0.25
     
