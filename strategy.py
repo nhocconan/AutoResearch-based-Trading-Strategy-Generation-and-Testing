@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R reversal + 1d volume spike + chop regime filter
-# Williams %R identifies overbought/oversold conditions for mean reversion
-# 1d volume spike confirms institutional participation in reversals
-# Chop regime filter adapts: CHOP > 61.8 = range (strong mean reversion), CHOP < 38.2 = trending (weaker signals)
-# Works in bull/bear: mean reversion effective in ranging markets, volume confirms breakout authenticity
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
+# Donchian breakout captures momentum in both bull and bear markets
+# 1d volume spike confirms breakout authenticity (avoids false breakouts)
+# Choppiness index regime filter: CHOP > 61.8 = range (mean revert at bands), CHOP < 38.2 = trending (follow breakout)
+# Works in bull/bear: regime filter adapts, breakout captures strong moves
+# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
 
-name = "12h_1d_williamsr_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,7 +45,7 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14) - smoothed TR using Wilder's smoothing
+    # ATR(14) - smoothed TR
     def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
@@ -70,70 +70,63 @@ def generate_signals(prices):
                        100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
                        50)  # neutral when range is zero
     
-    # Align 1d indicators to 12h timeframe (wait for 1d bar close)
+    # Align 1d indicators to 4h timeframe (wait for 1d bar close)
     avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate 12h Williams %R (14-period)
-    highest_high_12h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_12h = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r_12h = np.where((highest_high_12h - lowest_low_12h) != 0,
-                              -100 * (highest_high_12h - close) / (highest_high_12h - lowest_low_12h),
-                              -50)  # neutral when range is zero
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_12h[i]) or np.isnan(lowest_low_12h[i]) or
-            np.isnan(williams_r_12h[i]) or np.isnan(avg_volume_1d_aligned[i]) or
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 2.0x 1d average volume
-        volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x 1d average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
         
-        # Regime filter: CHOP > 61.8 = strong ranging (aggressive mean reversion)
-        #              CHOP < 38.2 = trending (weaker mean reversion, needs stronger signal)
-        strong_ranging = chop_1d_aligned[i] > 61.8
-        weak_ranging = chop_1d_aligned[i] > 38.2 and chop_1d_aligned[i] <= 61.8
-        trending = chop_1d_aligned[i] <= 38.2
+        # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
+        trending_regime = chop_1d_aligned[i] < 38.2
+        ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: Williams %R rises above -20 (overbought) OR regime shifts to trending
-            if williams_r_12h[i] > -20 or trending:
+            # Exit: price closes below Donchian lower band OR regime shifts to ranging
+            if close[i] < lowest_low[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R falls below -80 (oversold) OR regime shifts to trending
-            if williams_r_12h[i] < -80 or trending:
+            # Exit: price closes above Donchian upper band OR regime shifts to ranging
+            if close[i] > highest_high[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic based on regime and Williams %R extremes
-            if strong_ranging:
-                # Strong ranging: aggressive mean reversion at extreme levels
-                if williams_r_12h[i] <= -80 and volume_confirmed:  # Oversold
+            # Entry logic
+            if trending_regime:
+                # Follow breakout in trending regime
+                if close[i] > highest_high[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif williams_r_12h[i] >= -20 and volume_confirmed:  # Overbought
+                elif close[i] < lowest_low[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
-            elif weak_ranging:
-                # Weak ranging: moderate mean reversion, needs volume confirmation
-                if williams_r_12h[i] <= -85 and volume_confirmed:  # Deep oversold
+            elif ranging_regime:
+                # Mean revert at Donchian bands in ranging regime
+                if close[i] < lowest_low[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif williams_r_12h[i] >= -15 and volume_confirmed:  # Deep overbought
+                elif close[i] > highest_high[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
-            # In trending regime: no entries (avoid fading trends)
     
     return signals
