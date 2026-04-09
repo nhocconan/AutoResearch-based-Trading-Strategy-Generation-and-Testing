@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h HTF Camarilla pivot levels (H3/L3) with volume confirmation and ATR trailing stop
-# - Uses 12h HTF for Camarilla pivot calculation (based on completed 12h candles)
-# - Long when price breaks above H3 level with volume > 1.5x 20-period average
-# - Short when price breaks below L3 level with volume > 1.5x 20-period average
-# - ATR(14) trailing stop: exit long at 2.0x ATR below highest high since entry, exit short at 2.0x ATR above lowest low since entry
+# Hypothesis: 1d strategy using 1w Williams %R extreme reversal with volume confirmation and ATR trailing stop
+# - Uses 1w HTF for Williams %R(14) to identify overbought/oversold conditions on weekly timeframe
+# - Long when weekly Williams %R < -80 (oversold) and price closes above weekly low with volume > 1.5x 20-period average
+# - Short when weekly Williams %R > -20 (overbought) and price closes below weekly high with volume > 1.5x 20-period average
+# - ATR(14) trailing stop: exit long at 3.0x ATR below highest high since entry, exit short at 3.0x ATR above lowest low since entry
 # - Fixed position size 0.25 to control drawdown
-# - Camarilla pivots work well in ranging markets (common in 2025 BTC/ETH bear/range) and capture breakouts in trending markets
-# - Volume confirmation filters false breakouts, ATR stop manages risk
-# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
+# - Works in bull/bear: Williams %R captures extreme sentiment reversals, volume confirmation filters weak signals
+# - Target: 10-25 trades/year on 1d timeframe (40-100 total over 4 years)
 
-name = "4h_12h_camarilla_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_williamsr_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,37 +26,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    # Typical price = (high + low + close) / 3
-    typical_price = (high_12h + low_12h + close_12h) / 3.0
-    # Range = high - low
-    price_range = high_12h - low_12h
+    # Calculate 1w Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_1w) / (highest_high_14 - lowest_low_14) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Camarilla levels: H3 = close + (range * 1.1/4), L3 = close - (range * 1.1/4)
-    # Using previous bar's values to avoid look-ahead
-    camarilla_high = close_12h + (price_range * 1.1 / 4.0)
-    camarilla_low = close_12h - (price_range * 1.1 / 4.0)
+    # Align Williams %R to 1d timeframe (wait for completed 1w bar)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
     
-    # Shift by 1 to use previous bar's levels (completed bar)
-    camarilla_high = np.roll(camarilla_high, 1)
-    camarilla_low = np.roll(camarilla_low, 1)
-    camarilla_high[0] = np.nan
-    camarilla_low[0] = np.nan
+    # Pre-compute 1w highest high and lowest low for entry confirmation
+    highest_high_1w = pd.Series(high_1w).rolling(window=1, min_periods=1).max().values  # current week high
+    lowest_low_1w = pd.Series(low_1w).rolling(window=1, min_periods=1).min().values      # current week low
+    highest_high_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_high_1w)
+    lowest_low_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_1w)
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 12h bar)
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_12h, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_12h, camarilla_low)
-    
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Pre-compute volume confirmation (20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute ATR (14-period) for stoploss
@@ -73,23 +68,23 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(highest_high_1w_aligned[i]) or
+            np.isnan(lowest_low_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
             vol_ma_20[i] <= 0 or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average
+        # Volume confirmation: current 1d volume > 1.5x average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
+            # ATR-based trailing stop: exit if price drops 3.0x ATR from highest high
+            if close[i] < highest_high_since_entry - 3.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -101,8 +96,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
+            # ATR-based trailing stop: exit if price rises 3.0x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 3.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -110,16 +105,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Camarilla breakout with volume confirmation
+            # Entry logic: Williams %R extreme + price rejection of weekly extreme + volume confirmation
             if volume_confirmed:
-                # Long entry: price breaks above Camarilla H3 level
-                if close[i] > camarilla_high_aligned[i]:
+                # Long entry: weekly Williams %R oversold (< -80) and price rejects weekly low
+                if williams_r_aligned[i] < -80 and close[i] > lowest_low_1w_aligned[i]:
                     position = 1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: price breaks below Camarilla L3 level
-                elif close[i] < camarilla_low_aligned[i]:
+                # Short entry: weekly Williams %R overbought (> -20) and price rejects weekly high
+                elif williams_r_aligned[i] > -20 and close[i] < highest_high_1w_aligned[i]:
                     position = -1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
