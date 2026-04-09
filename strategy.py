@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 12h EMA trend + volume confirmation
-# Uses Williams %R(14) for overbought/oversold signals on 6h timeframe
-# Only takes trades when 12h EMA(50) confirms trend direction (EMA up for longs, EMA down for shorts)
-# Volume confirmation: current volume > 1.3x 20-period average to avoid low-volume false signals
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 1d ATR regime filter
+# Uses Camarilla levels from 1d for structure, breaks above H3 or below L3 on 4h for entries
+# Only takes breakouts when 1d ATR(14) is below its 50-period MA (low volatility regime) for reliability
 # Position size 0.25 to manage drawdown and enable multiple concurrent positions
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag
-# Works in both bull/bear: Williams %R captures mean reversion in ranging markets,
-# while 12h EMA filter ensures we only trade with the higher timeframe trend
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
+# Works in both bull/bear: 1d ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
 
-name = "6h_12h_williamsr_ema_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,49 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h data ONCE before loop for Williams %R calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Load 1d data ONCE before loop for Camarilla and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 6h Williams %R(14)
-    williams_r = np.full(len(df_6h), np.nan)
-    highest_high = np.full(len(df_6h), np.nan)
-    lowest_low = np.full(len(df_6h), np.nan)
+    # Calculate 1d Camarilla levels (H3, L3)
+    camarilla_h3 = np.full(len(df_1d), np.nan)
+    camarilla_l3 = np.full(len(df_1d), np.nan)
     
-    for i in range(len(df_6h)):
-        if i < 14:
-            williams_r[i] = np.nan
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
+    for i in range(len(df_1d)):
+        if i < 1:
+            camarilla_h3[i] = np.nan
+            camarilla_l3[i] = np.nan
         else:
-            # Lookback window excluding current bar to avoid look-ahead
-            highest_high[i] = np.max(df_6h['high'].iloc[i-14:i])
-            lowest_low[i] = np.min(df_6h['low'].iloc[i-14:i])
-            if highest_high[i] == lowest_low[i]:
-                williams_r[i] = -50  # Avoid division by zero
-            else:
-                williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+            # Use previous day's OHLC to avoid look-ahead
+            high_prev = df_1d['high'].iloc[i-1]
+            low_prev = df_1d['low'].iloc[i-1]
+            close_prev = df_1d['close'].iloc[i-1]
+            camarilla_h3[i] = close_prev + 1.1 * (high_prev - low_prev) / 2
+            camarilla_l3[i] = close_prev - 1.1 * (high_prev - low_prev) / 2
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        multiplier = 2 / (50 + 1)
-        ema_12h[49] = np.mean(close_12h[:50])  # SMA for first value
-        for i in range(50, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i-1] * (1 - multiplier))
+    # Calculate 1d ATR(14) for regime filter
+    tr_1d = np.full(len(df_1d), np.nan)
+    atr_1d = np.full(len(df_1d), np.nan)
     
-    # Align 6h Williams %R to 6h timeframe
-    williams_r_6h = align_htf_to_ltf(prices, df_6h, williams_r)
+    for i in range(1, len(df_1d)):
+        tr = max(
+            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+        )
+        tr_1d[i] = tr
     
-    # Align 12h EMA to 6h timeframe
-    ema_12h_6h = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate ATR with Wilder's smoothing
+    for i in range(len(df_1d)):
+        if i < 14:
+            atr_1d[i] = np.nan
+        elif i == 14:
+            atr_1d[i] = np.nanmean(tr_1d[1:15])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+    
+    # Calculate 50-period MA of ATR for regime filter
+    atr_ma_50 = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if i < 50:
+            atr_ma_50[i] = np.nan
+        else:
+            atr_ma_50[i] = np.mean(atr_1d[i-50:i])
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    camarilla_h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Align 1d ATR regime to 4h timeframe
+    atr_ma_50_4h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -83,39 +100,44 @@ def generate_signals(prices):
     
     for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_6h[i]) or 
-            np.isnan(ema_12h_6h[i]) or 
+        if (np.isnan(camarilla_h3_4h[i]) or 
+            np.isnan(camarilla_l3_4h[i]) or 
+            np.isnan(atr_ma_50_4h[i]) or 
+            np.isnan(atr_4h[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirm = volume[i] > 1.3 * avg_volume[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
+        
+        # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
+        atr_regime = atr_4h[i] < atr_ma_50_4h[i]
         
         if position == 1:  # Long position
-            # Exit conditions: Williams %R > -20 (overbought) OR volume confirmation fails
-            if williams_r_6h[i] > -20 or not volume_confirm:
+            # Exit conditions: price closes below Camarilla L3 OR ATR regime turns unfavorable
+            if close[i] < camarilla_l3_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: Williams %R < -80 (oversold) OR volume confirmation fails
-            if williams_r_6h[i] < -80 or not volume_confirm:
+            # Exit conditions: price closes above Camarilla H3 OR ATR regime turns unfavorable
+            if close[i] > camarilla_h3_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Williams %R extreme with 12h EMA trend filter and volume confirmation
-            if volume_confirm:
-                # Long entry: Williams %R < -80 (oversold) AND 12h EMA rising
-                if williams_r_6h[i] < -80 and ema_12h_6h[i] > ema_12h_6h[max(0, i-1)]:
+            # Entry logic: Camarilla breakout with volume confirmation and ATR regime filter
+            if volume_confirm and atr_regime:
+                # Long breakout: price closes above Camarilla H3
+                if close[i] > camarilla_h3_4h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: Williams %R > -20 (overbought) AND 12h EMA falling
-                elif williams_r_6h[i] > -20 and ema_12h_6h[i] < ema_12h_6h[max(0, i-1)]:
+                # Short breakout: price closes below Camarilla L3
+                elif close[i] < camarilla_l3_4h[i]:
                     position = -1
                     signals[i] = -0.25
     
