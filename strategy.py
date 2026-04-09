@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian breakout with volume confirmation
-# Weekly Donchian(20) provides clear multi-week trend structure
-# Long when price breaks above weekly Donchian upper with volume confirmation
-# Short when price breaks below weekly Donchian lower with volume confirmation
-# Uses discrete position sizing 0.25 to target ~10-20 trades/year and minimize fee drag
-# Works in bull/bear markets: breakout follows major trends, volume filter avoids false breakouts
+# Hypothesis: 12h strategy using 1d Donchian breakout + volume confirmation
+# Donchian(20) on 1d provides clear trend direction and structure
+# Long when price breaks above 1d Donchian upper with volume confirmation
+# Short when price breaks below 1d Donchian lower with volume confirmation
+# Uses discrete position sizing 0.25 to target ~15-25 trades/year and minimize fee drag
+# Works in bull/bear markets: breakout follows trends, volume filter ensures conviction
 
-name = "1d_1w_donchian_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +25,34 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1w Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     def rolling_max(arr, window):
         return pd.Series(arr).rolling(window=window, min_periods=window).max().values
     
     def rolling_min(arr, window):
         return pd.Series(arr).rolling(window=window, min_periods=window).min().values
     
-    donchian_upper_20 = rolling_max(high_1w, 20)
-    donchian_lower_20 = rolling_min(low_1w, 20)
+    donchian_upper_20 = rolling_max(high_1d, 20)
+    donchian_lower_20 = rolling_min(low_1d, 20)
     
-    # Calculate 1w average volume (20-period)
-    vol_s_1w = pd.Series(volume_1w)
-    avg_vol_1w = vol_s_1w.rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d average volume (20-period)
+    vol_s_1d = pd.Series(volume_1d)
+    avg_vol_1d = vol_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Align 1w indicators to 1d timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_20)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_20)
-    avg_vol_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_vol_1w)
+    # Align 1d indicators to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_20)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_20)
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -60,11 +60,11 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(avg_vol_1w_aligned[i])):
+            np.isnan(avg_vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x average 1d volume (20-period)
+        # Volume confirmation: current 12h volume > 1.5x average 12h volume (20-period)
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
         
