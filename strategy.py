@@ -3,94 +3,154 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1w Williams %R extremes + 1d volume spike confirmation
-# Williams %R > -20 = overbought (short signal), < -80 = oversold (long signal)
-# Only trade when 1d volume is above 2.0x its 20-period average to avoid low-volume false signals
-# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
-# Works in bull/bear markets: mean reversion from extremes tends to work across regimes
-# Williams %R is calculated on weekly data to reduce noise and avoid overtrading
+# Hypothesis: 12h Camarilla pivot breakout with 1d ATR-based volume spike and choppiness regime filter
+# In trending regimes (CHOP < 38.2): breakout above/below Camarilla H3/L3 levels with volume confirmation
+# In ranging regimes (CHOP > 61.8): mean reversion at Camarilla H3/L3 levels with volume confirmation
+# Uses ATR-normalized volume spike to avoid look-ahead and ensure volatility-adjusted confirmation
+# Discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
+# Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
 
-name = "6h_1w_williamsr_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_chop_v4"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 14-period Williams %R on weekly data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close_1w) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range is zero
-    )
-    
-    # Load daily data for volume confirmation
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d average volume (20-period)
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d ATR(14) for volatility normalization
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    atr_1d = wilders_smoothing(tr, 14)
+    
+    # Calculate 1d average volume (20-period) normalized by ATR for volatility-adjusted confirmation
+    volume_s_1d = pd.Series(volume_1d)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.where(atr_1d > 0, avg_volume_1d / atr_1d, np.nan)
+    avg_vol_ratio_1d = pd.Series(vol_ratio_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d Choppiness Index (CHOP)
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    range_14 = hh_1d - ll_1d
+    chop_1d = np.where(range_14 != 0, 
+                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
+                       50)
+    
+    # Calculate 1d Camarilla pivot levels (based on prior day to avoid look-ahead)
+    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
+    range_1d = high_1d - low_1d
+    h3_1d = close_1d + 1.1 * range_1d
+    l3_1d = close_1d - 1.1 * range_1d
+    h4_1d = close_1d + 1.5 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
+    
+    # Align 1d indicators to 12h timeframe
+    avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Pre-compute volume confirmation array (ATR-normalized)
+    volume_confirmed = volume > 2.0 * avg_volume_1d  # Use raw avg volume for confirmation, aligned later
+    volume_confirmed_aligned = align_htf_to_ltf(prices, df_1d, volume_confirmed.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(avg_volume_1d_aligned[i])):
+        if (np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(volume_confirmed_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume above 2.0x its 20-period average
-        volume_confirmed = volume > 2.0 * avg_volume_1d_aligned[i]
+        # Regime filter
+        trending_regime = chop_1d_aligned[i] < 38.2
+        ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit long when Williams %R rises above -50 (exiting oversold territory)
-            if williams_r_aligned[i] > -50:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
+            if trending_regime:
+                # Exit long if price breaks below H3 or we enter ranging regime
+                if close[i] < h3_1d_aligned[i] or ranging_regime:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            elif ranging_regime:
+                # Exit long if price rises above H4 or drops below L3
+                if close[i] > h4_1d_aligned[i] or close[i] < l3_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short when Williams %R falls below -50 (exiting overbought territory)
-            if williams_r_aligned[i] < -50:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+            if trending_regime:
+                # Exit short if price breaks above L3 or we enter ranging regime
+                if close[i] > l3_1d_aligned[i] or ranging_regime:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            elif ranging_regime:
+                # Exit short if price drops below L4 or rises above H3
+                if close[i] < l4_1d_aligned[i] or close[i] > h3_1d_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            # Enter long when Williams %R < -80 (oversold) with volume confirmation
-            if williams_r_aligned[i] < -80 and volume_confirmed:
-                position = 1
-                signals[i] = 0.25
-            # Enter short when Williams %R > -20 (overbought) with volume confirmation
-            elif williams_r_aligned[i] > -20 and volume_confirmed:
-                position = -1
-                signals[i] = -0.25
+            if trending_regime:
+                # Enter long on breakout above H3 with volume confirmation
+                if close[i] > h3_1d_aligned[i] and volume_confirmed_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Enter short on breakout below L3 with volume confirmation
+                elif close[i] < l3_1d_aligned[i] and volume_confirmed_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
+            elif ranging_regime:
+                # Mean reversion: buy near L3, sell near H3
+                if close[i] <= l3_1d_aligned[i] and volume_confirmed_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] >= h3_1d_aligned[i] and volume_confirmed_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
