@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 1d_donchian_breakout_volume_chop_regime_v1
-# Hypothesis: Daily Donchian(20) breakout with volume confirmation (>1.5x 20-day avg volume) and chop regime filter (CHOP(14) < 61.8 for trending markets).
-# Uses 1-week HMA(21) as higher timeframe trend filter: only take longs when price > weekly HMA, shorts when price < weekly HMA.
-# Exits when price crosses back through daily Donchian midpoint or when chop > 61.8 (range market).
-# Discrete position sizing (±0.25) to minimize fee churn. Target: 15-25 trades/year (60-100 total over 4 years) to avoid overtrading.
-# Works in bull markets via breakout momentum and in bear markets via short breakdowns with volume confirmation.
-# Weekly HMA filter ensures alignment with higher timeframe trend, reducing counter-trend trades.
+# 6h_ichimoku_cloud_regime_v1
+# Hypothesis: 6h strategy using Ichimoku Cloud from 1d timeframe for trend/filter,
+# with TK cross on 6h for entry timing. Uses volume confirmation and discrete sizing.
+# Works in bull/bear markets: Ichimoku cloud acts as dynamic S/R and regime filter
+# (price above cloud = bull bias, below = bear bias), TK cross provides momentum
+# entries with volume validation. Multi-timeframe alignment ensures no look-ahead.
+# Target: 50-150 total trades over 4 years (~12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_volume_chop_regime_v1"
-timeframe = "1d"
+name = "6h_ichimoku_cloud_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,99 +25,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index regime filter (14-period)
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr_series = pd.Series(tr)
-    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
-    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
-    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
-    denominator = highest_high - lowest_low
-    chop = np.where(
-        (denominator > 0) & (atr_series.values > 0),
-        100 * np.log10(atr_sum / np.log10(atr_period) / denominator),
-        100.0  # Default to ranging when invalid
-    )
+    # Ichimoku Cloud calculation on 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Multi-timeframe: 1-week HMA(21) trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_s = pd.Series(close_1w)
-    n_half = int(21 / 2)
-    n_sqrt = int(np.sqrt(21))
+    # Conversion line (Tenkan-sen): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    high_1d_s = pd.Series(high_1d)
+    low_1d_s = pd.Series(low_1d)
+    tenkan_sen = ((high_1d_s.rolling(window=period_tenkan, min_periods=period_tenkan).max() +
+                   low_1d_s.rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2).values
     
-    wma_half_1w = close_1w_s.rolling(window=n_half, min_periods=n_half).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    wma_full_1w = close_1w_s.rolling(window=21, min_periods=21).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    raw_hma_1w = 2 * wma_half_1w - wma_full_1w
-    hma_1w = pd.Series(raw_hma_1w).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Base line (Kijun-sen): (26-period high + 26-period low)/2
+    period_kijun = 26
+    kijun_sen = ((high_1d_s.rolling(window=period_kijun, min_periods=period_kijun).max() +
+                  low_1d_s.rolling(window=period_kijun, min_periods=period_kijun).min()) / 2).values
+    
+    # Leading Span A (Senkou Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Leading Span B (Senkou Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    senkou_span_b = ((high_1d_s.rolling(window=period_senkou_b, min_periods=period_senkou_b).max() +
+                      low_1d_s.rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2)
+    
+    # Lagging Span (Chikou Span): Close shifted 26 periods behind (not used for signals)
+    
+    # Align Ichimoku components to 6h timeframe (completed 1d bars only)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a, additional_delay_bars=26)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b, additional_delay_bars=26)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(hma_1w_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: chop < 61.8 indicates trending market
-        trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 1-week HMA
-        htf_uptrend = close[i] > hma_1w_aligned[i]
-        htf_downtrend = close[i] < hma_1w_aligned[i]
+        
+        # Ichimoku trend filters
+        price_above_cloud = (close[i] > senkou_span_a_aligned[i] and 
+                            close[i] > senkou_span_b_aligned[i])
+        price_below_cloud = (close[i] < senkou_span_a_aligned[i] and 
+                            close[i] < senkou_span_b_aligned[i])
+        
+        # TK Cross signals
+        tk_bullish_cross = (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and
+                           tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1])
+        tk_bearish_cross = (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and
+                           tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1])
         
         if position == 1:  # Long position
-            # Exit: price crosses below Donchian midpoint OR chop > 61.8 (range)
-            if close[i] < donchian_mid[i] or chop[i] >= 61.8:
+            # Exit: price breaks below cloud OR TK bearish cross
+            if price_below_cloud or tk_bearish_cross:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above Donchian midpoint OR chop > 61.8 (range)
-            if close[i] > donchian_mid[i] or chop[i] >= 61.8:
+            # Exit: price breaks above cloud OR TK bullish cross
+            if price_above_cloud or tk_bullish_cross:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume, regime, and HTF confirmation
-            bullish_breakout = (close[i] > donchian_high[i]) and volume_confirmed and trending_market and htf_uptrend
-            bearish_breakout = (close[i] < donchian_low[i]) and volume_confirmed and trending_market and htf_downtrend
-            
-            if bullish_breakout:
+            # Enter long: price above cloud + TK bullish cross + volume
+            if price_above_cloud and tk_bullish_cross and volume_confirmed:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            # Enter short: price below cloud + TK bearish cross + volume
+            elif price_below_cloud and tk_bearish_cross and volume_confirmed:
                 position = -1
                 signals[i] = -0.25
     
