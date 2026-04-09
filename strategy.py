@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_breakout_volume_v2
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and ATR filter.
-# Long: Price breaks above daily R4 level with volume > 1.5x 20-period average AND ATR(14) > 0.5 * ATR(50) (volatility filter).
-# Short: Price breaks below daily S4 level with volume > 1.5x 20-period average AND ATR(14) > 0.5 * ATR(50).
-# Exit: Price returns to daily pivot point (PP) or breaks opposite S4/R4 level.
-# Uses daily Camarilla for key support/resistance, 12h for execution, volume and volatility for confirmation.
-# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
+# 1d_1w_camarilla_breakout_volume_v2
+# Hypothesis: 1d strategy using weekly Camarilla pivot levels with volume confirmation and ATR filter.
+# Long: Price breaks above weekly R4 level with volume > 1.5x 20-period average AND ATR(14) > 0.5 * ATR(50).
+# Short: Price breaks below weekly S4 level with volume > 1.5x 20-period average AND ATR(14) > 0.5 * ATR(50).
+# Exit: Price returns to weekly pivot point (PP) or breaks opposite S4/R4 level.
+# Uses weekly Camarilla for key support/resistance, 1d for execution, volume and volatility for confirmation.
+# Target: 30-100 trades over 4 years (7-25/year) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_breakout_volume_v2"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,25 +41,25 @@ def generate_signals(prices):
     atr_50 = tr.rolling(window=50, min_periods=50).mean().values
     volatility_filter = atr_14 > (0.5 * atr_50)  # Only trade when volatility is above half of long-term average
     
-    # Get 1d data for Camarilla pivot levels (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
+    # Get 1w data for Camarilla pivot levels (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
     # Camarilla levels
-    r4 = close_1d + range_1d * 1.1 / 2.0
-    s4 = close_1d - range_1d * 1.1 / 2.0
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r4 = close_1w + range_1w * 1.1 / 2.0
+    s4 = close_1w - range_1w * 1.1 / 2.0
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -79,7 +79,7 @@ def generate_signals(prices):
         vol_filter = volatility_filter[i]
         
         if position == 1:  # Long position
-            # Exit: Price returns to daily pivot or breaks below S4
+            # Exit: Price returns to weekly pivot or breaks below S4
             if close[i] <= pivot_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
@@ -87,7 +87,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to daily pivot or breaks above R4
+            # Exit: Price returns to weekly pivot or breaks above R4
             if close[i] >= pivot_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
