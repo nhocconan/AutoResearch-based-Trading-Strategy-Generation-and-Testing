@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku cloud breakout with daily trend filter
-# Uses Ichimoku conversion/base lines (9,26) and cloud (26,52) from 6h data
-# Daily EMA(50) from 1d timeframe filters trades: only long when price > daily EMA, short when price < daily EMA
-# Reduces false signals by aligning with higher timeframe trend
-# Target: 50-150 total trades over 4 years = 12-37/year
+# Hypothesis: 12h Donchian channel breakout with volume confirmation and daily volatility filter
+# Uses daily ATR to filter for low volatility breakouts (avoiding chop)
+# Volume > 1.5x 24-period average confirms institutional participation
+# Position size 0.25 to limit drawdown
+# Target: 15-25 trades/year per symbol to minimize fee drag
 
-name = "6h_1d_ichimoku_trend_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,88 +25,100 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA(50) for trend filter
+    # Calculate daily ATR (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align daily EMA to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    tr_1d = np.zeros(len(df_1d))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
+        tr0 = high_1d[i] - low_1d[i]
+        tr1 = abs(high_1d[i] - close_1d[i-1])
+        tr2 = abs(low_1d[i] - close_1d[i-1])
+        tr_1d[i] = max(tr0, tr1, tr2)
     
-    # Ichimoku calculations (9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = np.full(n, np.nan)
-    low_9 = np.full(n, np.nan)
+    atr_1d = np.zeros(len(df_1d))
+    atr_1d[0] = tr_1d[0]
+    for i in range(1, len(df_1d)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+    
+    # ATR percentile rank (252-day lookback ~ 1 year)
+    atr_rank = np.zeros(len(df_1d))
+    for i in range(252, len(df_1d)):
+        window = atr_1d[i-252:i]
+        atr_rank[i] = np.sum(window < atr_1d[i]) / len(window) * 100
+    
+    # Align ATR rank to 12h timeframe (only use completed daily bars)
+    atr_rank_12h = align_htf_to_ltf(prices, df_1d, atr_rank)
+    
+    # Donchian channel (20-period) on 12h
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
+    
+    # Volume confirmation: 24-period average (12 days on 12h)
+    vol_ma_24 = np.full(n, np.nan)
+    vol_sum = 0.0
     for i in range(n):
-        if i >= 8:
-            high_9[i] = np.max(high[i-8:i+1])
-            low_9[i] = np.min(low[i-8:i+1])
-    tenkan = (high_9 + low_9) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = np.full(n, np.nan)
-    low_26 = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 25:
-            high_26[i] = np.max(high[i-25:i+1])
-            low_26[i] = np.min(low[i-25:i+1])
-    kijun = (high_26 + low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Conversion + Base) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = np.full(n, np.nan)
-    low_52 = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 51:
-            high_52[i] = np.max(high[i-51:i+1])
-            low_52[i] = np.min(low[i-51:i+1])
-    senkou_b = (high_52 + low_52) / 2
+        vol_sum += volume[i]
+        if i >= 24:
+            vol_sum -= volume[i-24]
+        if i >= 23:
+            vol_ma_24[i] = vol_sum / 24
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(252, n):  # Start after ATR rank warmup
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i]) or 
+            np.isnan(atr_rank_12h[i]) or 
+            np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        # Only trade in low volatility environment (ATR rank < 30 = bottom 30% volatility)
+        if atr_rank_12h[i] >= 30:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 1:  # Long position
-            # Exit: price closes below cloud OR below daily EMA
-            if close[i] < cloud_bottom or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price closes below Donchian low
+            if close[i] <= donch_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above cloud OR above daily EMA
-            if close[i] > cloud_top or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price closes above Donchian high
+            if close[i] >= donch_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above cloud AND above daily EMA
-            if close[i] > cloud_top and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: price closes above Donchian high with volume confirmation
+            vol_ratio = volume[i] / vol_ma_24[i] if vol_ma_24[i] > 0 else 0
+            if (close[i] > donch_high[i] and 
+                vol_ratio > 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below cloud AND below daily EMA
-            elif close[i] < cloud_bottom and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: price closes below Donchian low with volume confirmation
+            elif (close[i] < donch_low[i] and 
+                  vol_ratio > 1.5):
                 position = -1
                 signals[i] = -0.25
     
