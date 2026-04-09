@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # 4h_1d_camarilla_breakout_v3
-# Hypothesis: 4-hour breakouts above/below daily Camarilla H4/L4 levels with volume confirmation (volume > 1.5x 20-bar average).
-# Long when price breaks above H4 with volume confirmation. Short when price breaks below L4 with volume confirmation.
+# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and dynamic position sizing.
+# Uses tighter volume confirmation (2x average volume) to reduce trade frequency and improve quality.
+# Long when price breaks above H4 with volume > 2x 20-period average.
+# Short when price breaks below L4 with volume > 2x 20-period average.
 # Exit when price returns to the daily pivot point (PP).
-# Uses only daily Camarilla levels for simplicity and focus, reducing overtrading.
-# Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag.
+# Target: 50-150 total trades over 4 years (12-38/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -60,7 +61,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
@@ -82,12 +83,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 level with volume confirmation
-            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
+            # Enter long: price breaks above H4 level with volume confirmation (2x average)
+            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 level with volume confirmation
-            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
+            # Enter short: price breaks below L4 level with volume confirmation (2x average)
+            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = -1
                 signals[i] = -0.25
     
