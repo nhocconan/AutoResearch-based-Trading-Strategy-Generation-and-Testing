@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 12h_ema_crossover_volume_v1
-# Hypothesis: Uses 12h EMA crossovers with volume confirmation on 12h timeframe.
-# Long when fast EMA crosses above slow EMA with volume > 1.5x average; short when fast EMA crosses below slow EMA.
-# Includes volatility filter using ATR to avoid whipsaw in choppy markets.
-# Designed to work in both bull and bear markets by capturing trend changes with volume confirmation.
-# Target: 15-25 trades/year (60-100 total over 4 years) with strict entry conditions.
+# 4h_donchian_volume_breakout_v1
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d trend filter.
+# Long when price breaks above 20-period high with volume > 1.5x average and 1d EMA50 > EMA200.
+# Short when price breaks below 20-period low with volume > 1.5x average and 1d EMA50 < EMA200.
+# Uses ATR-based stop loss to manage risk. Designed to capture trends in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_ema_crossover_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_volume_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,23 +23,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1. EMA crossovers - 9 and 21 period
-    ema9 = np.zeros(n)
-    ema21 = np.zeros(n)
+    # 1. Donchian channels (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    # Initialize EMAs
-    ema9[0] = close[0]
-    ema21[0] = close[0]
-    
-    alpha9 = 2.0 / (9 + 1)
-    alpha21 = 2.0 / (21 + 1)
-    
-    for i in range(1, n):
-        ema9[i] = alpha9 * close[i] + (1 - alpha9) * ema9[i-1]
-        ema21[i] = alpha21 * close[i] + (1 - alpha21) * ema21[i-1]
-    
-    # 2. Volume confirmation - 20 period average
-    vol_ma_20 = np.zeros(n)
+    # 2. Volume confirmation (20-period average)
+    vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
@@ -49,54 +40,70 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
-    # 3. ATR for volatility filter
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # 3. 1d EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = 0.05 * tr[i] + 0.95 * atr[i-1]  # Wilder's smoothing
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    ema200_1d = np.full(len(close_1d), np.nan)
+    
+    # Calculate EMAs
+    for i in range(len(close_1d)):
+        if i == 0:
+            ema50_1d[i] = close_1d[i]
+            ema200_1d[i] = close_1d[i]
+        else:
+            alpha50 = 2.0 / (50 + 1)
+            ema50_1d[i] = alpha50 * close_1d[i] + (1 - alpha50) * ema50_1d[i-1]
+            alpha200 = 2.0 / (200 + 1)
+            ema200_1d[i] = alpha200 * close_1d[i] + (1 - alpha200) * ema200_1d[i-1]
+    
+    # Align to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(21, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(ema200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
-        # Volatility filter: avoid trading when ATR is too low (choppy market)
-        vol_filter_ok = atr[i] > np.mean(atr[max(0, i-20):i+1]) * 0.8
+        # Trend filter: 1d EMA50 > EMA200 for long, < for short
+        uptrend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        downtrend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: fast EMA crosses below slow EMA
-            if ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1]:
+            # Exit: price breaks below Donchian low
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: fast EMA crosses above slow EMA
-            if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1]:
+            # Exit: price breaks above Donchian high
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: fast EMA crosses above slow EMA with volume and volatility filters
-            if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1] and vol_ok and vol_filter_ok:
+            # Enter long: price breaks above Donchian high with volume and uptrend
+            if close[i] > donchian_high[i] and vol_ok and uptrend:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: fast EMA crosses below slow EMA with volume and volatility filters
-            elif ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1] and vol_ok and vol_filter_ok:
+            # Enter short: price breaks below Donchian low with volume and downtrend
+            elif close[i] < donchian_low[i] and vol_ok and downtrend:
                 position = -1
                 signals[i] = -0.25
     
