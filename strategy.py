@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session timing
-# - Uses 1h Camarilla pivot levels (H3/L3) for mean reversion entries in ranging markets
-# - 4h EMA(50) trend filter: only trade in direction of 4h trend to avoid counter-trend whipsaws
-# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# - Volume confirmation: 1h volume > 1.5x 20-period average to ensure breakout validity
-# - Position size: 0.20 (20% of capital) - discrete level to minimize fee churn
-# - Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe
-# - Works in both bull/bear: Camarilla pivots capture mean reversion in ranges, 
-#   4h trend filter allows trend continuation in strong moves, session filter reduces noise
+# Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Uses 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
+# - 1w EMA200 filter: only long when price > weekly EMA200, short when price < weekly EMA200
+# - Volume confirmation: 6h volume > 2.0x 20-period average to ensure breakout strength
+# - Discrete position sizing: 0.25 (25% of capital) to minimize fee churn
+# - Target: ~12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Novelty: Combines Camarilla pivot structure with weekly trend filter to avoid counter-trend trades
+# - Works in bull: breakouts at R4/S4 with trend filter; works in bear: mean reversion at R3/S3 with trend filter
 
-name = "1h_4h_camarilla_trend_session_v1"
-timeframe = "1h"
+name = "6h_1d_1w_camarilla_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,89 +22,101 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 60 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return np.zeros(n)
-    
-    # Pre-compute 4h indicators
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Pre-compute 1d indicators for Camarilla pivots
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Camarilla: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
-    #            L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
-    rng_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + (1.1 * rng_1d * 1.1 / 4)
-    camarilla_l3 = close_1d - (1.1 * rng_1d * 1.1 / 4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate previous day's Camarilla levels
+    # Camarilla: based on previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # fill first value
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # 1h price data
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    s3 = pivot - (range_hl * 1.1 / 4.0)
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
+    
+    # Align 1d Camarilla levels to 6h timeframe (completed 1d bar only)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Pre-compute 1w EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h volume > 1.5x 20-period average (volume confirmation)
+    # 6h volume > 2.0x 20-period average (volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume_20)
-    
-    # Session filter: 08-20 UTC (pre-compute hours for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or
-            np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_spike[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter
-        if not in_session[i]:
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_200_1w_aligned[i]) or
+            np.isnan(volume_spike[i]) or
+            volume[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches Camarilla H3 or reverses below VWAP approximation
-            if high[i] >= camarilla_h3_aligned[i]:
+            # Exit: price crosses below weekly EMA200 (trend change)
+            if close[i] < ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches Camarilla L3 or reverses above VWAP approximation
-            if low[i] <= camarilla_l3_aligned[i]:
+            # Exit: price crosses above weekly EMA200 (trend change)
+            if close[i] > ema_200_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with 4h trend filter and volume confirmation
-            # Long: price breaks above Camarilla H3 AND 4h EMA trending up AND volume spike
-            if (high[i] >= camarilla_h3_aligned[i] and 
-                close[i] > ema_4h_aligned[i] and 
-                volume_spike[i]):
+            # Look for Camarilla breakout/mean reversion with volume confirmation and trend filter
+            # Long breakout: price breaks above R4 AND above weekly EMA200 AND volume spike
+            if high[i] >= r4_aligned[i] and close[i] > ema_200_1w_aligned[i] and volume_spike[i]:
                 position = 1
-                signals[i] = 0.20
-            # Short: price breaks below Camarilla L3 AND 4h EMA trending down AND volume spike
-            elif (low[i] <= camarilla_l3_aligned[i] and 
-                  close[i] < ema_4h_aligned[i] and 
-                  volume_spike[i]):
+                signals[i] = 0.25
+            # Short breakout: price breaks below S4 AND below weekly EMA200 AND volume spike
+            elif low[i] <= s4_aligned[i] and close[i] < ema_200_1w_aligned[i] and volume_spike[i]:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
+            # Long mean reversion: price drops to S3 AND above weekly EMA200 AND volume spike
+            elif low[i] <= s3_aligned[i] and close[i] > ema_200_1w_aligned[i] and volume_spike[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short mean reversion: price rises to R3 AND below weekly EMA200 AND volume spike
+            elif high[i] >= r3_aligned[i] and close[i] < ema_200_1w_aligned[i] and volume_spike[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
