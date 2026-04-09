@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_donchian_volume_v6
-# Hypothesis: 6h strategy using weekly pivot points for trend direction and 6h Donchian channel breakouts with volume confirmation.
-# Weekly pivot > price = bullish bias (long Donchian breakouts); Weekly pivot < price = bearish bias (short Donchian breakouts).
-# Volume confirmation filters weak breakouts. Works in bull/bear via weekly pivot regime filter.
+# 12h_daily_camarilla_pivot_volume_v4
+# Hypothesis: 12h strategy using Camarilla pivot levels from 1d timeframe with volume confirmation and trend filter.
+# Long: Price breaks above Camarilla H3 level, volume > 1.5x 20-period average, price > 50-period SMA.
+# Short: Price breaks below Camarilla L3 level, volume > 1.5x 20-period average, price < 50-period SMA.
+# Exit: Opposite pivot break or trend reversal (price crosses 50-period SMA).
+# Uses 1d Camarilla pivots for structure, volume confirmation to filter weak breakouts, and SMA trend filter.
 # Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_donchian_volume_v6"
-timeframe = "6h"
+name = "12h_daily_camarilla_pivot_volume_v4"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,68 +29,65 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get weekly data for pivot points (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Trend filter: 50-period SMA
+    close_s = pd.Series(close)
+    sma_50 = close_s.rolling(window=50, min_periods=50).mean().values
+    
+    # Get 1d data for Camarilla pivots (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivots from 1d OHLC
+    # Camarilla: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot_point = (high_1w + low_1w + close_1w) / 3.0
-    resistance_1 = 2 * pivot_point - low_1w
-    support_1 = 2 * pivot_point - high_1w
+    # Camarilla H3 and L3 levels
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align HTF weekly pivot levels to 6h timeframe (wait for completed weekly bar)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
-    resistance_1_aligned = align_htf_to_ltf(prices, df_1w, resistance_1)
-    support_1_aligned = align_htf_to_ltf(prices, df_1w, support_1)
-    
-    # 6h Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Align HTF Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(resistance_1_aligned[i]) or
-            np.isnan(support_1_aligned[i]) or np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(sma_50[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
             np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Price breaks below Donchian low
-            if low[i] < lowest_low[i]:
+            # Exit: Price breaks below L3 OR trend reversal (price < SMA50)
+            if low[i] < camarilla_l3_aligned[i] or close[i] < sma_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price breaks above Donchian high
-            if high[i] > highest_high[i]:
+            # Exit: Price breaks above H3 OR trend reversal (price > SMA50)
+            if high[i] > camarilla_h3_aligned[i] or close[i] > sma_50[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above Donchian high, volume confirmed, weekly pivot bias bullish
-            if (high[i] > highest_high[i] and volume_confirmed and close[i] > pivot_aligned[i]):
+            # Long entry: Price breaks above H3, volume confirmed, and uptrend (price > SMA50)
+            if (high[i] > camarilla_h3_aligned[i] and volume_confirmed and close[i] > sma_50[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low, volume confirmed, weekly pivot bias bearish
-            elif (low[i] < lowest_low[i] and volume_confirmed and close[i] < pivot_aligned[i]):
+            # Short entry: Price breaks below L3, volume confirmed, and downtrend (price < SMA50)
+            elif (low[i] < camarilla_l3_aligned[i] and volume_confirmed and close[i] < sma_50[i]):
                 position = -1
                 signals[i] = -0.25
     
