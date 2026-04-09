@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d Williams Alligator (Jaw/Teeth/Lips) + volume confirmation
-# Donchian breakouts capture momentum; 1d Alligator shows trend alignment across timeframes
+# Hypothesis: 1d Donchian(20) breakout + 1w Supertrend(ATR=10,mult=3) trend filter + volume confirmation
+# Donchian breakouts capture momentum; 1w Supertrend shows higher timeframe trend direction
 # Volume confirmation ensures breakout authenticity with conviction
-# Works in bull/bear: Alligator adapts to higher timeframe trend strength and direction
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Works in bull/bear: Supertrend adapts to higher timeframe trend, Donchian captures breakouts in both directions
+# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25-0.30
 
-name = "4h_1d_alligator_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_supertrend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,51 +23,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Alligator calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1w data ONCE before loop for Supertrend calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 1d timeframe
-    # Jaw (blue): 13-period SMMA, offset 8 bars
-    # Teeth (red): 8-period SMMA, offset 5 bars  
-    # Lips (green): 5-period SMMA, offset 3 bars
-    close_1d = df_1d['close'].values
+    # Calculate 1w Supertrend (ATR=10, mult=3)
+    hl2 = (df_1w['high'].values + df_1w['low'].values) / 2
+    tr1 = df_1w['high'].values - df_1w['low'].values
+    tr2 = np.abs(df_1w['high'].values - np.roll(df_1w['close'].values, 1))
+    tr3 = np.abs(df_1w['low'].values - np.roll(df_1w['close'].values, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0  # First period TR = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full(len(arr), np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_CLOSE) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    atr = np.full(len(tr), np.nan)
+    for i in range(len(tr)):
+        if i < 10:
+            atr[i] = np.nan
+        elif i == 10:
+            atr[i] = np.mean(tr[:11])
+        else:
+            atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
     
-    jaw = smma(close_1d, 13)  # 13-period SMMA
-    teeth = smma(close_1d, 8)  # 8-period SMMA
-    lips = smma(close_1d, 5)   # 5-period SMMA
+    upper_band = hl2 + 3 * atr
+    lower_band = hl2 - 3 * atr
     
-    # Apply offsets: Jaw offset 8, Teeth offset 5, Lips offset 3
-    jaw_offset = np.full_like(jaw, np.nan)
-    teeth_offset = np.full_like(teeth, np.nan)
-    lips_offset = np.full_like(lips, np.nan)
+    supertrend = np.full(len(close), np.nan)
+    direction = np.full(len(close), np.nan)  # 1 for uptrend, -1 for downtrend
     
-    if len(jaw) > 8:
-        jaw_offset[8:] = jaw[:-8]
-    if len(teeth) > 5:
-        teeth_offset[5:] = teeth[:-5]
-    if len(lips) > 3:
-        lips_offset[3:] = lips[:-3]
+    for i in range(len(close)):
+        if i == 0:
+            supertrend[i] = upper_band[i]
+            direction[i] = 1
+        else:
+            if close[i-1] > supertrend[i-1]:
+                supertrend[i] = max(upper_band[i], supertrend[i-1])
+            else:
+                supertrend[i] = min(lower_band[i], supertrend[i-1])
+            
+            if close[i] > supertrend[i]:
+                direction[i] = 1
+            else:
+                direction[i] = -1
     
-    # Align Alligator lines to 4h timeframe (wait for daily close)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_offset)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_offset)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_offset)
+    # Align Supertrend data to 1d timeframe (wait for weekly close)
+    direction_aligned = align_htf_to_ltf(prices, df_1w, direction)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 1d Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -93,43 +95,37 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(avg_volume[i])):
+            np.isnan(direction_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
-        # Alligator alignment: Lips > Teeth > Jaw = bullish alignment
-        # Alligator alignment: Lips < Teeth < Jaw = bearish alignment
-        bullish_aligned = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
-        bearish_aligned = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price < Donchian low OR Alligator loses bullish alignment
-            if close[i] < donchian_low[i] or not bullish_aligned:
+            # Exit: price < Donchian low OR weekly trend turns down
+            if close[i] < donchian_low[i] or direction_aligned[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Donchian high OR Alligator loses bearish alignment
-            if close[i] > donchian_high[i] or not bearish_aligned:
+            # Exit: price > Donchian high OR weekly trend turns up
+            if close[i] > donchian_high[i] or direction_aligned[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Donchian breakout + Alligator filter
+            # Entry logic with volume confirmation and Donchian breakout + weekly trend filter
             if volume_confirmed:
-                # Long entry: price > Donchian high AND bullish Alligator alignment
-                if close[i] > donchian_high[i] and bullish_aligned:
+                # Long entry: price > Donchian high AND weekly uptrend
+                if close[i] > donchian_high[i] and direction_aligned[i] == 1:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Donchian low AND bearish Alligator alignment
-                elif close[i] < donchian_low[i] and bearish_aligned:
+                # Short entry: price < Donchian low AND weekly downtrend
+                elif close[i] < donchian_low[i] and direction_aligned[i] == -1:
                     position = -1
                     signals[i] = -0.25
     
