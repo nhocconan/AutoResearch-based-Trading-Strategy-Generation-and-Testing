@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
+# Hypothesis: 4h chart with daily Camarilla pivot breakouts + volume confirmation + volatility filter
+# Works in bull/bear by capturing breakouts from key daily levels with institutional volume
+# Target: 20-40 trades/year, low turnover, avoids overtrading via strict volume and level filters
+
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,15 +46,27 @@ def generate_signals(prices):
     prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Volume confirmation: 3-period average (12h)
-    vol_ma_3 = np.full(n, np.nan)
+    # Volume confirmation: 4-period average (16h) for stability
+    vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
+        if i >= 4:
+            vol_sum -= volume[i-4]
         if i >= 3:
-            vol_sum -= volume[i-3]
-        if i >= 2:
-            vol_ma_3[i] = vol_sum / 3
+            vol_ma_4[i] = vol_sum / 4
+    
+    # Volatility filter: ATR-based to avoid choppy markets
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = np.full(n, np.nan)
+    atr_sum = 0.0
+    for i in range(n):
+        atr_sum += tr[i]
+        if i >= 14:
+            atr_sum -= tr[i-14]
+        if i >= 13:
+            atr[i] = atr_sum / 14
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -61,7 +77,8 @@ def generate_signals(prices):
             np.isnan(s4_aligned[i]) or 
             np.isnan(prev_high_aligned[i]) or 
             np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_3[i])):
+            np.isnan(vol_ma_4[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -81,13 +98,20 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
+            # Volatility filter: only trade when ATR > 50-period median (avoid low vol chop)
+            if i >= 50:
+                vol_median = np.nanmedian(atr[max(0, i-50):i])
+                if atr[i] < vol_median * 0.5:  # Too quiet, skip
+                    signals[i] = 0.0
+                    continue
+            
             # Enter long: price closes above R4 with volume confirmation
-            vol_ratio = volume[i] / vol_ma_3[i] if vol_ma_3[i] > 0 else 0
-            if close[i] > r4_aligned[i] and vol_ratio > 2.0:
+            vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
+            if close[i] > r4_aligned[i] and vol_ratio > 2.5:
                 position = 1
                 signals[i] = 0.25
             # Enter short: price closes below S4 with volume confirmation
-            elif close[i] < s4_aligned[i] and vol_ratio > 2.0:
+            elif close[i] < s4_aligned[i] and vol_ratio > 2.5:
                 position = -1
                 signals[i] = -0.25
     
