@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
+# 12h_1d_camarilla_breakout_v2
 # Hypothesis: Breakout above/below 1d Camarilla pivot levels (H4/L4) on 12h chart with volume confirmation.
 # Long when price closes above H4 (bullish breakout), short when price closes below L4 (bearish breakout).
 # Exit when price returns to pivot point (mean reversion) or volatility filter fails.
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
+name = "12h_1d_camarilla_breakout_v2"
 timeframe = "12h"
 leverage = 1.0
 
