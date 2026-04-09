@@ -34,26 +34,19 @@ def generate_signals(prices):
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels (H3, L3)
+    # Calculate 1d Camarilla levels (H3, L3) using previous day's OHLC to avoid look-ahead
     camarilla_h3 = np.full(len(df_1d), np.nan)
     camarilla_l3 = np.full(len(df_1d), np.nan)
     
-    for i in range(len(df_1d)):
-        if i < 1:
-            camarilla_h3[i] = np.nan
-            camarilla_l3[i] = np.nan
-        else:
-            # Use previous day's OHLC to avoid look-ahead
-            high_prev = df_1d['high'].iloc[i-1]
-            low_prev = df_1d['low'].iloc[i-1]
-            close_prev = df_1d['close'].iloc[i-1]
-            camarilla_h3[i] = close_prev + 1.1 * (high_prev - low_prev) / 2
-            camarilla_l3[i] = close_prev - 1.1 * (high_prev - low_prev) / 2
+    for i in range(1, len(df_1d)):
+        high_prev = df_1d['high'].iloc[i-1]
+        low_prev = df_1d['low'].iloc[i-1]
+        close_prev = df_1d['close'].iloc[i-1]
+        camarilla_h3[i] = close_prev + 1.1 * (high_prev - low_prev) / 2
+        camarilla_l3[i] = close_prev - 1.1 * (high_prev - low_prev) / 2
     
     # Calculate 1d ATR(14) for regime filter
     tr_1d = np.full(len(df_1d), np.nan)
-    atr_1d = np.full(len(df_1d), np.nan)
-    
     for i in range(1, len(df_1d)):
         tr = max(
             df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
@@ -63,6 +56,7 @@ def generate_signals(prices):
         tr_1d[i] = tr
     
     # Calculate ATR with Wilder's smoothing
+    atr_1d = np.full(len(df_1d), np.nan)
     for i in range(len(df_1d)):
         if i < 14:
             atr_1d[i] = np.nan
