@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v6
-# Hypothesis: 4h strategy using 1d Camarilla H3/L3 levels with 12h trend filter and volume confirmation.
-# In ranging markets, price tends to revert from H3/L3 levels; in trending markets, breaks above/below
-# these levels with volume continuation signal strong moves. 12h EMA(50) determines trend bias.
-# Volume > 1.3x 20-period average filters weak breakouts. Discrete sizing (±0.25) minimizes fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year). Works in both bull and bear via trend alignment.
+# 1d_camarilla_1w_trend_volume_v1
+# Hypothesis: Daily strategy using weekly Camarilla H4/L4 levels with 1w trend filter and volume confirmation.
+# In ranging markets, price tends to revert from H4/L4 levels; in trending markets, breaks above/below
+# these levels with volume continuation signal strong moves. 1w EMA(50) determines trend bias.
+# Volume > 1.5x 20-period average filters weak breakouts. Discrete sizing (±0.30) minimizes fee churn.
+# Target: 30-100 total trades over 4 years (7-25/year). Works in both bull and bear via trend alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v6"
-timeframe = "4h"
+name = "1d_camarilla_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,17 +24,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h HTF data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # 1w HTF data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # 12h EMA(50) for trend bias
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1w = df_1w['close'].values
+    # 1w EMA(50) for trend bias
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d HTF data for Camarilla pivots
+    # 1d HTF data for Camarilla pivots (using 1d to calculate pivots, aligned to 1d)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -56,15 +56,15 @@ def generate_signals(prices):
     pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
     range_1d = prev_high_1d - prev_low_1d
     
-    # Camarilla H3 and L3 levels (strongest intraday support/resistance)
-    h3 = pivot_point + (range_1d * 1.1 / 4)
-    l3 = pivot_point - (range_1d * 1.1 / 4)
+    # Camarilla H4 and L4 levels (strongest support/resistance)
+    h4 = pivot_point + (range_1d * 1.1 / 2)
+    l4 = pivot_point - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Align Camarilla levels to 1d timeframe (no additional delay needed)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -72,38 +72,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes back below H3 (profit taken or reversal)
-            if close[i] < h3_aligned[i]:
+            # Exit: price closes back below H4 (profit taken or reversal)
+            if close[i] < h4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price closes back above L3 (profit taken or reversal)
-            if close[i] > l3_aligned[i]:
+            # Exit: price closes back above L4 (profit taken or reversal)
+            if close[i] > l4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price crosses above H3 with 12h bullish bias (price above EMA50)
-                if close[i] > h3_aligned[i] and close[i] > ema_50_12h_aligned[i]:
+                # Long: price crosses above H4 with 1w bullish bias (price above EMA50)
+                if close[i] > h4_aligned[i] and close[i] > ema_50_1w_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short: price crosses below L3 with 12h bearish bias (price below EMA50)
-                elif close[i] < l3_aligned[i] and close[i] < ema_50_12h_aligned[i]:
+                    signals[i] = 0.30
+                # Short: price crosses below L4 with 1w bearish bias (price below EMA50)
+                elif close[i] < l4_aligned[i] and close[i] < ema_50_1w_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
