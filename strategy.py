@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 1d_weekly_volume_regime_v1
-# Hypothesis: 1d strategy using 1w trend filter + daily volume spike + Donchian breakout.
-# Long: Price breaks above 20-day Donchian high + volume > 1.5x 20-day average + weekly close > weekly open (bullish week)
-# Short: Price breaks below 20-day Donchian low + volume > 1.5x 20-day average + weekly close < weekly open (bearish week)
-# Exit: Price closes back inside 10-day Donchian channel (reduces whipsaw)
+# 12h_daily_ema_volume_filter_v1
+# Hypothesis: 12h strategy using 1d EMA trend with volume confirmation.
+# Long when price > EMA50_1d and volume > 1.5x 20-period average.
+# Short when price < EMA50_1d and volume > 1.5x 20-period average.
+# Exit on opposite EMA cross or volume drop.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Designed to capture strong momentum moves in both bull and bear markets while avoiding chop.
-# Target: 15-25 trades/year (60-100 total over 4 years) on BTC/ETH/SOL.
+# Designed to capture strong trends in both bull and bear markets with volume confirmation.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_volume_regime_v1"
-timeframe = "1d"
+name = "12h_daily_ema_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,46 +22,31 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for EMA (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly trend: bullish if weekly close > weekly open, bearish if weekly close < weekly open
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open
-    weekly_bearish = weekly_close < weekly_open
+    # Calculate daily EMA50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly trend to daily timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
-    
-    # Daily Donchian channels (20-period for entry, 10-period for exit)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    donchian_high_20 = high_s.rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = low_s.rolling(window=20, min_periods=20).min().values
-    donchian_high_10 = high_s.rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = low_s.rolling(window=10, min_periods=10).min().values
+    # Align EMA to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or
-            np.isnan(donchian_high_10[i]) or np.isnan(donchian_low_10[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
@@ -69,29 +54,29 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Price closes back below 10-day Donchian low (reduces whipsaw)
-            if close[i] < donchian_low_10[i]:
+            # Exit: Price closes below EMA or volume drops
+            if close[i] < ema_50_aligned[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price closes back above 10-day Donchian high (reduces whipsaw)
-            if close[i] > donchian_high_10[i]:
+            # Exit: Price closes above EMA or volume drops
+            if close[i] > ema_50_aligned[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation and weekly trend filter
-            bullish_breakout = (close[i] > donchian_high_20[i]) and volume_confirmed and weekly_bullish_aligned[i] > 0.5
-            bearish_breakout = (close[i] < donchian_low_20[i]) and volume_confirmed and weekly_bearish_aligned[i] > 0.5
+            # Check for entry with volume confirmation
+            bullish_entry = (close[i] > ema_50_aligned[i]) and volume_confirmed
+            bearish_entry = (close[i] < ema_50_aligned[i]) and volume_confirmed
             
-            if bullish_breakout:
+            if bullish_entry:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_entry:
                 position = -1
                 signals[i] = -0.25
     
