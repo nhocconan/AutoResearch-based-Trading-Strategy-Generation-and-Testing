@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with 1w volume confirmation and ATR-based stoploss
-# - Uses 1d Kaufman Adaptive Moving Average (KAMA) for trend direction
-# - Volume confirmation: 1d volume > 1.3x 20-period average to filter weak moves
+# Hypothesis: 6h Williams %R + Elder Ray (Bull/Bear Power) + 1d volume regime filter
+# - Williams %R(14) on 6h: oversold < -80 for long, overbought > -20 for short
+# - Elder Ray: Bull Power = high - EMA(13), Bear Power = low - EMA(13) on 6h
+#   Long when Bull Power > 0 and rising, Short when Bear Power < 0 and falling
+# - 1d volume regime: only trade when 1d volume > 20-period average (avoid low-volume whipsaws)
+# - Position size: 0.25 (discrete level to minimize fee churn)
 # - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
-# - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
-# - Novelty: KAMA adapts to market noise, reducing whipsaws in ranging markets while catching trends
-# - Works in bull markets: catches sustained trends
-# - Works in bear markets: adaptive nature reduces false signals during chop, volume confirmation adds filter
+# - Works in bull/bear: Williams %R captures reversals, Elder Ray confirms trend strength,
+#   volume filter ensures participation only during active market phases
+# - Target: ~12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
 
-name = "1d_1w_kama_volume_atr_v1"
-timeframe = "1d"
+name = "6h_1d_williams_elderray_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,48 +24,41 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1w indicators
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 1d indicators
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1w Kaufman Adaptive Moving Average (KAMA)
-    # Efficiency Ratio (ER) = |Change| / Sum(|Changes|) over period
-    # Smoothing Constant (SC) = [ER * (fastest SC - slowest SC) + slowest SC]^2
-    # KAMAprev = KAMAprev + SC * (price - KAMAprev)
-    close_1w_series = pd.Series(close_1w)
-    change = abs(close_1w_series.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    direction = abs(close_1w_series - close_1w_series.shift(10))
-    er = direction / volatility
-    er = er.fillna(0)  # Handle division by zero
-    fastest_sc = 2 / (2 + 1)  # EMA(2)
-    slowest_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fastest_sc - slowest_sc) + slowest_sc) ** 2
-    sc = sc.fillna(0)  # Handle NaN
-    kama = np.zeros(len(close_1w))
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close_1w[i] - kama[i-1])
+    # 1d volume > 20-period average (volume regime filter)
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_regime = volume_1d > avg_volume_20
     
-    # Align KAMA to 1d timeframe (completed 1w bar only)
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Align volume regime to 6h timeframe (completed 1d bar only)
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
     
-    # 1w volume > 1.3x 20-period average (volume confirmation)
-    volume_1w_series = pd.Series(volume_1w)
-    avg_volume_20 = volume_1w_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1w > (1.3 * avg_volume_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
-    
-    # 1d price data
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1d ATR(14) for trailing stop
+    # 6h Williams %R(14): %R = (highest_high - close) / (highest_high - lowest_low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high_14 - lowest_low_14) > 0,
+                          ((highest_high_14 - close) / (highest_high_14 - lowest_low_14)) * -100, -50)
+    williams_r = np.where(np.isnan(williams_r), -50, williams_r)
+    
+    # 6h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # 6h Elder Ray: Bull Power = high - EMA, Bear Power = low - EMA
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # 6h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -79,8 +73,10 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(volume_spike_aligned[i]) or
+        if (np.isnan(williams_r[i]) or 
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(volume_regime_aligned[i]) or
             np.isnan(atr[i]) or
             atr[i] <= 0):
             signals[i] = 0.0
@@ -91,8 +87,9 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit condition: price retraces 2.0x ATR from high
-            if low[i] <= highest_since_entry - (2.0 * atr[i]):
+            # Exit conditions: price retraces 2.0x ATR from high OR Williams %R > -20 (overbought)
+            if low[i] <= highest_since_entry - (2.0 * atr[i]) or \
+               williams_r[i] > -20:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -103,22 +100,29 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit condition: price retraces 2.0x ATR from low
-            if high[i] >= lowest_since_entry + (2.0 * atr[i]):
+            # Exit conditions: price retraces 2.0x ATR from low OR Williams %R < -80 (oversold)
+            if high[i] >= lowest_since_entry + (2.0 * atr[i]) or \
+               williams_r[i] < -80:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for KAMA breakout with volume confirmation
-            # Long: price above KAMA AND volume spike
-            if close[i] > kama_aligned[i] and volume_spike_aligned[i]:
+            # Look for entry: Williams %R extreme + Elder Ray confirmation + volume regime
+            # Long: Williams %R < -80 (oversold) AND Bull Power > 0 AND Bull Power rising AND volume regime
+            if (williams_r[i] < -80 and 
+                bull_power[i] > 0 and 
+                i > 100 and bull_power[i] > bull_power[i-1] and
+                volume_regime_aligned[i]):
                 position = 1
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]
                 signals[i] = 0.25
-            # Short: price below KAMA AND volume spike
-            elif close[i] < kama_aligned[i] and volume_spike_aligned[i]:
+            # Short: Williams %R > -20 (overbought) AND Bear Power < 0 AND Bear Power falling AND volume regime
+            elif (williams_r[i] > -20 and 
+                  bear_power[i] < 0 and 
+                  i > 100 and bear_power[i] < bear_power[i-1] and
+                  volume_regime_aligned[i]):
                 position = -1
                 highest_since_entry = low[i]
                 lowest_since_entry = low[i]
