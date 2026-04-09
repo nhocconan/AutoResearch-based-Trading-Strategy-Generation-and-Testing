@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout + 1d ATR volatility filter + volume confirmation
-# Donchian(20) breakout provides clear structure; 1d ATR filter avoids low volatility chop
-# Volume confirmation (>1.5x 20-period average) filters false breakouts
-# Works in bull/bear: breakouts capture momentum, ATR filter avoids whipsaws in range
+# Hypothesis: 12h strategy using 1d Williams Fractal breakouts with volume confirmation
+# Williams Fractals from 1d provide swing high/low structure aligned with 12h timeframe
+# Volume confirmation (current 12h volume > 1.5x 20-period average) filters false breakouts
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Works in bull/bear: price reacts to 1d swing structure, volume confirms validity
 # Discrete position sizing: 0.0, ±0.25 to minimize fee churn
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
 
-name = "4h_1d_donchian_atr_volume_v1"
-timeframe = "4h"
+name = "12h_1d_williams_fractal_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,28 +26,32 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d Williams Fractals (5-bar pattern)
+    # Bearish fractal: high[n-2] < high[n] and high[n-1] < high[n] and high[n+1] < high[n] and high[n+2] < high[n]
+    # Bullish fractal: low[n-2] > low[n] and low[n-1] > low[n] and low[n+1] > low[n] and low[n+2] > low[n]
+    n_1d = len(high_1d)
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
     
-    # Align 1d ATR to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    for i in range(2, n_1d - 2):
+        if (high_1d[i-2] < high_1d[i] and high_1d[i-1] < high_1d[i] and 
+            high_1d[i+1] < high_1d[i] and high_1d[i+2] < high_1d[i]):
+            bearish_fractal[i] = high_1d[i]  # Swing high
+        if (low_1d[i-2] > low_1d[i] and low_1d[i-1] > low_1d[i] and 
+            low_1d[i+1] > low_1d[i] and low_1d[i+2] > low_1d[i]):
+            bullish_fractal[i] = low_1d[i]   # Swing low
     
-    # Calculate 4h Donchian channels (20-period)
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Williams Fractals to 12h timeframe with 2-bar extra delay for confirmation
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Pre-compute volume confirmation (20-period average for 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -55,40 +59,37 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume
+        # Volume confirmation: current 12h volume > 1.5x average 12h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # ATR filter: only trade when 1d ATR > 0.5 * 20-period ATR average (avoid low volatility chop)
-        atr_ma_20 = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean().values
-        atr_filter = atr_1d_aligned[i] > 0.5 * atr_ma_20[i] if not np.isnan(atr_ma_20[i]) else False
-        
         if position == 1:  # Long position
-            # Exit on Donchian lower band retracement
-            if close[i] < low_ma_20[i]:
+            # Exit on retracement to recent bullish fractal (support)
+            if close[i] < bullish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit on Donchian upper band retracement
-            if close[i] > high_ma_20[i]:
+            # Exit on retracement to recent bearish fractal (resistance)
+            if close[i] > bearish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout trading with volume and ATR confirmation
-            if volume_confirmed and atr_filter:
-                if close[i] > high_ma_20[i]:
+            # Breakout trading with volume confirmation
+            # Long on bearish fractal breakout (above resistance), Short on bullish fractal breakout (below support)
+            if volume_confirmed:
+                if close[i] > bearish_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < low_ma_20[i]:
+                elif close[i] < bullish_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
