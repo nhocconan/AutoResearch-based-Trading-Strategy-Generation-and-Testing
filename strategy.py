@@ -3,140 +3,136 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with TK cross and 1d weekly pivot direction filter
-# Uses Ichimoku (Tenkan/Kijun/Senkou) from 6h for trend and momentum signals
-# Only takes trades aligned with 1d weekly pivot (price above weekly pivot = long bias, below = short bias)
-# Weekly pivot calculated from prior 1d week (Mon-Sun) high/low/close
-# Position size 0.25 to manage drawdown, target 50-150 total trades over 4 years (12-37/year)
-# Works in both bull/bear: weekly pivot provides structural bias, Ichimoku TK cross captures momentum
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 1d ATR regime filter
+# Uses Camarilla pivot levels (H3/L3) from 1d for breakout triggers, confirmed by volume spike (>2.0x avg)
+# Only takes breakouts when 1d ATR(14) is below its 50-period MA (low volatility regime) for reliability
+# Position size 0.25 to manage drawdown and enable multiple concurrent positions
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
+# Works in both bull/bear: 1d ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
 
-name = "6h_1d_ichimoku_weekly_pivot_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for weekly pivot
+    # Load 1d data ONCE before loop for Camarilla pivots and ATR regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = np.full(n, np.nan)
-    period9_low = np.full(n, np.nan)
-    for i in range(n):
-        if i < 9:
-            period9_high[i] = np.nan
-            period9_low[i] = np.nan
+    # Calculate 1d ATR(14) for regime filter
+    tr_1d = np.full(len(df_1d), np.nan)
+    atr_1d = np.full(len(df_1d), np.nan)
+    
+    for i in range(1, len(df_1d)):
+        tr = max(
+            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+        )
+        tr_1d[i] = tr
+    
+    # Calculate ATR with Wilder's smoothing
+    for i in range(len(df_1d)):
+        if i < 14:
+            atr_1d[i] = np.nan
+        elif i == 14:
+            atr_1d[i] = np.nanmean(tr_1d[1:15])
         else:
-            period9_high[i] = np.max(high[i-9:i])
-            period9_low[i] = np.min(low[i-9:i])
-    tenkan = (period9_high + period9_low) / 2
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = np.full(n, np.nan)
-    period26_low = np.full(n, np.nan)
-    for i in range(n):
-        if i < 26:
-            period26_high[i] = np.nan
-            period26_low[i] = np.nan
+    # Calculate 50-period MA of ATR for regime filter
+    atr_ma_50 = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if i < 50:
+            atr_ma_50[i] = np.nan
         else:
-            period26_high[i] = np.max(high[i-26:i])
-            period26_low[i] = np.min(low[i-26:i])
-    kijun = (period26_high + period26_low) / 2
+            atr_ma_50[i] = np.mean(atr_1d[i-50:i])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    period52_high = np.full(n, np.nan)
-    period52_low = np.full(n, np.nan)
-    for i in range(n):
-        if i < 52:
-            period52_high[i] = np.nan
-            period52_low[i] = np.nan
-        else:
-            period52_high[i] = np.max(high[i-52:i])
-            period52_low[i] = np.min(low[i-52:i])
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Calculate weekly pivot from 1d data (prior week's high, low, close)
-    # Assuming 1d data is daily, weekly pivot uses prior 7 days (Mon-Sun)
-    weekly_high = np.full(len(df_1d), np.nan)
-    weekly_low = np.full(len(df_1d), np.nan)
-    weekly_close = np.full(len(df_1d), np.nan)
+    # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
+    camarilla_h3 = np.full(len(df_1d), np.nan)
+    camarilla_l3 = np.full(len(df_1d), np.nan)
     
     for i in range(len(df_1d)):
-        if i < 7:
-            weekly_high[i] = np.nan
-            weekly_low[i] = np.nan
-            weekly_close[i] = np.nan
+        if i < 1:
+            camarilla_h3[i] = np.nan
+            camarilla_l3[i] = np.nan
         else:
-            weekly_high[i] = np.max(df_1d['high'].iloc[i-7:i])
-            weekly_low[i] = np.min(df_1d['low'].iloc[i-7:i])
-            weekly_close[i] = df_1d['close'].iloc[i-1]  # prior day's close as weekly close proxy
+            # Use previous day's OHLC to avoid look-ahead
+            prev_high = df_1d['high'].iloc[i-1]
+            prev_low = df_1d['low'].iloc[i-1]
+            prev_close = df_1d['close'].iloc[i-1]
+            range_val = prev_high - prev_low
+            camarilla_h3[i] = prev_close + range_val * 1.1 / 4
+            camarilla_l3[i] = prev_close - range_val * 1.1 / 4
     
-    # Weekly pivot point: (weekly_high + weekly_low + weekly_close) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    # Align 1d indicators to 4h timeframe
+    camarilla_h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    atr_ma_50_4h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
+    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align 1d weekly pivot to 6h timeframe
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Calculate 20-period average volume for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            avg_volume[i] = np.nan
+        else:
+            avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after warmup for longest Ichimoku component
+    for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
-            np.isnan(weekly_pivot_6h[i])):
+        if (np.isnan(camarilla_h3_4h[i]) or 
+            np.isnan(camarilla_l3_4h[i]) or 
+            np.isnan(atr_ma_50_4h[i]) or 
+            np.isnan(atr_4h[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Ichimoku TK cross: Tenkan crosses above/below Kijun
-        tk_cross_above = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_cross_below = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirm = volume[i] > 2.0 * avg_volume[i]
         
-        # Price relative to cloud: above cloud = bullish, below cloud = bearish
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # Weekly pivot bias: price above pivot = long bias, below = short bias
-        price_above_pivot = close[i] > weekly_pivot_6h[i]
-        price_below_pivot = close[i] < weekly_pivot_6h[i]
+        # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
+        atr_regime = atr_4h[i] < atr_ma_50_4h[i]
         
         if position == 1:  # Long position
-            # Exit: TK cross below OR price breaks below cloud OR pivot bias turns bearish
-            if tk_cross_below or price_below_cloud or (not price_above_pivot and close[i] < weekly_pivot_6h[i]):
+            # Exit conditions: price closes below Camarilla L3 OR ATR regime turns unfavorable
+            if close[i] < camarilla_l3_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TK cross above OR price breaks above cloud OR pivot bias turns bullish
-            if tk_cross_above or price_above_cloud or (not price_below_pivot and close[i] > weekly_pivot_6h[i]):
+            # Exit conditions: price closes above Camarilla H3 OR ATR regime turns unfavorable
+            if close[i] > camarilla_h3_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry: TK cross in direction of price vs cloud AND aligned with weekly pivot bias
-            if tk_cross_above and price_above_cloud and price_above_pivot:
-                position = 1
-                signals[i] = 0.25
-            elif tk_cross_below and price_below_cloud and price_below_pivot:
-                position = -1
-                signals[i] = -0.25
+            # Entry logic: Camarilla breakout with volume confirmation and ATR regime filter
+            if volume_confirm and atr_regime:
+                # Long breakout: price closes above Camarilla H3
+                if close[i] > camarilla_h3_4h[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short breakout: price closes below Camarilla L3
+                elif close[i] < camarilla_l3_4h[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
