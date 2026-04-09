@@ -3,8 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v4"
-timeframe = "4h"
+# Hypothesis: 12h timeframe with 1w trend filter (EMA20) and 1d ATR-based breakout (ATR*2 from open)
+# Trend filter avoids counter-trend trades; breakout captures momentum; volume filter reduces false signals
+# Designed for low trade frequency (<30/year) to minimize fee drag, works in bull/bear via trend alignment
+
+name = "12h_1w_trend_atr_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,97 +21,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla levels
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 2:
+    # Weekly trend filter: EMA20 on close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_20 = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema_20[19] = np.mean(close_1w[:20])
+        for i in range(20, len(close_1w)):
+            ema_20[i] = (close_1w[i] * 2 + ema_20[i-1] * 18) / 20
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    r4 = np.full(len(df_d), np.nan)
-    s4 = np.full(len(df_d), np.nan)
-    prev_high = np.full(len(df_d), np.nan)
-    prev_low = np.full(len(df_d), np.nan)
-    for i in range(1, len(df_d)):
-        ph = float(df_d['high'].iloc[i-1])
-        pl = float(df_d['low'].iloc[i-1])
-        pc = float(df_d['close'].iloc[i-1])
-        r4[i] = pc + (ph - pl) * 1.1 / 2
-        s4[i] = pc - (ph - pl) * 1.1 / 2
-        prev_high[i] = ph
-        prev_low[i] = pl
+    # Daily ATR(14) for breakout threshold
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr = np.zeros(len(df_1d))
+    atr = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if i == 0:
+            tr[i] = high_1d[i] - low_1d[i]
+        else:
+            tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    atr[0] = tr[0]
+    for i in range(1, len(df_1d)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Align daily values to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_d, s4)
-    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
-    
-    # Volume confirmation: 3-period average (12h)
-    vol_ma_3 = np.full(n, np.nan)
+    # Volume confirmation: 4-period average
+    vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
+        if i >= 4:
+            vol_sum -= volume[i-4]
         if i >= 3:
-            vol_sum -= volume[i-3]
-        if i >= 2:
-            vol_ma_3[i] = vol_sum / 3
-    
-    # Choppiness regime filter (14-period)
-    chop = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 13:
-            high_max = np.max(high[i-13:i+1])
-            low_min = np.min(low[i-13:i+1])
-            sum_true_range = 0.0
-            for j in range(14):
-                tr = max(high[i-j] - low[i-j], 
-                         abs(high[i-j] - close[i-j-1]) if i-j-1 >= 0 else high[i-j] - low[i-j],
-                         abs(low[i-j] - close[i-j-1]) if i-j-1 >= 0 else high[i-j] - low[i-j])
-                sum_true_range += tr
-            if sum_true_range > 0:
-                chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
+            vol_ma_4[i] = vol_sum / 4
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(prev_high_aligned[i]) or 
-            np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_3[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(ema_20_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or 
+            np.isnan(vol_ma_4[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
-            if (close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]) or chop[i] > 61.8:
+            # Exit: price closes below open - ATR*2 OR trend turns bearish
+            if (close[i] < (prices['open'].iloc[i] - 2 * atr_aligned[i]) or 
+                close[i] < ema_20_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside previous day's range OR chop > 61.8
-            if (close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]) or chop[i] > 61.8:
+            # Exit: price closes above open + ATR*2 OR trend turns bullish
+            if (close[i] > (prices['open'].iloc[i] + 2 * atr_aligned[i]) or 
+                close[i] > ema_20_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
-            vol_ratio = volume[i] / vol_ma_3[i] if vol_ma_3[i] > 0 else 0
-            if (close[i] > r4_aligned[i] and 
-                vol_ratio > 2.0 and 
-                chop[i] < 61.8):
+            # Enter long: price closes above open + ATR*2 with volume confirmation AND bullish trend
+            vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
+            if (close[i] > (prices['open'].iloc[i] + 2 * atr_aligned[i]) and 
+                vol_ratio > 1.5 and 
+                close[i] > ema_20_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
-            elif (close[i] < s4_aligned[i] and 
-                  vol_ratio > 2.0 and 
-                  chop[i] < 61.8):
+            # Enter short: price closes below open - ATR*2 with volume confirmation AND bearish trend
+            elif (close[i] < (prices['open'].iloc[i] - 2 * atr_aligned[i]) and 
+                  vol_ratio > 1.5 and 
+                  close[i] < ema_20_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
