@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R reversal + 1d ATR-based volatility filter + volume confirmation
-# Williams %R identifies overbought/oversold conditions; 1d ATR filter ensures sufficient volatility for mean reversion to work
-# Volume confirmation adds conviction to reversals. Works in ranging markets (2025-2026 bear/range) and captures mean reversion swings.
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Hypothesis: 1h Camarilla pivot breakout + 4h volume confirmation + 1d trend filter
+# Camarilla levels provide precise intraday support/resistance; breakouts with volume confirm institutional participation
+# 1d EMA200 filters for higher timeframe trend alignment to avoid counter-trend whipsaws
+# Session filter (08-20 UTC) reduces noise during low-liquidity hours
+# Target: 60-150 total trades over 4 years (15-37/year) with discrete sizing 0.20
 
-name = "12h_1d_williamsr_atr_volume_v1"
-timeframe = "12h"
+name = "1h_4h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,96 +23,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ATR calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Precompute session hours (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop for volume confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period ATR for 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    tr1 = np.zeros(len(high_1d))
-    tr1[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(high_1d)):
-        tr1[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-    
-    atr_1d = np.zeros(len(high_1d))
-    if len(tr1) >= 14:
-        atr_1d[13] = np.mean(tr1[:14])
-        for i in range(14, len(tr1)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr1[i]) / 14
-    
-    # Align 1d ATR to 12h timeframe (wait for daily close)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 12h Williams %R (14-period)
-    williams_r = np.full(n, np.nan)
-    for i in range(n):
-        if i < 13:
-            williams_r[i] = np.nan
-        else:
-            highest_high = np.max(high[i-13:i+1])
-            lowest_low = np.min(low[i-13:i+1])
-            if highest_high == lowest_low:
-                williams_r[i] = -50.0  # avoid division by zero
-            else:
-                williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
-    
-    # Calculate 20-period average volume for volume confirmation
-    avg_volume = np.full(n, np.nan)
-    for i in range(n):
+    # Calculate 20-period average volume for 4h
+    vol_4h = df_4h['volume'].values
+    avg_vol_4h = np.full(len(vol_4h), np.nan)
+    for i in range(len(vol_4h)):
         if i < 20:
-            avg_volume[i] = np.nan
+            avg_vol_4h[i] = np.nan
         else:
-            avg_volume[i] = np.mean(volume[i-20:i])
+            avg_vol_4h[i] = np.mean(vol_4h[i-20:i])
+    
+    # Align 4h average volume to 1h (wait for 4h bar close)
+    avg_vol_4h_aligned = align_htf_to_ltf(prices, df_4h, avg_vol_4h)
+    
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema200 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 200:
+        multiplier = 2 / (200 + 1)
+        ema200[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema200[i] = (close_1d[i] * multiplier) + (ema200[i-1] * (1 - multiplier))
+    
+    # Align 1d EMA200 to 1h (wait for daily close)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(avg_volume[i]) or atr_1d_aligned[i] <= 0):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(avg_vol_4h_aligned[i]) or np.isnan(ema200_aligned[i]) or 
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * avg_volume[i]
-        
-        # Volatility filter: 1d ATR > 20-period average ATR (ensures sufficient market movement)
-        if i >= 20 + 100:  # enough history for ATR average
-            atr_avg = np.mean(atr_1d_aligned[max(100, i-20):i])
-            vol_filter = atr_1d_aligned[i] > atr_avg
-        else:
-            vol_filter = True  # allow trades during warmup of ATR average
-        
-        if position == 1:  # Long position
-            # Exit: Williams %R > -20 (overbought) OR loss of volume confirmation
-            if williams_r[i] > -20 or not volume_confirmed:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
+        # Calculate Camarilla levels for 1h using previous bar's range
+        if i >= 1:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            range_val = prev_high - prev_low
+            
+            if range_val > 0:
+                # Camarilla levels
+                h5 = prev_close + (range_val * 1.1 / 2)
+                h4 = prev_close + (range_val * 1.1 / 4)
+                h3 = prev_close + (range_val * 1.1 / 6)
+                l3 = prev_close - (range_val * 1.1 / 6)
+                l4 = prev_close - (range_val * 1.1 / 4)
+                l5 = prev_close - (range_val * 1.1 / 2)
                 
-        elif position == -1:  # Short position
-            # Exit: Williams %R < -80 (oversold) OR loss of volume confirmation
-            if williams_r[i] < -80 or not volume_confirmed:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat
-            # Entry logic with volume confirmation and volatility filter
-            if volume_confirmed and vol_filter:
-                # Long entry: Williams %R < -80 (oversold) - mean reversion long
-                if williams_r[i] < -80:
-                    position = 1
-                    signals[i] = 0.25
-                # Short entry: Williams %R > -20 (overbought) - mean reversion short
-                elif williams_r[i] > -20:
-                    position = -1
-                    signals[i] = -0.25
+                # Volume confirmation: current volume > 1.5x 4h average volume
+                volume_confirmed = volume[i] > 1.5 * avg_vol_4h_aligned[i]
+                
+                if position == 1:  # Long position
+                    # Exit: price < L3 (Camarilla support) OR trend turns bearish
+                    if close[i] < l3 or close[i] < ema200_aligned[i]:
+                        position = 0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = 0.20
+                        
+                elif position == -1:  # Short position
+                    # Exit: price > H3 (Camarilla resistance) OR trend turns bullish
+                    if close[i] > h3 or close[i] > ema200_aligned[i]:
+                        position = 0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = -0.20
+                else:  # Flat
+                    # Entry logic with volume confirmation and Camarilla breakout + trend filter
+                    if volume_confirmed:
+                        # Long entry: price > H3 AND bullish trend (price > EMA200)
+                        if close[i] > h3 and close[i] > ema200_aligned[i]:
+                            position = 1
+                            signals[i] = 0.20
+                        # Short entry: price < L3 AND bearish trend (price < EMA200)
+                        elif close[i] < l3 and close[i] < ema200_aligned[i]:
+                            position = -1
+                            signals[i] = -0.20
     
     return signals
