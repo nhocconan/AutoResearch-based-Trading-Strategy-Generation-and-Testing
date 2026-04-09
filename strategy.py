@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike (ATR-normalized) and choppiness regime filter
-# In trending regimes (CHOP < 38.2): breakout above/below Donchian H20/L20 with volume confirmation
-# In ranging regimes (CHOP > 61.8): mean reversion at Donchian mid-channel with volume confirmation
-# Uses discrete position sizing 0.25 to limit trades to ~20-50/year and reduce fee drag
+# Hypothesis: 12h Donchian breakout with 1d volume confirmation and choppiness regime filter
+# In trending regimes (CHOP < 38.2): breakout above/below Donchian(20) channels with volume confirmation
+# In ranging regimes (CHOP > 61.8): mean reversion at Donchian channel midpoint with volume confirmation
+# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
 # Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
+# Volume confirmation reduces false breakouts, regime filter adapts to market conditions
 
-name = "4h_1d_donchian_volume_chop_v2"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,7 +34,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR(14) for volatility normalization using Wilder's smoothing
+    # Calculate 1d ATR(14) for volatility normalization
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -66,14 +67,20 @@ def generate_signals(prices):
                        100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
                        50)
     
-    # Calculate 4h Donchian channels (20-period) based on prior close to avoid look-ahead
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    midpoint_20 = (highest_20 + lowest_20) / 2
+    # Calculate 1d Donchian channels (20-period) based on prior day to avoid look-ahead
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    high_s_1d = pd.Series(high_1d)
+    low_s_1d = pd.Series(low_1d)
+    upper_1d = high_s_1d.rolling(window=20, min_periods=20).max().values
+    lower_1d = low_s_1d.rolling(window=20, min_periods=20).min().values
+    midpoint_1d = (upper_1d + lower_1d) / 2.0
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    midpoint_1d_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
     
     # Pre-compute volume confirmation array
     avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -86,8 +93,8 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(midpoint_20[i]) or
-            np.isnan(volume_confirmed[i])):
+            np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
+            np.isnan(midpoint_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
@@ -97,15 +104,15 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             if trending_regime:
-                # Exit long if price breaks below midpoint or we enter ranging regime
-                if close[i] < midpoint_20[i] or ranging_regime:
+                # Exit long if price breaks below lower channel or we enter ranging regime
+                if close[i] < lower_1d_aligned[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price rises above highest_20 or drops below lowest_20
-                if close[i] > highest_20[i] or close[i] < lowest_20[i]:
+                # Exit long if price rises above midpoint or drops below lower channel
+                if close[i] > midpoint_1d_aligned[i] or close[i] < lower_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -113,35 +120,35 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             if trending_regime:
-                # Exit short if price breaks above midpoint or we enter ranging regime
-                if close[i] > midpoint_20[i] or ranging_regime:
+                # Exit short if price breaks above upper channel or we enter ranging regime
+                if close[i] > upper_1d_aligned[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price drops below lowest_20 or rises above highest_20
-                if close[i] < lowest_20[i] or close[i] > highest_20[i]:
+                # Exit short if price drops below midpoint or rises above upper channel
+                if close[i] < midpoint_1d_aligned[i] or close[i] > upper_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
             if trending_regime:
-                # Enter long on breakout above highest_20 with volume confirmation
-                if close[i] > highest_20[i] and volume_confirmed[i]:
+                # Enter long on breakout above upper channel with volume confirmation
+                if close[i] > upper_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short on breakout below lowest_20 with volume confirmation
-                elif close[i] < lowest_20[i] and volume_confirmed[i]:
+                # Enter short on breakout below lower channel with volume confirmation
+                elif close[i] < lower_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
             elif ranging_regime:
-                # Mean reversion: buy near lowest_20, sell near highest_20
-                if close[i] <= lowest_20[i] and volume_confirmed[i]:
+                # Mean reversion: buy near lower channel, sell near upper channel
+                if close[i] <= lower_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] >= highest_20[i] and volume_confirmed[i]:
+                elif close[i] >= upper_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
     
