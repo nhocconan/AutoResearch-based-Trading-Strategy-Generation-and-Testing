@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ATR-normalized volume spike + chop regime filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume/ATR expansion filter and chop regime
 # Donchian breakout captures medium-term trend structure proven on SOLUSDT test Sharpe 1.10-1.38
-# 1d volume spike normalized by ATR confirms institutional participation reducing false breakouts
+# 1d volume expansion (volume > 2.0 * 20-period average volume) confirms institutional participation
 # Chop regime filter adapts: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
-# Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Uses discrete sizing 0.25 to limit fee churn, targeting 75-200 total trades over 4 years (19-50/year)
 # Works in bull/bear: breakout catches trends, chop filter prevents whipsaws in ranging markets
 
-name = "4h_1d_donchian_volume_chop_v1"
+name = "4h_1d_donchian_volume_chop_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -81,22 +81,23 @@ def generate_signals(prices):
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
+    # Pre-calculate 20-period average volume from 1d data for efficiency
+    volume_s_1d = pd.Series(df_1d['volume'].values)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+            np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
+            np.isnan(avg_volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: volume > 2.0 * 20-period average volume (from 1d data aligned)
-        # Calculate 20-period average volume from 1d data
-        volume_s_1d = pd.Series(df_1d['volume'].values)
-        avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
-        avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
-        
         volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
         
         # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
