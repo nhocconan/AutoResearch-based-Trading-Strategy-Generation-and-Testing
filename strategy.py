@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v1
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d chop regime filter.
-# Long when price breaks above upper Donchian(20) + volume spike + chop > 61.8 (range).
-# Short when price breaks below lower Donchian(20) + volume spike + chop > 61.8 (range).
-# Uses discrete sizing (±0.25) to limit trades (~30-50/year) and avoid fee drag.
-# Works in bull/bear markets by using chop regime to avoid false breakouts in strong trends.
+# 6h_donchian_1d_pivot_breakout_v1
+# Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot filter for direction.
+# Long when price breaks above 6h Donchian high AND 1d close > R3 pivot (bullish bias).
+# Short when price breaks below 6h Donchian low AND 1d close < S3 pivot (bearish bias).
+# Volume confirmation: current 6h volume > 1.5x 20-period average.
+# Designed for low trade frequency (target: 50-150 total trades over 4 years) to avoid fee drag.
+# Works in bull/bear by using 1d pivot direction as regime filter.
+# Uses discrete sizing (±0.25) to minimize fee churn.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "6h_donchian_1d_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,61 +26,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load HTF data ONCE before loop
+    # 1d HTF data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Choppiness Index (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).sum().values
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1/2
+    # S3 = C - (H - L) * 1.1/2
+    # R4 = C + (H - L) * 1.1
+    # S4 = C - (H - L) * 1.1
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + range_1d * 1.1 / 2.0
+    s3_1d = close_1d - range_1d * 1.1 / 2.0
+    r4_1d = close_1d + range_1d * 1.1
+    s4_1d = close_1d - range_1d * 1.1
     
-    # High-Low range over 14 periods
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    hl_range = max_high - min_low
+    # Align 1d pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Chop = 100 * log10(sum(TR)/HL_range) / log10(14)
-    chop = 100 * np.log10(atr_1d / (hl_range + 1e-10)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # 6h Donchian channels (20-period)
+    # Donchian high = max(high, lookback=20)
+    # Donchian low = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 4h Donchian Channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # 4h volume confirmation (20-period average)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_series = pd.Series(volume)
+    volume_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 1.5 * volume_ma
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Chop regime: range-bound market (chop > 61.8)
-        ranging = chop_aligned[i] > 61.8
-        
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
-        
-        if ranging and volume_confirmed:
-            # Long: break above upper Donchian
-            if close[i] > highest_high[i]:
+        if position == 1:  # Long position
+            # Exit: price breaks below Donchian low OR 1d close < S3 (bearish shift)
+            if close[i] <= donchian_low[i] or close_1d[i] < s3_1d[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
                 signals[i] = 0.25
-            # Short: break below lower Donchian
-            elif close[i] < lowest_low[i]:
+                
+        elif position == -1:  # Short position
+            # Exit: price breaks above Donchian high OR 1d close > R3 (bullish shift)
+            if close[i] >= donchian_high[i] or close_1d[i] > r3_1d[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
                 signals[i] = -0.25
+        else:  # Flat
+            # Entry conditions with volume confirmation
+            if volume_confirmed[i]:
+                # Long: price breaks above Donchian high AND 1d close > R3 (bullish bias)
+                if close[i] > donchian_high[i] and close_1d[i] > r3_1d[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: price breaks below Donchian low AND 1d close < S3 (bearish bias)
+                elif close[i] < donchian_low[i] and close_1d[i] < s3_1d[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
