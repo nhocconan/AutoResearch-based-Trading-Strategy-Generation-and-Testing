@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h volume spike and ATR stoploss
-# - Uses 12h Camarilla pivot levels (H3/L3) for breakout entries on 4h timeframe
-# - Requires volume > 1.8 * 20-period volume average for confirmation (strict filter)
-# - Uses ATR(14) for dynamic stoploss (2.0 * ATR) and position sizing (0.25)
-# - Works in bull markets via breakouts above H3, in bear via breakdowns below L3
-# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to avoid fee drag
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and 1d volume confirmation
+# - Uses 4h HMA(21) for trend direction (long when price > HMA, short when price < HMA)
+# - Uses 1d Camarilla levels (H3, L3) for breakout entries on 1h timeframe
+# - Requires 1h volume > 1.5 * 20-period volume average for confirmation
+# - Uses session filter (08-20 UTC) to avoid low-liquidity hours
+# - Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years) to avoid fee drag
+# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
 
-name = "4h_12h_camarilla_pivot_breakout_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,29 +21,34 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 21 or len(df_1d) < 5:
         return np.zeros(n)
     
-    # 12h Camarilla pivot levels (H3, L3) - calculated from previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h HMA(21) for trend filter
+    close_4h = df_4h['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    wma_half = pd.Series(close_4h).rolling(window=half_len, min_periods=half_len).mean().values
+    wma_full = pd.Series(close_4h).rolling(window=21, min_periods=21).mean().values
+    raw_hma = 2 * wma_half - wma_full
+    hma_4h = pd.Series(raw_hma).rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_12h + low_12h + close_12h) / 3.0
-    # Range = H - L
-    range_12h = high_12h - low_12h
-    # H3 = PP + Range * 1.1 / 4
-    # L3 = PP - Range * 1.1 / 4
-    h3 = pp + (range_12h * 1.1 / 4.0)
-    l3 = pp - (range_12h * 1.1 / 4.0)
+    # 1d Camarilla levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    # Camarilla: H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
+    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Align Camarilla levels to 1h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Align Camarilla levels to 4h timeframe (use previous completed 12h bar)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
-    
-    # Pre-compute 4h ATR(14) for stoploss
+    # Pre-compute 1h ATR(14) for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -54,10 +60,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume confirmation: volume > 1.8 * 20-period average (strict)
+    # Pre-compute volume confirmation: volume > 1.5 * 20-period average
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -65,10 +75,10 @@ def generate_signals(prices):
     lowest_low_since_entry = 0.0
     
     for i in range(100, n):
-        # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(hma_4h_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(atr[i]) or atr[i] <= 0 or
-            np.isnan(volume_confirm[i])):
+            np.isnan(volume_confirm[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
@@ -88,7 +98,7 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Update lowest low since entry
@@ -106,18 +116,18 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Look for breakout entries with strict volume confirmation
-            if close[i] > h3_aligned[i] and volume_confirm[i]:  # Break above H3
+            # Look for breakout entries with trend and volume confirmation
+            if close[i] > h3_aligned[i] and close[i] > hma_4h_aligned[i] and volume_confirm[i]:  # Break above H3 with uptrend
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
-                signals[i] = 0.25
-            elif close[i] < l3_aligned[i] and volume_confirm[i]:  # Break below L3
+                signals[i] = 0.20
+            elif close[i] < l3_aligned[i] and close[i] < hma_4h_aligned[i] and volume_confirm[i]:  # Break below L3 with downtrend
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
