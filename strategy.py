@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_volume_regime_v3
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and choppiness regime filter.
-# Long when price touches Camarilla S3 level with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Short when price touches Camarilla R3 level with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Exit when price moves back to Camarilla H4/L4 levels or chop > 61.8 (ranging).
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
-# Works in both bull and bear markets: Camarilla levels provide intraday support/resistance, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
+# 4h_hma_volume_chop_regime_v1
+# Hypothesis: 4h strategy using Hull Moving Average (HMA) for trend direction, volume confirmation, and chop regime filter.
+# Long when price > HMA(21) with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Short when price < HMA(21) with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Exit when price crosses back through HMA(21).
+# Uses discrete position sizing (0.30) to minimize fee churn.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
+# Works in both bull and bear markets: HMA captures trend with less lag, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
+# Multi-timeframe: 12h HMA trend filter for higher timeframe confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_regime_v3"
-timeframe = "12h"
+name = "4h_hma_volume_chop_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,49 +31,23 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get daily HTF data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Hull Moving Average (HMA) calculation
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    close_s = pd.Series(close)
+    n_half = int(21 / 2)
+    n_sqrt = int(np.sqrt(21))
     
-    # Calculate Camarilla pivot levels from daily data
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    wma_half = close_s.rolling(window=n_half, min_periods=n_half).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    wma_full = close_s.rolling(window=21, min_periods=21).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
     
-    # Camarilla levels calculation
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # H3 = close + 1.125 * (high - low)
-    # L3 = close - 1.125 * (high - low)
-    # H2 = close + 0.75 * (high - low)
-    # L2 = close - 0.75 * (high - low)
-    # H1 = close + 0.5 * (high - low)
-    # L1 = close - 0.5 * (high - low)
-    # Pivot = (high + low + close) / 3
-    
-    high_low_range = prev_high - prev_low
-    camarilla_h4 = prev_close + 1.5 * high_low_range
-    camarilla_l4 = prev_close - 1.5 * high_low_range
-    camarilla_h3 = prev_close + 1.125 * high_low_range
-    camarilla_l3 = prev_close - 1.125 * high_low_range
-    camarilla_h2 = prev_close + 0.75 * high_low_range
-    camarilla_l2 = prev_close - 0.75 * high_low_range
-    camarilla_h1 = prev_close + 0.5 * high_low_range
-    camarilla_l1 = prev_close - 0.5 * high_low_range
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
-    
-    # Align HTF Camarilla levels to LTF (12h)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
-    h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
-    l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    raw_hma = 2 * wma_half - wma_full
+    hma = pd.Series(raw_hma).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
     
     # Choppiness Index regime filter (14-period)
     atr_period = 14
@@ -87,20 +62,33 @@ def generate_signals(prices):
     highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
     lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
     atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / denominator)
+    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
+    
+    # Multi-timeframe: 12h HMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    close_12h_s = pd.Series(close_12h)
+    wma_half_12h = close_12h_s.rolling(window=n_half, min_periods=n_half).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    wma_full_12h = close_12h_s.rolling(window=21, min_periods=21).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    raw_hma_12h = 2 * wma_half_12h - wma_full_12h
+    hma_12h = pd.Series(raw_hma_12h).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
+        if (np.isnan(hma[i]) or np.isnan(hma[i-1]) or 
+            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
             np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
+            np.isnan(hma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,34 +96,35 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
+        # HTF trend filter: price above/below 12h HMA
+        htf_uptrend = close[i] > hma_12h_aligned[i]
+        htf_downtrend = close[i] < hma_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price moves back to H4 level or chop > 61.8 (ranging market)
-            if close[i] >= h4_aligned[i] or chop[i] >= 61.8:
+            # Exit: price crosses below HMA(21)
+            if close[i] < hma[i] and close[i-1] >= hma[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price moves back to L4 level or chop > 61.8 (ranging market)
-            if close[i] <= l4_aligned[i] or chop[i] >= 61.8:
+            # Exit: price crosses above HMA(21)
+            if close[i] > hma[i] and close[i-1] <= hma[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
-            # Check for Camarilla level touches with volume and regime confirmation
-            # Long: price touches or goes below L3 level
-            # Short: price touches or goes above H3 level
-            long_touch = close[i] <= l3_aligned[i]
-            short_touch = close[i] >= h3_aligned[i]
+            # Check for price/HMA cross with volume, regime, and HTF confirmation
+            bullish_cross = (close[i] > hma[i] and close[i-1] <= hma[i-1]) and volume_confirmed and trending_market and htf_uptrend
+            bearish_cross = (close[i] < hma[i] and close[i-1] >= hma[i-1]) and volume_confirmed and trending_market and htf_downtrend
             
-            if long_touch and volume_confirmed and trending_market:
+            if bullish_cross:
                 position = 1
-                signals[i] = 0.25
-            elif short_touch and volume_confirmed and trending_market:
+                signals[i] = 0.30
+            elif bearish_cross:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
