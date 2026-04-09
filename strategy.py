@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_cloud_volume_v1
-# Hypothesis: 6h strategy using Ichimoku cloud from 1d for trend direction and 6h TK cross for entry timing.
-# Long: Price above 1d Ichimoku cloud, TK line crosses above Kijun line on 6h, volume > 1.5x 20-period average.
-# Short: Price below 1d Ichimoku cloud, TK line crosses below Kijun line on 6h, volume > 1.5x 20-period average.
-# Exit: Price crosses opposite TK/Kijun line or volume drops below average.
-# Uses Ichimoku cloud (Senkou Span A/B) from 1d for robust trend filtering that works in both bull and bear markets.
-# TK cross provides timely entries while cloud filter prevents counter-trend trades.
-# Target: 12-30 trades/year to minimize fee drag while maintaining edge.
+# 12h_daily_pivot_breakout_volume_v1
+# Hypothesis: 12h strategy using daily pivot levels (standard, not Camarilla) with volume confirmation and trend filter.
+# Long: Price breaks above R1 with volume > 1.5x 20-period average and 12h close > 12h EMA20.
+# Short: Price breaks below S1 with volume > 1.5x 20-period average and 12h close < 12h EMA20.
+# Exit: Price returns to pivot point (PP) for both long and short.
+# Uses standard pivot calculation: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H.
+# Target: 12-30 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
+# Standard pivots are widely watched and work in ranging markets (common in 2025 bear) while capturing breakouts in trends.
+# 12h timeframe reduces noise and overtrading vs lower timeframes.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_volume_v1"
-timeframe = "6h"
+name = "12h_daily_pivot_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,92 +31,85 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Ichimoku
+    # Get 1d data for standard pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    displacement = 26
+    # Calculate standard pivot points for each 1d bar
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Resistance 1: R1 = 2*PP - Low
+    r1 = 2 * pp - low_1d
+    # Support 1: S1 = 2*PP - High
+    s1 = 2 * pp - high_1d
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max()
-    low_9 = pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()
-    tenkan = (high_9 + low_9) / 2.0
+    # Align pivot levels to 12h
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max()
-    low_26 = pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()
-    kijun = (high_26 + low_26) / 2.0
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2
-    senkou_a = (tenkan + kijun) / 2.0
+    close_12h = df_12h['close'].values
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    high_52 = pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max()
-    low_52 = pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()
-    senkou_b = (high_52 + low_52) / 2.0
+    # 12h EMA20 for trend filter
+    close_12h_s = pd.Series(close_12h)
+    ema_20_12h = close_12h_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Ichimoku components to 6h
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan.values)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun.values)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a.values)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b.values)
+    # Align 12h EMA20 to 12h (no shift needed as both are 12h)
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(20, n):  # Start after volume MA warmup
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(high[i]) or np.isnan(low[i])):
+            np.isnan(ema_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine if price is above or below cloud
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        
-        # TK cross signals
-        tk_cross_above = tenkan_aligned[i] > kijun_aligned[i] and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-        tk_cross_below = tenkan_aligned[i] < kijun_aligned[i] and tenkan_aligned[i-1] >= kijun_aligned[i-1]
+        # 12h trend filter: close > EMA20 for uptrend, < EMA20 for downtrend
+        trend_12h_up = close_12h_aligned[i] > ema_20_12h_aligned[i]
+        trend_12h_down = close_12h_aligned[i] < ema_20_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: Price crosses below Kijun or volume drops
-            if (tenkan_aligned[i] < kijun_aligned[i]) or (not volume_confirmed):
+            # Exit: Price returns to pivot point (PP)
+            if close[i] <= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above Kijun or volume drops
-            if (tenkan_aligned[i] > kijun_aligned[i]) or (not volume_confirmed):
+            # Exit: Price returns to pivot point (PP)
+            if close[i] >= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price above cloud, TK crosses above Kijun, volume confirmed
-            if (price_above_cloud and tk_cross_above and volume_confirmed):
+            # Long entry: Price breaks above R1 with volume and 12h uptrend
+            if (close[i] > r1_aligned[i] and    # Break above R1
+                volume_confirmed and           # Volume spike
+                trend_12h_up):                 # 12h uptrend
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price below cloud, TK crosses below Kijun, volume confirmed
-            elif (price_below_cloud and tk_cross_below and volume_confirmed):
+            # Short entry: Price breaks below S1 with volume and 12h downtrend
+            elif (close[i] < s1_aligned[i] and  # Break below S1
+                  volume_confirmed and          # Volume spike
+                  trend_12h_down):              # 12h downtrend
                 position = -1
                 signals[i] = -0.25
     
