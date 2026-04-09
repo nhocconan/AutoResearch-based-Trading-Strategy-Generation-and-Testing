@@ -3,36 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v6"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Load weekly data ONCE before loop for weekly trend filter
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA(21) for trend filter
-    close_w = df_w['close'].values
-    ema_w = np.full(len(close_w), np.nan)
-    if len(close_w) >= 21:
-        alpha = 2.0 / (21 + 1)
-        ema_w[20] = np.mean(close_w[:21])
-        for i in range(21, len(close_w)):
-            ema_w[i] = alpha * close_w[i] + (1 - alpha) * ema_w[i-1]
-    
-    # Align weekly EMA to daily timeframe
-    ema_w_aligned = align_htf_to_ltf(prices, df_w, ema_w)
     
     # Load daily data ONCE before loop for Camarilla levels (using prior day's OHLC)
     df_d = get_htf_data(prices, '1d')
@@ -53,33 +36,32 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to daily timeframe (no shift needed for same timeframe)
-    r4_aligned = r4
-    s4_aligned = s4
-    prev_high_aligned = prev_high
-    prev_low_aligned = prev_low
+    # Align daily values to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_d, s4)
+    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Volume confirmation: 2-day average
-    vol_ma_2 = np.full(n, np.nan)
+    # Volume confirmation: 12-period average (12*12h = 144h = 6 days)
+    vol_ma_12 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 2:
-            vol_sum -= volume[i-2]
-        if i >= 1:
-            vol_ma_2[i] = vol_sum / 2
+        if i >= 12:
+            vol_sum -= volume[i-12]
+        if i >= 11:
+            vol_ma_12[i] = vol_sum / 12
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or 
             np.isnan(s4_aligned[i]) or 
             np.isnan(prev_high_aligned[i]) or 
             np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_2[i]) or 
-            np.isnan(ema_w_aligned[i])):
+            np.isnan(vol_ma_12[i])):
             signals[i] = 0.0
             continue
         
@@ -99,17 +81,13 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation and weekly uptrend
-            vol_ratio = volume[i] / vol_ma_2[i] if vol_ma_2[i] > 0 else 0
-            if (close[i] > r4_aligned[i] and 
-                vol_ratio > 1.5 and 
-                close[i] > ema_w_aligned[i]):
+            # Enter long: price closes above R4 with volume confirmation
+            vol_ratio = volume[i] / vol_ma_12[i] if vol_ma_12[i] > 0 else 0
+            if close[i] > r4_aligned[i] and vol_ratio > 1.8:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation and weekly downtrend
-            elif (close[i] < s4_aligned[i] and 
-                  vol_ratio > 1.5 and 
-                  close[i] < ema_w_aligned[i]):
+            # Enter short: price closes below S4 with volume confirmation
+            elif close[i] < s4_aligned[i] and vol_ratio > 1.8:
                 position = -1
                 signals[i] = -0.25
     
