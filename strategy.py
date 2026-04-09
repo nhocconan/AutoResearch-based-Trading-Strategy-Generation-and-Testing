@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-# 6h_camarilla_volume_breakout_v1
-# Hypothesis: Uses daily Camarilla pivot levels on 6h timeframe. 
-# Enters long on break above R3 with volume, short on break below S3 with volume.
-# Uses 12h trend filter to avoid counter-trend trades. 
-# Target: 12-30 trades/year (50-120 total over 4 years).
+# 12h_camarilla_volume_breakout_v1
+# Hypothesis: Uses daily Camarilla pivot levels on 12h timeframe. Enters long on break above R3 with volume, short on break below S3 with volume.
+# Uses 1d trend filter to avoid counter-trend trades. Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_volume_breakout_v1"
-timeframe = "6h"
+name = "12h_camarilla_volume_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -43,55 +41,53 @@ def generate_signals(prices):
     r4 = pivot + (range_hl * 1.1)
     s4 = pivot - (range_hl * 1.1)
     
-    # Align to 6h timeframe (using previous day's levels)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 12h timeframe (using previous day's levels)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate 12h trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate 1d trend filter (EMA25)
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # EMA25 on 12h
-    alpha_12h = 2 / (25 + 1)
-    ema25_12h = np.zeros(len(df_12h))
-    ema25_12h[0] = close_12h[0]
-    for i in range(1, len(df_12h)):
-        ema25_12h[i] = alpha_12h * close_12h[i] + (1 - alpha_12h) * ema25_12h[i-1]
+    close_1d = df_1d['close'].values
+    alpha_1d = 2 / (25 + 1)
+    ema25_1d = np.zeros(len(df_1d))
+    ema25_1d[0] = close_1d[0]
+    for i in range(1, len(df_1d)):
+        ema25_1d[i] = alpha_1d * close_1d[i] + (1 - alpha_1d) * ema25_1d[i-1]
     
-    # 12h trend: 1 if close > EMA25, -1 if close < EMA25
-    trend_12h = np.where(close_12h > ema25_12h, 1, -1)
-    trend_6h = align_htf_to_ltf(prices, df_12h, trend_12h)
+    # 1d trend: 1 if close > EMA25, -1 if close < EMA25
+    trend_1d = np.where(close_1d > ema25_1d, 1, -1)
+    trend_12h = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Volume filter: 20-period average
-    vol_ma_20 = np.zeros(n)
+    # Volume filter: 10-period average
+    vol_ma_10 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+        if i >= 10:
+            vol_sum -= volume[i-10]
+        if i >= 9:
+            vol_ma_10[i] = vol_sum / 10
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(10, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(trend_6h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(trend_12h[i]) or np.isnan(vol_ma_10[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5
+        vol_ok = volume[i] > vol_ma_10[i] * 1.5
         
         if position == 1:  # Long position
             # Exit: close below R3 or trend turns bearish
-            if close[i] < r3_6h[i] or trend_6h[i] == -1:
+            if close[i] < r3_12h[i] or trend_12h[i] == -1:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -99,22 +95,22 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: close above S3 or trend turns bullish
-            if close[i] > s3_6h[i] or trend_6h[i] == 1:
+            if close[i] > s3_12h[i] or trend_12h[i] == 1:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Enter long: break above R3 with volume and bullish trend
-            if (close[i] > r3_6h[i] and 
+            if (close[i] > r3_12h[i] and 
                 vol_ok and 
-                trend_6h[i] == 1):
+                trend_12h[i] == 1):
                 position = 1
                 signals[i] = 0.25
             # Enter short: break below S3 with volume and bearish trend
-            elif (close[i] < s3_6h[i] and 
+            elif (close[i] < s3_12h[i] and 
                   vol_ok and 
-                  trend_6h[i] == -1):
+                  trend_12h[i] == -1):
                 position = -1
                 signals[i] = -0.25
     
