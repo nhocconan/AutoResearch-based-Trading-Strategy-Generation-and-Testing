@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1w_donchian_breakout_v1
-# Hypothesis: Breakout above/below 20-period Donchian channel on 12h chart with 1-week trend filter (EMA 50).
-# Only take long when price > 1w EMA(50), short when price < 1w EMA(50).
-# Exit when price crosses 1w EMA(50) in opposite direction.
-# Uses volatility filter (ATR < 2.5% of price) and volume confirmation (volume > 1.5x 20-period avg).
-# Target: 12-37 trades/year (50-150 total over 4 years) with strict entry conditions.
-# Works in both bull and bear markets due to trend filter + volatility/volume filters reducing whipsaw.
+# 1d_1w_camarilla_breakout_v2
+# Hypothesis: Breakout above/below 1-day Camarilla pivot levels with weekly trend filter.
+# Long when price breaks above H3 with weekly uptrend (price > weekly EMA50).
+# Short when price breaks below L3 with weekly downtrend (price < weekly EMA50).
+# Exit when price returns to weekly EMA50.
+# Weekly trend filter prevents counter-trend trades in choppy markets.
+# Target: 10-25 trades/year (40-100 total over 4 years) with strict entry conditions.
+# Works in both bull and bear markets due to trend filter reducing false breakouts.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_donchian_breakout_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,7 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility filter
+    # Calculate True Range for ATR
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -34,24 +35,31 @@ def generate_signals(prices):
         lc = abs(low[i] - close[i-1])
         tr[i] = max(hl, hc, lc)
     
+    # ATR(14) for volatility filter
     atr = np.zeros(n)
     atr[0] = tr[0]
     for i in range(1, n):
         atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # Donchian channel (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Previous day's data for Camarilla calculation
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Load 1w data ONCE before loop for trend filter (EMA 50)
+    # Calculate Camarilla levels
+    range_val = prev_high - prev_low
+    camarilla_h3 = prev_close + range_val * 1.1 / 4
+    camarilla_l3 = prev_close - range_val * 1.1 / 4
+    
+    # Load weekly data ONCE before loop for trend filter (EMA 50)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA(50)
+    # Calculate weekly EMA(50)
     close_1w = df_1w['close'].values
     ema_1w = np.zeros_like(close_1w, dtype=float)
     ema_1w[0] = close_1w[0]
@@ -59,60 +67,43 @@ def generate_signals(prices):
     for i in range(1, len(close_1w)):
         ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
     
-    # Align 1w EMA to 12h timeframe
+    # Align weekly EMA to daily timeframe
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Volume confirmation - 20 period average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(1, n):  # Start after first bar (need previous day)
         # Skip if any required data is invalid
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility
-        vol_filter = atr[i] < 0.025 * close[i]  # ATR less than 2.5% of price
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5
-        
-        # Trend filter: price > 1w EMA for longs, price < 1w EMA for shorts
-        trend_long = close[i] > ema_1w_aligned[i]
-        trend_short = close[i] < ema_1w_aligned[i]
+        # Volatility filter: avoid extremely high volatility (>5% of price)
+        vol_filter = atr[i] < 0.05 * close[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below 1w EMA
-            if close[i] < ema_1w_aligned[i]:
+            # Exit: price returns to weekly EMA (mean reversion in trend)
+            if close[i] <= ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above 1w EMA
-            if close[i] > ema_1w_aligned[i]:
+            # Exit: price returns to weekly EMA
+            if close[i] >= ema_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume confirmation, volatility filter, and trend filter
-            if close[i] > donchian_high[i] and vol_ok and vol_filter and trend_long:
+            # Enter long: price breaks above H3 with volatility filter and weekly uptrend
+            if close[i] > camarilla_h3[i] and vol_filter and close[i] > ema_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume confirmation, volatility filter, and trend filter
-            elif close[i] < donchian_low[i] and vol_ok and vol_filter and trend_short:
+            # Enter short: price breaks below L3 with volatility filter and weekly downtrend
+            elif close[i] < camarilla_l3[i] and vol_filter and close[i] < ema_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
