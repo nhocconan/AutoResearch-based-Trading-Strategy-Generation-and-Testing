@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ATR-based volume confirmation + chop regime filter
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter
 # Donchian breakout captures momentum in both bull and bear markets
-# 1d volume spike (volume > 2.0 * ATR-scaled average volume) confirms breakout authenticity
-# Choppiness index regime filter: CHOP > 61.8 = range (mean revert at bands), CHOP < 38.2 = trending (follow breakout)
+# 1d volume spike (volume > 2.0 * 20-period average volume) confirms breakout authenticity
+# Choppiness index regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
 # Works in bull/bear: regime filter adapts, breakout captures strong moves
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.30
 
-name = "4h_1d_donchian_volume_chop_v4"
+name = "4h_1d_donchian_volume_chop_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,7 +29,13 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for volume normalization
+    # Calculate 1d average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_s_1d = pd.Series(volume_1d)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    
+    # Calculate 1d Choppiness Index (CHOP)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -54,14 +60,6 @@ def generate_signals(prices):
     
     atr_1d = wilders_smoothing(tr, 14)
     
-    # Calculate 1d average volume (20-period) normalized by ATR
-    volume_1d = df_1d['volume'].values
-    volume_s_1d = pd.Series(volume_1d)
-    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
-    # Normalize volume by ATR to get volume volatility ratio
-    vol_ratio_1d = np.where(atr_1d > 0, avg_volume_1d / atr_1d, np.nan)
-    avg_vol_ratio_1d = pd.Series(vol_ratio_1d).rolling(window=20, min_periods=20).mean().values
-    
     # Calculate 1d Choppiness Index (CHOP)
     hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
@@ -74,7 +72,7 @@ def generate_signals(prices):
                        50)  # neutral when range is zero
     
     # Align 1d indicators to 4h timeframe (wait for 1d bar close)
-    avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # Calculate 4h Donchian channels (20-period)
@@ -87,29 +85,11 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 2.0 * (1d avg volume ratio * current 1d ATR)
-        # Get current 1d ATR value (aligned)
-        current_atr_1d = atr_1d[-1] if len(atr_1d) > 0 else np.nan  # Simplified - we'll use the aligned approach below
-        # Instead, we'll use the volume ratio directly: volume > threshold * avg_vol_ratio * atr
-        # Since we normalized volume by ATR, we compare raw volume to (avg_vol_ratio * atr)
-        # But we need current 1d ATR - let's get it from the 1d data properly
-        
-        # Recalculate current 1d ATR for this bar (simplified approach)
-        if i >= 20:  # We need enough lookback for 1d calculations
-            # For simplicity, we'll use a rolling ATR calculation on the 1d data
-            # But since we're aligning, we'll use the last available ATR value
-            pass
-        
-        # Simpler volume confirmation: volume > 2.0 * 20-period average volume
-        # Calculate 20-period average volume from 1d data
-        volume_s_1d = pd.Series(df_1d['volume'].values)
-        avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
-        avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
-        
+        # Volume confirmation: current 4h volume > 2.0 * 1d average volume
         volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
         
         # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
