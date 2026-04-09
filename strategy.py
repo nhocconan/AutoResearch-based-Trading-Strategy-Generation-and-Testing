@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d ATR regime filter
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 12h ATR regime filter
 # Uses Camarilla pivot levels (H3/L3) from 1d for breakout triggers, confirmed by volume spike (>2.0x avg)
-# Only takes breakouts when 1d ATR(14) is below its 50-period MA (low volatility regime) for reliability
+# Only takes breakouts when 12h ATR(14) is below its 50-period MA (low volatility regime) for reliability
 # Position size 0.25 to manage drawdown and enable multiple concurrent positions
-# Target: 50-150 total trades over 4 years (12-37/year) to balance edge and fee drag
-# Works in both bull/bear: 1d ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
+# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
+# Works in both bull/bear: 12h ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
 
-name = "12h_1d_camarilla_volume_atr_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,39 +24,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots and ATR regime filter
+    # Load 1d data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 60:
         return np.zeros(n)
-    
-    # Calculate 1d ATR(14) for regime filter
-    tr_1d = np.full(len(df_1d), np.nan)
-    atr_1d = np.full(len(df_1d), np.nan)
-    
-    for i in range(1, len(df_1d)):
-        tr = max(
-            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-        )
-        tr_1d[i] = tr
-    
-    # Calculate ATR with Wilder's smoothing
-    for i in range(len(df_1d)):
-        if i < 14:
-            atr_1d[i] = np.nan
-        elif i == 14:
-            atr_1d[i] = np.nanmean(tr_1d[1:15])
-        else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
-    
-    # Calculate 50-period MA of ATR for regime filter
-    atr_ma_50 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        if i < 50:
-            atr_ma_50[i] = np.nan
-        else:
-            atr_ma_50[i] = np.mean(atr_1d[i-50:i])
     
     # Calculate Camarilla pivot levels (H3, L3) from 1d OHLC
     camarilla_h3 = np.full(len(df_1d), np.nan)
@@ -75,11 +46,47 @@ def generate_signals(prices):
             camarilla_h3[i] = prev_close + range_val * 1.1 / 4
             camarilla_l3[i] = prev_close - range_val * 1.1 / 4
     
-    # Align 1d indicators to 12h timeframe
-    camarilla_h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    atr_ma_50_12h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Load 12h data ONCE before loop for ATR regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
+        return np.zeros(n)
+    
+    # Calculate 12h ATR(14)
+    tr_12h = np.full(len(df_12h), np.nan)
+    atr_12h = np.full(len(df_12h), np.nan)
+    
+    for i in range(1, len(df_12h)):
+        tr = max(
+            df_12h['high'].iloc[i] - df_12h['low'].iloc[i],
+            abs(df_12h['high'].iloc[i] - df_12h['close'].iloc[i-1]),
+            abs(df_12h['low'].iloc[i] - df_12h['close'].iloc[i-1])
+        )
+        tr_12h[i] = tr
+    
+    # Calculate ATR with Wilder's smoothing
+    for i in range(len(df_12h)):
+        if i < 14:
+            atr_12h[i] = np.nan
+        elif i == 14:
+            atr_12h[i] = np.nanmean(tr_12h[1:15])
+        else:
+            atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
+    
+    # Calculate 50-period MA of ATR for regime filter
+    atr_ma_50 = np.full(len(df_12h), np.nan)
+    for i in range(len(df_12h)):
+        if i < 50:
+            atr_ma_50[i] = np.nan
+        else:
+            atr_ma_50[i] = np.mean(atr_12h[i-50:i])
+    
+    # Align 1d indicators to 4h timeframe
+    camarilla_h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Align 12h indicators to 4h timeframe
+    atr_ma_50_4h = align_htf_to_ltf(prices, df_12h, atr_ma_50)
+    atr_4h = align_htf_to_ltf(prices, df_12h, atr_12h)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -94,10 +101,10 @@ def generate_signals(prices):
     
     for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_12h[i]) or 
-            np.isnan(camarilla_l3_12h[i]) or 
-            np.isnan(atr_ma_50_12h[i]) or 
-            np.isnan(atr_12h[i]) or 
+        if (np.isnan(camarilla_h3_4h[i]) or 
+            np.isnan(camarilla_l3_4h[i]) or 
+            np.isnan(atr_ma_50_4h[i]) or 
+            np.isnan(atr_4h[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -106,11 +113,11 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 2.0 * avg_volume[i]
         
         # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
-        atr_regime = atr_12h[i] < atr_ma_50_12h[i]
+        atr_regime = atr_4h[i] < atr_ma_50_4h[i]
         
         if position == 1:  # Long position
             # Exit conditions: price closes below Camarilla L3 OR ATR regime turns unfavorable
-            if close[i] < camarilla_l3_12h[i] or not atr_regime:
+            if close[i] < camarilla_l3_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -118,7 +125,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions: price closes above Camarilla H3 OR ATR regime turns unfavorable
-            if close[i] > camarilla_h3_12h[i] or not atr_regime:
+            if close[i] > camarilla_h3_4h[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -127,11 +134,11 @@ def generate_signals(prices):
             # Entry logic: Camarilla breakout with volume confirmation and ATR regime filter
             if volume_confirm and atr_regime:
                 # Long breakout: price closes above Camarilla H3
-                if close[i] > camarilla_h3_12h[i]:
+                if close[i] > camarilla_h3_4h[i]:
                     position = 1
                     signals[i] = 0.25
                 # Short breakout: price closes below Camarilla L3
-                elif close[i] < camarilla_l3_12h[i]:
+                elif close[i] < camarilla_l3_4h[i]:
                     position = -1
                     signals[i] = -0.25
     
