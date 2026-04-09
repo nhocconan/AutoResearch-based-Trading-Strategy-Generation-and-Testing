@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume spike confirmation
-# - Uses 12h Donchian channel breakout (20-period) for entries in direction of 1d EMA trend
-# - Requires volume > 2.0x 20-period average to confirm breakout strength (stricter for fewer trades)
-# - ATR(14) trailing stop at 2.0x ATR from extreme to manage risk
-# - Position size: 0.25 (25% of capital) for balanced risk/return
-# - Target: ~15-25 trades/year (60-100 total over 4 years) to minimize fee drag
-# - Donchian breakouts capture strong trends, EMA filter avoids counter-trend trades, volume confirmation improves quality
-# - Works in bull markets (long breakouts) and bear markets (short breakdowns)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume spike confirmation
+# - Uses 4h Donchian channel breakout (20-period) for entries in direction of 1d EMA trend
+# - Requires volume > 2.0x 20-period average to confirm breakout strength (stricter than prior)
+# - ATR(14) trailing stop at 2.0x ATR from extreme (tighter stop for better risk control)
+# - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
+# - Target: ~25 trades/year (100 total over 4 years) to stay well under fee drag threshold
+# - Donchian breakouts capture strong trends, 1d EMA filter avoids counter-trend trades in bear markets, volume confirmation improves quality
+# - Designed to work in BOTH bull markets (long breakouts) and bear markets (short breakdowns) with proper risk management
 
-name = "12h_donchian_ema1d_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_ema1d_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,21 +33,21 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h price data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channel (20-period)
+    # 4h Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 12h volume > 2.0x 20-period average (volume confirmation - stricter)
+    # 4h volume > 2.0x 20-period average (stricter volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * avg_volume_20)
     
-    # 12h ATR(14) for trailing stop
+    # 4h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -76,7 +76,7 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.0x ATR from high
+            # Exit conditions: price retraces 2.0x ATR from high (tighter stop)
             if low[i] <= highest_since_entry - (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
@@ -88,7 +88,7 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.0x ATR from low
+            # Exit conditions: price retraces 2.0x ATR from low (tighter stop)
             if high[i] >= lowest_since_entry + (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
