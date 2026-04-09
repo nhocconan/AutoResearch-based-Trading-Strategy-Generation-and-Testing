@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_rsi_momentum_volume_v1
-# Hypothesis: 4-hour RSI momentum with volume confirmation works in both bull and bear markets.
-# Uses RSI(14) > 60 for long momentum and < 40 for short momentum, requiring volume > 1.5x 20-period average.
-# Includes dynamic exit: reverse signal or volume drop below average. Position size 0.25.
-# Target: 20-40 trades/year (80-160 over 4 years) with balanced win/loss.
+# 4h_ema_trend_volume_breakout_v1
+# Hypothesis: EMA trend alignment (4h EMA50 > 200) with volume breakout (volume > 2x 20-period avg) captures strong trends in both bull and bear markets.
+# Uses 12h EMA200 as higher timeframe filter to avoid counter-trend trades. Position size 0.25 for capital preservation.
+# Target: 20-30 trades/year (80-120 over 4 years) with focus on quality over quantity.
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_rsi_momentum_volume_v1"
+name = "4h_ema_trend_volume_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,51 +22,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # EMA calculations
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma_20 * 1.5
+    vol_threshold = vol_ma_20 * 2.0
+    
+    # Higher timeframe trend filter (12h EMA200)
+    df_12h = get_htf_data(prices, '12h')
+    ema_200_12h = pd.Series(df_12h['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(200, n):  # Wait for EMA200 warmup
         # Skip if any required data is NaN
-        if np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or 
+            np.isnan(ema_200_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Determine trend based on 4h EMA alignment
+        uptrend_4h = ema_50[i] > ema_200[i]
+        downtrend_4h = ema_50[i] < ema_200[i]
+        
+        # Higher timeframe filter: only trade in direction of 12h trend
+        uptrend_12h = close[i] > ema_200_12h_aligned[i]
+        downtrend_12h = close[i] < ema_200_12h_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: RSI < 40 (momentum lost) or volume drops below average
-            if rsi[i] < 40 or volume[i] < vol_ma_20[i]:
+            # Exit: trend reversal or volume drops below average
+            if not uptrend_4h or volume[i] < vol_ma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI > 60 (momentum lost) or volume drops below average
-            if rsi[i] > 60 or volume[i] < vol_ma_20[i]:
+            # Exit: trend reversal or volume drops below average
+            if not downtrend_4h or volume[i] < vol_ma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: RSI > 60 with volume confirmation (bullish momentum)
-            if rsi[i] > 60 and volume[i] > vol_threshold[i]:
+            # Enter long: 4h uptrend + 12h uptrend + volume breakout
+            if (uptrend_4h and uptrend_12h and volume[i] > vol_threshold[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: RSI < 40 with volume confirmation (bearish momentum)
-            elif rsi[i] < 40 and volume[i] > vol_threshold[i]:
+            # Enter short: 4h downtrend + 12h downtrend + volume breakout
+            elif (downtrend_4h and downtrend_12h and volume[i] > vol_threshold[i]):
                 position = -1
                 signals[i] = -0.25
     
