@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 1d_weekly_camarilla_pivot_volume_regime_v1
-# Hypothesis: 1d strategy using weekly Camarilla pivot levels with volume confirmation and choppiness regime filter.
-# Long: Price touches weekly L3 level with volume > 1.5x 20-period average and chop > 61.8 (range market).
-# Short: Price touches weekly H3 level with volume > 1.5x 20-period average and chop > 61.8 (range market).
-# Exit: Price moves to opposite H3/L3 level or closes beyond H4/L4 (breakout).
-# Uses weekly trend filter: only long when weekly close > weekly EMA20, only short when weekly close < weekly EMA20.
-# Target: 15-25 trades/year to minimize fee drag while capturing mean reversion in ranging markets.
-# Camarilla pivots work well in ranging markets (chop > 61.8) which frequently occur in BTC/ETH during bear phases.
+# 6h_camarilla_pivot_volume_v1
+# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation and 12h trend filter.
+# Long: Price breaks above R3 with volume > 2x 20-period average and 12h close > 12h EMA20.
+# Short: Price breaks below S3 with volume > 2x 20-period average and 12h close < 12h EMA20.
+# Exit: Price returns to pivot point (PP) for both long and short.
+# Uses 12h EMA20 for trend filter: only long when 12h close > 12h EMA20, only short when 12h close < 12h EMA20.
+# Target: 12-30 trades/year to minimize fee drag while maintaining edge.
+# Camarilla pivots work well in ranging markets (common in 2025 bear) and capture breakouts in trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_camarilla_pivot_volume_regime_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,134 +25,105 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_prices = prices['open'].values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get weekly data for Camarilla pivots and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need at least 20 periods for EMA
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels (based on previous week)
-    # Camarilla: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
-    #          L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
-    # Using previous week's high, low, close
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_open_1w = np.roll(open_1w, 1)
+    # Calculate Camarilla pivot levels for each 1d bar
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Range = High - Low
+    range_1d = high_1d - low_1d
     
-    # First week has no previous data
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    prev_close_1w[0] = close_1w[0]
-    prev_open_1w[0] = open_1w[0]
+    # Resistance levels
+    r1 = pp + (range_1d * 1.0 / 8.0)
+    r2 = pp + (range_1d * 2.0 / 8.0)
+    r3 = pp + (range_1d * 3.0 / 8.0)
+    r4 = pp + (range_1d * 4.0 / 8.0)
     
-    # Camarilla levels
-    camarilla_range = prev_high_1w - prev_low_1w
-    h4 = prev_close_1w + 1.1 * camarilla_range * 1.1 / 2.0
-    h3 = prev_close_1w + 1.1 * camarilla_range * 1.1 / 4.0
-    l3 = prev_close_1w - 1.1 * camarilla_range * 1.1 / 4.0
-    l4 = prev_close_1w - 1.1 * camarilla_range * 1.1 / 2.0
+    # Support levels
+    s1 = pp - (range_1d * 1.0 / 8.0)
+    s2 = pp - (range_1d * 2.0 / 8.0)
+    s3 = pp - (range_1d * 3.0 / 8.0)
+    s4 = pp - (range_1d * 4.0 / 8.0)
     
-    # Align weekly Camarilla levels to daily
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    # Align Camarilla levels to 6h
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Weekly trend filter: EMA20
-    close_1w_s = pd.Series(close_1w)
-    ema_20_1w = close_1w_s.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
     
-    # Choppiness Index regime filter (14-period)
-    # CHOP = 100 * log10(sum(ATR14) / (max(high14) - min(low14))) / log10(14)
-    # CHOP > 61.8 = ranging market (good for mean reversion)
-    # CHOP < 38.2 = trending market
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
+    close_12h = df_12h['close'].values
+    open_12h = df_12h['open'].values
     
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = abs(high_s - close_s.shift(1))
-    tr3 = abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).mean().values
+    # 12h EMA20 for trend filter
+    close_12h_s = pd.Series(close_12h)
+    ema_20_12h = close_12h_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Sum of ATR14
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    max_high14 = high_s.rolling(window=14, min_periods=14).max().values
-    min_low14 = low_s.rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = np.zeros(n)
-    for i in range(n):
-        if (max_high14[i] - min_low14[i]) > 0 and not np.isnan(sum_atr14[i]):
-            chop[i] = 100 * np.log10(sum_atr14[i] / (max_high14[i] - min_low14[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when undefined
+    # Align 12h EMA20 to 6h
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    open_12h_aligned = align_htf_to_ltf(prices, df_12h, open_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(20, n):  # Start after volume MA warmup
         # Skip if any required data is NaN
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or
-            np.isnan(volume[i]) or np.isnan(chop[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(ema_20_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or
+            np.isnan(open_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: chop > 61.8 = ranging market (good for mean reversion)
-        ranging_market = chop[i] > 61.8
-        # Weekly trend filter
-        weekly_uptrend = close_1w_aligned[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close_1w_aligned[i] < ema_20_1w_aligned[i]
+        # Volume confirmation: current volume > 2x 20-period average
+        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # 12h trend filter: close > EMA20 for uptrend, < EMA20 for downtrend
+        trend_12h_up = close_12h_aligned[i] > ema_20_12h_aligned[i]
+        trend_12h_down = close_12h_aligned[i] < ema_20_12h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: Price moves to L3 level or closes below L4 (breakdown)
-            if close[i] <= l3_aligned[i] or close[i] < l4_aligned[i]:
+            # Exit: Price returns to pivot point (PP)
+            if close[i] <= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price moves to H3 level or closes above H4 (breakout)
-            if close[i] >= h3_aligned[i] or close[i] > h4_aligned[i]:
+            # Exit: Price returns to pivot point (PP)
+            if close[i] >= pp_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price touches L3 level with volume, ranging market, and weekly uptrend bias
-            if (abs(close[i] - l3_aligned[i]) < (high[i] - low[i]) * 0.1 and  # Touches L3 (within 10% of daily range)
-                volume_confirmed and                       # Volume spike
-                ranging_market and                         # Ranging market (chop > 61.8)
-                weekly_uptrend):                           # Weekly uptrend bias
+            # Long entry: Price breaks above R3 with volume and 12h uptrend
+            if (close[i] > r3_aligned[i] and    # Break above R3
+                volume_confirmed and           # Volume spike
+                trend_12h_up):                 # 12h uptrend
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price touches H3 level with volume, ranging market, and weekly downtrend bias
-            elif (abs(close[i] - h3_aligned[i]) < (high[i] - low[i]) * 0.1 and  # Touches H3 (within 10% of daily range)
-                  volume_confirmed and                     # Volume spike
-                  ranging_market and                       # Ranging market (chop > 61.8)
-                  weekly_downtrend):                       # Weekly downtrend bias
+            # Short entry: Price breaks below S3 with volume and 12h downtrend
+            elif (close[i] < s3_aligned[i] and  # Break below S3
+                  volume_confirmed and          # Volume spike
+                  trend_12h_down):              # 12h downtrend
                 position = -1
                 signals[i] = -0.25
     
