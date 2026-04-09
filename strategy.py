@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w volume spike and ATR stoploss
-# - Uses 1w Donchian(20) channels for breakout entries on 1d timeframe
-# - Requires volume > 2.0 * 20-period volume average for confirmation (strict filter)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and ATR stoploss
+# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 12h timeframe
+# - Requires volume > 2.0 * 20-period volume average for confirmation
 # - Uses ATR(14) for dynamic stoploss (2.5 * ATR) and position sizing (0.25)
-# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
-# - Target: 10-20 trades/year on 1d timeframe (40-80 total over 4 years) to avoid fee drag
+# - Works in bull markets via breakouts above H3, in bear via breakdowns below L3
+# - Target: 12-30 trades/year on 12h timeframe (48-120 total over 4 years) to avoid fee drag
 
-name = "1d_1w_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,24 +20,28 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1w Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 1d OHLC for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Upper channel: highest high of last 20 weeks
-    upper_channel = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Lower channel: lowest low of last 20 weeks
-    lower_channel = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate daily pivot and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Align Donchian levels to 1d timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_channel)
+    # Camarilla levels: H3/L3 are key breakout levels
+    h3 = close_1d + range_1d * 1.1 / 4.0  # approx: close + 1.1*(HL)/4
+    l3 = close_1d - range_1d * 1.1 / 4.0  # approx: close - 1.1*(HL)/4
     
-    # Pre-compute 1d ATR(14) for stoploss
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    
+    # Pre-compute 12h ATR(14) for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(atr[i]) or atr[i] <= 0 or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
@@ -77,7 +81,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < lower_aligned[i]:  # Mean reversion exit (break below lower channel)
+            elif close[i] < l3_aligned[i]:  # Mean reversion exit (break below L3)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -95,7 +99,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > upper_aligned[i]:  # Mean reversion exit (break above upper channel)
+            elif close[i] > h3_aligned[i]:  # Mean reversion exit (break above H3)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -104,12 +108,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Look for breakout entries with strict volume confirmation
-            if close[i] > upper_aligned[i] and volume_confirm[i]:  # Break above upper channel
+            if close[i] > h3_aligned[i] and volume_confirm[i]:  # Break above H3
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif close[i] < lower_aligned[i] and volume_confirm[i]:  # Break below lower channel
+            elif close[i] < l3_aligned[i] and volume_confirm[i]:  # Break below L3
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
