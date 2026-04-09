@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + ADX regime with 1d trend filter
-# - Uses 1d EMA(50) as primary trend filter (bull if price > EMA50, bear if price < EMA50)
-# - In bull regime: long when Elder Ray Bull Power > 0 and ADX(14) > 20
-# - In bear regime: short when Elder Ray Bear Power < 0 and ADX(14) > 20
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-25 trades/year on 6h (50-100 total over 4 years)
-# - Combines trend strength (ADX) with momentum (Elder Ray) for high-conviction entries
-# - Works in bull markets via Bull Power + ADX, in bear via Bear Power + ADX
+# Hypothesis: 12h Williams Alligator with 1d volume confirmation and ATR stoploss
+# - Uses 12h Williams Alligator (Jaw=13, Teeth=8, Lips=5) for trend direction
+# - Requires 1d volume > 1.5 * 20-period volume average for confirmation
+# - Uses ATR(14) for dynamic stoploss (2.5 * ATR) and position sizing (0.25)
+# - Alligator convergence/divergence filters whipsaws in ranging markets
+# - Works in bull markets via teeth above lips, in bear via teeth below lips
+# - Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years) to avoid fee drag
+# - Williams Alligator provides smoothed trend identification that adapts to volatility
 
-name = "6h_1d_elder_ray_adx_regime_v2"
-timeframe = "6h"
+name = "12h_1d_williams_alligator_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,92 +23,100 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend regime
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d volume confirmation: volume > 1.5 * 20-period average
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1d = volume_1d > (1.5 * vol_ma_1d)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
     
-    # Pre-compute 6h indicators
+    # Pre-compute 12h Williams Alligator
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    median = (high + low) / 2.0
     
-    # EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    jaw = pd.Series(median).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # shift forward by 8 periods
+    teeth = pd.Series(median).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # shift forward by 5 periods
+    lips = pd.Series(median).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # shift forward by 3 periods
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    jaw_vals = jaw.values
+    teeth_vals = teeth.values
+    lips_vals = lips.values
     
-    # ADX(14) for trend strength
-    # True Range
+    # Pre-compute 12h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM-
-    tr_period = 14
-    atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / np.where(atr != 0, atr, 1e-10)
-    di_minus = 100 * dm_minus_smooth / np.where(atr != 0, atr, 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) != 0, (di_plus + di_minus), 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(adx[i]) or adx[i] <= 0):
+        if (np.isnan(jaw_vals[i]) or np.isnan(teeth_vals[i]) or np.isnan(lips_vals[i]) or
+            np.isnan(atr[i]) or atr[i] <= 0 or
+            np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine regime: bull if price > 1d EMA50, bear if price < 1d EMA50
-        is_bull_regime = close[i] > ema_50_1d_aligned[i]
-        is_bear_regime = close[i] < ema_50_1d_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit conditions: regime change or loss of momentum
-            if not is_bull_regime or adx[i] < 20 or bull_power[i] <= 0:
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, high[i])
+            
+            # Exit conditions: stoploss or trend reversal
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
+                signals[i] = 0.0
+            elif teeth_vals[i] < lips_vals[i]:  # Trend reversal (teeth below lips)
+                position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: regime change or loss of momentum
-            if not is_bear_regime or adx[i] < 20 or bear_power[i] >= 0:
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+            
+            # Exit conditions: stoploss or trend reversal
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
+                signals[i] = 0.0
+            elif teeth_vals[i] > lips_vals[i]:  # Trend reversal (teeth above lips)
+                position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for regime-aligned entries with momentum confirmation
-            if is_bull_regime and adx[i] > 20 and bull_power[i] > 0:
+            # Look for trend entries with volume confirmation
+            if teeth_vals[i] > lips_vals[i] and volume_confirm_aligned[i]:  # Uptrend (teeth above lips)
                 position = 1
+                highest_high_since_entry = high[i]
+                lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif is_bear_regime and adx[i] > 20 and bear_power[i] < 0:
+            elif teeth_vals[i] < lips_vals[i] and volume_confirm_aligned[i]:  # Downtrend (teeth below lips)
                 position = -1
+                highest_high_since_entry = high[i]
+                lowest_low_since_entry = low[i]
                 signals[i] = -0.25
     
     return signals
