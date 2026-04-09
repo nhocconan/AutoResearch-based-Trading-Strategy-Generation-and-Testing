@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy combining Donchian(20) breakout with 1w ADX regime filter and volume confirmation
-# Donchian breakout captures momentum in trending markets
-# 1w ADX > 25 filters for strong trending regime (avoids whipsaws in ranging markets)
-# Volume confirmation requires current volume > 1.5 * 20-period average to avoid false breakouts
-# In trending regime (ADX > 25): long when price breaks above Donchian(20) upper band, short when breaks below lower band
-# Exit when price returns to Donchian(20) middle band or ADX drops below 20 (regime change)
-# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
-# Works in bull/bear markets: trend following in strong trends, avoids trading in weak/choppy markets
+# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation
+# Camarilla levels provide structured support/resistance based on prior day's range
+# Fade at R3/S3 levels (mean reversion in ranging markets)
+# Breakout continuation at R4/S4 levels (trend following in strong moves)
+# Volume filter ensures breakouts/ reversals have participation
+# Works in bull/bear markets: mean reversion in ranges, trend following on breakouts
+# Target: 12-37 trades/year via tight entry conditions at specific pivot levels
 
-name = "12h_1w_donchian_breakout_adx_volume_v1"
-timeframe = "12h"
+name = "6h_1d_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,115 +25,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w ADX(14)
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
+    # Calculate 1d Camarilla pivot levels
+    # Based on prior day's OHLC
+    pivot = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3.0
+    range_1d = high_1d[:-1] - low_1d[:-1]
     
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = np.abs(high[1:] - low[:-1])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        atr = wilders_smoothing(tr, period)
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smoothed DM
-        plus_dm_smooth = wilders_smoothing(plus_dm, period)
-        minus_dm_smooth = wilders_smoothing(minus_dm, period)
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        
-        # DX and ADX
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        adx = wilders_smoothing(dx, period)
-        
-        return adx
+    # Camarilla levels
+    r4 = pivot + (range_1d * 1.1 / 2)
+    r3 = pivot + (range_1d * 1.1 / 4)
+    s3 = pivot - (range_1d * 1.1 / 4)
+    s4 = pivot - (range_1d * 1.1 / 2)
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    # Align Camarilla levels to 6h timeframe (using prior day's levels)
+    r4_6h = align_htf_to_ltf(prices, df_1d[:-1], r4)  # shift by 1 to avoid look-ahead
+    r3_6h = align_htf_to_ltf(prices, df_1d[:-1], r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d[:-1], s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d[:-1], s4)
     
-    # Calculate Donchian channels (20-period) on primary timeframe
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
-    
-    # Middle band
-    middle_band = (highest_high + lowest_low) / 2
-    
-    # Calculate volume average (20-period)
-    volume_avg = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        volume_avg[i] = np.mean(volume[i-lookback+1:i+1])
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    volume_confirmed = volume > (1.5 * volume_avg)
-    
-    # Align 1w ADX to 12h timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Calculate volume ratio (current vs 20-period average)
+    vol_s = pd.Series(volume)
+    vol_ma = vol_s.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_avg[i]) or np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter based on 1w ADX
-        trending_regime = adx_1w_aligned[i] > 25
+        # Volume confirmation: need above average volume
+        vol_confirmed = vol_ratio[i] > 1.2
         
         if position == 1:  # Long position
-            # Exit long if price returns to middle band or regime changes to ranging
-            if close[i] <= middle_band[i] or adx_1w_aligned[i] < 20:
+            # Exit long if price reaches R4 (take profit) or breaks below S3 (stop)
+            if close[i] >= r4_6h[i] or close[i] < s3_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # Short position
-            # Exit short if price returns to middle band or regime changes to ranging
-            if close[i] >= middle_band[i] or adx_1w_aligned[i] < 20:
+            # Exit short if price reaches S4 (take profit) or breaks above R3 (stop)
+            if close[i] <= s4_6h[i] or close[i] > r3_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Only enter in trending regime with volume confirmation
-            if trending_regime and volume_confirmed[i]:
-                # Long when price breaks above upper band
-                if close[i] > highest_high[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short when price breaks below lower band
-                elif close[i] < lowest_low[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Fade at R3/S3 with volume (mean reversion)
+            if close[i] > r3_6h[i] and vol_confirmed:
+                position = -1
+                signals[i] = -0.25
+            elif close[i] < s3_6h[i] and vol_confirmed:
+                position = 1
+                signals[i] = 0.25
+            # Breakout continuation at R4/S4 with volume (trend following)
+            elif close[i] > r4_6h[i] and vol_confirmed:
+                position = 1
+                signals[i] = 0.25
+            elif close[i] < s4_6h[i] and vol_confirmed:
+                position = -1
+                signals[i] = -0.25
     
     return signals
