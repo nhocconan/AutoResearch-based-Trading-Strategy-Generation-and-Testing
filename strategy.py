@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 12h ATR regime filter
-# Uses Camarilla pivot levels (H3/L3) from 12h for structure, breaks above/below for entries
-# Only takes breakouts when 12h ATR(14) is below its 50-period MA (low volatility regime) for reliability
-# Position size 0.25 to manage drawdown and enable multiple concurrent positions
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
-# Works in both bull/bear: 12h ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
+# Hypothesis: 1h Camarilla pivot breakout with volume confirmation and 4h trend filter
+# Uses Camarilla pivot levels (H3/L3) from 4h for structure, breaks above/below for entries
+# Only takes breakouts when 4h EMA(50) > EMA(200) for uptrend (longs) or EMA(50) < EMA(200) for downtrend (shorts)
+# Volume confirmation ensures breakouts have participation
+# Target: 60-150 total trades over 4 years (15-37/year) to balance edge and fee drag
+# Session filter (08-20 UTC) reduces noise trades
+# Works in both bull/bear: 4h trend filter ensures we trade with higher timeframe momentum
 
-name = "4h_12h_camarilla_volume_atr_v1"
-timeframe = "4h"
+name = "1h_4h_camarilla_volume_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,28 +25,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for Camarilla pivots and ATR regime
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Load 4h data ONCE before loop for Camarilla pivots and EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla pivot levels (H3, L3) using previous bar's data to avoid look-ahead
-    camarilla_h3 = np.full(len(df_12h), np.nan)
-    camarilla_l3 = np.full(len(df_12h), np.nan)
-    camarilla_h4 = np.full(len(df_12h), np.nan)
-    camarilla_l4 = np.full(len(df_12h), np.nan)
+    # Calculate 4h Camarilla pivot levels (H3, L3) using previous bar's data to avoid look-ahead
+    camarilla_h3 = np.full(len(df_4h), np.nan)
+    camarilla_l3 = np.full(len(df_4h), np.nan)
+    camarilla_h4 = np.full(len(df_4h), np.nan)
+    camarilla_l4 = np.full(len(df_4h), np.nan)
     
-    for i in range(len(df_12h)):
+    for i in range(len(df_4h)):
         if i < 1:
             camarilla_h3[i] = np.nan
             camarilla_l3[i] = np.nan
             camarilla_h4[i] = np.nan
             camarilla_l4[i] = np.nan
         else:
-            # Use previous 12h bar's OHLC to calculate current pivot levels
-            prev_high = df_12h['high'].iloc[i-1]
-            prev_low = df_12h['low'].iloc[i-1]
-            prev_close = df_12h['close'].iloc[i-1]
+            # Use previous 4h bar's OHLC to calculate current pivot levels
+            prev_high = df_4h['high'].iloc[i-1]
+            prev_low = df_4h['low'].iloc[i-1]
+            prev_close = df_4h['close'].iloc[i-1]
             
             pivot = (prev_high + prev_low + prev_close) / 3.0
             range_val = prev_high - prev_low
@@ -55,43 +56,18 @@ def generate_signals(prices):
             camarilla_h4[i] = pivot + range_val * 1.1 / 2.0
             camarilla_l4[i] = pivot - range_val * 1.1 / 2.0
     
-    # Calculate 12h ATR(14) for regime filter
-    tr_12h = np.full(len(df_12h), np.nan)
-    for i in range(1, len(df_12h)):
-        tr = max(
-            df_12h['high'].iloc[i] - df_12h['low'].iloc[i],
-            abs(df_12h['high'].iloc[i] - df_12h['close'].iloc[i-1]),
-            abs(df_12h['low'].iloc[i] - df_12h['close'].iloc[i-1])
-        )
-        tr_12h[i] = tr
+    # Calculate 4h EMA(50) and EMA(200) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate ATR with Wilder's smoothing
-    atr_12h = np.full(len(df_12h), np.nan)
-    for i in range(len(df_12h)):
-        if i < 14:
-            atr_12h[i] = np.nan
-        elif i == 14:
-            atr_12h[i] = np.nanmean(tr_12h[1:15])
-        else:
-            atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
-    
-    # Calculate 50-period MA of ATR for regime filter
-    atr_ma_50 = np.full(len(df_12h), np.nan)
-    for i in range(len(df_12h)):
-        if i < 50:
-            atr_ma_50[i] = np.nan
-        else:
-            atr_ma_50[i] = np.mean(atr_12h[i-50:i])
-    
-    # Align 12h Camarilla levels to 4h timeframe
-    camarilla_h3_4h = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_4h = align_htf_to_ltf(prices, df_12h, camarilla_l3)
-    camarilla_h4_4h = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    camarilla_l4_4h = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-    
-    # Align 12h ATR regime to 4h timeframe
-    atr_ma_50_4h = align_htf_to_ltf(prices, df_12h, atr_ma_50)
-    atr_4h = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Align 4h Camarilla levels and EMAs to 1h timeframe
+    camarilla_h3_1h = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    camarilla_l3_1h = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    camarilla_h4_1h = align_htf_to_ltf(prices, df_4h, camarilla_h4)
+    camarilla_l4_1h = align_htf_to_ltf(prices, df_4h, camarilla_l4)
+    ema_50_4h_1h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_200_4h_1h = align_htf_to_ltf(prices, df_4h, ema_200_4h)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -101,50 +77,56 @@ def generate_signals(prices):
         else:
             avg_volume[i] = np.mean(volume[i-20:i])
     
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup
-        # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_4h[i]) or 
-            np.isnan(camarilla_l3_4h[i]) or 
-            np.isnan(atr_ma_50_4h[i]) or 
-            np.isnan(atr_4h[i]) or 
-            np.isnan(avg_volume[i])):
+    for i in range(200, n):  # Start after warmup
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(camarilla_h3_1h[i]) or 
+            np.isnan(camarilla_l3_1h[i]) or 
+            np.isnan(ema_50_4h_1h[i]) or 
+            np.isnan(ema_200_4h_1h[i]) or 
+            np.isnan(avg_volume[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
-        # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
-        atr_regime = atr_4h[i] < atr_ma_50_4h[i]
+        # Trend filter: EMA(50) > EMA(200) for uptrend, EMA(50) < EMA(200) for downtrend
+        uptrend = ema_50_4h_1h[i] > ema_200_4h_1h[i]
+        downtrend = ema_50_4h_1h[i] < ema_200_4h_1h[i]
         
         if position == 1:  # Long position
-            # Exit conditions: price closes below Camarilla L3 OR ATR regime turns unfavorable
-            if close[i] < camarilla_l3_4h[i] or not atr_regime:
+            # Exit conditions: price closes below Camarilla L3 OR trend turns down
+            if close[i] < camarilla_l3_1h[i] or not uptrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit conditions: price closes above Camarilla H3 OR ATR regime turns unfavorable
-            if close[i] > camarilla_h3_4h[i] or not atr_regime:
+            # Exit conditions: price closes above Camarilla H3 OR trend turns up
+            if close[i] > camarilla_h3_1h[i] or not downtrend:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Entry logic: Camarilla breakout with volume confirmation and ATR regime filter
-            if volume_confirm and atr_regime:
-                # Long breakout: price closes above Camarilla H3
-                if close[i] > camarilla_h3_4h[i]:
+            # Entry logic: Camarilla breakout with volume confirmation and trend filter
+            if volume_confirm:
+                # Long breakout: price closes above Camarilla H3 in uptrend
+                if close[i] > camarilla_h3_1h[i] and uptrend:
                     position = 1
-                    signals[i] = 0.25
-                # Short breakout: price closes below Camarilla L3
-                elif close[i] < camarilla_l3_4h[i]:
+                    signals[i] = 0.20
+                # Short breakout: price closes below Camarilla L3 in downtrend
+                elif close[i] < camarilla_l3_1h[i] and downtrend:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
