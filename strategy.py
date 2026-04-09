@@ -1,18 +1,35 @@
 #!/usr/bin/env python3
-# 6h_keltner_breakout_1d_atr_v1
-# Hypothesis: 6h Keltner Channel breakout with 1d ATR regime filter and volume confirmation.
-# Uses 6h timeframe to balance trade frequency and responsiveness. Keltner Channel breakouts capture volatility expansion moves.
-# 1d ATR regime filter ensures we only trade when daily volatility is elevated (ATR > 20-period MA), avoiding low-volatility chop.
-# Volume confirmation ensures institutional participation. Designed for 12-37 trades/year (50-150 over 4 years).
-# Works in bull/bear markets: breakouts work in trending markets, ATR filter avoids false signals in ranging markets.
+# 12h_hma_camarilla_volume_v1
+# Hypothesis: 12h Hull Moving Average (HMA) crossover with 1d Camarilla H3/L3 filter and volume confirmation.
+# Uses 12h timeframe to minimize trade frequency and fee drag while capturing medium-term trends.
+# HMA provides smooth trend signals with reduced lag, Camarilla H3/L3 acts as strong bias filter from daily pivot structure,
+# volume spike confirms institutional participation. Target: 12-37 trades/year (50-150 over 4 years).
+# Works in bull/bear markets: HMA captures trends with less whipsaw, Camarilla filter avoids counter-trend fakes during ranging.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_keltner_breakout_1d_atr_v1"
-timeframe = "6h"
+name = "12h_hma_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA for half period
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean().values
+    # WMA for full period
+    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean().values
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA: WMA of raw_hma with sqrt_period
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,59 +41,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Keltner Channel calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:  # Need enough for EMA(20) and ATR(10)
+    # Get 12h data for HMA calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 55:  # Need enough for HMA(55)
         return np.zeros(n)
     
-    # Calculate 6h EMA(20) for Keltner Channel middle line
-    close_6h = df_6h['close'].values
-    ema_20 = pd.Series(close_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 12h HMA(55) for trend
+    close_12h = df_12h['close'].values
+    hma_12h = calculate_hma(close_12h, 55)
     
-    # Calculate 6h ATR(10) for Keltner Channel width
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Align 12h HMA to 12h timeframe (completed 12h candle only)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Keltner Channel bands: EMA(20) ± 2 * ATR(10)
-    upper_band = ema_20 + 2 * atr_10
-    lower_band = ema_20 - 2 * atr_10
-    
-    # Align 6h Keltner Channel to 6h timeframe (completed 6h candle only)
-    ema_20_aligned = align_htf_to_ltf(prices, df_6h, ema_20)
-    upper_band_aligned = align_htf_to_ltf(prices, df_6h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_6h, lower_band)
-    
-    # Get 1d HTF data ONCE before loop for ATR regime filter
+    # Get 1d HTF data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:  # Need enough for ATR(20) calculation
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ATR(20) for regime filter
+    # Calculate Camarilla pivot levels for daily
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]  # First period TR is just high-low
-    atr_20_1d = pd.Series(tr_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 1d ATR(20) moving average for regime filter
-    atr_ma_20_1d = pd.Series(atr_20_1d).rolling(window=20, min_periods=20).mean().values
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # ATR regime: trade only when daily ATR > 20-period MA (elevated volatility)
-    atr_regime = atr_20_1d > atr_ma_20_1d
+    # Camarilla H3/L3 levels (stronger bias filter than H4/L4)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Align 1d ATR regime to 6h timeframe (completed daily candle only)
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime.astype(float))
+    # Align Camarilla levels to 12h timeframe (completed daily candle only)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
     # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -87,34 +83,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i]) or np.isnan(atr_regime_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(hma_12h_aligned[i]) or np.isnan(h3_1d_aligned[i]) or 
+            np.isnan(l3_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below 6h EMA(20) (middle line)
-            if close[i] < ema_20_aligned[i]:
+            # Exit: price closes below 12h HMA
+            if close[i] < hma_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 6h EMA(20) (middle line)
-            if close[i] > ema_20_aligned[i]:
+            # Exit: price closes above 12h HMA
+            if close[i] > hma_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 6h Keltner upper band, with ATR regime and volume spike
-            if (close[i] > upper_band_aligned[i]) and atr_regime_aligned[i] and vol_spike[i]:
+            # Enter long: price closes above 12h HMA, above 1d H3, with volume spike
+            if (close[i] > hma_12h_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 6h Keltner lower band, with ATR regime and volume spike
-            elif (close[i] < lower_band_aligned[i]) and atr_regime_aligned[i] and vol_spike[i]:
+            # Enter short: price closes below 12h HMA, below 1d L3, with volume spike
+            elif (close[i] < hma_12h_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
