@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v8
-# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
-# Works in bull/bear by aligning with 1d trend via EMA50. Volume confirms institutional participation.
-# Discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 12-37 trades/year.
+# 1h_camarilla_4h1d_trend_volume_v1
+# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter, executed on 1h timeframe.
+# Uses 4h/1d for signal direction, 1h only for entry timing. Session filter (08-20 UTC) reduces noise.
+# Discrete position sizing (0.0, ±0.20) to minimize fee churn. Target: 15-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v8"
-timeframe = "4h"
+name = "1h_camarilla_4h1d_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -58,17 +58,26 @@ def generate_signals(prices):
     h3 = pivot_point + (range_1d * 1.1 / 4)
     l3 = pivot_point - (range_1d * 1.1 / 4)
     
-    # Align to 4h timeframe
+    # Align to 1h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (balanced)
+    # Volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC (pre-compute hour array)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         # Skip if any required data is NaN
         if (np.isnan(ema50_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(atr14_1d_aligned[i])):
@@ -76,7 +85,6 @@ def generate_signals(prices):
             continue
         
         # Volatility filter: avoid low volatility conditions that cause whipsaws
-        # Only trade when current ATR > 0.4 * 50-period ATR average (adaptive threshold)
         atr_ma = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=50).mean().values
         if np.isnan(atr_ma[i]) or atr14_1d_aligned[i] < 0.4 * atr_ma[i]:
             signals[i] = 0.0
@@ -88,7 +96,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
             # Exit: price closes above L3 OR trend turns bullish
@@ -96,7 +104,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
             # Need volume confirmation
             volume_confirmed = volume[i] > 2.0 * volume_ma[i]
@@ -105,10 +113,10 @@ def generate_signals(prices):
                 # Long: price breaks above H3 with bullish trend
                 if close[i] > h3_aligned[i] and close[i] > ema50_1d_aligned[i]:
                     position = 1
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                 # Short: price breaks below L3 with bearish trend
                 elif close[i] < l3_aligned[i] and close[i] < ema50_1d_aligned[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
