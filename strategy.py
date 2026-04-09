@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_donchian_1d_volume_chop_v1
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and choppiness regime filter.
-# Long: price breaks above Donchian(20) high + 1d volume > 1.5x 20-period average + CHOP(14) > 61.8 (range)
-# Short: price breaks below Donchian(20) low + 1d volume > 1.5x 20-period average + CHOP(14) > 61.8 (range)
-# Exit: Donchian(10) opposite breakout or volume < 1.2x average
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
+# 1d_kama_1w_trend_volume_v1
+# Hypothesis: 1d strategy using Kaufman Adaptive Moving Average (KAMA) from 1w for trend direction, 
+# with volume confirmation and discrete sizing (±0.25) to target 30-100 trades over 4 years.
+# Long: price > 1w KAMA + volume spike
+# Short: price < 1w KAMA + volume spike
+# Exit: opposite signal or volume drop below average
+# KAMA adapts to market noise, reducing whipsaw in ranging markets while capturing trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_1d_volume_chop_v1"
-timeframe = "4h"
+name = "1d_kama_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,84 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for volume and choppiness
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w HTF data for KAMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # 1d Volume MA (20-period)
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Kaufman Adaptive Moving Average (KAMA) - 30 period, fast=2, slow=30
+    # Based on Perry Kaufman's algorithm
+    close_1w_series = pd.Series(close_1w)
     
-    # 1d Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high_n) - min(low_n))))
-    tr1 = np.maximum(high_1d[1:] - low_1d[:-1], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr1 = np.concatenate([[np.nan], tr1])
-    tr2 = np.concatenate([[np.nan], tr2])
-    atr_14 = pd.Series(np.maximum(tr1, tr2)).rolling(window=14, min_periods=14).mean().values
+    # Direction = absolute change over lookback period
+    direction = abs(close_1w_series - close_1w_series.shift(10))  # 10-period change
     
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    atr_sum_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    chop_denominator = np.log10(14) * (max_high_14 - min_low_14)
-    chop = 100 * np.log10(atr_sum_14 / chop_denominator)
+    # Volatility = sum of absolute changes over lookback period
+    volatility = abs(close_1w_series - close_1w_series.shift(1)).rolling(window=10, min_periods=10).sum()
     
-    # Align 1d indicators to 4h timeframe
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Efficiency Ratio (ER) = Direction / Volatility
+    er = direction / volatility.replace(0, np.nan)
     
-    # 4h Donchian channels
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    
+    # Scaling factor (SC) = [ER * (fast_sc - slow_sc) + slow_sc]^2
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA = previous KAMA + SC * (price - previous KAMA)
+    kama = np.full_like(close_1w, np.nan)
+    kama[0] = close_1w[0]  # seed
+    
+    for i in range(1, len(close_1w)):
+        if np.isnan(sc.iloc[i]) or np.isnan(kama[i-1]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close_1w[i] - kama[i-1])
+    
+    # Align KAMA to 1d timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or
-            np.isnan(donchian_high_10[i]) or np.isnan(donchian_low_10[i])):
+        if np.isnan(kama_aligned[i]) or np.isnan(volume_ma[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        volume_confirmed = volume_1d[i // 16] > 1.5 * volume_ma_1d_aligned[i] if i // 16 < len(volume_1d) else False
-        
-        # Choppiness filter: CHOP > 61.8 (range-bound market)
-        chop_confirmed = chop_aligned[i] > 61.8
-        
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian(10) low OR volume drops
-            if close[i] < donchian_low_10[i] or not volume_confirmed:
+            # Exit: price below KAMA OR volume drops below average
+            if close[i] < kama_aligned[i] or volume[i] < volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian(10) high OR volume drops
-            if close[i] > donchian_high_10[i] or not volume_confirmed:
+            # Exit: price above KAMA OR volume drops below average
+            if close[i] > kama_aligned[i] or volume[i] < volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Need both volume and chop confirmation
-            if volume_confirmed and chop_confirmed:
-                # Long: price breaks above Donchian(20) high
-                if close[i] > donchian_high_20[i]:
+            # Need volume confirmation
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            
+            if volume_confirmed:
+                # Long: price above KAMA
+                if close[i] > kama_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below Donchian(20) low
-                elif close[i] < donchian_low_20[i]:
+                # Short: price below KAMA
+                elif close[i] < kama_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
