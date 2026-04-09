@@ -5,6 +5,7 @@
 # Exit when price returns to the daily pivot point (PP).
 # Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# This version uses 12h timeframe and tightens filters to reduce trade frequency.
 
 import numpy as np
 import pandas as pd
