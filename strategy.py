@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R + 1d ATR-based volatility filter + volume confirmation
-# Williams %R identifies overbought/oversold conditions; in high volatility regimes (ATR ratio > 1.2),
-# we fade extremes with volume confirmation. In low volatility (ATR ratio <= 1.2), we follow momentum.
-# Uses discrete position sizing 0.25 to target ~12-37 trades/year and minimize fee drag.
-# Works in bull/bear markets: mean reversion in high vol, momentum in low vol.
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 12h ADX regime filter
+# In trending regimes (ADX > 25): breakout above/below Donchian channels with volume confirmation
+# In ranging regimes (ADX < 20): mean reversion at Donchian channel midpoints with volume confirmation
+# Uses discrete position sizing 0.25 to limit trades and reduce fee drag
+# Works in bull/bear markets: breakout catches trends, ADX filter avoids whipsaws in ranging markets
 
-name = "12h_1d_williamsr_vol_filter_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,20 +23,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d ATR(14) for volatility normalization
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # Calculate 12h ATR(14) for ADX calculation
+    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     def wilders_smoothing(values, period):
@@ -49,90 +49,103 @@ def generate_signals(prices):
             result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    atr_1d = wilders_smoothing(tr, 14)
+    atr_12h = wilders_smoothing(tr, 14)
     
-    # Calculate 1d ATR ratio (current ATR / 20-period average ATR) for volatility regime
-    atr_avg_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio_1d = np.where(atr_avg_1d > 0, atr_1d / atr_avg_1d, np.nan)
+    # Calculate 12h +DM and -DM for ADX
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
     
-    # Calculate 1d Williams %R(14) based on prior day to avoid look-ahead
-    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Calculate 1d average volume (20-period)
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate smoothed +DM, -DM and TR
+    plus_dm_smooth = wilders_smoothing(plus_dm, 14)
+    minus_dm_smooth = wilders_smoothing(minus_dm, 14)
+    tr_smooth = wilders_smoothing(tr, 14)
     
-    # Align 1d indicators to 12h timeframe
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    # Calculate 12h ADX(14)
+    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx_12h = wilders_smoothing(dx, 14)
+    
+    # Calculate 4h Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_20 + lowest_20) / 2
+    
+    # Align 12h indicators to 4h timeframe
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    volume_12h_sma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_12h_sma_aligned = align_htf_to_ltf(prices, df_12h, volume_12h_sma)
     
     # Pre-compute volume confirmation array
-    volume_confirmed = volume > 1.5 * avg_volume_1d_aligned
+    volume_confirmed = volume > 1.5 * volume_12h_sma_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(williams_r_1d_aligned[i]) or
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(donchian_mid[i]) or
             np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility regime filter
-        high_vol_regime = atr_ratio_1d_aligned[i] > 1.2
-        low_vol_regime = atr_ratio_1d_aligned[i] <= 1.2
+        # Regime filter based on 12h ADX
+        trending_regime = adx_12h_aligned[i] > 25
+        ranging_regime = adx_12h_aligned[i] < 20
         
         if position == 1:  # Long position
-            if high_vol_regime:
-                # Exit long if Williams %R rises above -20 (overbought) or volatility drops
-                if williams_r_1d_aligned[i] > -20 or low_vol_regime:
+            if trending_regime:
+                # Exit long if price breaks below Donchian midpoint or we enter ranging regime
+                if close[i] < donchian_mid[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            elif low_vol_regime:
-                # Exit long if Williams %R falls below -80 (oversold) or volatility rises
-                if williams_r_1d_aligned[i] < -80 or high_vol_regime:
+            elif ranging_regime:
+                # Exit long if price rises above upper Donchian or drops below lower Donchian
+                if close[i] > highest_20[i] or close[i] < lowest_20[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if high_vol_regime:
-                # Exit short if Williams %R falls below -80 (oversold) or volatility drops
-                if williams_r_1d_aligned[i] < -80 or low_vol_regime:
+            if trending_regime:
+                # Exit short if price breaks above Donchian midpoint or we enter ranging regime
+                if close[i] > donchian_mid[i] or ranging_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            elif low_vol_regime:
-                # Exit short if Williams %R rises above -20 (overbought) or volatility rises
-                if williams_r_1d_aligned[i] > -20 or high_vol_regime:
+            elif ranging_regime:
+                # Exit short if price drops below lower Donchian or rises above upper Donchian
+                if close[i] < lowest_20[i] or close[i] > highest_20[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            if high_vol_regime:
-                # Enter long near oversold (-80) with volume confirmation
-                if williams_r_1d_aligned[i] <= -80 and volume_confirmed[i]:
+            if trending_regime:
+                # Enter long on breakout above upper Donchian with volume confirmation
+                if close[i] > highest_20[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short near overbought (-20) with volume confirmation
-                elif williams_r_1d_aligned[i] >= -20 and volume_confirmed[i]:
+                # Enter short on breakout below lower Donchian with volume confirmation
+                elif close[i] < lowest_20[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
-            elif low_vol_regime:
-                # Enter long on momentum up (Williams %R rising from oversold)
-                if williams_r_1d_aligned[i] > williams_r_1d_aligned[i-1] and williams_r_1d_aligned[i] < -50 and volume_confirmed[i]:
+            elif ranging_regime:
+                # Mean reversion: buy near lower Donchian, sell near upper Donchian
+                if close[i] <= lowest_20[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short on momentum down (Williams %R falling from overbought)
-                elif williams_r_1d_aligned[i] < williams_r_1d_aligned[i-1] and williams_r_1d_aligned[i] > -50 and volume_confirmed[i]:
+                elif close[i] >= highest_20[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
     
