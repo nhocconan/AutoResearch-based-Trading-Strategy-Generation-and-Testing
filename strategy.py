@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_volume_chop_v1
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation
-# and 1-week choppiness regime filter. Enters long when price touches S3 level with
-# volume spike in choppy market (CHOP > 61.8), short when touches R3 level with
-# volume spike. Uses discrete sizing (±0.25) to minimize fee churn. Designed for
-# low trade frequency (target: 50-150 total trades over 4 years) to avoid fee drag
-# and work in both bull/bear markets via regime adaptation.
+# 1d_kama_rsi_chop_v2
+# Hypothesis: Daily KAMA trend direction + RSI mean reversion + Choppiness regime filter.
+# In trending markets (CHOP < 38.2): enter pullbacks in KAMA direction.
+# In ranging markets (CHOP > 61.8): fade extreme RSI at Bollinger Bands.
+# Designed for low trade frequency (<25/year) to avoid fee drag. Works in bull/bear via regime adaptation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_volume_chop_v1"
-timeframe = "12h"
+name = "1d_kama_rsi_chop_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,115 +23,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate daily Camarilla pivot levels (based on previous day)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # S3 = C - (Range * 1.1000 / 2)
-    # S2 = C - (Range * 1.1000 / 4)
-    # S1 = C - (Range * 1.1000 / 6)
-    # R1 = C + (Range * 1.1000 / 6)
-    # R2 = C + (Range * 1.1000 / 4)
-    # R3 = C + (Range * 1.1000 / 2)
-    
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    s3_1d = close_1d - (range_1d * 1.1000 / 2.0)
-    s2_1d = close_1d - (range_1d * 1.1000 / 4.0)
-    s1_1d = close_1d - (range_1d * 1.1000 / 6.0)
-    r1_1d = close_1d + (range_1d * 1.1000 / 6.0)
-    r2_1d = close_1d + (range_1d * 1.1000 / 4.0)
-    r3_1d = close_1d + (range_1d * 1.1000 / 2.0)
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    
-    # 1w HTF data for choppiness regime filter
+    # Weekly HTF data for Donchian trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Calculate Choppiness Index (14-period)
-    # True Range
-    tr1 = pd.Series(high_1w).shift(1) - pd.Series(low_1w).shift(1)
-    tr2 = abs(pd.Series(high_1w) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w) - pd.Series(close_1w).shift(1))
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Donchian channels (20-period)
+    highest_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high = align_htf_to_ltf(prices, df_1w, highest_20)
+    donchian_low = align_htf_to_ltf(prices, df_1w, lowest_20)
     
-    # ATR = smoothed TR
-    atr_1w = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Daily indicators
+    # KAMA (10,2,30)
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(window=10, min_periods=10).sum()
+    er = change / (volatility + 1e-10)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [close[0]]  # seed
+    for i in range(1, n):
+        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Highest high and lowest low over 14 periods
-    hh_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # RSI (14)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Chop = 100 * log10(sum(ATR14) / (HH - LL)) / log10(14)
-    sum_atr_1w = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
-    chop_1w = 100 * (np.log10(sum_atr_1w) - np.log10(hh_1w - ll_1w + 1e-10)) / np.log10(14)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Bollinger Bands (20,2)
+    sma20 = close_s.rolling(window=20, min_periods=20).mean().values
+    std20 = close_s.rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    
+    # Choppiness Index (14)
+    atr1 = abs(high - low)
+    atr2 = abs(high - np.roll(close, 1))
+    atr3 = abs(low - np.roll(close, 1))
+    atr1[0] = atr2[0] = atr3[0] = 0
+    tr = np.maximum(np.maximum(atr1, atr2), atr3)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low + 1e-10)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(s3_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(upper_bb[i]) or
+            np.isnan(lower_bb[i]) or np.isnan(chop[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        if i >= 20:
-            volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().iloc[i]
-            volume_confirmed = volume[i] > 2.0 * volume_ma if not np.isnan(volume_ma) else False
-        else:
-            volume_confirmed = False
-        
-        # Regime filter: choppy market (CHOP > 61.8 = ranging)
-        ranging = chop_1w_aligned[i] > 61.8
-        
         if position == 1:  # Long position
-            # Exit: price moves above S2 (profit target) or below S3 (stop)
-            if close[i] > s2_1d_aligned[i] or close[i] < s3_1d_aligned[i]:
+            # Exit: price touches upper Bollinger Band OR Donchian breakout fails
+            if close[i] >= upper_bb[i] or close[i] <= donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price moves below R2 (profit target) or above R3 (stop)
-            if close[i] < r2_1d_aligned[i] or close[i] > r3_1d_aligned[i]:
+            # Exit: price touches lower Bollinger Band OR Donchian breakout fails
+            if close[i] <= lower_bb[i] or close[i] >= donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed and ranging:
-                # Long conditions: price touches or crosses below S3 with volume
-                if close[i] <= s3_1d_aligned[i] and low[i] <= s3_1d_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short conditions: price touches or crosses above R3 with volume
-                elif close[i] >= r3_1d_aligned[i] and high[i] >= r3_1d_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Volume confirmation: current volume > 1.3x 20-period average
+            volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+            volume_confirmed = volume[i] > 1.3 * volume_ma[i] if not np.isnan(volume_ma[i]) else False
+            
+            if volume_confirmed:
+                if chop[i] < 38.2:  # Trending regime
+                    # Long: pullback to KAMA in uptrend
+                    if close[i] > kama[i] and close[i] < kama[i] * 1.02 and close[i] > donchian_low[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    # Short: pullback to KAMA in downtrend
+                    elif close[i] < kama[i] and close[i] > kama[i] * 0.98 and close[i] < donchian_high[i]:
+                        position = -1
+                        signals[i] = -0.25
+                elif chop[i] > 61.8:  # Ranging regime
+                    # Long: RSI oversold near lower BB
+                    if rsi[i] < 30 and close[i] <= lower_bb[i] * 1.01:
+                        position = 1
+                        signals[i] = 0.25
+                    # Short: RSI overbought near upper BB
+                    elif rsi[i] > 70 and close[i] >= upper_bb[i] * 0.99:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
