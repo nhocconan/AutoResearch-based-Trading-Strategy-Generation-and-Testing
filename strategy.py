@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout + 1w EMA trend filter + volume confirmation
-# - Primary signal: 1d close breaks above/below Camarilla H3/L3 levels from prior 1d session
-# - Trend filter: 1w EMA50 - price must be above EMA for longs, below for shorts
-# - Volume confirmation: 1d volume > 20-period median volume (avoid low-participation signals)
+# Hypothesis: 12h Camarilla pivot breakout + 1d EMA trend filter + volume confirmation
+# - Primary signal: 12h close breaks above/below Camarilla H3/L3 levels from prior 1d session
+# - Trend filter: 1d EMA50 - price must be above EMA for longs, below for shorts
+# - Volume confirmation: 12h volume > 20-period median volume (avoid low-participation signals)
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
 # - Works in bull/bear: Camarilla pivots provide structure in ranging markets, EMA50 filter
 #   ensures alignment with higher timeframe trend, reducing false signals
 
-name = "1d_1w_camarilla_ema_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +23,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute 1d indicators for Camarilla levels
@@ -38,24 +37,23 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align Camarilla levels to 1d timeframe (completed 1d bar only)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Pre-compute 1w EMA50 for trend direction
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Pre-compute 1d EMA50 for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 1d timeframe (completed 1w bar only)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA50 to 12h timeframe (completed 1d bar only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d volume regime: volume > 20-period median volume
+    # 12h volume regime: volume > 20-period median volume
     median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     volume_regime = volume > median_volume_20
     
