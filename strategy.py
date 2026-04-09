@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ichimoku_cloud_breakout_v1
-# Hypothesis: 6h strategy using Ichimoku Cloud for trend identification and breakout confirmation.
-# Long when price breaks above cloud in bullish regime (price > 1d EMA50); short when price breaks below cloud in bearish regime (price < 1d EMA50).
-# Uses volume confirmation (>1.3x 20-bar average) to filter weak breakouts.
-# Designed for low trade frequency (12-30/year) to minimize fee drag. Works in bull/bear via regime filter and cloud as dynamic support/resistance.
+# 12h_donchian_breakout_volume_chop_regime_v1
+# Hypothesis: 12h strategy using Donchian(20) breakouts for entry, volume confirmation (>1.5x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_cloud_breakout_v1"
-timeframe = "6h"
+name = "12h_donchian_breakout_volume_chop_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,40 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Ichimoku Cloud components (9, 26, 52 periods)
+    # Donchian Channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = high_series.rolling(window=9, min_periods=9).max()
-    period9_low = low_series.rolling(window=9, min_periods=9).min()
-    tenkan_sen = ((period9_high + period9_low) / 2).values
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = high_series.rolling(window=26, min_periods=26).max()
-    period26_low = low_series.rolling(window=26, min_periods=26).min()
-    kijun_sen = ((period26_high + period26_low) / 2).values
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2, shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2, shifted 26 periods ahead
-    period52_high = high_series.rolling(window=52, min_periods=52).max()
-    period52_low = low_series.rolling(window=52, min_periods=52).min()
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # The cloud is between Senkou Span A and Senkou Span B
-    # For plotting, these would be shifted forward, but for breakout detection we use current values
-    # Upper cloud boundary = max(Senkou A, Senkou B)
-    # Lower cloud boundary = min(Senkou A, Senkou B)
-    upper_cloud = np.maximum(senkou_a, senkou_b)
-    lower_cloud = np.minimum(senkou_a, senkou_b)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Multi-timeframe: 1d EMA(50) for regime filter
+    # Choppiness Index regime filter (14-period)
+    atr_period = 14
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr_series = pd.Series(tr)
+    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
+    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
+    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
+    # Avoid division by zero or log of zero
+    denominator = np.log10(atr_period) * (highest_high - lowest_low)
+    denominator = np.where(denominator == 0, np.nan, denominator)
+    chop = 100 * np.log10(atr_sum / denominator)
+    
+    # Multi-timeframe: 1d EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     close_1d_s = pd.Series(close_1d)
@@ -68,39 +58,40 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or
             np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
-        
-        # Regime filter: 1d EMA50 trend
-        regime_uptrend = close[i] > ema_50_1d_aligned[i]
-        regime_downtrend = close[i] < ema_50_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Regime filter: chop < 61.8 indicates trending market
+        trending_market = chop[i] < 61.8
+        # HTF trend filter: price above/below 1d EMA(50)
+        htf_uptrend = close[i] > ema_50_1d_aligned[i]
+        htf_downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below cloud (bearish cloud break)
-            if close[i] < lower_cloud[i]:
+            # Exit: price closes below Donchian low (20)
+            if close[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above cloud (bullish cloud break)
-            if close[i] > upper_cloud[i]:
+            # Exit: price closes above Donchian high (20)
+            if close[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for cloud breakout with volume and regime confirmation
-            bullish_breakout = (close[i] > upper_cloud[i]) and volume_confirmed and regime_uptrend
-            bearish_breakout = (close[i] < lower_cloud[i]) and volume_confirmed and regime_downtrend
+            # Check for Donchian breakout with volume, regime, and HTF confirmation
+            bullish_breakout = (close[i] > donchian_high[i-1]) and volume_confirmed and trending_market and htf_uptrend
+            bearish_breakout = (close[i] < donchian_low[i-1]) and volume_confirmed and trending_market and htf_downtrend
             
             if bullish_breakout:
                 position = 1
