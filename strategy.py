@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels + volume spike + choppiness regime filter
-# Long when price touches Camarilla L3 support with volume spike in choppy market (mean reversion)
-# Short when price touches Camarilla H3 resistance with volume spike in choppy market
-# Uses discrete position sizing 0.25 to target ~25-40 trades/year and minimize fee drag
-# Works in bull/bear markets: mean reversion in chop, volume confirms genuine interest
+# Hypothesis: 6h strategy using 1d Williams Fractal breakout + volume confirmation + chop regime filter
+# Williams Fractals identify key swing highs/lows from 1d timeframe
+# Long when price breaks above recent bullish fractal with volume expansion and chop < 61.8 (trending)
+# Short when price breaks below recent bearish fractal with volume expansion and chop < 61.8
+# Uses discrete position sizing 0.25 to target ~20-40 trades/year and minimize fee drag
+# Works in bull/bear markets: breakout follows trends, chop filter avoids whipsaws in ranging markets
 
-name = "4h_1d_camarilla_pivot_volume_chop_v2"
-timeframe = "4h"
+name = "6h_1d_williams_fractal_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,111 +26,109 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Camarilla: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    # H2 = close + 1.1*(high-low)/6, L2 = close - 1.1*(high-low)/6
-    # H1 = close + 1.1*(high-low)/12, L1 = close - 1.1*(high-low)/12
-    # Pivot = (high + low + close)/3
+    # Calculate Williams Fractals on 1d
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    n_1d = len(high_1d)
+    bearish_fractal = np.full(n_1d, np.nan)
+    bullish_fractal = np.full(n_1d, np.nan)
     
-    rng = high_1d - low_1d
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_h3 = camarilla_pivot + 1.1 * rng / 4.0
-    camarilla_l3 = camarilla_pivot - 1.1 * rng / 4.0
+    for i in range(2, n_1d - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and
+            high_1d[i-1] > high_1d[i-3] and
+            high_1d[i-1] > high_1d[i+1]):
+            bearish_fractal[i-1] = high_1d[i-1]  # Value at the fractal point
+            
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and
+            low_1d[i-1] < low_1d[i-3] and
+            low_1d[i-1] < low_1d[i+1]):
+            bullish_fractal[i-1] = low_1d[i-1]  # Value at the fractal point
     
-    # Calculate 1d average volume (20-period) for volume spike detection
-    vol_1d = df_1d['volume'].values
-    vol_s_1d = pd.Series(vol_1d)
+    # Calculate 1d chopiness index (14-period) for regime filter
+    def true_range(h, l, c_prev):
+        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    
+    tr_1d = np.full(n_1d, np.nan)
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    for i in range(1, n_1d):
+        tr_1d[i] = true_range(high_1d[i], low_1d[i], close_1d[i-1])
+    
+    def rolling_sum(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).sum().values
+    
+    def rolling_max(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    
+    def rolling_min(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
+    
+    sum_tr_14 = rolling_sum(tr_1d, 14)
+    max_high_14 = rolling_max(high_1d, 14)
+    min_low_14 = rolling_min(low_1d, 14)
+    
+    chop_1d = 100 * np.log10(sum_tr_14 / (max_high_14 - min_low_14)) / np.log10(14)
+    
+    # Calculate 1d average volume (20-period)
+    vol_s_1d = pd.Series(df_1d['volume'].values)
     avg_vol_1d = vol_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align 1d indicators to 6h timeframe
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    
-    # Calculate choppiness index on 4h (14-period) for regime filter
-    def true_range(h, l, pc):
-        return np.maximum(np.maximum(h - l, np.abs(h - pc)), np.abs(l - pc))
-    
-    tr = np.zeros_like(high)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = true_range(high[i], low[i], close[i-1])
-    
-    # Sum of true range over 14 periods
-    tr_s = pd.Series(tr)
-    tr_sum_14 = tr_s.rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
-    # CHOP > 61.8 = ranging market (good for mean reversion)
-    # CHOP < 38.2 = trending market
-    denominator = hh_14 - ll_14
-    chop = np.full(n, np.nan)
-    mask = (denominator > 0) & ~np.isnan(tr_sum_14) & ~np.isnan(denominator)
-    chop[mask] = 100 * np.log10(tr_sum_14[mask] / denominator[mask]) / np.log10(14)
-    
-    # Volume confirmation: current 4h volume > 2.0x average 4h volume (20-period)
-    vol_s = pd.Series(volume)
-    vol_ma_20 = vol_s.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(avg_vol_1d_aligned[i]) or np.isnan(chop[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(chop_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in choppy market (CHOP > 61.8)
-        if chop[i] <= 61.8:
-            # Exit position if market becomes trending
-            if position == 1:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume (20-period)
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
+        
+        # Chop regime filter: only trade when trending (chop < 61.8)
+        chop_filter = chop_1d_aligned[i] < 61.8
         
         if position == 1:  # Long position
-            # Exit long if price moves above L3 (mean reversion complete) or stops volume spike
-            if close[i] > camarilla_l3_aligned[i] or not volume_spike[i]:
+            # Exit long if price falls below recent bullish fractal
+            if close[i] < bullish_fractal_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short if price moves below H3 (mean reversion complete) or stops volume spike
-            if close[i] < camarilla_h3_aligned[i] or not volume_spike[i]:
+            # Exit short if price rises above recent bearish fractal
+            if close[i] > bearish_fractal_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Mean reversion entry: price at L3/H3 with volume spike in choppy market
-            if abs(close[i] - camarilla_l3_aligned[i]) < 0.001 * close[i] and volume_spike[i]:
-                # Price touching L3 support -> long
+            # Breakout strategy: enter on fractal breakout with volume confirmation and chop filter
+            if (close[i] > bullish_fractal_aligned[i] and 
+                volume_confirmed and 
+                chop_filter):
                 position = 1
                 signals[i] = 0.25
-            elif abs(close[i] - camarilla_h3_aligned[i]) < 0.001 * close[i] and volume_spike[i]:
-                # Price touching H3 resistance -> short
+            elif (close[i] < bearish_fractal_aligned[i] and 
+                  volume_confirmed and 
+                  chop_filter):
                 position = -1
                 signals[i] = -0.25
     
