@@ -1,113 +1,103 @@
 #!/usr/bin/env python3
-# 6h_ema_12h_swing_v1
-# Hypothesis: 6h strategy using EMA(21) trend filter from 12h and swing failure points for entries.
-# Enters long when 12h EMA(21) is rising (bullish trend), price makes a higher low above 6h EMA(50), and closes above prior swing high.
-# Enters short when 12h EMA(21) is falling (bearish trend), price makes a lower high below 6h EMA(50), and closes below prior swing low.
-# Uses swing points from 6h timeframe for entry timing and 12h EMA for trend direction.
-# Works in bull/bear via trend filter and mean reversion to 6h EMA(50) during pullbacks.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 4h_donchian_1d_camarilla_volume_v1
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels (H3/L3) as directional filter and 4h Donchian(20) breakout for entry timing, with volume confirmation.
+# Enters long when price breaks above 4h Donchian upper band AND price > 1d H3 level AND volume > 1.3x 20-period average.
+# Enters short when price breaks below 4h Donchian lower band AND price < 1d L3 level AND volume > 1.3x average.
+# Uses discrete position sizing (±0.25) to minimize fee churn. Works in bull/bear via Donchian structure and pivot direction filter.
+# Target: 75-200 total trades over 4 years (19-50/year). HARD MAX: 400 total.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ema_12h_swing_v1"
-timeframe = "6h"
+name = "4h_donchian_1d_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h HTF data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Get 4h data for Donchian channels (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate EMA(21) on 12h closes
-    close_12h = df_12h['close'].values
-    ema_21_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Align 12h EMA(21) to 6h timeframe (completed 12h candle only)
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    donchian_upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h EMA(50) for dynamic support/resistance
-    ema_50_6h = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Align 4h Donchian levels to 4h timeframe (no additional delay needed for price channels)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper_4h)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower_4h)
     
-    # Calculate swing points on 6h (pivot highs/lows)
-    # Swing high: high[i] > high[i-1] and high[i] > high[i+1]
-    # Swing low: low[i] < low[i-1] and low[i] < low[i+1]
-    swing_high = np.zeros(n, dtype=bool)
-    swing_low = np.zeros(n, dtype=bool)
+    # Get 1d HTF data ONCE before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    for i in range(1, n-1):
-        if high[i] > high[i-1] and high[i] > high[i+1]:
-            swing_high[i] = True
-        if low[i] < low[i-1] and low[i] < low[i+1]:
-            swing_low[i] = True
+    # Calculate Camarilla pivot levels for daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Track most recent swing high and low
-    last_swing_high = np.full(n, np.nan)
-    last_swing_low = np.full(n, np.nan)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    last_high_val = np.nan
-    last_low_val = np.nan
+    # Camarilla levels for daily (H3/L3 for direction filter)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    for i in range(n):
-        if swing_high[i]:
-            last_high_val = high[i]
-        if swing_low[i]:
-            last_low_val = low[i]
-        last_swing_high[i] = last_high_val
-        last_swing_low[i] = last_low_val
+    # Align Camarilla levels to 4h timeframe (completed daily candle only)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    
+    # Volume spike detection (20-period volume average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma_20 * 1.3)  # Volume at least 1.3x average
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(ema_50_6h[i]) or
-            np.isnan(last_swing_high[i]) or np.isnan(last_swing_low[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 12h EMA trend: rising if current > previous, falling if current < previous
-        if i > 0:
-            ema_trend_rising = ema_21_12h_aligned[i] > ema_21_12h_aligned[i-1]
-            ema_trend_falling = ema_21_12h_aligned[i] < ema_21_12h_aligned[i-1]
-        else:
-            ema_trend_rising = False
-            ema_trend_falling = False
-        
         if position == 1:  # Long position
-            # Exit: price falls below 6h EMA(50) or makes lower low below prior swing low
-            if close[i] < ema_50_6h[i] or (i > 0 and low[i] < last_swing_low[i-1]):
+            # Exit: price falls below 4h Donchian lower band
+            if close[i] < donchian_lower_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above 6h EMA(50) or makes higher high above prior swing high
-            if close[i] > ema_50_6h[i] or (i > 0 and high[i] > last_swing_high[i-1]):
+            # Exit: price rises above 4h Donchian upper band
+            if close[i] > donchian_upper_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: 12h EMA trending up, price above 6h EMA(50), and breaks above prior swing high
-            if (ema_trend_rising and close[i] > ema_50_6h[i] and 
-                i > 0 and close[i] > last_swing_high[i-1] and close[i-1] <= last_swing_high[i-1]):
+            # Enter long: price breaks above 4h Donchian upper, above 1d H3, with volume spike
+            if (close[i] > donchian_upper_aligned[i]) and (close[i] > h3_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: 12h EMA trending down, price below 6h EMA(50), and breaks below prior swing low
-            elif (ema_trend_falling and close[i] < ema_50_6h[i] and 
-                  i > 0 and close[i] < last_swing_low[i-1] and close[i-1] >= last_swing_low[i-1]):
+            # Enter short: price breaks below 4h Donchian lower, below 1d L3, with volume spike
+            elif (close[i] < donchian_lower_aligned[i]) and (close[i] < l3_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
