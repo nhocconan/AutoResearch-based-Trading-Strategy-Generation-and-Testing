@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed for 4h timeframe to target 20-50 trades/year (75-200 over 4 years)
 # Works in bull/bear: HMA50 adapts to trend, Donchian provides robust structure
 
-name = "4h_1d_donchian_hma_volume_v4"
+name = "4h_1d_donchian_hma_volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
