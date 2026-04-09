@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian channel breakout with weekly trend filter and volume confirmation
-# Uses weekly ADX to filter trend direction, daily Donchian(20) breakout for entry
-# Volume > 1.5x 20-period average confirms breakout strength
-# Fixed position size 0.25 to limit drawdown and control risk
-# Designed for ~15-25 trades/year (~60-100 total over 4 years) to minimize fee drag
-# Works in bull markets (breakouts continuation) and bear markets (false breakouts filtered by weekly trend)
+# Hypothesis: 12-hour ATR breakout with 1-day trend filter and volume confirmation
+# Uses daily ATR to set dynamic breakout levels from the prior day's close
+# Daily ADX > 25 filters for trending conditions to avoid false breakouts in ranging markets
+# Volume > 1.5x 6-period average confirms institutional participation
+# Designed for 12-30 trades per year (~50-120 total over 4 years) to minimize fee drag
+# Works in bull markets via upward breakouts and in bear markets via downward breakdowns
 
-name = "1d_donchian_weekly_trend_v1"
-timeframe = "1d"
+name = "12h_1d_atr_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,134 +24,124 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly ADX(14) for trend strength
-    wh = df_1w['high'].values
-    wl = df_1w['low'].values
-    wc = df_1w['close'].values
-    wn = len(wh)
+    # Calculate daily ATR (14-period)
+    atr_1d = np.full(len(df_1d), np.nan)
+    tr_1d = np.full(len(df_1d), np.nan)
     
-    # True Range
-    wtr = np.full(wn, np.nan)
-    wdm_plus = np.full(wn, np.nan)
-    wdm_minus = np.full(wn, np.nan)
+    for i in range(1, len(df_1d)):
+        tr0 = df_1d['high'].iloc[i] - df_1d['low'].iloc[i]
+        tr1 = abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1])
+        tr2 = abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+        tr_1d[i] = max(tr0, tr1, tr2)
     
-    for i in range(1, wn):
-        wtr0 = wh[i] - wl[i]
-        wtr1 = abs(wh[i] - wc[i-1])
-        wtr2 = abs(wl[i] - wc[i-1])
-        wtr[i] = max(wtr0, wtr1, wtr2)
+    if len(df_1d) >= 14:
+        atr_1d[13] = np.nansum(tr_1d[1:14])
+        for i in range(14, len(df_1d)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+    
+    # Calculate daily ADX (14-period)
+    adx_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 28:
+        # Calculate +DM and -DM
+        dm_plus = np.zeros(len(df_1d))
+        dm_minus = np.zeros(len(df_1d))
+        for i in range(1, len(df_1d)):
+            up_move = df_1d['high'].iloc[i] - df_1d['high'].iloc[i-1]
+            down_move = df_1d['low'].iloc[i-1] - df_1d['low'].iloc[i]
+            dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
+            dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
         
-        wup = wh[i] - wh[i-1]
-        wdown = wl[i-1] - wl[i]
-        if wup > wdown and wup > 0:
-            wdm_plus[i] = wup
-        else:
-            wdm_plus[i] = 0.0
-        if wdown > wup and wdown > 0:
-            wdm_minus[i] = wdown
-        else:
-            wdm_minus[i] = 0.0
-    
-    # Smoothed averages (Wilder smoothing)
-    wtr14 = np.full(wn, np.nan)
-    wdm_plus_14 = np.full(wn, np.nan)
-    wdm_minus_14 = np.full(wn, np.nan)
-    
-    if wn >= 14:
-        wtr14[13] = np.nansum(wtr[1:14])
-        wdm_plus_14[13] = np.nansum(wdm_plus[1:14])
-        wdm_minus_14[13] = np.nansum(wdm_minus[1:14])
+        # Smooth TR, +DM, -DM
+        tr14 = np.full(len(df_1d), np.nan)
+        dm_plus_14 = np.full(len(df_1d), np.nan)
+        dm_minus_14 = np.full(len(df_1d), np.nan)
+        tr14[13] = np.nansum(tr_1d[1:14])
+        dm_plus_14[13] = np.nansum(dm_plus[1:14])
+        dm_minus_14[13] = np.nansum(dm_minus[1:14])
+        for i in range(14, len(df_1d)):
+            tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr_1d[i]
+            dm_plus_14[i] = dm_plus_14[i-1] - (dm_plus_14[i-1] / 14) + dm_plus[i]
+            dm_minus_14[i] = dm_minus_14[i-1] - (dm_minus_14[i-1] / 14) + dm_minus[i]
         
-        for i in range(14, wn):
-            wtr14[i] = wtr14[i-1] - (wtr14[i-1] / 14) + wtr[i]
-            wdm_plus_14[i] = wdm_plus_14[i-1] - (wdm_plus_14[i-1] / 14) + wdm_plus[i]
-            wdm_minus_14[i] = wdm_minus_14[i-1] - (wdm_minus_14[i-1] / 14) + wdm_minus[i]
+        # Calculate DI and DX
+        di_plus = np.full(len(df_1d), np.nan)
+        di_minus = np.full(len(df_1d), np.nan)
+        dx = np.full(len(df_1d), np.nan)
+        for i in range(14, len(df_1d)):
+            if tr14[i] > 0:
+                di_plus[i] = 100 * dm_plus_14[i] / tr14[i]
+                di_minus[i] = 100 * dm_minus_14[i] / tr14[i]
+                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
+        
+        # Calculate ADX (smoothed DX)
+        if len(df_1d) >= 28:
+            adx_1d[27] = np.nansum(dx[14:28]) / 14
+            for i in range(28, len(df_1d)):
+                adx_1d[i] = (adx_1d[i-1] * 13 + dx[i]) / 14
     
-    # DI and DX
-    wdi_plus = np.full(wn, np.nan)
-    wdi_minus = np.full(wn, np.nan)
-    wdx = np.full(wn, np.nan)
+    # Align 1d values to 12h timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    for i in range(14, wn):
-        if wtr14[i] > 0:
-            wdi_plus[i] = 100 * wdm_plus_14[i] / wtr14[i]
-            wdi_minus[i] = 100 * wdm_minus_14[i] / wtr14[i]
-            wdx[i] = 100 * abs(wdi_plus[i] - wdi_minus[i]) / (wdi_plus[i] + wdi_minus[i])
-    
-    # ADX (smoothed DX)
-    wadx = np.full(wn, np.nan)
-    if wn >= 28:
-        wadx[27] = np.nansum(wdx[14:28]) / 14
-        for i in range(28, wn):
-            wadx[i] = (wadx[i-1] * 13 + wdx[i]) / 14
-    
-    # Align weekly ADX to daily timeframe
-    wadx_daily = align_htf_to_ltf(prices, df_1w, wadx)
-    
-    # Daily Donchian channel (20-period)
-    dcm = np.full(n, np.nan)  # upper band
-    dcl = np.full(n, np.nan)  # lower band
-    
-    for i in range(n):
-        if i >= 19:
-            dcm[i] = np.max(high[i-19:i+1])
-            dcl[i] = np.min(low[i-19:i+1])
-    
-    # Volume confirmation: 20-period average
-    vol_ma_20 = np.full(n, np.nan)
+    # Volume confirmation: 6-period average (3d)
+    vol_ma_6 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+        if i >= 6:
+            vol_sum -= volume[i-6]
+        if i >= 5:
+            vol_ma_6[i] = vol_sum / 6
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(28, n):  # Start after ADX warmup
         # Skip if any required data is invalid
-        if (np.isnan(dcm[i]) or 
-            np.isnan(dcl[i]) or 
-            np.isnan(vol_ma_20[i]) or 
-            np.isnan(wadx_daily[i])):
+        if (np.isnan(atr_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_6[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR weekly ADX < 20 (weak trend)
-            if close[i] < dcl[i] or wadx_daily[i] < 20:
+            # Exit: price closes below prior day's close OR ADX drops below 20
+            if (close[i] <= df_1d['close'].iloc[-1] if len(df_1d) > 0 else 0) or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR weekly ADX < 20
-            if close[i] > dcm[i] or wadx_daily[i] < 20:
+            # Exit: price closes above prior day's close OR ADX drops below 20
+            if (close[i] >= df_1d['close'].iloc[-1] if len(df_1d) > 0 else 0) or adx_aligned[i] < 20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above Donchian upper band with volume confirmation AND weekly ADX > 25
-            vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (close[i] > dcm[i] and 
-                vol_ratio > 1.5 and 
-                wadx_daily[i] > 25):
-                position = 1
-                signals[i] = 0.25
-            # Enter short: price closes below Donchian lower band with volume confirmation AND weekly ADX > 25
-            elif (close[i] < dcl[i] and 
-                  vol_ratio > 1.5 and 
-                  wadx_daily[i] > 25):
-                position = -1
-                signals[i] = -0.25
+            # Calculate breakout levels using prior day's close and ATR
+            if len(df_1d) >= 2:
+                prev_close = df_1d['close'].iloc[-2]
+                atr_val = atr_aligned[i]
+                
+                # Enter long: price breaks above prior close + 0.5*ATR with volume confirmation AND ADX > 25
+                vol_ratio = volume[i] / vol_ma_6[i] if vol_ma_6[i] > 0 else 0
+                if (close[i] > prev_close + 0.5 * atr_val and 
+                    vol_ratio > 1.5 and 
+                    adx_aligned[i] > 25):
+                    position = 1
+                    signals[i] = 0.25
+                # Enter short: price breaks below prior close - 0.5*ATR with volume confirmation AND ADX > 25
+                elif (close[i] < prev_close - 0.5 * atr_val and 
+                      vol_ratio > 1.5 and 
+                      adx_aligned[i] > 25):
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
