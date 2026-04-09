@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_donchian_volume_chop_v3
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x 20-period average) and chop regime filter (CHOP(14) > 61.8 for mean reversion, < 38.2 for trend following). 
-# In choppy markets (CHOP > 61.8): fade breaks (short upper band, long lower band). 
-# In trending markets (CHOP < 38.2): follow breaks (long upper band, short lower band). 
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 25-40 trades/year.
-# Uses 1d HTF data for ADX regime confirmation (ADX > 25 = trending) as secondary filter.
+# 1d_donchian_volume_chop_regime_v1
+# Hypothesis: Daily Donchian(20) breakout with volume confirmation (>1.5x 20-day average) and weekly chop regime filter (CHOP(14) > 61.8 = range, < 38.2 = trend).
+# In ranging markets (CHOP > 61.8): mean reversion at Donchian bands (short at upper band, long at lower band).
+# In trending markets (CHOP < 38.2): trend continuation (breakout long at upper band, short at lower band).
+# Uses 1d primary timeframe, 1w HTF for chop regime. Discrete sizing (±0.25) minimizes fee churn.
+# Target: 15-25 trades/year to avoid fee drag in bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_volume_chop_v3"
-timeframe = "4h"
+name = "1d_donchian_volume_chop_regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,124 +24,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for ADX regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
-        return np.zeros(n)
+    # 1d Donchian(20) - upper/lower bands
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
-    
-    # Calculate ADX on daily timeframe
-    # True Range
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # Directional Movement
-    dm_plus = np.where((high_d[1:] - high_d[:-1]) > (low_d[:-1] - low_d[1:]), 
-                       np.maximum(high_d[1:] - high_d[:-1], 0), 0)
-    dm_minus = np.where((low_d[:-1] - low_d[1:]) > (high_d[1:] - high_d[:-1]), 
-                        np.maximum(low_d[:-1] - low_d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(values[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(values)):
-                result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    period = 14
-    atr_1d = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, dm_plus_smooth / atr_1d * 100, 0)
-    di_minus = np.where(atr_1d != 0, dm_minus_smooth / atr_1d * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1d = wilders_smoothing(dx, period)
-    
-    # Align daily ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 4h indicators
-    # Donchian Channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume average for confirmation (20-period)
+    # 1d volume average for confirmation
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index (14-period)
-    def choppiness_index(high, low, close, period):
-        atr_sum = np.zeros_like(close)
-        for i in range(len(close)):
-            if i < period:
-                atr_sum[i] = np.nan
-            else:
-                tr_sum = 0
-                for j in range(i-period+1, i+1):
-                    tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-                    tr_sum += tr
-                atr_sum[i] = tr_sum
-        
-        # Calculate CHOP
-        chop = np.full_like(close, np.nan)
-        max_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        min_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        
-        for i in range(len(close)):
-            if i < period or np.isnan(atr_sum[i]) or atr_sum[i] == 0:
-                chop[i] = np.nan
-            else:
-                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
-        return chop
+    # 1w HTF data for chop regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough for weekly ATR(14) and HH/LL(14)
+        return np.zeros(n)
     
-    chop = choppiness_index(high, low, close, 14)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    
+    # Weekly ATR(14) for chop denominator
+    tr_w = np.maximum(
+        np.maximum(
+            np.abs(high_w[1:] - low_w[1:]),
+            np.abs(high_w[1:] - close_w[:-1])
+        ),
+        np.abs(low_w[1:] - close_w[:-1])
+    )
+    tr_w = np.concatenate([[np.nan], tr_w])  # align length
+    atr_14_w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    
+    # Weekly highest high and lowest low over 14 periods
+    highest_high_14w = pd.Series(high_w).rolling(window=14, min_periods=14).max().values
+    lowest_low_14w = pd.Series(low_w).rolling(window=14, min_periods=14).min().values
+    
+    # Chopiness index formula: 100 * log10(sum(ATR(14)) / (max(HH,14) - min(LL,14))) / log10(14)
+    sum_atr_14w = pd.Series(atr_14_w).rolling(window=14, min_periods=14).sum().values
+    range_14w = highest_high_14w - lowest_low_14w
+    chop_denom = np.where(range_14w > 0, range_14w, np.nan)
+    chop_raw = 100 * np.log10(sum_atr_14w / chop_denom) / np.log10(14)
+    chop_w = chop_raw  # Already in [0, 100] range
+    
+    # Align weekly chop to daily timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-day average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Regime filters
-        is_choppy = chop[i] > 61.8  # Mean reversion regime
-        is_trending = chop[i] < 38.2  # Trend following regime
-        strong_trend = adx_aligned[i] > 25  # Additional trend strength filter
+        if not volume_confirmed:
+            signals[i] = 0.0
+            continue
+        
+        chop = chop_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions
-            if is_choppy:
-                # In choppy regime: exit when price reaches midpoint (mean reversion target)
-                midpoint = (donch_high[i] + donch_low[i]) / 2
-                if close[i] >= midpoint:
+            if chop > 61.8:  # ranging market: mean reversion exit at opposite band
+                if close[i] >= lowest_low[i]:  # price retraced to lower band
                     position = 0
                     signals[i] = 0.0
-            else:
-                # In trending regime: exit when price breaks lower band OR ADX weakens
-                if close[i] < donch_low[i] or adx_aligned[i] < 20:
+                else:
+                    signals[i] = 0.25
+            else:  # trending market: trail with Donchian lower band
+                if close[i] <= lowest_low[i]:  # broke below lower band
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -149,36 +103,36 @@ def generate_signals(prices):
                     
         elif position == -1:  # Short position
             # Exit conditions
-            if is_choppy:
-                # In choppy regime: exit when price reaches midpoint
-                midpoint = (donch_high[i] + donch_low[i]) / 2
-                if close[i] <= midpoint:
+            if chop > 61.8:  # ranging market: mean reversion exit at opposite band
+                if close[i] <= highest_high[i]:  # price retraced to upper band
                     position = 0
                     signals[i] = 0.0
-            else:
-                # In trending regime: exit when price breaks upper band OR ADX weakens
-                if close[i] > donch_high[i] or adx_aligned[i] < 20:
+                else:
+                    signals[i] = -0.25
+            else:  # trending market: trail with Donchian upper band
+                if close[i] >= highest_high[i]:  # broke above upper band
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed:
-                if is_choppy:
-                    # In choppy regime: fade the breakout
-                    if close[i] > donch_high[i]:  # Price above upper band -> short
-                        position = -1
-                        signals[i] = -0.25
-                    elif close[i] < donch_low[i]:  # Price below lower band -> long
-                        position = 1
-                        signals[i] = 0.25
-                elif is_trending and strong_trend:
-                    # In trending regime with strong ADX: follow the breakout
-                    if close[i] > donch_high[i]:  # Price above upper band -> long
-                        position = 1
-                        signals[i] = 0.25
-                    elif close[i] < donch_low[i]:  # Price below lower band -> short
-                        position = -1
-                        signals[i] = -0.25
+            if chop > 61.8:  # ranging market: mean reversion at bands
+                if close[i] <= lowest_low[i] and volume_confirmed:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] >= highest_high[i] and volume_confirmed:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+            else:  # trending market: breakout continuation
+                if close[i] >= highest_high[i] and volume_confirmed:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] <= lowest_low[i] and volume_confirmed:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
     
     return signals
