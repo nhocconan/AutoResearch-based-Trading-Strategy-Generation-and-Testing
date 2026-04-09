@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_volume_v4
-# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation and ATR filter.
-# Enters long when price breaks above H3 level with volume spike and ATR > 0, short when breaks below L3 level.
-# Uses discrete sizing (±0.30) to minimize fee churn. Target: 50-150 trades over 4 years.
-# Works in bull/bear by using Camarilla levels as dynamic support/resistance from higher timeframe.
+# 4h_donchian_12h_volume_v1
+# Hypothesis: 4h strategy using Donchian(20) breakout with 12h volume confirmation and ATR filter.
+# Enters long when price breaks above 20-period high with volume spike and ATR > 0, short when breaks below 20-period low.
+# Uses discrete sizing (±0.30) to minimize fee churn. Target: 75-200 trades over 4 years.
+# Works in bull/bear by using price channels as dynamic support/resistance.
 # ATR filter ensures volatility is sufficient for breakout validity, reducing false signals.
 # Added volume spike requirement to reduce false breakouts and lower trade frequency.
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_volume_v4"
-timeframe = "12h"
+name = "4h_donchian_12h_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,36 +25,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Volume spike detection on 12h (20-period volume average)
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike_12h = volume_12h > (vol_ma_20_12h * 2.0)  # Volume at least 2x average
     
-    # Camarilla levels
-    h3 = pivot + (range_1d * 1.1 / 4)
-    l3 = pivot - (range_1d * 1.1 / 4)
-    h4 = pivot + (range_1d * 1.1 / 2)
-    l4 = pivot - (range_1d * 1.1 / 2)
+    # Align volume spike to 4h timeframe (completed 12h candle only)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
     
-    # Align Camarilla levels to 12h timeframe (completed 1d candle only)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Donchian channels (20-period) on 4h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume spike detection (20-period volume average on 12h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma_20 * 2.0)  # Volume at least 2x average
-    
-    # ATR filter for volatility (14-period ATR on 12h)
+    # ATR filter for volatility (14-period ATR on 4h)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -68,34 +57,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below L3 level
-            if close[i] < l3_aligned[i]:
+            # Exit: price falls below 20-period low
+            if close[i] < lowest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price rises above H3 level
-            if close[i] > h3_aligned[i]:
+            # Exit: price rises above 20-period high
+            if close[i] > highest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.30
         else:  # Flat
-            # Enter long: price breaks above H3 level with volume spike and ATR filter
-            if (close[i] > h3_aligned[i]) and vol_spike[i] and atr_filter[i]:
+            # Enter long: price breaks above 20-period high with volume spike and ATR filter
+            if (close[i] > highest_20[i]) and vol_spike_aligned[i] and atr_filter[i]:
                 position = 1
                 signals[i] = 0.30
-            # Enter short: price breaks below L3 level with volume spike and ATR filter
-            elif (close[i] < l3_aligned[i]) and vol_spike[i] and atr_filter[i]:
+            # Enter short: price breaks below 20-period low with volume spike and ATR filter
+            elif (close[i] < lowest_20[i]) and vol_spike_aligned[i] and atr_filter[i]:
                 position = -1
                 signals[i] = -0.30
     
