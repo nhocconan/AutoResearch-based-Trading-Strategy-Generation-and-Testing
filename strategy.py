@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_pivot_volume_spike_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation.
-# Long: Price breaks above H4 with volume > 2.0x 20-period average.
-# Short: Price breaks below L4 with volume > 2.0x 20-period average.
+# 4h_daily_camarilla_pivot_volume_spike_v6
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with tighter entry conditions to reduce trade frequency and improve edge.
+# Long: Price breaks above H4 with volume > 2.5x 20-period average, RSI(14) > 55, and bullish candle.
+# Short: Price breaks below L4 with volume > 2.5x 20-period average, RSI(14) < 45, and bearish candle.
 # Exit: Price returns to opposite Camarilla level (H3 for longs, L3 for shorts).
-# Designed for lower trade frequency on 12h timeframe to reduce fee drag while capturing pivot breakouts.
-# Works in bull markets via breakouts and bear markets via fade-from-extremes logic.
+# Tightened volume threshold (2.5x vs 2.0x) and RSI thresholds (55/45 vs 50/50) to reduce false signals.
+# Position size: 0.25 (25% of capital) to balance risk and return.
+# Target: 15-30 trades/year to minimize fee drag while maintaining statistical significance.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_pivot_volume_spike_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_pivot_volume_spike_v6"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,6 +30,17 @@ def generate_signals(prices):
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # RSI(14) for momentum filter
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)  # Avoid division by zero
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -49,7 +61,7 @@ def generate_signals(prices):
     h4_1d = pivot_1d + (range_1d * 1.1 / 2)
     l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 12h
+    # Align 1d Camarilla levels to 4h
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
@@ -62,13 +74,21 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
             np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(rsi_values[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i]) or
             np.isnan(open_prices[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Volume confirmation: current volume > 2.5x 20-period average (tighter)
+        volume_confirmed = volume[i] > 2.5 * volume_ma[i]
+        # Momentum filter: RSI > 55 for long, < 45 for short (tighter)
+        rsi_long_filter = rsi_values[i] > 55
+        rsi_short_filter = rsi_values[i] < 45
+        # Bullish candle: close > open
+        bullish_candle = close[i] > open_prices[i]
+        # Bearish candle: close < open
+        bearish_candle = close[i] < open_prices[i]
         
         if position == 1:  # Long position
             # Exit: Price returns to H3
@@ -86,14 +106,18 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above H4 with volume confirmation
+            # Long entry: Price breaks above H4 with volume, momentum, and bullish candle
             if (close[i] > h4_1d_aligned[i] and    # Break above H4
-                volume_confirmed):                 # Volume spike
+                volume_confirmed and               # Volume spike (2.5x)
+                rsi_long_filter and                # RSI > 55 (strong bullish momentum)
+                bullish_candle):                   # Bullish candle
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L4 with volume confirmation
+            # Short entry: Price breaks below L4 with volume, momentum, and bearish candle
             elif (close[i] < l4_1d_aligned[i] and  # Break below L4
-                  volume_confirmed):               # Volume spike
+                  volume_confirmed and             # Volume spike (2.5x)
+                  rsi_short_filter and             # RSI < 45 (strong bearish momentum)
+                  bearish_candle):                 # Bearish candle
                 position = -1
                 signals[i] = -0.25
     
