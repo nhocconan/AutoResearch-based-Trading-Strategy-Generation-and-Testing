@@ -3,18 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
-# - Uses 1d EMA(50) for trend direction (long when price > EMA, short when price < EMA)
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 12h timeframe
-# - Requires volume > 1.5 * 20-period volume average for confirmation
-# - ATR-based stoploss and mean reversion exits
-# - Fixed position size 0.25 to manage drawdown and reduce fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Hypothesis: 4h Donchian breakout with 1d volume spike and ATR stoploss
+# - Uses 1d Donchian(20) channels for breakout entries on 4h timeframe
+# - Requires volume > 2.0 * 20-period volume average for confirmation (strict filter)
+# - Uses ATR(14) for dynamic stoploss (2.5 * ATR) and position sizing (0.25)
 # - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
-# - Volume confirmation and ATR filter reduce false breakouts
+# - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to avoid fee drag
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +21,23 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1d Camarilla pivot levels
+    # 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Typical price for pivot calculation
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Upper channel: highest high of last 20 days
+    upper_channel = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low of last 20 days
+    lower_channel = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    camarilla_h3 = typical_price + (range_1d * 1.1 / 4)
-    camarilla_l3 = typical_price - (range_1d * 1.1 / 4)
-    camarilla_h4 = typical_price + (range_1d * 1.1 / 2)
-    camarilla_l4 = typical_price - (range_1d * 1.1 / 2)
+    # Align Donchian levels to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
     
-    # Align Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Pre-compute 12h ATR(14) for stoploss
+    # Pre-compute 4h ATR(14) for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -65,10 +49,10 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume confirmation: volume > 1.5 * 20-period average
+    # Pre-compute volume confirmation: volume > 2.0 * 20-period average (strict)
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -77,15 +61,11 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(atr[i]) or atr[i] <= 0 or
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(atr[i]) or atr[i] <= 0 or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
-        
-        # Determine trend direction from 1d EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -97,7 +77,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < l3_aligned[i]:  # Mean reversion exit
+            elif close[i] < lower_aligned[i]:  # Mean reversion exit (break below lower channel)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -115,7 +95,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > h3_aligned[i]:  # Mean reversion exit
+            elif close[i] > upper_aligned[i]:  # Mean reversion exit (break above upper channel)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -123,13 +103,13 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for breakout entries in direction of 1d trend with volume confirmation
-            if uptrend and close[i] > h4_aligned[i] and volume_confirm[i]:  # Break above H4 in uptrend
+            # Look for breakout entries with strict volume confirmation
+            if close[i] > upper_aligned[i] and volume_confirm[i]:  # Break above upper channel
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif downtrend and close[i] < l4_aligned[i] and volume_confirm[i]:  # Break below L4 in downtrend
+            elif close[i] < lower_aligned[i] and volume_confirm[i]:  # Break below lower channel
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
