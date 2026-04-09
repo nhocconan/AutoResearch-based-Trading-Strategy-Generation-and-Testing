@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_atr_v1
-# Hypothesis: 4h Donchian breakout strategy with volume confirmation and ATR-based stoploss.
-# Long when price breaks above Donchian(20) high with volume > 1.5x 20-period average.
-# Short when price breaks below Donchian(20) low with volume > 1.5x 20-period average.
-# Exit via ATR trailing stop (3x ATR) or opposite breakout.
-# Uses 1d HMA as higher timeframe trend filter: only long when price > 1d HMA, short when price < 1d HMA.
-# Discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year.
-# Works in bull/bear markets: Donchian captures breakouts, volume confirms conviction, 1d HMA avoids counter-trend trades.
+# 4h_donchian_breakout_volume_chop_regime_v1
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and chop regime filter.
+# Long when price breaks above Donchian(20) high with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Short when price breaks below Donchian(20) low with volume > 1.5x 20-period average and chop < 61.8 (trending).
+# Exit when price returns to Donchian(20) midpoint.
+# Uses discrete position sizing (0.25) to minimize fee churn.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
+# Works in both bull and bear markets: Donchian captures breakouts with clear levels, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
+# Multi-timeframe: 1d trend filter using EMA(50) for higher timeframe confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_atr_v1"
+name = "4h_donchian_breakout_volume_chop_regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,103 +31,77 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Donchian channels (20-period)
+    # Donchian Channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # ATR (14-period) for trailing stop
+    # Choppiness Index regime filter (14-period)
+    atr_period = 14
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     tr_series = pd.Series(tr)
-    atr = tr_series.rolling(window=14, min_periods=14).mean().values
+    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
+    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
+    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
+    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
+    chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
     
-    # Multi-timeframe: 1d HMA trend filter
+    # Multi-timeframe: 1d EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    # HMA(21) calculation
-    n_half = int(21 / 2)
-    n_sqrt = int(np.sqrt(21))
-    wma_half = close_1d_s.rolling(window=n_half, min_periods=n_half).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    wma_full = close_1d_s.rolling(window=21, min_periods=21).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    raw_hma = 2 * wma_half - wma_full
-    hma_1d = pd.Series(raw_hma).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_since_long = 0.0
-    lowest_since_short = 0.0
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
             np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(hma_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
+        # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Regime filter: chop < 61.8 indicates trending market
+        trending_market = chop[i] < 61.8
+        # HTF trend filter: price above/below 1d EMA(50)
+        htf_uptrend = close[i] > ema_50_1d_aligned[i]
+        htf_downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            if close[i] > highest_since_long:
-                highest_since_long = close[i]
-            # ATR trailing stop: exit if price drops 3*ATR from highest
-            if close[i] < highest_since_long - 3.0 * atr[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] <= donchian_mid[i]:
                 position = 0
-                highest_since_long = 0.0
-                signals[i] = 0.0
-            # Opposite breakout exit
-            elif close[i] < donchian_low[i]:
-                position = 0
-                highest_since_long = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if close[i] < lowest_since_short:
-                lowest_since_short = close[i]
-            # ATR trailing stop: exit if price rises 3*ATR from lowest
-            if close[i] > lowest_since_short + 3.0 * atr[i]:
+            # Exit: price returns to Donchian midpoint
+            if close[i] >= donchian_mid[i]:
                 position = 0
-                lowest_since_short = 0.0
-                signals[i] = 0.0
-            # Opposite breakout exit
-            elif close[i] > donchian_high[i]:
-                position = 0
-                lowest_since_short = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation and 1d HMA filter
-            bullish_breakout = (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]) and \
-                              volume_confirmed and (close[i] > hma_1d_aligned[i])
-            bearish_breakout = (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]) and \
-                              volume_confirmed and (close[i] < hma_1d_aligned[i])
+            # Check for Donchian breakout with volume, regime, and HTF confirmation
+            bullish_breakout = (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]) and volume_confirmed and trending_market and htf_uptrend
+            bearish_breakout = (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]) and volume_confirmed and trending_market and htf_downtrend
             
             if bullish_breakout:
                 position = 1
-                highest_since_long = close[i]
                 signals[i] = 0.25
             elif bearish_breakout:
                 position = -1
-                lowest_since_short = close[i]
                 signals[i] = -0.25
     
     return signals
