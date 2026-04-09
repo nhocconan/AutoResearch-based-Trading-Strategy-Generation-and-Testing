@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and volatility filter
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and volatility filter
 # Uses 1d Camarilla pivot levels (H3/L3) from previous day for breakout signals
-# Enters only when 12h ATR rank < 30 (low volatility) to avoid whipsaws in choppy markets
-# Volume confirmation: 12h volume > 1.5x 20-period average
+# Enters only when 1d ATR rank < 30 (low volatility) to avoid whipsaws in choppy markets
+# Volume confirmation: 4h volume > 1.5x 20-period average (~5 days)
 # Exits when price closes opposite Camarilla level (H4/L4)
 # Position size 0.25 to limit drawdown
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag
 # Works in both bull/bear: Camarilla provides structure, low vol filter avoids false breakouts
 
-name = "12h_1d_camarilla_vol_filter_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -83,14 +83,14 @@ def generate_signals(prices):
         window = atr_1d[i-100:i]
         atr_rank_1d[i] = np.sum(window < atr_1d[i]) / len(window) * 100
     
-    # Align 1d data to 12h timeframe (only use completed daily bars)
-    camarilla_h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    atr_rank_12h = align_htf_to_ltf(prices, df_1d, atr_rank_1d)
+    # Align 1d data to 4h timeframe (only use completed daily bars)
+    camarilla_h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    atr_rank_4h = align_htf_to_ltf(prices, df_1d, atr_rank_1d)
     
-    # Volume confirmation: 20-period average on 12h (~10 days)
+    # Volume confirmation: 20-period average on 4h (~5 days)
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -105,17 +105,17 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after ATR rank warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_12h[i]) or 
-            np.isnan(camarilla_l3_12h[i]) or 
-            np.isnan(camarilla_h4_12h[i]) or 
-            np.isnan(camarilla_l4_12h[i]) or 
-            np.isnan(atr_rank_12h[i]) or 
+        if (np.isnan(camarilla_h3_4h[i]) or 
+            np.isnan(camarilla_l3_4h[i]) or 
+            np.isnan(camarilla_h4_4h[i]) or 
+            np.isnan(camarilla_l4_4h[i]) or 
+            np.isnan(atr_rank_4h[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         # Only trade in low volatility environment (ATR rank < 30 = bottom 30% volatility)
-        if atr_rank_12h[i] >= 30:
+        if atr_rank_4h[i] >= 30:
             if position != 0:
                 position = 0
                 signals[i] = 0.0
@@ -125,7 +125,7 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: price closes below 1d Camarilla L4
-            if close[i] <= camarilla_l4_12h[i]:
+            if close[i] <= camarilla_l4_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -133,7 +133,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price closes above 1d Camarilla H4
-            if close[i] >= camarilla_h4_12h[i]:
+            if close[i] >= camarilla_h4_4h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -141,12 +141,12 @@ def generate_signals(prices):
         else:  # Flat
             # Enter long: price closes above 1d Camarilla H3 with volume confirmation
             vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (close[i] > camarilla_h3_12h[i] and 
+            if (close[i] > camarilla_h3_4h[i] and 
                 vol_ratio > 1.5):
                 position = 1
                 signals[i] = 0.25
             # Enter short: price closes below 1d Camarilla L3 with volume confirmation
-            elif (close[i] < camarilla_l3_12h[i] and 
+            elif (close[i] < camarilla_l3_4h[i] and 
                   vol_ratio > 1.5):
                 position = -1
                 signals[i] = -0.25
