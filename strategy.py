@@ -3,94 +3,125 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using 1w Donchian breakout + volume confirmation
-# Donchian(20) on 1w provides clear multi-week trend direction and structure
-# Long when price breaks above 1w Donchian upper with volume confirmation
-# Short when price breaks below 1w Donchian lower with volume confirmation
-# Uses discrete position sizing 0.25 to target ~15-25 trades/year and minimize fee drag
-# Works in bull/bear markets: breakout follows trends, volume confirmation filters false breakouts
+# Hypothesis: 6h strategy using 1d Camarilla pivot levels with breakout/fade logic
+# Fade at R3/S3 levels (mean reversion in ranging markets)
+# Breakout continuation at R4/S4 levels (trend following in strong moves)
+# Uses 1d Camarilla calculations for structure, 6h for execution timing
+# Designed to work in both bull/bear markets via adaptive logic
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "1d_1w_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_fade_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Donchian channels (20-period)
-    def rolling_max(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    # Calculate 1d Camarilla levels (based on previous day)
+    # Camarilla: HLC3 = (high + low + close) / 3
+    # Range = high - low
+    hlc3 = (high_1d + low_1d + close_1d) / 3.0
+    rng = high_1d - low_1d
     
-    def rolling_min(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
+    # Camarilla levels for current day based on previous day's action
+    # We shift by 1 to avoid look-ahead (use previous day's data)
+    hlc3_prev = np.roll(hlc3, 1)
+    rng_prev = np.roll(rng, 1)
+    hlc3_prev[0] = np.nan
+    rng_prev[0] = np.nan
     
-    donchian_upper_20 = rolling_max(high_1w, 20)
-    donchian_lower_20 = rolling_min(low_1w, 20)
+    camarilla_h4 = hlc3_prev + rng_prev * 1.1 / 2  # R4
+    camarilla_l4 = hlc3_prev - rng_prev * 1.1 / 2  # S4
+    camarilla_h3 = hlc3_prev + rng_prev * 1.1 / 4  # R3
+    camarilla_l3 = hlc3_prev - rng_prev * 1.1 / 4  # S3
+    camarilla_h2 = hlc3_prev + rng_prev * 1.1 / 6  # R2
+    camarilla_l2 = hlc3_prev - rng_prev * 1.1 / 6  # S2
+    camarilla_h1 = hlc3_prev + rng_prev * 1.1 / 12 # R1
+    camarilla_l1 = hlc3_prev - rng_prev * 1.1 / 12 # S1
+    camarilla_pivot = hlc3_prev                    # Pivot point
     
-    # Calculate 1w average volume (20-period)
-    vol_s_1w = pd.Series(volume_1w)
-    avg_vol_1w = vol_s_1w.rolling(window=20, min_periods=20).mean().values
+    # Align 1d Camarilla levels to 6h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
+    l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
+    h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
+    p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Align 1w indicators to 1d timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_20)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_20)
-    avg_vol_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_vol_1w)
-    
-    # Pre-compute 1d volume moving average (20-period)
+    # Calculate 6h average volume (20-period) for confirmation
     vol_s = pd.Series(volume)
-    vol_ma_20 = vol_s.rolling(window=20, min_periods=20).mean().values
+    avg_vol_20 = vol_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute session filter (08-20 UTC) - avoid low liquidity periods
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
-        # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(avg_vol_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(50, n):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(avg_vol_20[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x average 1d volume (20-period)
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.3x average 6h volume (20-period)
+        volume_confirmed = volume[i] > 1.3 * avg_vol_20[i] if not np.isnan(avg_vol_20[i]) else False
         
         if position == 1:  # Long position
-            # Exit long if price falls below 1w Donchian lower
-            if close[i] < donchian_lower_aligned[i]:
+            # Exit long if price falls below S3 (mean reversion failure)
+            if close[i] < l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short if price rises above 1w Donchian upper
-            if close[i] > donchian_upper_aligned[i]:
+            # Exit short if price rises above R3 (mean reversion failure)
+            if close[i] > h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Breakout strategy: enter on 1w Donchian breakout with volume confirmation
-            if close[i] > donchian_upper_aligned[i] and volume_confirmed:
+            # Fade at R3/S3 levels (mean reversion)
+            if close[i] > h3_aligned[i] and close[i] < h4_aligned[i] and volume_confirmed:
+                # Price between R3 and R4 - fade short expecting reversion to pivot
+                position = -1
+                signals[i] = -0.25
+            elif close[i] < l3_aligned[i] and close[i] > l4_aligned[i] and volume_confirmed:
+                # Price between S3 and S4 - fade long expecting reversion to pivot
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < donchian_lower_aligned[i] and volume_confirmed:
+            # Breakout continuation at R4/S4 levels (trend following)
+            elif close[i] > h4_aligned[i] and volume_confirmed:
+                # Price breaks above R4 - go long expecting continuation
+                position = 1
+                signals[i] = 0.25
+            elif close[i] < l4_aligned[i] and volume_confirmed:
+                # Price breaks below S4 - go short expecting continuation
                 position = -1
                 signals[i] = -0.25
     
