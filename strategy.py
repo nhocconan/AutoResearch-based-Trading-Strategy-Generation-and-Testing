@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_volume_chop_v1
-# Hypothesis: 12h Donchian channel breakout with volume confirmation and choppiness regime filter.
-# Long: Price breaks above 20-period Donchian high, volume > 1.5x 20-period average, and chop < 61.8 (trending regime).
-# Short: Price breaks below 20-period Donchian low, volume > 1.5x 20-period average, and chop < 61.8 (trending regime).
-# Exit: Opposite Donchian breakout or ATR trailing stop (2.5x ATR from extreme).
-# Uses 1w EMA as higher timeframe trend filter to avoid counter-trend trades.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# 1d_1w_camarilla_pivot_volume_v2
+# Hypothesis: Daily Camarilla pivot levels with weekly trend filter and volume confirmation.
+# Long: Price touches Camarilla L3 support, weekly close > weekly open (bullish week), volume > 1.5x 20-day average.
+# Short: Price touches Camarilla H3 resistance, weekly close < weekly open (bearish week), volume > 1.5x 20-day average.
+# Exit: Opposite Camarilla level touch (L4/H4) or ATR trailing stop (2.5x ATR from extreme).
+# Uses weekly trend for direction, Camarilla for precise entries/exits, volume for confirmation.
+# Target: 7-25 trades/year (30-100 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_pivot_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,6 +24,7 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
@@ -39,28 +40,20 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Donchian channel (20-period)
-    highest_high = high_s.rolling(window=20, min_periods=20).max().values
-    lowest_low = low_s.rolling(window=20, min_periods=20).min().values
-    
-    # Choppiness Index (14-period) for regime filter
-    chop_sum = tr.rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = high_s.rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = low_s.rolling(window=14, min_periods=14).min().values
-    chop_denom = highest_high_14 - lowest_low_14
-    chop = np.where(chop_denom != 0, 100 * np.log10(chop_sum / chop_denom) / np.log10(14), 50.0)
-    
-    # Get 1w data for EMA trend filter (HTF)
+    # Get 1w data for trend filter (HTF)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) == 0:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
+    # Calculate weekly bullish/bearish: close > open for bullish week
     close_1w = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
+    open_1w = pd.Series(df_1w['open'].values)
+    weekly_bullish = close_1w > open_1w
+    weekly_bearish = close_1w < open_1w
     
-    # Align HTF EMA to 12h timeframe (wait for completed 1w bar)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align HTF weekly trend to daily timeframe (wait for completed 1w bar)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.values.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.values.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -69,21 +62,14 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i]) or np.isnan(close[i]) or
-            np.isnan(high[i]) or np.isnan(low[i])):
+        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
+            np.isnan(open_price[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        
-        # Trend filter: price above/below weekly EMA20
-        price_above_weekly_ema = close[i] > ema20_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema20_1w_aligned[i]
-        
-        # Choppiness regime filter: chop < 61.8 indicates trending market (good for breakouts)
-        trending_regime = chop[i] < 61.8
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -93,8 +79,8 @@ def generate_signals(prices):
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
-            # Exit: Price breaks below Donchian low (20-period)
-            elif close[i] < lowest_low[i]:
+            # Exit: Price touches or exceeds Camarilla H4 level
+            elif close[i] >= camarilla_h4[i]:
                 position = 0
                 long_high = 0.0
                 signals[i] = 0.0
@@ -109,21 +95,40 @@ def generate_signals(prices):
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
-            # Exit: Price breaks above Donchian high (20-period)
-            elif close[i] > highest_high[i]:
+            # Exit: Price touches or exceeds Camarilla L4 level
+            elif close[i] <= camarilla_l4[i]:
                 position = 0
                 short_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above Donchian high, volume confirmed, above weekly EMA, trending regime
-            if (close[i] > highest_high[i] and volume_confirmed and price_above_weekly_ema and trending_regime):
+            # Calculate Camarilla levels for today using yesterday's OHLC
+            if i >= 1:
+                # Camarilla levels: based on previous day's range
+                phigh = high[i-1]
+                plow = low[i-1]
+                pclose = close[i-1]
+                range_val = phigh - plow
+                
+                camarilla_h3 = pclose + range_val * 1.1 / 4
+                camarilla_l3 = pclose - range_val * 1.1 / 4
+                camarilla_h4 = pclose + range_val * 1.1 / 2
+                camarilla_l4 = pclose - range_val * 1.1 / 2
+            else:
+                camarilla_h3 = camarilla_l3 = camarilla_h4 = camarilla_l4 = 0.0
+            
+            # Long entry: Price touches L3 support, weekly bullish, volume confirmed
+            if (low[i] <= camarilla_l3 and 
+                weekly_bullish_aligned[i] > 0.5 and 
+                volume_confirmed):
                 position = 1
                 long_high = high[i]
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low, volume confirmed, below weekly EMA, trending regime
-            elif (close[i] < lowest_low[i] and volume_confirmed and price_below_weekly_ema and trending_regime):
+            # Short entry: Price touches H3 resistance, weekly bearish, volume confirmed
+            elif (high[i] >= camarilla_h3 and 
+                  weekly_bearish_aligned[i] > 0.5 and 
+                  volume_confirmed):
                 position = -1
                 short_low = low[i]
                 signals[i] = -0.25
