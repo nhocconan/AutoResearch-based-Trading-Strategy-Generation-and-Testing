@@ -1,30 +1,17 @@
 #!/usr/bin/env python3
-# 12h_hma_trend_volume_v1
-# Hypothesis: 12h strategy using Hull Moving Average (HMA) trend with volume confirmation.
-# HMA reduces lag while maintaining smoothness for trend identification. Volume confirms
-# institutional participation in moves. Works in both bull/bear by following the trend.
-# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 12-37 trades/year.
+# 4h_donchian_breakout_volume_chop_v2
+# Hypothesis: 4h Donchian(20) breakouts with volume confirmation and chop regime filter.
+# Entry only when volume > 1.8x 20-period MA and chop > 55 (ranging market).
+# Exit on Donchian reversal or volume drop below 1.2x MA.
+# Discrete sizing 0.0, ±0.30 to minimize fee churn. Target: 30-60 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_hma_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
-
-def _hma(arr, period):
-    """Calculate Hull Moving Average."""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan, dtype=np.float64)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    arr = np.asarray(arr, dtype=np.float64)
-    wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
-    wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
-    raw = 2 * wma2 - wma1
-    hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
-    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,57 +23,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for volume regime filter
+    # 1d HTF data for chop regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate HMA (55-period) on close
-    hma_55 = _hma(close, 55)
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d average volume for regime filter
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Chop regime (14-period) from 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    atr_1d = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).sum().values
+    high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index formula: CHOP = 100 * LOG10(SUM(TR14)/(LOG10(14)*HH14-LL14)) / LOG10(14)
+    chop_denom = np.log10(atr_1d) * np.log10(14)
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
+    chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
+    
+    # Align chop to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(hma_55[i]) or np.isnan(hma_55[i-1]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume regime: current 12h volume > 1.2x 1d average volume (scaled)
-        # Scale 1d average to 12h by dividing by 2 (approx 2x 12h bars in 1d)
-        volume_regime = volume[i] > 1.2 * (vol_ma_1d_aligned[i] / 2.0)
+        # Volume confirmation levels
+        volume_high = volume[i] > 1.8 * volume_ma[i]   # Entry threshold
+        volume_low = volume[i] > 1.2 * volume_ma[i]    # Maintenance threshold
+        
+        # Chop regime: only trade when market is ranging (chop > 55)
+        chop_regime = chop_aligned[i] > 55
         
         if position == 1:  # Long position
-            # Exit: price closes below HMA
-            if close[i] < hma_55[i]:
+            # Exit: price moves below Donchian low OR volume drops below maintenance
+            if close[i] < low_20[i] or not volume_low:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price closes above HMA
-            if close[i] > hma_55[i]:
+            # Exit: price moves above Donchian high OR volume drops below maintenance
+            if close[i] > high_20[i] or not volume_low:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
-            if volume_regime:
-                # Long entry: price closes above HMA and HMA is rising
-                if close[i] > hma_55[i] and hma_55[i] > hma_55[i-1]:
+            if volume_high and chop_regime:
+                # Long entry: price breaks above Donchian high with high volume
+                if close[i] > high_20[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short entry: price closes below HMA and HMA is falling
-                elif close[i] < hma_55[i] and hma_55[i] < hma_55[i-1]:
+                    signals[i] = 0.30
+                # Short entry: price breaks below Donchian low with high volume
+                elif close[i] < low_20[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
