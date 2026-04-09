@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 4h_trix_volume_chop_v1
-# Hypothesis: 4h strategy using TRIX momentum with volume confirmation and chop regime filter.
-# TRIX (12) filters noise and identifies sustainable momentum. Volume confirmation ensures
-# institutional participation. Chop filter (from 1d) ensures we trade in trending regimes
-# (chop < 50) to avoid whipsaws in ranging markets. Works in bull/bear by capturing
-# sustained moves with proper regime filtering. Target: 25-40 trades/year.
+# 12h_donchian_breakout_volume_chop_v1
+# Hypothesis: 12h strategy using Donchian(20) breakouts with volume confirmation and chop regime filter.
+# In ranging markets (2025+), price tends to revert from Donchian channel extremes.
+# Volume confirmation filters false breakouts. Chop filter ensures ranging conditions.
+# Discrete sizing (0.0, ±0.30) minimizes fee churn. Target: 12-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_trix_volume_chop_v1"
-timeframe = "4h"
+name = "12h_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,17 +28,9 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate TRIX (12) - triple smoothed EMA of ROC
-    close_s = pd.Series(close)
-    # ROC(1): (close[t] - close[t-1]) / close[t-1]
-    roc = close_s.pct_change(1)
-    # EMA1 of ROC
-    ema1 = roc.ewm(span=12, min_periods=12, adjust=False).mean()
-    # EMA2 of EMA1
-    ema2 = ema1.ewm(span=12, min_periods=12, adjust=False).mean()
-    # EMA3 of EMA2 (TRIX)
-    ema3 = ema2.ewm(span=12, min_periods=12, adjust=False).mean()
-    trix = ema3.values * 100  # Scale for readability
+    # Calculate Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate chop regime (14-period) from 1d data
     high_1d = df_1d['high'].values
@@ -55,7 +46,7 @@ def generate_signals(prices):
     chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
     chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
     
-    # Align chop to 4h timeframe
+    # Align chop to 12h timeframe
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # Volume average for confirmation (20-period)
@@ -67,40 +58,40 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(trix[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Chop regime: only trade when market is trending (chop < 50)
-        chop_regime = chop_aligned[i] < 50
+        # Chop regime: only trade when market is ranging (chop > 50)
+        chop_regime = chop_aligned[i] > 50
         
         if position == 1:  # Long position
-            # Exit: TRIX turns negative or volume dries up
-            if trix[i] < 0 or not volume_confirmed:
+            # Exit: price moves below Donchian low or volume dries up
+            if close[i] < low_20[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: TRIX turns positive or volume dries up
-            if trix[i] > 0 or not volume_confirmed:
+            # Exit: price moves above Donchian high or volume dries up
+            if close[i] > high_20[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.30
         else:  # Flat
             if volume_confirmed and chop_regime:
-                # Long entry: TRIX positive with volume confirmation
-                if trix[i] > 0:
+                # Long entry: price breaks above Donchian high with volume
+                if close[i] > high_20[i]:
                     position = 1
                     signals[i] = 0.30
-                # Short entry: TRIX negative with volume confirmation
-                elif trix[i] < 0:
+                # Short entry: price breaks below Donchian low with volume
+                elif close[i] < low_20[i]:
                     position = -1
                     signals[i] = -0.30
     
