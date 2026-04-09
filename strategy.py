@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v1
-# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
-# Camarilla pivots provide institutional support/resistance levels; volume confirms participation;
-# EMA50 defines medium-term trend to avoid counter-trend entries. Works in bull/bear by aligning with HTF trend.
-# Target: 19-50 trades/year (75-200 total over 4 years).
+# 6h_ichimoku_1d1w_trend_volume_v1
+# Hypothesis: 6h Ichimoku cloud (TK cross + cloud filter) with 1d/1w trend alignment and volume confirmation.
+# Uses Ichimoku's leading span A/B cloud for dynamic support/resistance and TK cross for momentum.
+# 1d/1w EMAs filter counter-trend trades; volume ensures participation. Works in bull/bear by aligning with higher timeframe trend.
+# Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v1"
-timeframe = "4h"
+name = "6h_ichimoku_1d1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,91 +23,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots and EMA trend
+    # 1d and 1w HTF data for trend filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA50 for trend filter
+    # 1d EMA50 and 1w EMA20 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # 1d Camarilla pivot levels (based on previous day's range)
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # Calculated from previous day's high, low, close
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan  # First value has no previous
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    pivot_point = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    range_1d = prev_high_1d - prev_low_1d
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Camarilla levels
-    h4 = pivot_point + (range_1d * 1.1 / 2)
-    h3 = pivot_point + (range_1d * 1.1 / 4)
-    h2 = pivot_point + (range_1d * 1.1 / 6)
-    h1 = pivot_point + (range_1d * 1.1 / 12)
-    l1 = pivot_point - (range_1d * 1.1 / 12)
-    l2 = pivot_point - (range_1d * 1.1 / 6)
-    l3 = pivot_point - (range_1d * 1.1 / 4)
-    l4 = pivot_point - (range_1d * 1.1 / 2)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, h2)
-    h1_aligned = align_htf_to_ltf(prices, df_1d, h1)
-    l1_aligned = align_htf_to_ltf(prices, df_1d, l1)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, l2)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # For trend filter, we use current close vs cloud
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, prices, tenkan)  # same timeframe, no alignment needed
+    kijun_aligned = align_htf_to_ltf(prices, prices, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(52, n):  # Need 52 periods for Senkou B
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or
+            np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Determine cloud top and bottom (Senkou Span A/B)
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
         if position == 1:  # Long position
-            # Exit: price closes below H3 (strong resistance) OR trend turns bearish
-            if close[i] < h3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: price closes below cloud OR TK cross turns bearish OR trend turns bearish
+            if (close[i] < cloud_bottom or tenkan_aligned[i] < kijun_aligned[i] or
+                close[i] < ema50_1d_aligned[i] or close[i] < ema20_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above L3 (strong support) OR trend turns bullish
-            if close[i] > l3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: price closes above cloud OR TK cross turns bullish OR trend turns bullish
+            if (close[i] > cloud_top or tenkan_aligned[i] > kijun_aligned[i] or
+                close[i] > ema50_1d_aligned[i] or close[i] > ema20_1w_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price breaks above H3 with bullish trend (intraday continuation)
-                if close[i] > h3_aligned[i] and close[i] > ema50_1d_aligned[i]:
+                # Long: price above cloud, TK bullish, and aligned with higher timeframe trend
+                if (close[i] > cloud_top and tenkan_aligned[i] > kijun_aligned[i] and
+                    close[i] > ema50_1d_aligned[i] and close[i] > ema20_1w_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below L3 with bearish trend (intraday continuation)
-                elif close[i] < l3_aligned[i] and close[i] < ema50_1d_aligned[i]:
+                # Short: price below cloud, TK bearish, and aligned with higher timeframe trend
+                elif (close[i] < cloud_bottom and tenkan_aligned[i] < kijun_aligned[i] and
+                      close[i] < ema50_1d_aligned[i] and close[i] < ema20_1w_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
