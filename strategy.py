@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_donchian_volume_v1
-# Hypothesis: 6h strategy using weekly pivot levels for regime filter and daily Donchian breakout with volume confirmation.
-# Long: Weekly close above weekly pivot (bullish regime) + price breaks above daily Donchian upper (20) + volume > 1.5x 20-period average.
-# Short: Weekly close below weekly pivot (bearish regime) + price breaks below daily Donchian lower (20) + volume > 1.5x 20-period average.
-# Exit: Price returns to opposite Donchian level (exit long at lower band, exit short at upper band).
-# Uses 6h primary timeframe with 1d HTF for Donchian levels and 1w HTF for weekly pivot regime.
-# Designed for low trade frequency (~15-35/year) to minimize fee drag while capturing strong directional moves.
-# Works in bull markets via breakouts in bullish regime and bear markets via shorting in bearish regime.
+# 12h_daily_camarilla_pivot_volume_spike_v1
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation.
+# Long: Price breaks above H4 with volume > 2.0x 20-period average and close > open.
+# Short: Price breaks below L4 with volume > 2.0x 20-period average and close < open.
+# Exit: Price returns to opposite Camarilla level (H3 for longs, L3 for shorts).
+# Uses 12h primary timeframe with 1d HTF for Camarilla levels.
+# Designed for low trade frequency (~12-37/year) to minimize fee drag in bear markets.
+# Works in bull markets via breakouts and bear markets via fade-from-extremes logic.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_donchian_volume_v1"
-timeframe = "6h"
+name = "12h_daily_camarilla_pivot_volume_spike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,82 +25,82 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_prices = prices['open'].values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Donchian levels
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily Donchian channels (20-period)
-    donchian_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Daily pivot and range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Align 1d Donchian levels to 6h
-    donchian_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_1d)
-    donchian_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_1d)
+    # Camarilla levels
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Get 1w data for weekly pivot regime
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot point
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    
-    # Align 1w weekly pivot to 6h
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Align 1d Camarilla levels to 12h
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_1d_aligned[i]) or np.isnan(donchian_low_1d_aligned[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(close[i]) or
-            np.isnan(volume[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(open_prices[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Bullish candle: close > open
+        bullish_candle = close[i] > open_prices[i]
+        # Bearish candle: close < open
+        bearish_candle = close[i] < open_prices[i]
         
         if position == 1:  # Long position
-            # Exit: Price returns to daily Donchian lower band
-            if close[i] <= donchian_low_1d_aligned[i]:
+            # Exit: Price returns to H3
+            if close[i] <= h3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to daily Donchian upper band
-            if close[i] >= donchian_high_1d_aligned[i]:
+            # Exit: Price returns to L3
+            if close[i] >= l3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Weekly close above weekly pivot (bullish regime) + break above daily Donchian upper + volume
-            if (close_1w[-1] > weekly_pivot_aligned[i] and    # Weekly close above pivot (bullish regime)
-                close[i] > donchian_high_1d_aligned[i] and    # Break above daily Donchian upper
-                volume_confirmed):                            # Volume spike
+            # Long entry: Price breaks above H4 with volume and bullish candle
+            if (close[i] > h4_1d_aligned[i] and    # Break above H4
+                volume_confirmed and               # Volume spike
+                bullish_candle):                   # Bullish candle
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Weekly close below weekly pivot (bearish regime) + break below daily Donchian lower + volume
-            elif (close_1w[-1] < weekly_pivot_aligned[i] and  # Weekly close below pivot (bearish regime)
-                  close[i] < donchian_low_1d_aligned[i] and   # Break below daily Donchian lower
-                  volume_confirmed):                          # Volume spike
+            # Short entry: Price breaks below L4 with volume and bearish candle
+            elif (close[i] < l4_1d_aligned[i] and  # Break below L4
+                  volume_confirmed and             # Volume spike
+                  bearish_candle):                 # Bearish candle
                 position = -1
                 signals[i] = -0.25
     
