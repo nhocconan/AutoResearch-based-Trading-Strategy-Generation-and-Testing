@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter (HMA50) and volume confirmation
-# Uses Donchian channels from 1d data: breakout above upper band = long, below lower band = short
-# 1w HMA50 filter ensures trades align with higher timeframe trend (more stable than 1d)
+# Hypothesis: 6h Donchian(20) breakout with 12h trend filter (EMA21) and volume confirmation
+# Uses Donchian channels from 6h data: breakout above upper band = long, below lower band = short
+# 12h EMA21 filter ensures trades align with higher timeframe trend (more stable than 1d)
 # Volume confirmation reduces false breakouts
-# Designed for 1d timeframe to target 10-30 trades/year (30-100 over 4 years)
-# Works in bull/bear: HMA50 adapts to trend, Donchian provides robust structure
+# Designed for 6h timeframe to target 12-37 trades/year (50-150 over 4 years)
+# Works in bull/bear: EMA21 adapts to trend, Donchian provides robust structure
 
-name = "1d_1w_donchian_hma_volume_v1"
-timeframe = "1d"
+name = "6h_12h_donchian_ema_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,31 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for HMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop for Donchian channels and EMA21
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) from 1d data
-    high_1d = high
-    low_1d = low
+    # Calculate Donchian channels (20-period) from 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Upper band: highest high of last 20 periods
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
     # Lower band: lowest low of last 20 periods
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1w HMA50 trend filter
-    close_1w = df_1w['close'].values
-    half_n = int(50/2 + 0.5)
-    wma_half = pd.Series(close_1w).rolling(window=half_n, min_periods=half_n).mean()
-    wma_full = pd.Series(close_1w).rolling(window=50, min_periods=50).mean()
-    hma_50_1w = (2 * wma_half - wma_full).values
+    # Align 12h Donchian bands to 6h timeframe
+    upper_20_6h = align_htf_to_ltf(prices, df_12h, upper_20)
+    lower_20_6h = align_htf_to_ltf(prices, df_12h, lower_20)
     
-    # Align 1w HMA50 to 1d timeframe
-    hma_50_1d = align_htf_to_ltf(prices, df_1w, hma_50_1w)
+    # Calculate 12h EMA21 trend filter
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 20-period average volume for volume confirmation (1d volume)
+    # Align 12h EMA21 to 6h timeframe
+    ema_21_6h = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    
+    # Calculate 20-period average volume for volume confirmation (6h volume)
     avg_volume = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
@@ -61,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
-            np.isnan(hma_50_1d[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_20_6h[i]) or np.isnan(lower_20_6h[i]) or
+            np.isnan(ema_21_6h[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -70,16 +71,16 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR trend turns bearish
-            if close[i] < lower_20[i] or close[i] < hma_50_1d[i]:
+            # Exit: price closes below Donchian lower band OR price < EMA21 (trend turns bearish)
+            if close[i] < lower_20_6h[i] or close[i] < ema_21_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR trend turns bullish
-            if close[i] > upper_20[i] or close[i] > hma_50_1d[i]:
+            # Exit: price closes above Donchian upper band OR price > EMA21 (trend turns bullish)
+            if close[i] > upper_20_6h[i] or close[i] > ema_21_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -87,12 +88,12 @@ def generate_signals(prices):
         else:  # Flat
             # Entry logic with volume confirmation
             if volume_confirm:
-                # Long breakout: price closes above Donchian upper band AND price > 1w HMA50 (bullish trend)
-                if close[i] > upper_20[i] and close[i] > hma_50_1d[i]:
+                # Long breakout: price closes above Donchian upper band AND price > EMA21 (bullish trend)
+                if close[i] > upper_20_6h[i] and close[i] > ema_21_6h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price closes below Donchian lower band AND price < 1w HMA50 (bearish trend)
-                elif close[i] < lower_20[i] and close[i] < hma_50_1d[i]:
+                # Short breakout: price closes below Donchian lower band AND price < EMA21 (bearish trend)
+                elif close[i] < lower_20_6h[i] and close[i] < ema_21_6h[i]:
                     position = -1
                     signals[i] = -0.25
     
