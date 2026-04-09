@@ -3,52 +3,45 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and ATR trailing stop
-# - Williams %R(14) on 4h: oversold < -80 for long, overbought > -20 for short
-# - 1d EMA(50) trend filter: only long when price > EMA, short when price < EMA
-# - ATR(14) trailing stop: exit when price moves 2.5*ATR against position from extreme
-# - Fixed position size 0.25 to balance return and drawdown
-# - Works in bull via buying dips in uptrend, in bear via selling rallies in downtrend
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and ATR stoploss
+# - Uses 1w EMA(50) for trend direction (long when price > EMA, short when price < EMA)
+# - Uses 1d Donchian(20) channels for breakout entries
+# - ATR(14) stoploss and time-based exit (max 10 days holding)
+# - Fixed position size 0.25 to manage drawdown
+# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
+# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
+# - Weekly trend filter prevents counter-trend trades in choppy markets
 
-name = "4h_1d_williamsr_meanrev_trend_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 50 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h Williams %R(14)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    denominator = highest_high - lowest_low
-    williams_r = np.where(denominator != 0, -100 * (highest_high - close_4h) / denominator, -50)
-    
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align indicators to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Pre-compute 4h ATR(14) for trailing stop
+    # Pre-compute 1d Donchian(20) channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # Donchian channels: highest high/lowest low of last 20 periods
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # Pre-compute 1d ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,66 +51,61 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
+    entry_bar = 0  # track entry bar for time-based exit
     
-    for i in range(100, n):
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(atr[i]) or atr[i] <= 0):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(atr[i]) or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 1d EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Determine trend direction from 1w EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            
-            # Exit conditions: ATR trailing stop or mean reversion signal
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: stoploss, mean reversion, or time-based
+            if close[i] < highest_high[i] - 2.0 * atr[i]:  # ATR stop
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
+                entry_bar = 0
                 signals[i] = 0.0
-            elif williams_r_aligned[i] > -50:  # Exit on mean reversion (centerline)
+            elif close[i] < lowest_low[i]:  # Mean reversion exit (break below Donchian low)
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
+                entry_bar = 0
+                signals[i] = 0.0
+            elif i - entry_bar >= 10:  # Time-based exit (max 10 days)
+                position = 0
+                entry_bar = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            
-            # Exit conditions: ATR trailing stop or mean reversion signal
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
+            # Exit conditions: stoploss, mean reversion, or time-based
+            if close[i] > lowest_low[i] + 2.0 * atr[i]:  # ATR stop
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
+                entry_bar = 0
                 signals[i] = 0.0
-            elif williams_r_aligned[i] < -50:  # Exit on mean reversion (centerline)
+            elif close[i] > highest_high[i]:  # Mean reversion exit (break above Donchian high)
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
+                entry_bar = 0
+                signals[i] = 0.0
+            elif i - entry_bar >= 10:  # Time-based exit (max 10 days)
+                position = 0
+                entry_bar = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for mean reversion entries in direction of 1d trend
-            if uptrend and williams_r_aligned[i] < -80:  # Oversold in uptrend → long
+            # Look for breakout entries in direction of 1w trend
+            if uptrend and close[i] > highest_high[i]:  # Break above Donchian high in uptrend
                 position = 1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
+                entry_bar = i
                 signals[i] = 0.25
-            elif downtrend and williams_r_aligned[i] > -20:  # Overbought in downtrend → short
+            elif downtrend and close[i] < lowest_low[i]:  # Break below Donchian low in downtrend
                 position = -1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
+                entry_bar = i
                 signals[i] = -0.25
     
     return signals
