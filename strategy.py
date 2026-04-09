@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 1h_ema_pullback_4h1d_volume_v1
-# Hypothesis: 1h strategy using 4h EMA trend and 1d EMA filter for direction, with 1h EMA pullback entries and volume confirmation.
-# In bull markets: 4h EMA up + 1d EMA up → long on 1h pullback to 21 EMA with volume spike.
-# In bear markets: 4h EMA down + 1d EMA down → short on 1h pullback to 21 EMA with volume spike.
-# Uses discrete sizing (0.0, ±0.20) to minimize fee churn. Session filter (08-20 UTC) reduces noise.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# 12h_camarilla_pivot_volume_v3
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and chop filter.
+# In ranging markets (2025+), price tends to revert from pivot support/resistance levels.
+# Volume confirmation filters false touches. Chop filter ensures ranging regime.
+# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_ema_pullback_4h1d_volume_v1"
-timeframe = "1h"
+name = "12h_camarilla_pivot_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,86 +22,91 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute hour filter for session (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h HTF data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA21 for trend
-    close_4h = pd.Series(df_4h['close'].values)
-    ema_21_4h = close_4h.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # 1d HTF data for higher timeframe filter
+    # 1d HTF data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for regime filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1h EMA21 for pullback entries
-    close_s = pd.Series(close)
-    ema_21_1h = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # 1h volume average for confirmation (20-period)
+    # Camarilla levels (using formula: Close ± (Range * 1.1/12))
+    camarilla_h5 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_h4 = close_1d + (range_1d * 1.1 / 6)
+    camarilla_h3 = close_1d + (range_1d * 1.1 / 4)
+    camarilla_l3 = close_1d - (range_1d * 1.1 / 4)
+    camarilla_l4 = close_1d - (range_1d * 1.1 / 6)
+    camarilla_l5 = close_1d - (range_1d * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe
+    h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    
+    # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness index regime filter (14-period) - using 1d data
+    high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    atr_14 = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero
+    chop_denom = np.log10(atr_14) * np.log10(14)
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
+    chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_21_1h[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(h5_aligned[i]) or np.isnan(l5_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        
+        # Chop regime: only trade when market is ranging (chop > 50)
+        chop_regime = chop_aligned[i] > 50
         
         if position == 1:  # Long position
-            # Exit: price closes below 1h EMA21 or volume dries up
-            if close[i] < ema_21_1h[i] or not volume_confirmed:
+            # Exit: price moves below L3 or volume dries up
+            if close[i] < l3_aligned[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 1h EMA21 or volume dries up
-            if close[i] > ema_21_1h[i] or not volume_confirmed:
+            # Exit: price moves above H3 or volume dries up
+            if close[i] > h3_aligned[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed:
-                # Long entry: 4h and 1d EMAs bullish + price pulls back to 1h EMA21
-                if (ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1] and  # 4h EMA rising
-                    ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and  # 1d EMA rising
-                    low[i] <= ema_21_1h[i] and close[i] > ema_21_1h[i]):  # Pullback to EMA with close above
+            if volume_confirmed and chop_regime:
+                # Long entry: price touches L5 with volume confirmation
+                if close[i] <= l5_aligned[i] and low[i] <= l5_aligned[i]:
                     position = 1
-                    signals[i] = 0.20
-                # Short entry: 4h and 1d EMAs bearish + price pulls back to 1h EMA21
-                elif (ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1] and  # 4h EMA falling
-                      ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and  # 1d EMA falling
-                      high[i] >= ema_21_1h[i] and close[i] < ema_21_1h[i]):  # Pullback to EMA with close below
+                    signals[i] = 0.25
+                # Short entry: price touches H5 with volume confirmation
+                elif close[i] >= h5_aligned[i] and high[i] >= h5_aligned[i]:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
