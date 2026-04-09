@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_volume_v1
-# Hypothesis: Uses Camarilla pivot levels on 1d timeframe with volume confirmation on 12h timeframe.
-# Long when price touches S3 level with volume > 1.5x average; short when price touches R3 level with volume > 1.5x average.
-# Designed to work in both bull and bear markets by capturing reversals at key pivot levels.
-# Target: 15-25 trades/year (60-100 total over 4 years) with strict entry conditions.
+# 1h_pullback_volume_sr_4h1d_v1
+# Hypothesis: Buy pullbacks in strong uptrends on 4h with volume confirmation on 1h; sell rallies in strong downtrends on 4h with volume confirmation.
+# Uses 4h EMA(50) for trend direction, 1h EMA(20) for pullback/retrace entries, and volume > 1.5x average for confirmation.
+# Designed to work in both bull and bear markets by trading with the 4h trend and using volume to confirm momentum.
+# Target: 15-37 trades/year (60-150 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "1h_pullback_volume_sr_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,29 +23,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels once before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h trend: EMA(50) on 4h close
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = np.zeros(len(close_4h))
+    ema_4h[0] = close_4h[0]
+    alpha_4h = 2.0 / (50 + 1)
+    for i in range(1, len(close_4h)):
+        ema_4h[i] = alpha_4h * close_4h[i] + (1 - alpha_4h) * ema_4h[i-1]
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # 1h EMA(20) for pullback entries
+    ema_20 = np.zeros(n)
+    ema_20[0] = close[0]
+    alpha_20 = 2.0 / (20 + 1)
+    for i in range(1, n):
+        ema_20[i] = alpha_20 * close[i] + (1 - alpha_20) * ema_20[i-1]
     
-    # Camarilla levels
-    s3 = pivot - (range_1d * 1.1 / 2)
-    s2 = pivot - (range_1d * 1.1 / 4)
-    s1 = pivot - (range_1d * 1.1 / 6)
-    r1 = pivot + (range_1d * 1.1 / 6)
-    r2 = pivot + (range_1d * 1.1 / 4)
-    r3 = pivot + (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    
-    # Volume confirmation - 20 period average on 12h
+    # Volume confirmation: 1h volume > 1.5x 20-period average
     vol_ma_20 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
@@ -58,38 +53,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
-        # Skip if any required data is invalid
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(vol_ma_20[i]):
+    for i in range(50, n):  # Start after warmup
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 1:  # Long position
-            # Exit: price moves above S1 level or volume confirmation fails
-            if close[i] > s1_aligned[i] or not vol_ok:
+            # Exit: price crosses below 1h EMA(20) or trend turns bearish
+            if close[i] < ema_20[i] or close[i] < ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price moves below R1 level or volume confirmation fails
-            if close[i] < r1_aligned[i] or not vol_ok:
+            # Exit: price crosses above 1h EMA(20) or trend turns bullish
+            if close[i] > ema_20[i] or close[i] > ema_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Enter long: price touches or goes below S3 with volume confirmation
-            if close[i] <= s3_aligned[i] and vol_ok:
+            # Enter long: price > 4h EMA (uptrend) and pullback to 1h EMA(20) with volume
+            if close[i] > ema_4h_aligned[i] and close[i] <= ema_20[i] and close[i-1] > ema_20[i-1] and vol_ok:
                 position = 1
-                signals[i] = 0.25
-            # Enter short: price touches or goes above R3 with volume confirmation
-            elif close[i] >= r3_aligned[i] and vol_ok:
+                signals[i] = 0.20
+            # Enter short: price < 4h EMA (downtrend) and retrace to 1h EMA(20) with volume
+            elif close[i] < ema_4h_aligned[i] and close[i] >= ema_20[i] and close[i-1] < ema_20[i-1] and vol_ok:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
