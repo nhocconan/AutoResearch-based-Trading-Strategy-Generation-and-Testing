@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v3
-# Hypothesis: 12-hour breakout of daily Camarilla pivot levels with volume confirmation and ATR volatility filter.
-# Long when price closes above R4 resistance with volume > 1.5x 24-period average and ATR > 0.
-# Short when price closes below S4 support with volume > 1.5x 24-period average and ATR > 0.
-# Exit when price closes back inside the previous day's range (H-L band).
-# Daily Camarilla levels: PP=(H+L+C)/3, R4=C+(H-L)*1.1/2, S4=C-(H-L)*1.1/2.
-# ATR filter prevents trading in extremely low volatility conditions.
-# Target: 50-150 total trades over 4 years (12-37/year). Position size: 0.25.
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v3"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for Camarilla levels
     df_d = get_htf_data(prices, '1d')
     if len(df_d) < 10:
         return np.zeros(n)
@@ -47,37 +38,37 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to 12h timeframe
+    # Align daily values to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_d, pp)
     r4_aligned = align_htf_to_ltf(prices, df_d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_d, s4)
     prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Calculate ATR (14-period) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    tr_sum = 0
-    for i in range(n):
-        if not np.isnan(tr[i]):
-            tr_sum += tr[i]
-            if i >= 14:
-                tr_sum -= tr[i-14]
-            if i >= 13:
-                atr[i] = tr_sum / 14
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
     
-    # Volume confirmation: 24-period average (24*12h = 12 days)
-    vol_ma_24 = np.full(n, np.nan)
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = np.full(len(df_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema_values = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_12h[:len(ema_values)] = ema_values
+    
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Volume confirmation: 20-period average (20*4h = 80h ~ 3.3 days)
+    vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 24:
-            vol_sum -= volume[i-24]
-        if i >= 23:
-            vol_ma_24[i] = vol_sum / 24
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -88,9 +79,8 @@ def generate_signals(prices):
             np.isnan(s4_aligned[i]) or 
             np.isnan(prev_high_aligned[i]) or 
             np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_24[i]) or 
-            np.isnan(atr[i]) or
-            atr[i] <= 0):  # ATR filter: only trade when volatility > 0
+            np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -110,14 +100,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation and ATR filter
+            # Enter long: price closes above R4 with volume confirmation AND 12h uptrend
             if (close[i] > r4_aligned[i] and 
-                volume[i] > vol_ma_24[i] * 1.5):
+                volume[i] > vol_ma_20[i] * 1.5 and
+                close[i] > ema_12h_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation and ATR filter
+            # Enter short: price closes below S4 with volume confirmation AND 12h downtrend
             elif (close[i] < s4_aligned[i] and 
-                  volume[i] > vol_ma_24[i] * 1.5):
+                  volume[i] > vol_ma_20[i] * 1.5 and
+                  close[i] < ema_12h_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
