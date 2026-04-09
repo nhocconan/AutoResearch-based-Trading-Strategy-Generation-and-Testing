@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
+# 4h_1d_camarilla_breakout_v14
+# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
 # Uses breakout of H4/L4 levels (stronger breakout than H3/L3) for higher probability moves.
 # Exit when price returns to the daily pivot point (PP).
 # Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
+# This version further tightens entry conditions to reduce trade frequency and improve win rate.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v14"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -57,7 +58,7 @@ def generate_signals(prices):
     h4_1d = close_1d + (range_1d * 1.1 / 2)  # Same as R4
     l4_1d = close_1d - (range_1d * 1.1 / 2)  # Same as S4
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
@@ -72,8 +73,8 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_spike = volume > vol_ma_20 * 2.0
+    # Volume spike: current volume > 2.5x 20-period average (more restrictive)
+    vol_spike = volume > vol_ma_20 * 2.5
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -85,10 +86,10 @@ def generate_signals(prices):
             continue
         
         # Volatility filter: avoid extremely high volatility (more restrictive)
-        vol_filter = atr[i] < 0.025 * close[i]  # ATR less than 2.5% of price (was 4%)
+        vol_filter = atr[i] < 0.015 * close[i]  # ATR less than 1.5% of price (was 2.5%)
         
-        # Volume confirmation: current volume > 1.8x 20-period average (more restrictive)
-        vol_ok = volume[i] > vol_ma_20[i] * 1.8  # Was 1.3
+        # Volume confirmation: current volume > 2.5x 20-period average (more restrictive)
+        vol_ok = volume[i] > vol_ma_20[i] * 2.5  # Was 2.0
         
         if position == 1:  # Long position
             # Exit: price returns to or below Pivot Point
