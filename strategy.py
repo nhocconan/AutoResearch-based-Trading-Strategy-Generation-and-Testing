@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v4
+# 4h_1d_camarilla_breakout_v5
 # Hypothesis: 4-hour breakout of daily Camarilla levels with 1-day EMA50 trend filter and volume confirmation.
 # Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
 # Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v4"
+name = "4h_1d_camarilla_breakout_v5"
 timeframe = "4h"
 leverage = 1.0
 
