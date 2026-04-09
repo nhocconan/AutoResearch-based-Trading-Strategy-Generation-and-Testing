@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and 1d ATR regime filter
-# Uses Donchian(20) breakout from 4h for entry triggers, confirmed by volume spike (>1.5x avg)
-# Only takes breakouts when 1d ATR(14) is below its 50-period MA (low volatility regime) for reliability
+# Hypothesis: 1d Donchian channel breakout with weekly ATR regime filter and volume confirmation
+# Uses Donchian(20) breakout from 1d for entry triggers, confirmed by volume spike (>1.5x avg)
+# Only takes breakouts when weekly ATR(14) is below its 20-period MA (low volatility regime) for reliability
 # Position size 0.25 to manage drawdown and enable multiple concurrent positions
-# Target: 75-200 total trades over 4 years (19-50/year) to balance edge and fee drag
-# Works in both bull/bear: 1d ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
+# Target: 30-100 total trades over 4 years (7-25/year) to balance edge and fee drag
+# Works in both bull/bear: weekly ATR regime filter ensures we trade breakouts only in low volatility environments where they are more reliable
 
-name = "4h_1d_donchian_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_atr_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,65 +24,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE before loop for ATR regime filter
+    # Load 1d data ONCE before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high = np.full(len(df_4h), np.nan)
-    donchian_low = np.full(len(df_4h), np.nan)
+    # Load weekly data ONCE before loop for ATR regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    for i in range(len(df_4h)):
+    # Calculate 1d Donchian channels (20-period)
+    donchian_high = np.full(len(df_1d), np.nan)
+    donchian_low = np.full(len(df_1d), np.nan)
+    
+    for i in range(len(df_1d)):
         if i < 20:
             donchian_high[i] = np.nan
             donchian_low[i] = np.nan
         else:
             # Use lookback window excluding current bar to avoid look-ahead
-            donchian_high[i] = np.max(df_4h['high'].iloc[i-20:i])
-            donchian_low[i] = np.min(df_4h['low'].iloc[i-20:i])
+            donchian_high[i] = np.max(df_1d['high'].iloc[i-20:i])
+            donchian_low[i] = np.min(df_1d['low'].iloc[i-20:i])
     
-    # Calculate 1d ATR(14) for regime filter
-    tr_1d = np.full(len(df_1d), np.nan)
-    atr_1d = np.full(len(df_1d), np.nan)
+    # Calculate weekly ATR(14) for regime filter
+    tr_1w = np.full(len(df_1w), np.nan)
+    atr_1w = np.full(len(df_1w), np.nan)
     
-    for i in range(1, len(df_1d)):
+    for i in range(1, len(df_1w)):
         tr = max(
-            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+            df_1w['high'].iloc[i] - df_1w['low'].iloc[i],
+            abs(df_1w['high'].iloc[i] - df_1w['close'].iloc[i-1]),
+            abs(df_1w['low'].iloc[i] - df_1w['close'].iloc[i-1])
         )
-        tr_1d[i] = tr
+        tr_1w[i] = tr
     
     # Calculate ATR with Wilder's smoothing
-    for i in range(len(df_1d)):
+    for i in range(len(df_1w)):
         if i < 14:
-            atr_1d[i] = np.nan
+            atr_1w[i] = np.nan
         elif i == 14:
-            atr_1d[i] = np.nanmean(tr_1d[1:15])
+            atr_1w[i] = np.nanmean(tr_1w[1:15])
         else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
     
-    # Calculate 50-period MA of ATR for regime filter
-    atr_ma_50 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        if i < 50:
-            atr_ma_50[i] = np.nan
+    # Calculate 20-period MA of ATR for regime filter
+    atr_ma_20 = np.full(len(df_1w), np.nan)
+    for i in range(len(df_1w)):
+        if i < 20:
+            atr_ma_20[i] = np.nan
         else:
-            atr_ma_50[i] = np.mean(atr_1d[i-50:i])
+            atr_ma_20[i] = np.mean(atr_1w[i-20:i])
     
-    # Align 4h Donchian channels to 4h timeframe (no shift needed as already aligned)
-    donchian_high_4h = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_4h = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # Align 1d Donchian channels to 1d timeframe (no shift needed as already aligned)
+    donchian_high_1d = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_1d = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Align 1d ATR regime to 4h timeframe
-    atr_ma_50_4h = align_htf_to_ltf(prices, df_1d, atr_ma_50)
-    atr_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align weekly ATR regime to 1d timeframe
+    atr_ma_20_1d = align_htf_to_ltf(prices, df_1w, atr_ma_20)
+    atr_1w_1d = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -97,10 +97,10 @@ def generate_signals(prices):
     
     for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_4h[i]) or 
-            np.isnan(donchian_low_4h[i]) or 
-            np.isnan(atr_ma_50_4h[i]) or 
-            np.isnan(atr_4h[i]) or 
+        if (np.isnan(donchian_high_1d[i]) or 
+            np.isnan(donchian_low_1d[i]) or 
+            np.isnan(atr_ma_20_1d[i]) or 
+            np.isnan(atr_1w_1d[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
@@ -109,11 +109,11 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         # ATR regime filter: only trade when current ATR < ATR MA (low volatility regime)
-        atr_regime = atr_4h[i] < atr_ma_50_4h[i]
+        atr_regime = atr_1w_1d[i] < atr_ma_20_1d[i]
         
         if position == 1:  # Long position
             # Exit conditions: price closes below Donchian low OR ATR regime turns unfavorable
-            if close[i] < donchian_low_4h[i] or not atr_regime:
+            if close[i] < donchian_low_1d[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -121,7 +121,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit conditions: price closes above Donchian high OR ATR regime turns unfavorable
-            if close[i] > donchian_high_4h[i] or not atr_regime:
+            if close[i] > donchian_high_1d[i] or not atr_regime:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -130,11 +130,11 @@ def generate_signals(prices):
             # Entry logic: Donchian breakout with volume confirmation and ATR regime filter
             if volume_confirm and atr_regime:
                 # Long breakout: price closes above Donchian high
-                if close[i] > donchian_high_4h[i]:
+                if close[i] > donchian_high_1d[i]:
                     position = 1
                     signals[i] = 0.25
                 # Short breakout: price closes below Donchian low
-                elif close[i] < donchian_low_4h[i]:
+                elif close[i] < donchian_low_1d[i]:
                     position = -1
                     signals[i] = -0.25
     
