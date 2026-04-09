@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
-# - Uses 4h Donchian channels (20-period) for breakout entries
-# - Trend filter: 1d EMA50 (must be above for longs, below for shorts)
-# - Volume confirmation: volume > 1.5 * 20-period average
-# - ATR-based stoploss (2.0 * ATR) and position sizing (0.25)
-# - Works in bull markets via breakouts above upper channel, in bear via breakdowns below lower channel
-# - Target: 15-30 trades/year on 4h timeframe (60-120 total over 4 years) to minimize fee drag
-# - Donchian channels provide clear volatility-based support/resistance levels
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# - Uses 1d Donchian channel (20-day high/low) for breakout entries
+# - Uses 1w EMA(21) as trend filter: long only when price > 1w EMA, short only when price < 1w EMA
+# - Requires volume > 1.5 * 20-day volume average for confirmation
+# - Uses ATR(14) for dynamic stoploss (2.0 * ATR) and position sizing (0.25)
+# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
+# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years) to avoid fee drag
+# - Donchian breakouts capture strong momentum moves; 1w EMA filter avoids counter-trend trades
 
-name = "4h_1d_donchian_breakout_trend_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,26 +22,25 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1w EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Pre-compute 4h Donchian channels (20-period)
+    # Pre-compute 1d Donchian(20) channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Upper channel: highest high of past 20 periods
-    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower channel: lowest low of past 20 periods
-    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian upper/lower (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 4h ATR(14) for stoploss
+    # Pre-compute 1d ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -61,8 +60,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or atr[i] <= 0 or
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(ema_21_1w_aligned[i]) or
+            np.isnan(atr[i]) or atr[i] <= 0 or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
@@ -71,13 +71,13 @@ def generate_signals(prices):
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # Exit conditions: stoploss or trend reversal
+            # Exit conditions: stoploss or mean reversion
             if close[i] < highest_high_since_entry - 2.0 * atr[i]:  # ATR stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close_1d[i] < ema50_1d[i]:  # Trend filter exit (1d close below EMA50)
+            elif close[i] < donch_low[i]:  # Mean reversion exit (break below Donchian low)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -89,13 +89,13 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # Exit conditions: stoploss or trend reversal
+            # Exit conditions: stoploss or mean reversion
             if close[i] > lowest_low_since_entry + 2.0 * atr[i]:  # ATR stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close_1d[i] > ema50_1d[i]:  # Trend filter exit (1d close above EMA50)
+            elif close[i] > donch_high[i]:  # Mean reversion exit (break above Donchian high)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -104,12 +104,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Look for breakout entries with volume confirmation and trend filter
-            if close[i] > upper_channel[i] and volume_confirm[i] and close_1d[i] > ema50_1d[i]:  # Break above upper channel with uptrend
+            if close[i] > donch_high[i] and close[i] > ema_21_1w_aligned[i] and volume_confirm[i]:
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif close[i] < lower_channel[i] and volume_confirm[i] and close_1d[i] < ema50_1d[i]:  # Break below lower channel with downtrend
+            elif close[i] < donch_low[i] and close[i] < ema_21_1w_aligned[i] and volume_confirm[i]:
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
