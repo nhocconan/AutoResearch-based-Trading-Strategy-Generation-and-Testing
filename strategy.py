@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_volatility_breakout_volume_v3
-# Hypothesis: 4h strategy using volatility breakout with volume confirmation and 1d chop regime filter.
-# Enters long when price breaks above Donchian(20) high with volume > 1.5x average and chop > 61.8 (trending).
-# Enters short when price breaks below Donchian(20) low with volume > 1.5x average and chop > 61.8 (trending).
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 75-200 trades over 4 years.
-# Works in bull/bear by using chop regime to avoid false breakouts in ranging markets.
+# 1d_camarilla_pivot_volume_chop_v1
+# Hypothesis: Daily strategy using Camarilla pivot levels from 1d with volume confirmation and weekly chop regime filter.
+# Enters long when price breaks above H3 level with volume spike, short when breaks below L3 level with volume spike.
+# Uses weekly choppiness index to avoid ranging markets (CHOP > 61.8 = range, no trades).
+# Designed for low trade frequency (target: 30-100 total trades over 4 years) to avoid fee drag.
+# Works in bull/bear by using weekly regime filter and Camarilla levels as dynamic support/resistance.
+# Uses discrete sizing (±0.25) to minimize fee churn.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_volatility_breakout_volume_v3"
-timeframe = "4h"
+name = "1d_camarilla_pivot_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,79 +26,106 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 1d HTF data for choppiness index (regime filter)
+    # 1d HTF data (same as primary timeframe for Camarilla calculation)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) on daily data
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot point = (high + low + close) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate choppiness index: CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (HHV - LLV)))
-    # Simplified: CHOP = 100 * log10( sum(TR(14)) / log10(14) / (max(high)-min(low)) ) over 14 periods
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(sum_tr_14 / (np.log10(14) * (highest_high_14 - lowest_low_14) + 1e-10))
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Camarilla levels
+    # H4 = pivot + (range * 1.1/2)
+    # H3 = pivot + (range * 1.1/4)
+    # L3 = pivot - (range * 1.1/4)
+    # L4 = pivot - (range * 1.1/2)
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
     
-    # 4h indicators: Donchian(20) and volume average
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 1d timeframe (completed 1d candle only)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # 1w HTF data for choppiness index regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate True Range for 1w
+    tr1 = pd.Series(high_1w).shift(1) - pd.Series(low_1w).shift(1)
+    tr2 = abs(pd.Series(high_1w) - pd.Series(close_1w).shift(1))
+    tr3 = abs(pd.Series(low_1w) - pd.Series(close_1w).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate Choppiness Index (14-period)
+    # SUM(ATR, 14) / (MAX(HIGH,14) - MIN(LOW,14)) * 100
+    sum_atr_14 = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    chop_denominator = max_high_14 - min_low_14
+    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)
+    chop_1w = (sum_atr_14 / chop_denominator) * 100
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    
+    # Volume spike detection (20-period volume average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma_20 * 2.0)  # Volume at least 2x average
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(avg_volume_20[i]) or np.isnan(chop_1d_aligned[i]) or
-            not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(chop_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (choppiness > 61.8)
-        trending = chop_1d_aligned[i] > 61.8
+        # Weekly regime filter: only trade in trending markets (CHOP <= 61.8)
+        trending = chop_1w_aligned[i] <= 61.8
         
         if position == 1:  # Long position
-            # Exit: price falls below Donchian low OR volume drops below average
-            if (close[i] < lowest_low_20[i]) or (volume[i] < 0.5 * avg_volume_20[i]):
+            # Exit: price falls below L3 level
+            if close[i] < l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian high OR volume drops below average
-            if (close[i] > highest_high_20[i]) or (volume[i] < 0.5 * avg_volume_20[i]):
+            # Exit: price rises above H3 level
+            if close[i] > h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume spike AND trending regime
-            if (close[i] > highest_high_20[i]) and \
-               (volume[i] > 1.5 * avg_volume_20[i]) and \
-               trending:
+            # Enter long: price breaks above H3 level with volume spike
+            if (close[i] > h3_aligned[i]) and \
+               (vol_spike[i]) and \
+               (trending):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume spike AND trending regime
-            elif (close[i] < lowest_low_20[i]) and \
-                 (volume[i] > 1.5 * avg_volume_20[i]) and \
-                 trending:
+            # Enter short: price breaks below L3 level with volume spike
+            elif (close[i] < l3_aligned[i]) and \
+                 (vol_spike[i]) and \
+                 (trending):
                 position = -1
                 signals[i] = -0.25
     
