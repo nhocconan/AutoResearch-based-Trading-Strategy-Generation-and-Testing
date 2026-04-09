@@ -1,95 +1,94 @@
-#!/usr/bin/env python3
-# 12h_donchian_20_volume_regime_v1
-# Hypothesis: 12h Donchian(20) breakouts with volume confirmation and 1d chop regime filter work in both bull and bear markets by capturing breakouts while avoiding whipsaws in ranging conditions.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 12h_price_action_reversal_v2
+# Hypothesis: 12h price action reversals with volume confirmation and daily trend filter work in both bull and bear markets.
+# Uses 12h price action reversal signals (engulfing candles, pin bars) with volume > 1.5x 20-period average.
+# Daily EMA50 trend filter ensures alignment with higher timeframe trend.
+# Target: 20-40 trades/year (80-160 over 4 years) with controlled risk.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_20_volume_regime_v1"
+name = "12h_price_action_reversal_v2"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma_20 * 1.5
     
-    # 1d chop regime filter: Chop(14) > 61.8 = ranging (avoid), < 38.2 = trending (trade)
+    # Daily trend filter: EMA50 on daily data
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Highest and lowest over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop calculation: 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh_ll_diff = highest_high - lowest_low
-    chop = 100 * np.log10(sum_tr_14 / hh_ll_diff) / np.log10(14)
-    chop = np.where(hh_ll_diff == 0, 100, chop)  # avoid division by zero
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(vol_ma_20[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
+        # Price action reversal signals
+        body_size = abs(close[i] - open_price[i])
+        total_range = high[i] - low[i]
+        
+        # Avoid division by zero
+        if total_range == 0:
+            signals[i] = 0.0
+            continue
+            
+        # Bullish engulfing: current bullish candle engulfs previous bearish candle
+        bullish_engulfing = (close[i] > open_price[i]) and (open_price[i-1] > close[i-1]) and \
+                           (close[i] > open_price[i-1]) and (open_price[i] < close[i-1])
+        
+        # Bearish engulfing: current bearish candle engulfs previous bullish candle
+        bearish_engulfing = (close[i] < open_price[i]) and (open_price[i-1] < close[i-1]) and \
+                           (close[i] < open_price[i-1]) and (open_price[i] > close[i-1])
+        
+        # Bullish pin bar: long lower shadow, small upper shadow, body near top
+        lower_shadow = min(open_price[i], close[i]) - low[i]
+        upper_shadow = high[i] - max(open_price[i], close[i])
+        bullish_pin = (lower_shadow > 2 * body_size) and (upper_shadow < 0.5 * body_size)
+        
+        # Bearish pin bar: long upper shadow, small lower shadow, body near bottom
+        bearish_pin = (upper_shadow > 2 * body_size) and (lower_shadow < 0.5 * body_size)
+        
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low or chop becomes too high (ranging)
-            if close[i] <= donchian_low[i] or chop_aligned[i] > 61.8:
+            # Exit: Bearish reversal signal or daily trend turns bearish
+            if bearish_engulfing or bearish_pin or close[i] < ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high or chop becomes too high (ranging)
-            if close[i] >= donchian_high[i] or chop_aligned[i] > 61.8:
+            # Exit: Bullish reversal signal or daily trend turns bullish
+            if bullish_engulfing or bullish_pin or close[i] > ema_50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume confirmation and trending regime
-            if close[i] > donchian_high[i] and volume[i] > vol_threshold[i] and chop_aligned[i] < 38.2:
+            # Enter long: Bullish reversal with volume confirmation and daily uptrend
+            if (bullish_engulfing or bullish_pin) and volume[i] > vol_threshold[i] and close[i] > ema_50_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume confirmation and trending regime
-            elif close[i] < donchian_low[i] and volume[i] > vol_threshold[i] and chop_aligned[i] < 38.2:
+            # Enter short: Bearish reversal with volume confirmation and daily downtrend
+            elif (bearish_engulfing or bearish_pin) and volume[i] > vol_threshold[i] and close[i] < ema_50_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
