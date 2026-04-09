@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R with volume confirmation and ATR trailing stop
-# - Uses 1d HTF for Williams %R(14) to identify overbought/oversold conditions on completed daily candles
-# - Long when Williams %R crosses above -80 (oversold exit) with volume > 1.5x 20-period average
-# - Short when Williams %R crosses below -20 (overbought entry) with volume > 1.5x 20-period average
-# - ATR(14) trailing stop: exit long at 2.0x ATR below highest high since entry, exit short at 2.0x ATR above lowest low since entry
+# Hypothesis: 6h strategy using weekly Camarilla pivot levels with volume confirmation and ATR trailing stop
+# - Uses 1w HTF for Camarilla pivot calculation (based on completed weekly candles)
+# - Long when price breaks above weekly R4 level with volume > 2.0x 20-period average
+# - Short when price breaks below weekly S4 level with volume > 2.0x 20-period average
+# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry, exit short at 2.5x ATR above lowest low since entry
 # - Fixed position size 0.25 to control drawdown
-# - Works in bull/bear: Williams %R captures mean reversion in ranging markets, volume filters noise
-# - Target: 30-60 trades/year on 4h timeframe (120-240 total over 4 years)
+# - Weekly pivots adapt to volatility and provide significant support/resistance levels
+# - Volume confirmation filters false breakouts
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_williamsr_volume_atr_v1"
-timeframe = "4h"
+name = "6h_1w_camarilla_volume_atr_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,27 +27,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Williams %R (14-period) - based on completed daily candles
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate weekly Camarilla pivot levels (based on previous week's OHLC)
+    # Camarilla formulas:
+    # Pivot = (H + L + C) / 3
+    # R4 = C + ((H - L) * 1.1 / 2)
+    # S4 = C - ((H - L) * 1.1 / 2)
+    # We use the previous week's values to avoid look-ahead
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    camarilla_r4_1w = close_1w + ((high_1w - low_1w) * 1.1 / 2.0)
+    camarilla_s4_1w = close_1w - ((high_1w - low_1w) * 1.1 / 2.0)
     
-    # Align Williams %R to 4h timeframe (wait for completed 1d bar)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Shift by 1 to use previous week's levels (avoid look-ahead)
+    pivot_1w_shifted = np.roll(pivot_1w, 1)
+    camarilla_r4_1w_shifted = np.roll(camarilla_r4_1w, 1)
+    camarilla_s4_1w_shifted = np.roll(camarilla_s4_1w, 1)
+    pivot_1w_shifted[0] = np.nan
+    camarilla_r4_1w_shifted[0] = np.nan
+    camarilla_s4_1w_shifted[0] = np.nan
     
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Align Camarilla levels to 6h timeframe (wait for completed 1w bar)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_1w_shifted)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4_1w_shifted)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute ATR (14-period) for stoploss
@@ -64,20 +76,21 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(atr[i]) or vol_ma_20[i] <= 0 or atr[i] <= 0):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
+            vol_ma_20[i] <= 0 or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 2.0x average
+        volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
+            # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -89,8 +102,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
+            # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -98,16 +111,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Williams %R with volume confirmation
+            # Entry logic: Camarilla breakout with volume confirmation
             if volume_confirmed:
-                # Long entry: Williams %R crosses above -80 (from oversold)
-                if williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80:
+                # Long entry: price breaks above weekly R4 level
+                if close[i] > camarilla_r4_aligned[i]:
                     position = 1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: Williams %R crosses below -20 (from overbought)
-                elif williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20:
+                # Short entry: price breaks below weekly S4 level
+                elif close[i] < camarilla_s4_aligned[i]:
                     position = -1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
