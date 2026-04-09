@@ -3,131 +3,142 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# - Elder Ray (Bull/Bear Power) from 6h: measures buying/selling pressure vs EMA13
-# - ADX from 1d: trend strength filter (ADX > 25 = trending market)
-# - Entry: Long when Bull Power > 0 AND Bear Power < 0 AND ADX > 25
-# - Exit: Reverse signal or ADX < 20 (trend weakening)
+# Hypothesis: 12h Donchian(20) breakout with 1w ADX trend filter and volume confirmation
+# - Uses 12h Donchian channel breakout for trend following entries
+# - Trend filter: 1w ADX(14) > 25 to ensure trading only in trending markets (works in bull/bear)
+# - Volume confirmation: 12h volume > 2.0x 20-period average to ensure breakout strength
+# - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
-# - Novelty: Combines Elder Ray momentum with 1d ADX regime to avoid whipsaws in ranging markets
-# - Works in both bull/bear: Elder Ray captures momentum shifts, ADX filter ensures trades only in trending conditions
+# - Target: ~12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - Novelty: Combines Donchian breakout with 1w ADX regime filter to avoid false signals in ranging markets
+# - ADX filter prevents whipsaws during consolidation, works in both bull and bear trends
 
-name = "6h_1d_elderray_adx_regime_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1w indicators for ADX trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ADX(14) for trend regime filter
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr[0]
+    # Calculate 1w ADX(14) for trend regime filter
+    tr1_1w = high_1w - low_1w
+    tr2_1w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3_1w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))
+    tr_1w[0] = tr_1w[0]
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # +DM and -DM
+    up_move_1w = high_1w - np.roll(high_1w, 1)
+    down_move_1w = np.roll(low_1w, 1) - low_1w
+    plus_dm_1w = np.where((up_move_1w > down_move_1w) & (up_move_1w > 0), up_move_1w, 0.0)
+    minus_dm_1w = np.where((down_move_1w > up_move_1w) & (down_move_1w > 0), down_move_1w, 0.0)
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def WilderSmoothing(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value: simple average
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[:period])
-        # Rest: Wilder's smoothing
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]):
-                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-        return result
+    # Smoothed +DM, -DM, and TR
+    plus_dm_1w_smooth = pd.Series(plus_dm_1w).rolling(window=14, min_periods=14).mean().values
+    minus_dm_1w_smooth = pd.Series(minus_dm_1w).rolling(window=14, min_periods=14).mean().values
+    atr_1w_smooth = pd.Series(atr_1w).rolling(window=14, min_periods=14).mean().values
     
-    atr_1d = WilderSmoothing(tr, 14)
-    dm_plus_smooth = WilderSmoothing(dm_plus, 14)
-    dm_minus_smooth = WilderSmoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d > 0, (dm_plus_smooth / atr_1d) * 100, 0)
-    di_minus = np.where(atr_1d > 0, (dm_minus_smooth / atr_1d) * 100, 0)
+    # +DI and -DI
+    plus_di_1w = 100 * plus_dm_1w_smooth / atr_1w_smooth
+    minus_di_1w = 100 * minus_dm_1w_smooth / atr_1w_smooth
     
     # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx_1d = WilderSmoothing(dx, 14)
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = pd.Series(dx_1w).rolling(window=14, min_periods=14).mean().values
     
-    # Trend regime: ADX > 25 = trending market
-    trending_regime = adx_1d > 25
+    # Trend regime: ADX > 25 indicates trending market
+    trending_regime = adx_1w > 25.0
     
-    # Align 1d trend regime to 6h timeframe (completed 1d bar only)
-    trending_regime_aligned = align_htf_to_ltf(prices, df_1d, trending_regime)
+    # Align 1w trend regime to 12h timeframe (completed 1w bar only)
+    trending_regime_aligned = align_htf_to_ltf(prices, df_1w, trending_regime)
     
-    # 6h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h EMA(13) for Elder Ray
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 12h Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Elder Ray components
-    bull_power = high - ema_13  # Buying pressure
-    bear_power = low - ema_13   # Selling pressure (negative values indicate selling)
+    # 12h volume > 2.0x 20-period average (volume confirmation)
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * avg_volume_20)
+    
+    # 12h ATR(14) for trailing stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(trending_regime_aligned[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(trending_regime_aligned[i]) or
+            atr[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: reverse signal OR trend weakening (ADX < 20)
-            if (bull_power[i] <= 0 and bear_power[i] >= 0) or trending_regime_aligned[i] == False:
+            # Update highest high since entry
+            if high[i] > highest_since_entry:
+                highest_since_entry = high[i]
+            
+            # Exit conditions: price retraces 2.0x ATR from high
+            if low[i] <= highest_since_entry - (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: reverse signal OR trend weakening (ADX < 20)
-            if (bull_power[i] >= 0 and bear_power[i] <= 0) or trending_regime_aligned[i] == False:
+            # Update lowest low since entry
+            if low[i] < lowest_since_entry:
+                lowest_since_entry = low[i]
+            
+            # Exit conditions: price retraces 2.0x ATR from low
+            if high[i] >= lowest_since_entry + (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Elder Ray signals with trend regime filter
-            # Long: Bull Power > 0 (buying pressure) AND Bear Power < 0 (weak selling) AND trending market
-            if bull_power[i] > 0 and bear_power[i] < 0 and trending_regime_aligned[i]:
+            # Look for Donchian breakout with volume confirmation and trend filter
+            # Long: price breaks above Donchian high AND volume spike AND trending regime
+            if high[i] >= donchian_high[i] and volume_spike[i] and trending_regime_aligned[i]:
                 position = 1
+                highest_since_entry = high[i]
+                lowest_since_entry = high[i]
                 signals[i] = 0.25
-            # Short: Bull Power < 0 (weak buying) AND Bear Power > 0 (selling pressure) AND trending market
-            elif bull_power[i] < 0 and bear_power[i] > 0 and trending_regime_aligned[i]:
+            # Short: price breaks below Donchian low AND volume spike AND trending regime
+            elif low[i] <= donchian_low[i] and volume_spike[i] and trending_regime_aligned[i]:
                 position = -1
+                highest_since_entry = low[i]
+                lowest_since_entry = low[i]
                 signals[i] = -0.25
     
     return signals
