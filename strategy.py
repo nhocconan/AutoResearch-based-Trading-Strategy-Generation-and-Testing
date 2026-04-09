@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d RSI extremes with 12h volume spike confirmation
-# RSI(14) < 30 = oversold, RSI(14) > 70 = overbought
-# Volume spike = current volume > 1.5 * 20-period average volume
-# Long when RSI < 30 + volume spike, Short when RSI > 70 + volume spike
-# Exit when RSI returns to 50 (neutral)
-# Uses discrete position sizing 0.25 to limit trades and reduce fee drag
-# Works in bull/bear markets: mean reversion at extremes with volume confirmation filters false signals
+# Hypothesis: 4h strategy using Donchian(20) breakout with volume confirmation and ATR stoploss
+# Donchian breakout captures momentum; volume confirmation filters false breakouts
+# ATR-based stoploss manages risk. Works in both bull and bear markets by following price channels
+# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag
 
-name = "6h_12h_1d_rsi_volume_spike_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,95 +17,71 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    close_1d = df_1d['close'].values
+    # Calculate ATR(14) for stoploss
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 1d RSI(14)
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        # Wilder's smoothing
-        def wilders_smoothing(values, period):
-            if len(values) < period:
-                return np.full(len(values), np.nan)
-            alpha = 1.0 / period
-            result = np.full(len(values), np.nan)
-            result[period-1] = np.mean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-            return result
-        
-        avg_gain = wilders_smoothing(gain, period)
-        avg_loss = wilders_smoothing(loss, period)
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_1d = calculate_rsi(close_1d, 14)
-    
-    # Load 12h data for volume spike confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate 12h volume moving average (20-period)
-    def calculate_sma(values, period):
+    def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
+        alpha = 1.0 / period
         result = np.full(len(values), np.nan)
-        for i in range(period-1, len(values)):
-            result[i] = np.mean(values[i-period+1:i+1])
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    vol_ma_12h = calculate_sma(volume_12h, 20)
-    volume_spike_12h = np.where(vol_ma_12h > 0, volume_12h / vol_ma_12h, 1.0)
+    atr = wilders_smoothing(tr, 14)
     
-    # Align indicators to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    volume_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
+    # Volume confirmation: 20-period volume SMA
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(volume_spike_12h_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_sma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit long when RSI returns to neutral (50)
-            if rsi_1d_aligned[i] >= 50:
+            # Exit long if price hits ATR-based stoploss or breaks below Donchian low
+            if close[i] <= highest_high[i-1] - 2.0 * atr[i] or close[i] < lowest_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit short when RSI returns to neutral (50)
-            if rsi_1d_aligned[i] <= 50:
+            # Exit short if price hits ATR-based stoploss or breaks above Donchian high
+            if close[i] >= lowest_low[i-1] + 2.0 * atr[i] or close[i] > highest_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long when RSI oversold (<30) + volume spike (>1.5)
-            if rsi_1d_aligned[i] < 30 and volume_spike_12h_aligned[i] > 1.5:
+            # Enter long on Donchian high breakout with volume confirmation
+            if (high[i] > highest_high[i-1] and 
+                volume[i] > volume_sma[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short when RSI overbought (>70) + volume spike (>1.5)
-            elif rsi_1d_aligned[i] > 70 and volume_spike_12h_aligned[i] > 1.5:
+            # Enter short on Donchian low breakdown with volume confirmation
+            elif (low[i] < lowest_low[i-1] and 
+                  volume[i] > volume_sma[i]):
                 position = -1
                 signals[i] = -0.25
     
