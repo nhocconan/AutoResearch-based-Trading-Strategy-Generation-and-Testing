@@ -3,147 +3,103 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h/1d regime filter and session timing
-# - Uses 4h Supertrend (ATR=10, mult=3) for trend direction
-# - Uses 1d RSI(14) for overbought/oversold extremes
-# - Enters mean reversion trades on 1h when price touches Bollinger Bands(20,2)
-# - Only takes trades aligned with 4h trend (long in uptrend, short in downtrend)
-# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# - Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years) to avoid fee drag
-# - Combines trend-following (HTF) with mean reversion (LTF) for robustness in bull/bear markets
+# Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume confirmation
+# - Uses 1w EMA(34) for primary trend direction (long when price > EMA34, short when price < EMA34)
+# - Uses 6h Williams %R(14) for overbought/oversold signals (long when %R crosses above -80, short when crosses below -20)
+# - Requires 6h volume > 1.5x 20-period average volume for confirmation
+# - Only takes mean reversion trades aligned with 1w trend (long in uptrend, short in downtrend)
+# - Target: 12-35 trades/year on 6h timeframe (50-140 total over 4 years) to avoid fee drag
+# - Williams %R is effective in ranging markets which appear in both bull and bear phases
+# - 1w trend filter prevents trading against the primary trend during strong moves
 
-name = "1h_4h_1d_supertrend_rsi_bb_meanrev_v2"
-timeframe = "1h"
+name = "6h_1w_williamsr_meanrev_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Pre-compute session-independent (6h bars less session-sensitive)
     
-    # 4h Supertrend (ATR=10, mult=3) for trend direction
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # 1w EMA(34) for trend direction
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w = np.where(close_1w > ema_34_1w, 1, -1)  # 1=uptrend, -1=downtrend
     
-    # Calculate ATR(10)
-    tr1_4h = high_4h - low_4h
-    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    tr_4h[0] = tr1_4h[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
+    # Align 1w trend to 6h
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Supertrend calculation
-    hl2_4h = (high_4h + low_4h) / 2
-    upper_band_4h = hl2_4h + (3.0 * atr_4h)
-    lower_band_4h = hl2_4h - (3.0 * atr_4h)
-    
-    supertrend_4h = np.full_like(close_4h, np.nan, dtype=float)
-    direction_4h = np.full_like(close_4h, np.nan, dtype=float)  # 1=uptrend, -1=downtrend
-    
-    for i in range(10, len(close_4h)):
-        if np.isnan(atr_4h[i]) or atr_4h[i] <= 0:
-            continue
-            
-        if i == 10:
-            supertrend_4h[i] = lower_band_4h[i]
-            direction_4h[i] = 1
-        else:
-            if close_4h[i-1] > supertrend_4h[i-1]:
-                upper_band_4h[i] = min(upper_band_4h[i], upper_band_4h[i-1])
-            else:
-                lower_band_4h[i] = max(lower_band_4h[i], lower_band_4h[i-1])
-            
-            if close_4h[i] <= upper_band_4h[i]:
-                supertrend_4h[i] = upper_band_4h[i]
-                direction_4h[i] = -1
-            else:
-                supertrend_4h[i] = lower_band_4h[i]
-                direction_4h[i] = 1
-    
-    # Align 4h Supertrend direction to 1h
-    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
-    
-    # 1d RSI(14) for overbought/oversold
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Align 1d RSI to 1h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 1h Bollinger Bands(20,2) for mean reversion entries
-    close = prices['close'].values
+    # 6h Williams %R(14) for mean reversion signals
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2.0 * std_20)
-    lower_bb = sma_20 - (2.0 * std_20)
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Range: -100 to 0, where -20 is overbought, -80 is oversold
+    rr = highest_high - lowest_low
+    williams_r = np.where(rr != 0, ((highest_high - close) / rr) * -100, -50)
+    
+    # 6h volume confirmation
+    volume = prices['volume'].values
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = np.where(avg_volume > 0, volume / avg_volume, 0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if any required data is invalid or outside session
-        if (not in_session[i] or
-            np.isnan(direction_4h_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
-            std_20[i] <= 0):
+    for i in range(35, n):  # Start after warmup period for 1w EMA34
+        # Skip if any required data is invalid
+        if (np.isnan(trend_1w_aligned[i]) or
+            np.isnan(williams_r[i]) or
+            np.isnan(volume_ratio[i]) or
+            np.isnan(avg_volume[i]) or
+            avg_volume[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit conditions: mean reversion or trend change
-            if close[i] >= sma_20[i]:  # Return to mean
+            # Exit conditions: mean reversion completion or trend change
+            if williams_r[i] >= -20:  # Return from oversold
                 position = 0
                 signals[i] = 0.0
-            elif direction_4h_aligned[i] == -1:  # 4h trend turned down
+            elif trend_1w_aligned[i] == -1:  # 1w trend turned down
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit conditions: mean reversion or trend change
-            if close[i] <= sma_20[i]:  # Return to mean
+            # Exit conditions: mean reversion completion or trend change
+            if williams_r[i] <= -80:  # Return from overbought
                 position = 0
                 signals[i] = 0.0
-            elif direction_4h_aligned[i] == 1:  # 4h trend turned up
+            elif trend_1w_aligned[i] == 1:  # 1w trend turned up
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Look for mean reversion entries aligned with 4h trend
-            if (close[i] <= lower_bb[i] and 
-                rsi_1d_aligned[i] < 30 and  # Oversold on 1d
-                direction_4h_aligned[i] == 1):  # 4h uptrend
+            # Look for mean reversion entries aligned with 1w trend
+            if (williams_r[i] <= -80 and  # Oversold
+                volume_ratio[i] > 1.5 and  # Volume confirmation
+                trend_1w_aligned[i] == 1):  # 1w uptrend
                 position = 1
-                signals[i] = 0.20
-            elif (close[i] >= upper_bb[i] and 
-                  rsi_1d_aligned[i] > 70 and  # Overbought on 1d
-                  direction_4h_aligned[i] == -1):  # 4h downtrend
+                signals[i] = 0.25
+            elif (williams_r[i] >= -20 and  # Overbought
+                  volume_ratio[i] > 1.5 and  # Volume confirmation
+                  trend_1w_aligned[i] == -1):  # 1w downtrend
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
