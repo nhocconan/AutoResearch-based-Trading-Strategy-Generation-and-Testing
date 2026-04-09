@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR stoploss
-# - Uses 1d Camarilla pivot levels (based on previous day's range) for breakout entries on 4h
-# - Requires volume > 1.8 * 20-period volume average for confirmation (balanced filter)
-# - Uses ATR(14) for dynamic stoploss (2.0 * ATR) and position sizing (0.25)
-# - Works in bull markets via breakouts above resistance (H3/H4), in bear via breakdowns below support (L3/L4)
-# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to avoid fee drag
-# - Camarilla levels provide mathematically derived support/resistance that adapts to volatility
+# Hypothesis: 12h Donchian breakout with 1d volume confirmation and ATR-based position sizing
+# - Uses 12h Donchian channel (20-period) for breakout entries
+# - Requires 1d volume > 1.5 * 20-period volume average for confirmation
+# - Uses ATR(14) for dynamic position sizing (inverse volatility: size = 0.30 * (atr_median / atr))
+# - Works in bull markets via upside breakouts, in bear via downside breakouts
+# - Target: 12-25 trades/year on 12h timeframe (48-100 total over 4 years) to minimize fee drag
+# - Donchian channels adapt to volatility, providing robust breakout levels
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,106 +25,72 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d Camarilla pivot levels (based on previous day's OHLC)
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # Formula based on previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    h4 = pivot + range_hl * 1.1 / 2
-    h3 = pivot + range_hl * 1.1 / 4
-    l3 = pivot - range_hl * 1.1 / 4
-    l4 = pivot - range_hl * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Pre-compute 4h ATR(14) for stoploss
+    # Pre-compute 12h Donchian channel (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # Donchian upper/lower bands (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 12h ATR(14) for volatility-based position sizing
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_median = np.nanmedian(atr[~np.isnan(atr)]) if np.any(~np.isnan(atr)) else 0.01
     
-    # Pre-compute volume confirmation: volume > 1.8 * 20-period average
+    # Pre-compute 1d volume confirmation: volume > 1.5 * 20-period average
     volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma)
+    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    volume_confirm = volume > (1.5 * vol_ma_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or
-            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
             np.isnan(atr[i]) or atr[i] <= 0 or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
+        # Calculate volatility-adjusted position size (0.20 to 0.35 range)
+        if atr_median > 0:
+            vol_scaling = np.clip(atr_median / atr[i], 0.5, 2.0)  # Limit extreme volatility effects
+            base_size = 0.25
+            size = base_size * vol_scaling
+            size = np.clip(size, 0.20, 0.35)  # Keep within reasonable bounds
+        else:
+            size = 0.25
+        
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            
-            # Exit conditions: stoploss or mean reversion
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:  # ATR stop
+            # Exit: price breaks below Donchian lower band
+            if close[i] < donch_low[i]:
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
-                signals[i] = 0.0
-            elif close[i] < l3_aligned[i]:  # Mean reversion exit (break below L3)
-                position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = size
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            
-            # Exit conditions: stoploss or mean reversion
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:  # ATR stop
+            # Exit: price breaks above Donchian upper band
+            if close[i] > donch_high[i]:
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
-                signals[i] = 0.0
-            elif close[i] > h3_aligned[i]:  # Mean reversion exit (break above H3)
-                position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -size
         else:  # Flat
             # Look for breakout entries with volume confirmation
-            if close[i] > h4_aligned[i] and volume_confirm[i]:  # Break above H4
+            if close[i] > donch_high[i] and volume_confirm[i]:  # Break above upper band
                 position = 1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
-                signals[i] = 0.25
-            elif close[i] < l4_aligned[i] and volume_confirm[i]:  # Break below L4
+                signals[i] = size
+            elif close[i] < donch_low[i] and volume_confirm[i]:  # Break below lower band
                 position = -1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
-                signals[i] = -0.25
+                signals[i] = -size
     
     return signals
