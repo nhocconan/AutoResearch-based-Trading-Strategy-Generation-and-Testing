@@ -3,17 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1d ADX regime filter
-# Donchian breakout captures strong momentum moves in both bull/bear markets
-# 1d volume spike (>2x 20-period average) confirms institutional participation
-# 1d ADX > 25 filters for trending markets, avoids choppy false breakouts
-# Long when price breaks above Donchian upper band with volume+ADX confirmation
-# Short when price breaks below Donchian lower band with volume+ADX confirmation
-# Exit when price returns to Donchian middle (mean reversion) or ADX < 20
-# Discrete sizing: 0.25 to limit fee churn, target 20-40 trades/year per symbol
+# Hypothesis: 1d Donchian(20) breakout + 1w volume confirmation + chop regime filter
+# Donchian breakout captures strong momentum moves in both bull and bear markets
+# 1w volume spike confirms institutional participation and breakout authenticity
+# Choppiness index regime filter on 1d: CHOP > 61.8 = range (mean revert at bands), CHOP < 38.2 = trending (follow breakout)
+# Works in bull/bear: regime filter adapts to market conditions, breakout captures directional moves
+# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25-0.30
 
-name = "4h_1d_donchian_volume_adx_v2"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,108 +24,107 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d indicators
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate 1w average volume (20-period)
+    volume_1w = df_1w['volume'].values
+    volume_s_1w = pd.Series(volume_1w)
+    avg_volume_1w = volume_s_1w.rolling(window=20, min_periods=20).mean().values
     
-    # 1d ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Smoothed TR, +DM, -DM using Wilder's smoothing
-        def wilders_smooth(values, period):
-            if len(values) < period:
-                return np.full(len(values), np.nan)
-            result = np.full(len(values), np.nan)
-            result[period-1] = np.nanmean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = (result[i-1] * (period-1) + values[i]) / period
-            return result
-        
-        atr = wilders_smooth(tr, period)
-        plus_dm_smooth = wilders_smooth(plus_dm, period)
-        minus_dm_smooth = wilders_smooth(minus_dm, period)
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        
-        # DX and ADX
-        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-        adx = wilders_smooth(dx, period)
-        return adx
+    # Calculate 1d Choppiness Index (CHOP)
+    high_1d = high
+    low_1d = low
+    close_1d = close
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # 1d average volume (20-period)
-    volume_s_1d = pd.Series(volume_1d)
-    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
+    # ATR(14) - smoothed TR using Wilder's smoothing
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        # First value is simple average
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Align 1d indicators to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    atr_1d = wilders_smoothing(tr, 14)
     
-    # 4h Donchian channels (20-period)
+    # Highest high and lowest low over 14 periods
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop calculation: 100 * log10(sum(atr14) / (hh14 - ll14)) / log10(14)
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    range_14 = hh_1d - ll_1d
+    chop_1d = np.where(range_14 != 0, 
+                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
+                       50)  # neutral when range is zero
+    
+    # Align 1w indicators to 1d timeframe (wait for 1w bar close)
+    avg_volume_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_volume_1w)
+    
+    # Calculate 1d Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    middle_channel = (highest_high + lowest_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
+            np.isnan(avg_volume_1w_aligned[i]) or np.isnan(chop_1d[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 2.0x 1d average volume
-        volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 1w average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_1w_aligned[i]
         
-        # Regime filter: ADX > 25 = trending (follow breakout), ADX < 20 = ranging/choppy (avoid)
-        trending_regime = adx_1d_aligned[i] > 25
-        ranging_regime = adx_1d_aligned[i] < 20
+        # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
+        trending_regime = chop_1d[i] < 38.2
+        ranging_regime = chop_1d[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: price returns to middle channel OR regime becomes ranging
-            if close[i] <= middle_channel[i] or ranging_regime:
+            # Exit: price closes below Donchian lower band OR regime shifts to ranging
+            if close[i] < lowest_low[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to middle channel OR regime becomes ranging
-            if close[i] >= middle_channel[i] or ranging_regime:
+            # Exit: price closes above Donchian upper band OR regime shifts to ranging
+            if close[i] > highest_high[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: only in trending regime with volume confirmation
-            if trending_regime and volume_confirmed:
-                if close[i] > highest_high[i]:
+            # Entry logic
+            if trending_regime:
+                # Follow breakout in trending regime
+                if close[i] > highest_high[i] and volume_confirmed:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < lowest_low[i]:
+                elif close[i] < lowest_low[i] and volume_confirmed:
+                    position = -1
+                    signals[i] = -0.25
+            elif ranging_regime:
+                # Mean revert at Donchian bands in ranging regime
+                if close[i] < lowest_low[i] and volume_confirmed:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] > highest_high[i] and volume_confirmed:
                     position = -1
                     signals[i] = -0.25
     
