@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot levels from 1d + volume confirmation + 1w trend filter
-# Uses daily Camarilla levels (H3, L3, H4, L4) for mean reversion and breakout signals
-# Weekly EMA200 determines trend: only take mean reversion when price < weekly EMA200 (bearish bias in 2025+)
-# Volume confirmation requires current volume > 2.0x 20-period average to filter weak signals
-# Works in bull/bear: weekly trend filter ensures we align with higher timeframe direction
+# Hypothesis: 12h Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+# Uses 12h price breaking above/below 20-period Donchian channel for breakout signals
+# 1w EMA50 determines higher timeframe trend: only take longs when price > 1w EMA50, shorts when price < 1w EMA50
+# Volume confirmation requires current volume > 2.0x 20-period average to filter weak breakouts
+# Works in bull/bear: 1w EMA filter ensures we trade with the higher timeframe trend, avoiding counter-trend whipsaws
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "6h_1d_1w_camarilla_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,38 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: H4, H3, L3, L4
-    range_1d = high_1d - low_1d
-    h4 = close_1d + range_1d * 1.1 / 2
-    h3 = close_1d + range_1d * 1.1 / 4
-    l3 = close_1d - range_1d * 1.1 / 4
-    l4 = close_1d - range_1d * 1.1 / 2
-    
-    # Align 1d Camarilla levels to 6h timeframe (completed 1d bar only)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Load 1w data ONCE before loop for trend filter
+    # Load 1w data ONCE before loop for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA200 for trend direction
+    # Calculate 1w EMA50 for trend direction
     close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 12h Donchian(20) channels
+    donchian_period = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    for i in range(n):
+        if i < donchian_period - 1:
+            upper_channel[i] = np.nan
+            lower_channel[i] = np.nan
+        else:
+            upper_channel[i] = np.max(high[i-donchian_period+1:i+1])
+            lower_channel[i] = np.min(low[i-donchian_period+1:i+1])
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -70,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -79,37 +68,29 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 2.0 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price < L3 (mean reversion failure) OR price > H4 (strong breakout - take profit)
-            if close[i] < l3_aligned[i] or close[i] > h4_aligned[i]:
+            # Exit: price < 12h Donchian lower channel OR price < 1w EMA50 (trend change)
+            if close[i] < lower_channel[i] or close[i] < ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > H3 (mean reversion failure) OR price < L4 (strong breakout - take profit)
-            if close[i] > h3_aligned[i] or close[i] < l4_aligned[i]:
+            # Exit: price > 12h Donchian upper channel OR price > 1w EMA50 (trend change)
+            if close[i] > upper_channel[i] or close[i] > ema_50_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Camarilla levels
+            # Entry logic with volume confirmation and Donchian breakout
             if volume_confirmed:
-                # Mean reversion long: price < L3 AND above weekly EMA200 (bullish weekly bias)
-                if close[i] < l3_aligned[i] and close[i] > ema_200_1w_aligned[i]:
+                # Long entry: price > 12h Donchian upper channel AND price > 1w EMA50 (breakout + uptrend)
+                if close[i] > upper_channel[i] and close[i] > ema_50_1w_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Mean reversion short: price > H3 AND below weekly EMA200 (bearish weekly bias)
-                elif close[i] > h3_aligned[i] and close[i] < ema_200_1w_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
-                # Breakout long: price > H4 AND above weekly EMA200 (bullish breakout with trend)
-                elif close[i] > h4_aligned[i] and close[i] > ema_200_1w_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Breakout short: price < L4 AND below weekly EMA200 (bearish breakout with trend)
-                elif close[i] < l4_aligned[i] and close[i] < ema_200_1w_aligned[i]:
+                # Short entry: price < 12h Donchian lower channel AND price < 1w EMA50 (breakdown + downtrend)
+                elif close[i] < lower_channel[i] and close[i] < ema_50_1w_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
