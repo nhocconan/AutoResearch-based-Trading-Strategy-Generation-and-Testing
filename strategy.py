@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams Alligator with Elder Ray confirmation
-# Williams Alligator (Jaw/Teeth/Lips) from 1d provides trend direction aligned with 4h timeframe
-# Elder Ray (Bull Power/Bear Power) confirms trend strength and filters weak moves
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# Works in bull/bear: Alligator identifies trend, Elder Ray confirms momentum
-# Discrete position sizing: 0.0, ±0.30 to minimize fee churn
+# Hypothesis: 1d strategy using 1w Williams Fractal levels with volume confirmation
+# Williams Fractals from 1w provide key reversal points aligned with daily timeframe
+# Volume confirmation (current 1d volume > 1.8x 20-period average) filters false breakouts
+# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# Works in bull/bear: price reacts to weekly structure, volume confirms validity
+# Discrete position sizing: 0.0, ±0.25 to minimize fee churn
 
-name = "4h_1d_alligator_elder_v1"
-timeframe = "4h"
+name = "1d_1w_williams_fractal_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,49 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator (1d)
-    # Jaw: 13-period SMMA smoothed 8 periods ahead
-    # Teeth: 8-period SMMA smoothed 5 periods ahead  
-    # Lips: 5-period SMMA smoothed 3 periods ahead
-    def smma(values, period):
-        """Smoothed Moving Average"""
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        result = np.full(len(values), np.nan)
-        sma = np.mean(values[:period])
-        result[period-1] = sma
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # Calculate 1w Williams Fractals (5-bar pattern)
+    # Bearish fractal: high[n-2] < high[n] and high[n-1] < high[n] and high[n+1] < high[n] and high[n+2] < high[n]
+    # Bullish fractal: low[n-2] > low[n] and low[n-1] > low[n] and low[n+1] > low[n] and low[n+2] > low[n]
+    bearish_fractal = np.full(len(high_1w), np.nan)
+    bullish_fractal = np.full(len(low_1w), np.nan)
     
-    jaw_1d = smma(smma(close_1d, 13), 8)
-    teeth_1d = smma(smma(close_1d, 8), 5)
-    lips_1d = smma(smma(close_1d, 5), 3)
+    for i in range(2, len(high_1w) - 2):
+        if (high_1w[i-2] < high_1w[i] and high_1w[i-1] < high_1w[i] and 
+            high_1w[i+1] < high_1w[i] and high_1w[i+2] < high_1w[i]):
+            bearish_fractal[i] = high_1w[i]
+        if (low_1w[i-2] > low_1w[i] and low_1w[i-1] > low_1w[i] and 
+            low_1w[i+1] > low_1w[i] and low_1w[i+2] > low_1w[i]):
+            bullish_fractal[i] = low_1w[i]
     
-    # Elder Ray (1d)
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Align Williams Fractals to 1d timeframe (need 2-bar extra delay for confirmation)
+    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
+    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
     
-    # Align Alligator lines and Elder Ray to 4h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Pre-compute volume confirmation (20-period average for 1d)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -74,43 +59,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or
-            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bearish_aligned[i]) or np.isnan(bullish_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 1.8x average 1d volume
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
-            # Exit when Lips cross below Teeth (trend weakening) OR Bear Power > 0 (bulls losing)
-            if lips_aligned[i] < teeth_aligned[i] or bear_power_aligned[i] > 0:
+            # Exit on bearish fractal retracement (mean reversion from resistance)
+            if close[i] < bearish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit when Lips cross above Teeth (trend weakening) OR Bull Power < 0 (bears losing)
-            if lips_aligned[i] > teeth_aligned[i] or bull_power_aligned[i] < 0:
+            # Exit on bullish fractal retracement (mean reversion from support)
+            if close[i] > bullish_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
-            # Trend following with volume confirmation
-            # Long when Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0
-            # Short when Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0
+            # Breakout trading with volume confirmation
+            # Long on bullish fractal breakout, Short on bearish fractal breakout
             if volume_confirmed:
-                bullish_aligned = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
-                bearish_aligned = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
-                
-                if bullish_aligned and bull_power_aligned[i] > 0:
+                if close[i] > bullish_aligned[i]:
                     position = 1
-                    signals[i] = 0.30
-                elif bearish_aligned and bear_power_aligned[i] < 0:
+                    signals[i] = 0.25
+                elif close[i] < bearish_aligned[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
