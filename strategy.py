@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 6h_weekly_pivot_breakout_v1
-# Hypothesis: Combines weekly pivot points (from 1w) with 6h price action to capture breakouts.
-# In both bull and bear markets, price often respects weekly support/resistance levels.
-# Long when price breaks above weekly R1 with volume confirmation; short when breaks below weekly S1.
-# Uses 6 Donchian channel to filter for momentum and avoid false breakouts.
+# 12h_ema_crossover_volume_v1
+# Hypothesis: Uses 12h EMA crossovers with volume confirmation on 12h timeframe.
+# Long when fast EMA crosses above slow EMA with volume > 1.5x average; short when fast EMA crosses below slow EMA.
+# Includes volatility filter using ATR to avoid whipsaw in choppy markets.
+# Designed to work in both bull and bear markets by capturing trend changes with volume confirmation.
 # Target: 15-25 trades/year (60-100 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_breakout_v1"
-timeframe = "6h"
+name = "12h_ema_crossover_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,37 +24,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1. Weekly pivot points (using weekly OHLC)
-    df_1w = get_htf_data(prices, '1w')  # Load weekly data ONCE
-    if len(df_1w) == 0:
-        return np.zeros(n)
+    # 1. EMA crossovers - 9 and 21 period
+    ema9 = np.zeros(n)
+    ema21 = np.zeros(n)
     
-    # Calculate weekly pivot: P = (H + L + C) / 3
-    # Resistance: R1 = 2*P - L, S1 = 2*P - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Initialize EMAs
+    ema9[0] = close[0]
+    ema21[0] = close[0]
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    alpha9 = 2.0 / (9 + 1)
+    alpha21 = 2.0 / (21 + 1)
     
-    # Align weekly levels to 6h timeframe (wait for weekly close)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    for i in range(1, n):
+        ema9[i] = alpha9 * close[i] + (1 - alpha9) * ema9[i-1]
+        ema21[i] = alpha21 * close[i] + (1 - alpha21) * ema21[i-1]
     
-    # 2. 6-period Donchian channel on 6h for momentum filter
-    donchian_period = 6
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i >= donchian_period - 1:
-            highest_high[i] = np.max(high[i-donchian_period+1:i+1])
-            lowest_low[i] = np.min(low[i-donchian_period+1:i+1])
-    
-    # 3. Volume confirmation - 20 period average
+    # 2. Volume confirmation - 20 period average
     vol_ma_20 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
@@ -64,46 +49,54 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
+    # 3. ATR for volatility filter
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr = np.zeros(n)
+    atr[0] = tr[0]
+    for i in range(1, n):
+        atr[i] = 0.05 * tr[i] + 0.95 * atr[i-1]  # Wilder's smoothing
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(21, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(vol_ma_20[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_ok = volume[i] > vol_ma_20[i] * 1.3
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_ok = volume[i] > vol_ma_20[i] * 1.5
+        
+        # Volatility filter: avoid trading when ATR is too low (choppy market)
+        vol_filter_ok = atr[i] > np.mean(atr[max(0, i-20):i+1]) * 0.8
         
         if position == 1:  # Long position
-            # Exit: price closes below weekly pivot OR Donchian break down
-            if close[i] < weekly_pivot_aligned[i] or close[i] < lowest_low[i]:
+            # Exit: fast EMA crosses below slow EMA
+            if ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly pivot OR Donchian break up
-            if close[i] > weekly_pivot_aligned[i] or close[i] > highest_high[i]:
+            # Exit: fast EMA crosses above slow EMA
+            if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above weekly R1 with volume and Donchian confirmation
-            if (close[i] > weekly_r1_aligned[i] and 
-                close[i] > highest_high[i] and 
-                vol_ok):
+            # Enter long: fast EMA crosses above slow EMA with volume and volatility filters
+            if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1] and vol_ok and vol_filter_ok:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below weekly S1 with volume and Donchian confirmation
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  close[i] < lowest_low[i] and 
-                  vol_ok):
+            # Enter short: fast EMA crosses below slow EMA with volume and volatility filters
+            elif ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1] and vol_ok and vol_filter_ok:
                 position = -1
                 signals[i] = -0.25
     
