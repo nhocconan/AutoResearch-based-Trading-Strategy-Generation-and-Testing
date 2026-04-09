@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator + 1w trend filter + volume confirmation
-# Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength
-# 1w EMA50 filter ensures we only trade in alignment with weekly trend
-# Volume confirmation (1d volume > 1.5 * 20-period average) filters false breakouts
-# Works in bull/bear: Alligator adapts to changing markets, weekly filter prevents counter-trend trades
-# Target: 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25
+# Hypothesis: 12h Williams Alligator + 1d volume spike + chop regime filter
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend presence and direction
+# 1d volume spike (>2.0 * 20-period average volume) confirms breakout strength
+# Choppiness index regime filter: CHOP < 38.2 = trending (follow Alligator), CHOP > 61.8 = range (mean revert)
+# Works in bull/bear: regime filter adapts, Alligator catches strong trends, mean reversion in ranges
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "1d_1w_williams_alligator_volume_v1"
-timeframe = "1d"
+name = "12h_1d_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,105 +24,135 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Alligator calculation
+    # Load 1d data ONCE before loop for volume and chop calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 1d Williams Alligator (Smoothed Medians)
+    # Jaw: 13-period Smoothed Median (8-period offset)
+    # Teeth: 8-period Smoothed Median (5-period offset) 
+    # Lips: 5-period Smoothed Median (3-period offset)
+    median_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
     
-    # Calculate Williams Alligator on 1d data
-    # Jaw: Blue line (13-period SMMA, shifted 8 bars)
-    # Teeth: Red line (8-period SMMA, shifted 5 bars)
-    # Lips: Green line (5-period SMMA, shifted 3 bars)
-    median_price_1d = (df_1d['high'].values + df_1d['low'].values) / 2
-    
-    def smma(values, period):
-        """Smoothed Moving Average"""
+    def smoothed_median(values, period):
+        """Williams Alligator uses smoothed median (SMMA)"""
         if len(values) < period:
             return np.full(len(values), np.nan)
         result = np.full(len(values), np.nan)
         # First value is simple average
-        result[period-1] = np.mean(values[:period])
+        result[period-1] = np.nanmean(values[:period])
         for i in range(period, len(values)):
             result[i] = (result[i-1] * (period-1) + values[i]) / period
         return result
     
-    jaw = smma(median_price_1d, 13)
-    teeth = smma(median_price_1d, 8)
-    lips = smma(median_price_1d, 5)
+    jaw_1d = smoothed_median(median_1d, 13)  # Jaw
+    teeth_1d = smoothed_median(median_1d, 8)  # Teeth
+    lips_1d = smoothed_median(median_1d, 5)   # Lips
     
-    # Shift the lines (Jaw shifted 8, Teeth shifted 5, Lips shifted 3)
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
+    # Calculate 1d average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_s_1d = pd.Series(volume_1d)
+    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Set NaN for shifted values that don't have enough data
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    # Calculate 1d Choppiness Index (CHOP)
+    hh_1d = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # True Range for ATR calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align 1d indicators to 1d timeframe (no alignment needed for same timeframe)
-    # Align 1w EMA50 to 1d timeframe (wait for 1w bar close)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # ATR(14) - Wilder's smoothing
+    def wilders_smoothing(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        alpha = 1.0 / period
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.nanmean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Calculate 1d volume confirmation
-    volume_s = pd.Series(volume)
-    avg_volume = volume_s.rolling(window=20, min_periods=20).mean().values
+    atr_1d = wilders_smoothing(tr, 14)
+    
+    # Sum of ATR over 14 periods
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    range_14 = hh_1d - ll_1d
+    chop_1d = np.where(range_14 != 0, 
+                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
+                       50)  # neutral when range is zero
+    
+    # Align 1d indicators to 12h timeframe (wait for 1d bar close)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(lips_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(jaw_shifted[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(avg_volume_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: volume > 1.5 * 20-period average volume
-        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
+        # Volume confirmation: current 12h volume > 2.0 * 1d average volume
+        volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
         
-        # Alligator signals:
-        # Lips above Teeth above Jaw = bullish alignment
-        # Lips below Teeth below Jaw = bearish alignment
-        # Intertwined lines = ranging/no trend
-        bullish_alignment = (lips_shifted[i] > teeth_shifted[i]) and (teeth_shifted[i] > jaw_shifted[i])
-        bearish_alignment = (lips_shifted[i] < teeth_shifted[i]) and (teeth_shifted[i] < jaw_shifted[i])
+        # Regime filter
+        trending_regime = chop_1d_aligned[i] < 38.2
+        ranging_regime = chop_1d_aligned[i] > 61.8
         
-        # Weekly trend filter: only trade in direction of weekly EMA50
-        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
+        # Alligator conditions
+        # Alligator asleep: jaws, teeth, lips intertwined (no trend)
+        # Alligator awake: jaws, teeth, lips separated (trend)
+        # Alligator eating: lips > teeth > jaws (bullish) or lips < teeth < jaws (bearish)
+        bullish_alligator = lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i]
+        bearish_alligator = lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: bearish alignment OR price crosses below Jaw
-            if bearish_alignment or close[i] < jaw_shifted[i]:
+            # Exit: price closes below Alligator teeth OR regime shifts to ranging
+            if close[i] < teeth_1d_aligned[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: bullish alignment OR price crosses above Jaw
-            if bullish_alignment or close[i] > jaw_shifted[i]:
+            # Exit: price closes above Alligator teeth OR regime shifts to ranging
+            if close[i] > teeth_1d_aligned[i] or ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: trade in direction of weekly trend with Alligator alignment
-            if weekly_uptrend and bullish_alignment and volume_confirmed:
-                position = 1
-                signals[i] = 0.25
-            elif weekly_downtrend and bearish_alignment and volume_confirmed:
-                position = -1
-                signals[i] = -0.25
+            # Entry logic
+            if trending_regime and volume_confirmed:
+                # Follow Alligator in trending regime
+                if bullish_alligator:
+                    position = 1
+                    signals[i] = 0.25
+                elif bearish_alligator:
+                    position = -1
+                    signals[i] = -0.25
+            elif ranging_regime and volume_confirmed:
+                # Mean revert at Alligator extremes in ranging regime
+                # Buy near lips (lower extreme), sell near jaws (upper extreme)
+                if close[i] < lips_1d_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] > jaw_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
