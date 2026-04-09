@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band breakout with 1d volume regime filter and ATR trailing stop
-# - Uses 4h Bollinger Bands (20, 2.0) for breakout signals (long at upper band, short at lower band)
-# - Confirms with 1d volume regime: volume > 1.5x 20-day average (high participation environment)
-# - Uses ATR(14) trailing stop: exits when price retraces 2.0x ATR from extreme
+# Hypothesis: 6h Donchian(20) breakout with 1d volatility filter and weekly trend filter
+# - Uses 6h Donchian breakout (20-period) for entry signals
+# - Filters with 1d ATR ratio (ATR(7)/ATR(30) < 0.8) to avoid high volatility chop
+# - Uses 1w EMA(21) for trend filter: long only when price > EMA21, short only when price < EMA21
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Bollinger Bands work in ranging markets (mean reversion at bands) and trending markets (breakout)
-# - Volume regime filter ensures breakouts occur during high conviction moves, reducing false signals
-# - ATR stop adapts to volatility, keeping risk consistent across market regimes
-# - Target: 30-60 trades/year on 4h timeframe (120-240 total over 4 years)
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Donchian breakouts capture trending moves, volatility filter reduces false signals in chop
+# - Weekly trend filter ensures we trade with the higher timeframe trend
 
-name = "4h_1d_bb_volume_atr_v1"
-timeframe = "4h"
+name = "6h_1d_1w_donchian_vol_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,91 +23,87 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 60 or len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 1d volume > 1.5x 20-period average (volume regime filter)
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_regime_1d = volume_1d > (1.5 * avg_volume_20)
+    # 1d True Range for ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr_1d[0]
     
-    # Align 1d volume regime to 4h
-    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime_1d)
+    # 1d ATR(7) and ATR(30) for volatility filter
+    atr_7 = pd.Series(tr_1d).rolling(window=7, min_periods=7).mean().values
+    atr_30 = pd.Series(tr_1d).rolling(window=30, min_periods=30).mean().values
+    # Volatility filter: ATR(7)/ATR(30) < 0.8 (low volatility environment)
+    vol_filter = (atr_7 / atr_30) < 0.8
     
-    # 4h price data
+    # Pre-compute 1w indicators
+    close_1w = df_1w['close'].values
+    # 1w EMA(21) for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # Align 1d and 1w indicators to 6h
+    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # 6h price data for Donchian channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 4h Bollinger Bands (20, 2.0)
-    bb_period = 20
-    bb_std = 2.0
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_20 + (bb_std * bb_std_dev)
-    lower_band = sma_20 - (bb_std * bb_std_dev)
-    
-    # 4h ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 6h Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(sma_20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(volume_regime_aligned[i]) or np.isnan(atr_14[i]) or
-            atr_14[i] <= 0):
+        if (np.isnan(vol_filter_aligned[i]) or 
+            np.isnan(ema_21_1w_aligned[i]) or
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
+            close[i] == 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            if high[i] > highest_since_entry:
-                highest_since_entry = high[i]
-            
-            # Exit conditions: price retraces 2.0x ATR from high
-            if low[i] <= highest_since_entry - (2.0 * atr_14[i]):
+            # Exit when price breaks below Donchian low
+            if low[i] <= lowest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if low[i] < lowest_since_entry:
-                lowest_since_entry = low[i]
-            
-            # Exit conditions: price retraces 2.0x ATR from low
-            if high[i] >= lowest_since_entry + (2.0 * atr_14[i]):
+            # Exit when price breaks above Donchian high
+            if high[i] >= highest_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Bollinger Band breakout with volume regime confirmation
-            if (high[i] >= upper_band[i] and    # Break above upper band
-                volume_regime_aligned[i]):      # Volume regime confirmation
+            # Look for Donchian breakout with filters
+            # Long: price breaks above Donchian high + low volatility + price > weekly EMA
+            if (high[i] >= highest_20[i] and
+                vol_filter_aligned[i] and
+                close[i] > ema_21_1w_aligned[i]):
                 position = 1
-                highest_since_entry = high[i]
-                lowest_since_entry = high[i]
                 signals[i] = 0.25
-            elif (low[i] <= lower_band[i] and    # Break below lower band
-                  volume_regime_aligned[i]):     # Volume regime confirmation
+            # Short: price breaks below Donchian low + low volatility + price < weekly EMA
+            elif (low[i] <= lowest_20[i] and
+                  vol_filter_aligned[i] and
+                  close[i] < ema_21_1w_aligned[i]):
                 position = -1
-                highest_since_entry = low[i]
-                lowest_since_entry = low[i]
                 signals[i] = -0.25
     
     return signals
