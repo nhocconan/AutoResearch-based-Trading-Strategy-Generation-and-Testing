@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_volume_chop_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels for support/resistance,
-# with volume confirmation (>1.5x 20-period average) and choppiness regime filter.
-# Long when price touches S3 level with volume confirmation in trending regime (CHOP < 38.2).
-# Short when price touches R3 level with volume confirmation in trending regime (CHOP < 38.2).
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 12-37 trades/year.
-# Uses 1d HTF data for Camarilla levels and choppiness, called ONCE before loop.
+# 6h_ichimoku_volume_confirmation_v2
+# Hypothesis: Refined Ichimoku strategy with stricter entry conditions to reduce trade frequency.
+# Uses daily Ichimoku Cloud for trend/regime filter, 6h TK cross for momentum, and volume confirmation.
+# Added requirement: price must close beyond cloud by at least 0.5*ATR(6h) to avoid whipsaws.
+# Discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 15-25 trades/year.
+# Uses 1d HTF data for Ichimoku components, called ONCE before loop.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_chop_v1"
-timeframe = "12h"
+name = "6h_ichimoku_volume_confirmation_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,61 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivot and choppiness
+    # 1d HTF data for Ichimoku Cloud
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for choppiness calculation
+    if len(df_1d) < 52:  # Need enough for daily Ichimoku (26*2)
         return np.zeros(n)
     
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
     
-    # Daily Camarilla pivot levels (based on previous day)
-    # Pivot = (high + low + close) / 3
-    pivot = (high_d + low_d + close_d) / 3.0
-    # Range = high - low
-    rng = high_d - low_d
+    # Daily Ichimoku parameters
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    # Camarilla levels
-    # S3 = close - (range * 1.1/4)
-    s3 = close_d - (rng * 1.1 / 4.0)
-    # S2 = close - (range * 1.1/6)
-    s2 = close_d - (rng * 1.1 / 6.0)
-    # S1 = close - (range * 1.1/12)
-    s1 = close_d - (rng * 1.1 / 12.0)
-    # R1 = close + (range * 1.1/12)
-    r1 = close_d + (rng * 1.1 / 12.0)
-    # R2 = close + (range * 1.1/6)
-    r2 = close_d + (rng * 1.1 / 6.0)
-    # R3 = close + (range * 1.1/4)
-    r3 = close_d + (rng * 1.1 / 4.0)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2.0
     
-    # Daily Choppiness Index (CHOP) - measures trend vs range
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    # Using 14-period as standard
-    tr1 = high_d[1:] - low_d[1:]
-    tr2 = np.abs(high_d[1:] - close_d[:-1])
-    tr3 = np.abs(low_d[1:] - close_d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2.0)
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high_d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr / (max_high - min_low)) / np.log10(14)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2.0)
     
-    # Align daily data to 12h timeframe
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align daily Ichimoku data to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
     
-    # 12h volume average for confirmation (20-period)
+    # 6h TK cross (Tenkan/Kijun cross) for entry timing
+    tenkan_6h = (pd.Series(close).rolling(window=9, min_periods=9).max().values +
+                 pd.Series(close).rolling(window=9, min_periods=9).min().values) / 2.0
+    kijun_6h = (pd.Series(close).rolling(window=26, min_periods=26).max().values +
+                pd.Series(close).rolling(window=26, min_periods=26).min().values) / 2.0
+    tk_cross = tenkan_6h - kijun_6h  # Positive when Tenkan > Kijun (bullish)
+    
+    # 6h ATR for volatility filter
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_6h = tr.rolling(window=14, min_periods=14).mean().values
+    atr_6h[0] = np.nan  # First value invalid due to roll
+    
+    # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
@@ -88,41 +82,46 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(s3_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(tk_cross[i]) or np.isnan(volume_ma[i]) or np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Trending regime: CHOP < 38.2 (strong trend)
-        trending_regime = chop_aligned[i] < 38.2
+        # Determine cloud boundaries (Senkou Span A/B)
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        # Cloud thickness as filter (avoid thin cloud whipsaws)
+        cloud_thickness = cloud_top - cloud_bottom
+        min_cloud_thickness = 0.5 * atr_6h[i]  # Require cloud thicker than half ATR
         
         if position == 1:  # Long position
-            # Exit: price moves above S2 (profit target) OR below S1 (stop loss)
-            if close[i] > s2_aligned[i] or close[i] < s1_aligned[i]:
+            # Exit: price falls below cloud OR TK cross turns bearish
+            if close[i] < cloud_bottom or tk_cross[i] < 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price moves below R2 (profit target) OR above R1 (stop loss)
-            if close[i] < r2_aligned[i] or close[i] > r1_aligned[i]:
+            # Exit: price rises above cloud OR TK cross turns bullish
+            if close[i] > cloud_top or tk_cross[i] > 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed and trending_regime:
-                # Long entry: price touches or crosses below S3 with volume confirmation
-                if low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]:
+            if volume_confirmed and cloud_thickness > min_cloud_thickness:
+                # Long entry: price above cloud by at least 0.5*ATR AND TK cross bullish
+                if close[i] > cloud_top + 0.5 * atr_6h[i] and tk_cross[i] > 0:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price touches or crosses above R3 with volume confirmation
-                elif high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]:
+                # Short entry: price below cloud by at least 0.5*ATR AND TK cross bearish
+                elif close[i] < cloud_bottom - 0.5 * atr_6h[i] and tk_cross[i] < 0:
                     position = -1
                     signals[i] = -0.25
     
