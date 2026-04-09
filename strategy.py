@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v4
-# Hypothesis: Breakout above/below 1d Camarilla H3/L3 levels on 12h chart with volume confirmation.
+# 4h_1d_camarilla_breakout_v5
+# Hypothesis: Breakout above/below 1d Camarilla H3/L3 levels on 4h chart with volume confirmation.
 # Uses 1d trend filter: only take long trades when price > 1d EMA(50), only short trades when price < 1d EMA(50).
 # Exit when price returns to opposite side of pivot point (mean reversion).
-# Target: 12-37 trades/year (50-150 total over 4 years) with strict entry conditions.
+# Target: 15-40 trades/year (60-160 total over 4 years) with strict entry conditions.
 # Works in both bull and bear markets due to breakout logic + trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v4"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -56,7 +56,7 @@ def generate_signals(prices):
     # Pivot point = (high + low + close) / 3
     pp = (ph + pl + pc) / 3
     
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
+    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
@@ -69,7 +69,7 @@ def generate_signals(prices):
     for i in range(1, len(close_1d)):
         ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume confirmation - 20 period average
