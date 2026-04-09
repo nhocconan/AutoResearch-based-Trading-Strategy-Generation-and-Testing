@@ -3,95 +3,59 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA direction + RSI(14) + chop regime filter (CHOP < 61.8 = trending)
-# KAMA adapts to market efficiency - follows trend in trending markets, avoids whipsaws in ranging
-# RSI(14) confirms momentum strength (avoid overbought/oversold extremes)
-# Chop regime filter: only trade when CHOP < 61.8 (not strongly ranging) to reduce false signals
-# Designed for 1d timeframe targeting 30-100 total trades over 4 years (7-25/year) with discrete sizing 0.25
-# Works in bull/bear: KAMA follows trends, chop filter prevents trading in strong ranging markets
+# Hypothesis: 6h Elder Ray + ADX regime filter + 12h volume confirmation
+# Elder Ray measures bull/bear power relative to EMA13, identifying strong directional moves
+# ADX > 25 filters for trending markets where Elder Ray signals are reliable
+# 12h volume spike (>1.5x 20-period average) confirms institutional participation
+# Works in bull/bear: Elder Ray adapts to trend direction, volume filter reduces false signals
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_12h_elder_ray_volume_adx_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for regime context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data ONCE before loop for ADX and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d close
-    def kama(close, period=10, fast=2, slow=30):
-        # Efficiency ratio
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        # Handle first period values
-        er = np.full_like(change, np.nan, dtype=np.float64)
-        er[period-1:] = change / np.where(volatility[period-1:] == 0, 1, volatility[period-1:])
-        er = np.concatenate([np.full(period, np.nan), er])
-        
-        # Smoothing constants
-        fast_sc = 2.0 / (fast + 1)
-        slow_sc = 2.0 / (slow + 1)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        # KAMA calculation
-        kama_vals = np.full_like(close, np.nan, dtype=np.float64)
-        kama_vals[period] = close[period]  # Start with first close after period
-        for i in range(period + 1, len(close)):
-            if np.isnan(kama_vals[i-1]):
-                kama_vals[i] = close[i]
-            else:
-                kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-        return kama_vals
+    # Calculate EMA13 for Elder Ray on 6h timeframe
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    kama_vals = kama(close, 10, 2, 30)
+    # Calculate Elder Ray components on 6h
+    bull_power = high - ema13  # Bull power: high minus EMA13
+    bear_power = low - ema13   # Bear power: low minus EMA13
     
-    # Calculate RSI(14)
-    def rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close, np.nan, dtype=np.float64)
-        avg_loss = np.full_like(close, np.nan, dtype=np.float64)
-        
-        # First average
-        avg_gain[period] = np.nanmean(gain[:period])
-        avg_loss[period] = np.nanmean(loss[:period])
-        
-        # Wilder's smoothing
-        for i in range(period + 1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_vals = 100 - (100 / (1 + rs))
-        return rsi_vals
-    
-    rsi_vals = rsi(close, 14)
-    
-    # Calculate 1w Chopiness Index for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate ADX on 12h timeframe
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14) - Wilder's smoothing
+    # Directional Movement
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Wilder's smoothing for TR, +DM, -DM
     def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
@@ -103,59 +67,69 @@ def generate_signals(prices):
             result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    atr_1w = wilders_smoothing(tr, 14)
+    atr_12h = wilders_smoothing(tr_12h, 14)
+    plus_dm_12h = wilders_smoothing(plus_dm, 14)
+    minus_dm_12h = wilders_smoothing(minus_dm, 14)
     
-    # Chopiness Index
-    hh_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Directional Indicators
+    plus_di_12h = np.where(atr_12h > 0, 100 * plus_dm_12h / atr_12h, 0)
+    minus_di_12h = np.where(atr_12h > 0, 100 * minus_dm_12h / atr_12h, 0)
     
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_1w).rolling(window=14, min_periods=14).sum().values
-    range_14 = hh_1w - ll_1w
-    chop_1w = np.where(range_14 != 0, 
-                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
-                       50)  # neutral when range is zero
+    # DX and ADX
+    dx_12h = np.where((plus_di_12h + minus_di_12h) > 0, 
+                      100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h), 
+                      0)
+    adx_12h = wilders_smoothing(dx_12h, 14)
     
-    # Align 1w indicators to 1d timeframe (wait for 1w bar close)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Calculate 12h average volume (20-period)
+    volume_12h = df_12h['volume'].values
+    volume_s_12h = pd.Series(volume_12h)
+    avg_volume_12h = volume_s_12h.rolling(window=20, min_periods=20).mean().values
+    
+    # Align 12h indicators to 6h timeframe (wait for 12h bar close)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    avg_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_volume_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
-            np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(avg_volume_12h_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when not strongly ranging (CHOP < 61.8)
-        not_strongly_ranging = chop_1w_aligned[i] < 61.8
+        # Volume confirmation: volume > 1.5 * 20-period average volume (from 12h data)
+        volume_confirmed = volume[i] > 1.5 * avg_volume_12h_aligned[i]
+        
+        # ADX filter: ADX > 25 indicates trending market
+        trending_market = adx_12h_aligned[i] > 25
         
         if position == 1:  # Long position
-            # Exit: price closes below KAMA OR RSI < 30 (momentum loss) OR strong ranging
-            if close[i] < kama_vals[i] or rsi_vals[i] < 30 or not not_strongly_ranging:
+            # Exit: bear power becomes positive (weakening bearish pressure) OR ADX drops
+            if bear_power[i] > 0 or not trending_market:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above KAMA OR RSI > 70 (momentum loss) OR strong ranging
-            if close[i] > kama_vals[i] or rsi_vals[i] > 70 or not not_strongly_ranging:
+            # Exit: bull power becomes negative (weakening bullish pressure) OR ADX drops
+            if bull_power[i] < 0 or not trending_market:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: only in non-strongly-ranging regime
-            if not_strongly_ranging:
-                # Long: price above KAMA AND RSI > 50 (bullish momentum)
-                if close[i] > kama_vals[i] and rsi_vals[i] > 50:
+            # Entry logic: only in trending market with volume confirmation
+            if trending_market and volume_confirmed:
+                # Strong bullish signal: bull power > 0 and bear power < 0
+                if bull_power[i] > 0 and bear_power[i] < 0:
                     position = 1
                     signals[i] = 0.25
-                # Short: price below KAMA AND RSI < 50 (bearish momentum)
-                elif close[i] < kama_vals[i] and rsi_vals[i] < 50:
+                # Strong bearish signal: bear power < 0 and bull power < 0 (both negative)
+                elif bear_power[i] < 0 and bull_power[i] < 0:
                     position = -1
                     signals[i] = -0.25
     
