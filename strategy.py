@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_spike_v6
+# 4h_daily_camarilla_pivot_volume_spike_v7
 # Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume spike confirmation.
-# Long: Price breaks above H4 pivot with volume > 2.0x 20-period average
-# Short: Price breaks below L4 pivot with volume > 2.0x 20-period average
+# Long: Price breaks above H4 pivot with volume > 2.2x 20-period average (tighter filter)
+# Short: Price breaks below L4 pivot with volume > 2.2x 20-period average (tighter filter)
 # Exit: Price returns to H3/L3 levels
 # Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation.
-# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag.
-# Volume spike filter reduces false breakouts. Works in both bull and bear markets by
-# capturing institutional breakouts with confirmation.
+# Target: 75-150 total trades over 4 years (19-38/year) to reduce fee drag.
+# Tighter volume confirmation (2.2x vs 2.0x) reduces false breakouts and trade frequency.
+# Works in both bull and bear markets by capturing institutional breakouts with confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_spike_v6"
+name = "4h_daily_camarilla_pivot_volume_spike_v7"
 timeframe = "4h"
 leverage = 1.0
 
@@ -68,8 +68,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict filter)
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Volume confirmation: current volume > 2.2x 20-period average (tighter filter)
+        volume_confirmed = volume[i] > 2.2 * volume_ma[i]
         
         if position == 1:  # Long position
             # Exit: Price returns to H3 level
