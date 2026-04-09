@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ATR-based volatility filter
-# Donchian breakouts capture momentum with clear entry/exit levels
-# 1d ATR filter ensures trades only occur in sufficient volatility regimes
-# Works in bull/bear: ATR adapts to changing market conditions
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
+# Hypothesis: 6h Donchian(20) breakout + 1d Elder Ray (Bull/Bear Power) + volume confirmation
+# Donchian breakouts capture momentum; 1d Elder Ray shows institutional buying/selling pressure
+# Volume confirmation ensures breakout authenticity with conviction
+# Works in bull/bear: Elder Ray adapts to higher timeframe power balance
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "4h_1d_donchian_atr_volatility_filter_v1"
-timeframe = "4h"
+name = "6h_1d_elder_ray_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +23,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ATR calculation
+    # Load 1d data ONCE before loop for Elder Ray calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period ATR on 1d timeframe
-    tr1 = np.abs(df_1d['high'].values - df_1d['low'].values)
-    tr2 = np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1))
-    tr3 = np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    # Calculate 13-period EMA for Elder Ray (standard)
+    close_1d = df_1d['close'].values
+    ema13 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 13:
+        multiplier = 2 / (13 + 1)
+        ema13[12] = np.mean(close_1d[:13])
+        for i in range(13, len(close_1d)):
+            ema13[i] = (close_1d[i] * multiplier) + (ema13[i-1] * (1 - multiplier))
     
-    atr_1d = np.full_like(tr, np.nan, dtype=np.float64)
-    for i in range(len(tr)):
-        if i < 13:
-            atr_1d[i] = np.nan
-        else:
-            atr_1d[i] = np.mean(tr[i-13:i+1])
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = df_1d['high'].values - ema13
+    bear_power = df_1d['low'].values - ema13
     
-    # Align 1d ATR to 4h timeframe (wait for daily close)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align Elder Ray data to 6h timeframe (wait for daily close)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate 4h Donchian channels (20-period)
+    # Calculate 6h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -57,43 +57,52 @@ def generate_signals(prices):
             donchian_high[i] = np.max(high[i-20:i])
             donchian_low[i] = np.min(low[i-20:i])
     
+    # Calculate 20-period average volume for volume confirmation
+    avg_volume = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            avg_volume[i] = np.nan
+        else:
+            avg_volume[i] = np.mean(volume[i-20:i])
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when 1d ATR > 0.5% of price
-        volatility_filter = atr_1d_aligned[i] > 0.005 * close[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price < Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit: price < Donchian low OR Bear Power > 0 (bulls losing control)
+            if close[i] < donchian_low[i] or bear_power_aligned[i] > 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit: price > Donchian high OR Bull Power < 0 (bears losing control)
+            if close[i] > donchian_high[i] or bull_power_aligned[i] < 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volatility filter and Donchian breakout
-            if volatility_filter:
-                # Long entry: price > Donchian high
-                if close[i] > donchian_high[i]:
+            # Entry logic with volume confirmation and Donchian breakout + Elder Ray filter
+            if volume_confirmed:
+                # Long entry: price > Donchian high AND Bull Power > 0 (bulls in control)
+                if close[i] > donchian_high[i] and bull_power_aligned[i] > 0:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Donchian low
-                elif close[i] < donchian_low[i]:
+                # Short entry: price < Donchian low AND Bear Power < 0 (bears in control)
+                elif close[i] < donchian_low[i] and bear_power_aligned[i] < 0:
                     position = -1
                     signals[i] = -0.25
     
