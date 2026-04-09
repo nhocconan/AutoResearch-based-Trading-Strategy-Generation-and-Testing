@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation
-# - Uses 4h Donchian channel (20-period) for breakout entries
-# - Requires 12h HMA(21) trend alignment: long when price > HMA, short when price < HMA
-# - Volume confirmation: volume > 2.0 * 20-period volume average (strict filter)
-# - ATR(14) stoploss: 2.5 * ATR for wider stops in volatile markets
-# - Position size: 0.25 (discrete level to minimize fee churn)
-# - Designed for fewer trades (~20-40/year) to avoid fee drag while capturing strong trends
-# - Works in bull markets via breakouts above upper channel with uptrend confirmation
-# - Works in bear markets via breakdowns below lower channel with downtrend confirmation
+# Hypothesis: 6h Elder Ray + Weekly Regime Filter
+# - Uses 6h Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) for momentum
+# - Filters by 1w ADX regime: ADX > 25 = trending (trade Elder Ray signals), ADX < 20 = ranging (fade Elder Ray extremes)
+# - Weekly pivot (based on prior week) provides directional bias: long only above weekly pivot, short only below
+# - Volume confirmation: volume > 1.5 * 20-period average
+# - Designed to work in bull markets via trend-following Elder Ray signals and in bear markets via mean reversion in ranging regimes
+# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag on 6h timeframe
+# - Elder Ray captures institutional buying/selling pressure better than simple price crosses
 
-name = "4h_12h_donchian_hma_volume_v1"
-timeframe = "4h"
+name = "6h_1w_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,115 +22,150 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1w) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h HMA(21) for trend filter
-    close_12h = df_12h['close'].values
-    # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    def wma(data, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(data, weights, 'valid') / weights.sum()
+    # 1w ADX for regime detection (trending vs ranging)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]
     
-    wma_half = pd.Series(close_12h).rolling(window=half_len, min_periods=half_len).apply(
-        lambda x: np.dot(x, np.arange(1, half_len+1)) / np.arange(1, half_len+1).sum(), raw=False
-    ).values
-    wma_full = pd.Series(close_12h).rolling(window=21, min_periods=21).apply(
-        lambda x: np.dot(x, np.arange(1, 22)) / np.arange(1, 22).sum(), raw=False
-    ).values
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    hma_raw = 2 * wma_half - wma_full
-    hma_12h = pd.Series(hma_raw).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
-        lambda x: np.dot(x, np.arange(1, sqrt_len+1)) / np.arange(1, sqrt_len+1).sum(), raw=False
-    ).values
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Align 12h HMA to 4h timeframe
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    atr_1w = wilders_smoothing(tr_1w, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # Pre-compute 4h Donchian channels (20-period)
+    # DI+ and DI-
+    di_plus = np.where(atr_1w > 0, dm_plus_smooth / atr_1w * 100, 0)
+    di_minus = np.where(atr_1w > 0, dm_minus_smooth / atr_1w * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align 1w ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # 1d Weekly pivot levels (based on prior week's OHLC)
+    # Need to resample 1d to get weekly OHLC from daily data
+    # Since we have daily data, we can calculate weekly pivot from last 5 days approx
+    # But better: use actual weekly data from mtf_data - we already have df_1w
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
+    
+    # Weekly pivot point
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    weekly_range = prev_week_high - prev_week_low
+    
+    # Align weekly pivot to 6h
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # 6h Elder Ray components
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Pre-compute 4h ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Pre-compute volume confirmation: volume > 2.0 * 20-period average
+    # 6h ATR(14) for dynamic thresholds
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.roll(close, 1))
+    tr3_6h = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    tr_6h[0] = tr1_6h[0]
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     volume = prices['volume'].values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(hma_12h_aligned[i]) or np.isnan(atr[i]) or atr[i] <= 0 or
+        if (np.isnan(adx_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(atr_6h[i]) or atr_6h[i] <= 0 or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
+        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
+        is_trending = adx_aligned[i] > 25
+        is_ranging = adx_aligned[i] < 20
+        
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_high_since_entry = max(highest_high_since_entry, high[i])
-            
-            # Exit conditions: stoploss or mean reversion
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
+            # Exit conditions
+            if is_ranging and bear_power[i] < 0.5 * atr_6h[i]:  # Fade long in ranging market when bear power weakens
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < donchian_low[i]:  # Mean reversion exit (break below lower Donchian)
+            elif close[i] < weekly_pivot_aligned[i]:  # Break below weekly pivot
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-            
-            # Exit conditions: stoploss or mean reversion
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
+            # Exit conditions
+            if is_ranging and bull_power[i] < 0.5 * atr_6h[i]:  # Fade short in ranging market when bull power weakens
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > donchian_high[i]:  # Mean reversion exit (break above upper Donchian)
+            elif close[i] > weekly_pivot_aligned[i]:  # Break above weekly pivot
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for breakout entries with volume confirmation and trend filter
-            if close[i] > donchian_high[i] and close[i] > hma_12h_aligned[i] and volume_confirm[i]:
-                position = 1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
-                signals[i] = 0.25
-            elif close[i] < donchian_low[i] and close[i] < hma_12h_aligned[i] and volume_confirm[i]:
-                position = -1
-                highest_high_since_entry = high[i]
-                lowest_low_since_entry = low[i]
-                signals[i] = -0.25
+            # Look for entries based on regime and Elder Ray
+            if is_trending:
+                # Trending regime: trade with Elder Ray momentum
+                if bull_power[i] > atr_6h[i] and close[i] > weekly_pivot_aligned[i] and volume_confirm[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif bear_power[i] > atr_6h[i] and close[i] < weekly_pivot_aligned[i] and volume_confirm[i]:
+                    position = -1
+                    signals[i] = -0.25
+            else:  # ranging regime
+                # Ranging regime: fade Elder Ray extremes at weekly pivot levels
+                if bull_power[i] > atr_6h[i] and close[i] < weekly_pivot_aligned[i] and volume_confirm[i]:
+                    # Strong bull power but below pivot = potential fade short
+                    position = -1
+                    signals[i] = -0.25
+                elif bear_power[i] > atr_6h[i] and close[i] > weekly_pivot_aligned[i] and volume_confirm[i]:
+                    # Strong bear power but above pivot = potential fade long
+                    position = 1
+                    signals[i] = 0.25
     
     return signals
