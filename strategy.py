@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 1d_weekly_camarilla_pivot_volume_regime_v1
-# Hypothesis: Daily strategy using weekly Camarilla pivot levels with volume confirmation and chop regime filter.
-# Long: Price breaks above weekly H4 with volume > 1.5x 20-period average and CHOP > 61.8 (rangy market).
-# Short: Price breaks below weekly L4 with volume > 1.5x 20-period average and CHOP > 61.8.
+# 6h_12h_1d_camarilla_pivot_volume_v1
+# Hypothesis: 6h strategy using 12h and 1d Camarilla pivot levels with volume confirmation.
+# Long: Price breaks above 1d H4 with volume > 1.8x 20-period average and 12h close > 12h open.
+# Short: Price breaks below 1d L4 with volume > 1.8x 20-period average and 12h close < 12h open.
 # Exit: Price returns to opposite Camarilla level (H3 for longs, L3 for shorts).
-# Uses weekly HTF for structure, daily timeframe for execution, and chop filter to avoid whipsaws in strong trends.
-# Target: 15-25 trades/year to minimize fee drag while capturing mean reversion in ranging markets.
+# Uses 12h trend filter: only long when 12h close > 12h EMA20, only short when 12h close < 12h EMA20.
+# Target: 12-30 trades/year to minimize fee drag while maintaining edge.
+# Works in bull markets via breakouts and bear markets via fade-from-extremes logic.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_camarilla_pivot_volume_regime_v1"
-timeframe = "1d"
+name = "6h_12h_1d_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,80 +25,81 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_prices = prices['open'].values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index (CHOP) - calculates if market is ranging (high CHOP) or trending (low CHOP)
-    # CHOP > 61.8 = ranging (good for mean reversion), CHOP < 38.2 = trending
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = abs(high_s - close_s.shift(1))
-    tr3 = abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = high_s.rolling(window=14, min_periods=14).max().values
-    ll = low_s.rolling(window=14, min_periods=14).min().values
-    
-    # Chopiness Index: 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    sum_tr14 = tr.rolling(window=14, min_periods=14).sum().values
-    hh_ll = hh - ll
-    # Avoid division by zero
-    chop_raw = 100 * np.log10(sum_tr14 / (hh_ll + 1e-10)) / np.log10(14)
-    chop_values = chop_raw  # Already in 0-100 range
-    
-    # Get weekly data for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly pivot and range
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    # Daily pivot and range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # Camarilla levels
-    h3_1w = pivot_1w + (range_1w * 1.1 / 4)
-    l3_1w = pivot_1w - (range_1w * 1.1 / 4)
-    h4_1w = pivot_1w + (range_1w * 1.1 / 2)
-    l4_1w = pivot_1w - (range_1w * 1.1 / 2)
+    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align weekly Camarilla levels to daily
-    h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
-    l3_1w_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
-    h4_1w_aligned = align_htf_to_ltf(prices, df_1w, h4_1w)
-    l4_1w_aligned = align_htf_to_ltf(prices, df_1w, l4_1w)
+    # Align 1d Camarilla levels to 6h
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    open_12h = df_12h['open'].values
+    
+    # 12h EMA20 for trend filter
+    close_12h_s = pd.Series(close_12h)
+    ema_20_12h = close_12h_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align 12h EMA20 and bullish/bearish candle to 6h
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    open_12h_aligned = align_htf_to_ltf(prices, df_12h, open_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(h3_1w_aligned[i]) or np.isnan(l3_1w_aligned[i]) or
-            np.isnan(h4_1w_aligned[i]) or np.isnan(l4_1w_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(chop_values[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or
+            np.isnan(volume[i]) or np.isnan(open_prices[i]) or
+            np.isnan(ema_20_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or
+            np.isnan(open_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion)
-        chop_filter = chop_values[i] > 61.8
+        # Volume confirmation: current volume > 1.8x 20-period average
+        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+        # 12h bullish candle: close > open
+        candle_12h_bullish = close_12h_aligned[i] > open_12h_aligned[i]
+        # 12h bearish candle: close < open
+        candle_12h_bearish = close_12h_aligned[i] < open_12h_aligned[i]
+        # 12h trend filter: close > EMA20 for uptrend, < EMA20 for downtrend
+        trend_12h_up = close_12h_aligned[i] > ema_20_12h_aligned[i]
+        trend_12h_down = close_12h_aligned[i] < ema_20_12h_aligned[i]
         
         if position == 1:  # Long position
             # Exit: Price returns to H3
-            if close[i] <= h3_1w_aligned[i]:
+            if close[i] <= h3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,22 +107,24 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: Price returns to L3
-            if close[i] >= l3_1w_aligned[i]:
+            if close[i] >= l3_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above H4 with volume and chop filter
-            if (close[i] > h4_1w_aligned[i] and    # Break above H4
+            # Long entry: Price breaks above H4 with volume, 12h bullish candle, and uptrend
+            if (close[i] > h4_1d_aligned[i] and    # Break above H4
                 volume_confirmed and               # Volume spike
-                chop_filter):                      # Ranging market
+                candle_12h_bullish and             # 12h bullish candle
+                trend_12h_up):                     # 12h uptrend
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L4 with volume and chop filter
-            elif (close[i] < l4_1w_aligned[i] and  # Break below L4
+            # Short entry: Price breaks below L4 with volume, 12h bearish candle, and downtrend
+            elif (close[i] < l4_1d_aligned[i] and  # Break below L4
                   volume_confirmed and             # Volume spike
-                  chop_filter):                    # Ranging market
+                  candle_12h_bearish and           # 12h bearish candle
+                  trend_12h_down):                 # 12h downtrend
                 position = -1
                 signals[i] = -0.25
     
