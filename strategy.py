@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v1
-# Hypothesis: 12h Camarilla pivot breakout with 1d EMA50 trend filter and volume confirmation.
-# Works in bull/bear: 1d EMA50 defines institutional trend; Camarilla R3/S3/R4/S4 levels provide
-# precise entry/exit levels; volume confirms institutional participation. Target: 12-37 trades/year.
+# 4h_donchian_volume_atr_v3
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR-based trend filter.
+# Works in bull/bear: Donchian captures breakouts, volume confirms institutional participation,
+# ATR(50) > ATR(100) ensures trending market (avoids chop). Target: 20-50 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_volume_atr_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,41 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA trend and pivot calculation
+    # 1d HTF data for ATR trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:  # Need sufficient data for EMA50
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d ATR(50) and ATR(100) for trend filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr50_1d = pd.Series(tr1d).rolling(window=50, min_periods=50).mean().values
+    atr100_1d = pd.Series(tr1d).rolling(window=100, min_periods=100).mean().values
+    atr50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr50_1d)
+    atr100_1d_aligned = align_htf_to_ltf(prices, df_1d, atr100_1d)
     
-    # Previous day's Camarilla pivot levels (using completed 1d bar)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = Pivot + Range * 1.1/2
-    # R3 = Pivot + Range * 1.1/4
-    # S3 = Pivot - Range * 1.1/4
-    # S4 = Pivot - Range * 1.1/2
+    # 4h Donchian(20) channels
+    donchian_window = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r4_1d = pivot_1d + range_1d * 1.1 / 2
-    r3_1d = pivot_1d + range_1d * 1.1 / 4
-    s3_1d = pivot_1d - range_1d * 1.1 / 4
-    s4_1d = pivot_1d - range_1d * 1.1 / 2
-    
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # 4h volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -64,37 +54,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(atr50_1d_aligned[i]) or np.isnan(atr100_1d_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Trend filter: ATR(50) > ATR(100) indicates trending market
+        trending = atr50_1d_aligned[i] > atr100_1d_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price closes below R3 OR trend turns bearish
-            if close[i] < r3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: price closes below lower Donchian channel OR loss of trend
+            if close[i] < lower_channel[i] or not trending:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above S3 OR trend turns bullish
-            if close[i] > s3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: price closes above upper Donchian channel OR loss of trend
+            if close[i] > upper_channel[i] or not trending:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Need volume confirmation
-            volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+            # Need volume confirmation and trending market
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
             
-            if volume_confirmed:
-                # Long: price breaks above R4 with bullish trend
-                if close[i] > r4_aligned[i] and close[i] > ema50_1d_aligned[i]:
+            if volume_confirmed and trending:
+                # Long: price breaks above upper Donchian channel
+                if close[i] > upper_channel[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below S4 with bearish trend
-                elif close[i] < s4_aligned[i] and close[i] < ema50_1d_aligned[i]:
+                # Short: price breaks below lower Donchian channel
+                elif close[i] < lower_channel[i]:
                     position = -1
                     signals[i] = -0.25
     
