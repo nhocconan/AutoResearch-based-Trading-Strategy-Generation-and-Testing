@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and chop regime filter
-# - Uses 1d Camarilla pivot levels (H3/L3) as breakout triggers on 4h chart
-# - Volume confirmation: 1d volume > 1.8x 20-period average to ensure institutional participation
-# - Regime filter: 4h Choppiness Index > 61.8 for mean-reversion exit (fade extremes in ranging markets)
-# - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
+# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 12h timeframe
+# - Volume confirmation: 12h volume > 1.5x 20-period average to ensure breakout strength
+# - Regime filter: 12h Choppiness Index > 61.8 for mean-reversion (fade extreme touches)
+# - ATR(14) trailing stop at 2.5x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~20-50 trades/year (80-200 total over 4 years) per 4h strategy guidelines
-# - Novelty: Combines Camarilla pivots with 1d volume confirmation and chop regime to avoid false breakouts
-# - Works in both bull/bear: Camarilla levels adapt to volatility, chop filter prevents whipsaws in sideways markets
+# - Target: ~12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - Novelty: Combines Camarilla pivots with chop regime to avoid false breakouts in sideways markets
+# - Works in both bull/bear: Camarilla levels adapt to volatility, chop filter prevents whipsaws
 
-name = "4h_1d_camarilla_volume_chop_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_chop_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,29 +31,27 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Calculate 1d Camarilla pivot levels (H3, L3)
     # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
     camarilla_h3 = close_1d + (1.1 * (high_1d - low_1d) / 4)
     camarilla_l3 = close_1d - (1.1 * (high_1d - low_1d) / 4)
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
+    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 1d volume > 1.8x 20-period average (volume confirmation)
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.8 * avg_volume_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    
-    # 4h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h ATR(14) for trailing stop
+    # 12h volume > 1.5x 20-period average (volume confirmation)
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * avg_volume_20)
+    
+    # 12h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -61,7 +59,7 @@ def generate_signals(prices):
     tr[0] = tr[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h Choppiness Index (CHOP) for regime filter
+    # 12h Choppiness Index (CHOP) for regime filter
     # CHOP = 100 * log10(sum(ATR(14)) / (max(high,n) - min(low,n))) / log10(n)
     # Simplified: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
@@ -82,7 +80,7 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_spike_aligned[i]) or
+            np.isnan(volume_spike[i]) or
             np.isnan(atr[i]) or
             np.isnan(chop_regime[i]) or
             atr[i] <= 0):
@@ -94,8 +92,8 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.0x ATR from high OR Camarilla L3 touch (mean reversion in chop)
-            if low[i] <= highest_since_entry - (2.0 * atr[i]) or \
+            # Exit conditions: price retraces 2.5x ATR from high OR Camarilla L3 touch (mean reversion in chop)
+            if low[i] <= highest_since_entry - (2.5 * atr[i]) or \
                (chop_regime[i] and low[i] <= camarilla_l3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
@@ -107,8 +105,8 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.0x ATR from low OR Camarilla H3 touch (mean reversion in chop)
-            if high[i] >= lowest_since_entry + (2.0 * atr[i]) or \
+            # Exit conditions: price retraces 2.5x ATR from low OR Camarilla H3 touch (mean reversion in chop)
+            if high[i] >= lowest_since_entry + (2.5 * atr[i]) or \
                (chop_regime[i] and high[i] >= camarilla_h3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
@@ -117,13 +115,13 @@ def generate_signals(prices):
         else:  # Flat
             # Look for Camarilla breakout with volume confirmation
             # Long: price breaks above Camarilla H3 AND volume spike
-            if high[i] >= camarilla_h3_aligned[i] and volume_spike_aligned[i]:
+            if high[i] >= camarilla_h3_aligned[i] and volume_spike[i]:
                 position = 1
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]
                 signals[i] = 0.25
             # Short: price breaks below Camarilla L3 AND volume spike
-            elif low[i] <= camarilla_l3_aligned[i] and volume_spike_aligned[i]:
+            elif low[i] <= camarilla_l3_aligned[i] and volume_spike[i]:
                 position = -1
                 highest_since_entry = low[i]
                 lowest_since_entry = low[i]
