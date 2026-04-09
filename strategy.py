@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w volume spike and choppiness regime filter
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
 # In trending regimes (CHOP < 38.2): breakout above/below Camarilla H3/L3 levels with volume confirmation
 # In ranging regimes (CHOP > 61.8): mean reversion at Camarilla H3/L3 levels with volume confirmation
-# Uses discrete position sizing 0.25 to limit trades to ~7-25/year and reduce fee drag
+# Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
 # Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
-# Weekly HTF adds structural context for multi-timeframe confluence
 
-name = "1d_1w_camarilla_breakout_volume_chop_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_chop_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -68,13 +67,14 @@ def generate_signals(prices):
                        50)
     
     # Calculate 1d Camarilla pivot levels (based on prior day to avoid look-ahead)
+    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
     range_1d = high_1d - low_1d
     h3_1d = close_1d + 1.1 * range_1d
     l3_1d = close_1d - 1.1 * range_1d
     h4_1d = close_1d + 1.5 * range_1d
     l4_1d = close_1d - 1.5 * range_1d
     
-    # Align 1d indicators to 1d timeframe (no shift needed as we use prior day's data)
+    # Align 1d indicators to 12h timeframe
     avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
@@ -87,25 +87,15 @@ def generate_signals(prices):
     avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     volume_confirmed = volume > 2.0 * avg_volume_1d_aligned
     
-    # Load weekly data for HTF context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Weekly trend filter: price above/below 21-period EMA
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
             np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
             np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(volume_confirmed[i]) or np.isnan(ema_21_1w_aligned[i])):
+            np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
         
@@ -146,16 +136,16 @@ def generate_signals(prices):
                     signals[i] = -0.25
         else:  # Flat
             if trending_regime:
-                # Enter long on breakout above H3 with volume confirmation and weekly uptrend
-                if close[i] > h3_1d_aligned[i] and volume_confirmed[i] and close[i] > ema_21_1w_aligned[i]:
+                # Enter long on breakout above H3 with volume confirmation
+                if close[i] > h3_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short on breakout below L3 with volume confirmation and weekly downtrend
-                elif close[i] < l3_1d_aligned[i] and volume_confirmed[i] and close[i] < ema_21_1w_aligned[i]:
+                # Enter short on breakout below L3 with volume confirmation
+                elif close[i] < l3_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
             elif ranging_regime:
-                # Mean reversion: buy near L3, sell near H3 (only in ranging markets)
+                # Mean reversion: buy near L3, sell near H3
                 if close[i] <= l3_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
