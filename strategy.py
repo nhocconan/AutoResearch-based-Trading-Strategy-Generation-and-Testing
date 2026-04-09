@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_v12
-# Hypothesis: Uses Camarilla pivot levels from 1d timeframe on 4h chart with volume confirmation and ATR stoploss.
+# 12h_1d_camarilla_volume_v1
+# Hypothesis: Uses Camarilla pivot levels from 1d timeframe on 12h chart with volume confirmation.
 # Long when price crosses above L4 (support) with volume > 1.3x average; short when price crosses below H4 (resistance) with volume > 1.3x average.
 # Includes volatility filter using ATR to avoid choppy markets. Designed to work in both bull and bear markets by fading overextensions at key levels.
-# Target: 20-40 trades/year (80-160 total over 4 years) with strict entry conditions.
+# Target: 12-37 trades/year (50-150 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_v12"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility filter and stoploss
+    # Calculate ATR(14) for volatility filter
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -59,7 +59,7 @@ def generate_signals(prices):
     h3 = pc + 1.25 * range_1d * 1.1 / 2
     l3 = pc - 1.25 * range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
+    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
