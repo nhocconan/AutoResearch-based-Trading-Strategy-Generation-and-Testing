@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v6
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x 20-bar average volume) and
-# chop regime filter (Choppiness Index > 61.8 = range, < 38.2 = trend). Only take breakouts
-# aligned with 1d EMA(50) trend. Long: price breaks above upper band + volume + chop < 38.2 + price > 1d EMA50.
-# Short: price breaks below lower band + volume + chop < 38.2 + price < 1d EMA50.
-# Exit: opposite Donchian breakout or chop > 61.8 (range regime). Uses discrete positions ±0.25.
-# Designed for low trade frequency (<40/year) and works in bull/bear via 1d EMA trend filter.
+# 1d_weekly_pivot_vwap_reversion_v1
+# Hypothesis: Daily price tends to revert to weekly VWAP (volume-weighted average price),
+# with entries triggered when price deviates significantly (>1.5 sigma) from weekly VWAP
+# and shows mean-reversion signals (RSI < 30 for long, > 70 for short) during high volume.
+# Weekly VWAP acts as dynamic support/resistance; reversion trades work in both bull and bear
+# markets as price oscillates around weekly fair value. Uses 1d timeframe for lower frequency
+# to minimize fee drag (target: 15-25 trades/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_v6"
-timeframe = "4h"
+name = "1d_weekly_pivot_vwap_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,53 +25,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for EMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 1d EMA(50)
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly VWAP: cumulative (price * volume) / cumulative volume
+    # Using typical price = (high + low + close) / 3
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+    pv = typical_price * df_1w['volume']
+    cum_pv = pv.cumsum()
+    cum_vol = df_1w['volume'].cumsum()
+    vwap_1w = (cum_pv / cum_vol).values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align weekly VWAP to daily timeframe (completed weekly bars only)
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # Volume confirmation: current volume > 1.5x 20-period average volume
+    # Daily RSI(14) for mean-reversion signals
+    delta = pd.Series(close).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Daily volume confirmation: volume > 1.5x 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Choppiness Index (14-period)
-    atr = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean().values
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr / (highest_high_14 - lowest_low_14)) / np.log10(14)
-    # Handle division by zero or invalid values
-    chop = np.where((highest_high_14 - lowest_low_14) > 0, chop, 50.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after warmup for RSI and volume MA
         # Skip if any required data is NaN
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(volume_ma[i]) or np.isnan(chop[i]):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
+        # Calculate deviation from weekly VWAP in percentage
+        if vwap_1w_aligned[i] != 0:
+            deviation = (close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i]
+        else:
+            deviation = 0
+        
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian OR chop > 61.8 (range regime)
-            if close[i] < lowest_low[i] or chop[i] > 61.8:
+            # Exit: price returns to weekly VWAP OR RSI exceeds 50 (momentum shift)
+            if close[i] >= vwap_1w_aligned[i] or rsi_values[i] > 50:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian OR chop > 61.8 (range regime)
-            if close[i] > highest_high[i] or chop[i] > 61.8:
+            # Exit: price returns to weekly VWAP OR RSI falls below 50
+            if close[i] <= vwap_1w_aligned[i] or rsi_values[i] < 50:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -80,13 +87,13 @@ def generate_signals(prices):
             # Volume confirmation
             volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
-            if volume_confirmed and chop[i] < 38.2:  # Only in trending regime (chop < 38.2)
-                # Long breakout: price above upper Donchian + above 1d EMA50
-                if close[i] > highest_high[i] and close[i] > ema_1d_aligned[i]:
+            if volume_confirmed:
+                # Long signal: price significantly below VWAP + oversold RSI
+                if deviation < -0.015 and rsi_values[i] < 30:  # >1.5% below VWAP + RSI < 30
                     position = 1
                     signals[i] = 0.25
-                # Short breakout: price below lower Donchian + below 1d EMA50
-                elif close[i] < lowest_low[i] and close[i] < ema_1d_aligned[i]:
+                # Short signal: price significantly above VWAP + overbought RSI
+                elif deviation > 0.015 and rsi_values[i] > 70:  # >1.5% above VWAP + RSI > 70
                     position = -1
                     signals[i] = -0.25
     
