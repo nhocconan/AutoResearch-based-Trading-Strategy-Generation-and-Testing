@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v7
-# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
+# 12h_1d_camarilla_breakout_v8
+# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
 # Uses tighter entry conditions (volume > 2.5x 20-period average) to reduce trades and avoid fee drag.
 # Works in bull markets by catching breakouts, in bear markets by fading false breaks via pivot reversion.
-# Target: 20-50 trades per year per symbol.
+# Target: 12-37 trades per year per symbol.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v7"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v8"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     h4_1d = close_1d + (range_1d * 1.1 / 2)
     l4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d levels to 4h timeframe
+    # Align 1d levels to 12h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
