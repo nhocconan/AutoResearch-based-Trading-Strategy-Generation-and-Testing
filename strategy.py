@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_v2
-# Hypothesis: Uses weekly Camarilla pivot levels on daily chart. Long when price closes above L4 with volume > 1.5x average; short when price closes below H4 with volume > 1.5x average. Includes ADX trend filter to avoid choppy markets. Designed to work in both bull and bear markets by fading overextensions at key levels. Target: 10-25 trades/year (40-100 total over 4 years).
+# 4h_1d_camarilla_pivot_v12
+# Hypothesis: Uses Camarilla pivot levels from 1d timeframe on 4h chart with volume confirmation and ATR stoploss.
+# Long when price crosses above L4 (support) with volume > 1.3x average; short when price crosses below H4 (resistance) with volume > 1.3x average.
+# Includes volatility filter using ATR to avoid choppy markets. Designed to work in both bull and bear markets by fading overextensions at key levels.
+# Target: 20-40 trades/year (80-160 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_v2"
-timeframe = "1d"
+name = "4h_1d_camarilla_pivot_v12"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ADX(14) for trend filter
+    # Calculate ATR(14) for volatility filter and stoploss
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -32,79 +35,35 @@ def generate_signals(prices):
     atr = np.zeros(n)
     atr[0] = tr[0]
     for i in range(1, n):
-        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]
+        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # +DM and -DM
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        if up > down and up > 0:
-            plus_dm[i] = up
-        else:
-            plus_dm[i] = 0
-        if down > up and down > 0:
-            minus_dm[i] = down
-        else:
-            minus_dm[i] = 0
-    
-    # Smoothed +DM, -DM, TR
-    plus_dm_smooth = np.zeros(n)
-    minus_dm_smooth = np.zeros(n)
-    tr_smooth = np.zeros(n)
-    plus_dm_smooth[0] = plus_dm[0]
-    minus_dm_smooth[0] = minus_dm[0]
-    tr_smooth[0] = tr[0]
-    for i in range(1, n):
-        plus_dm_smooth[i] = 0.9 * plus_dm_smooth[i-1] + 0.1 * plus_dm[i]
-        minus_dm_smooth[i] = 0.9 * minus_dm_smooth[i-1] + 0.1 * minus_dm[i]
-        tr_smooth[i] = 0.9 * tr_smooth[i-1] + 0.1 * tr[i]
-    
-    # +DI and -DI
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    for i in range(n):
-        if tr_smooth[i] != 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / tr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / tr_smooth[i]
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
-    
-    # DX and ADX
-    dx = np.zeros(n)
-    for i in range(n):
-        if plus_di[i] + minus_di[i] != 0:
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        else:
-            dx[i] = 0
-    
-    adx = np.zeros(n)
-    adx[0] = dx[0]
-    for i in range(1, n):
-        adx[i] = 0.9 * adx[i-1] + 0.1 * dx[i]
-    
-    # Load weekly data ONCE before loop for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for previous week
-    ph = df_1w['high'].values
-    pl = df_1w['low'].values
-    pc = df_1w['close'].values
-    range_1w = ph - pl
-    h4 = pc + 1.5 * range_1w * 1.1 / 2
-    l4 = pc - 1.5 * range_1w * 1.1 / 2
-    h3 = pc + 1.25 * range_1w * 1.1 / 2
-    l3 = pc - 1.25 * range_1w * 1.1 / 2
+    # Calculate Camarilla levels for previous day
+    # Formula: based on previous day's high, low, close
+    ph = df_1d['high'].values  # previous day high
+    pl = df_1d['low'].values   # previous day low
+    pc = df_1d['close'].values # previous day close
     
-    # Align Camarilla levels to daily timeframe (wait for previous week's close)
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    # Camarilla levels
+    # H4 = close + 1.5 * (high - low) * 1.1/2
+    # L4 = close - 1.5 * (high - low) * 1.1/2
+    # H3 = close + 1.25 * (high - low) * 1.1/2
+    # L3 = close - 1.25 * (high - low) * 1.1/2
+    range_1d = ph - pl
+    h4 = pc + 1.5 * range_1d * 1.1 / 2
+    l4 = pc - 1.5 * range_1d * 1.1 / 2
+    h3 = pc + 1.25 * range_1d * 1.1 / 2
+    l3 = pc - 1.25 * range_1d * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe (wait for previous day's close)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.zeros(n)
@@ -117,36 +76,42 @@ def generate_signals(prices):
             vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        if np.isnan(adx[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i]):
+    for i in range(20, n):  # Start after warmup
+        # Skip if any required data is invalid
+        if np.isnan(atr[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # ADX filter: only trade in trending markets (ADX > 20)
-        trend_filter = adx[i] > 20
+        # Volatility filter: avoid extremely high volatility
+        vol_filter = atr[i] < 0.05 * close[i]  # ATR less than 5% of price
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_ok = volume[i] > vol_ma_20[i] * 1.3
         
-        if position == 1:
+        if position == 1:  # Long position
+            # Exit: price crosses below L3 (support break)
             if close[i] < l3_aligned[i] and close[i-1] >= l3_aligned[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
-        elif position == -1:
+                
+        elif position == -1:  # Short position
+            # Exit: price crosses above H3 (resistance break)
             if close[i] > h3_aligned[i] and close[i-1] <= h3_aligned[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:
-            if close[i] > l4_aligned[i] and close[i-1] <= l4_aligned[i-1] and vol_ok and trend_filter:
+        else:  # Flat
+            # Enter long: price crosses above L4 with volume confirmation and volatility filter
+            if close[i] > l4_aligned[i] and close[i-1] <= l4_aligned[i-1] and vol_ok and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            elif close[i] < h4_aligned[i] and close[i-1] >= h4_aligned[i-1] and vol_ok and trend_filter:
+            # Enter short: price crosses below H4 with volume confirmation and volatility filter
+            elif close[i] < h4_aligned[i] and close[i-1] >= h4_aligned[i-1] and vol_ok and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
