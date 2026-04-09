@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_breakout_volume_v1
-# Hypothesis: 12h strategy using daily Camarilla pivot levels (from 1d HTF) for breakout entries, volume confirmation (>1.5x 20-bar avg volume), and trend alignment via 1w EMA(50). Enters long when price breaks above daily R4 with volume and price > 1w EMA(50); enters short when price breaks below daily S4 with volume and price < 1w EMA(50). Exits on opposite pivot level touch (R3/S3) or close beyond R5/S5. Uses discrete sizing (0.25) to limit fee churn. Target: 12-37 trades/year (50-150 total over 4 years). Daily pivots provide structural support/resistance that works in bull/bear markets; volume confirms breakout conviction; 1w EMA filters counter-trend noise.
+# mtf_1h_ema_rsi_pullback_4h1d_v1
+# Hypothesis: 1h strategy using 4h EMA(21) for trend direction and daily RSI(14) for mean-reversion entries. Enters long on pullbacks to 4h EMA when daily RSI < 30 (oversold), enters short on rallies to 4h EMA when daily RSI > 70 (overbought). Uses session filter (08-20 UTC) to avoid low-liquidity hours. Position size fixed at 0.20 to limit fee churn. Target: 60-150 total trades over 4 years (15-37/year). Works in bull markets via trend-following pullsbacks and in bear markets via mean-reversion bounces off HTF trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_breakout_volume_v1"
-timeframe = "12h"
+name = "mtf_1h_ema_rsi_pullback_4h1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,88 +19,69 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Volume average for confirmation (20-period = 10 days of 12h bars)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Multi-timeframe: 1w EMA(50) trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_s = pd.Series(close_1w)
-    ema_50_1w = close_1w_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Multi-timeframe: 4h EMA(21) trend
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    close_4h_s = pd.Series(close_4h)
+    ema_21_4h = close_4h_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # Multi-timeframe: daily Camarilla pivot levels (from 1d HTF)
+    # Multi-timeframe: daily RSI(14)
     df_1d = get_htf_data(prices, '1d')
-    # Camarilla pivot calculation: based on prior day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    r3 = pivot + (range_1d * 1.1 / 4)
-    r4 = pivot + (range_1d * 1.1 / 2)
-    r5 = pivot + (range_1d * 1.1)
-    s3 = pivot - (range_1d * 1.1 / 4)
-    s4 = pivot - (range_1d * 1.1 / 2)
-    s5 = pivot - (range_1d * 1.1)
-    
-    # Align daily levels to 12h timeframe (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r5_aligned = align_htf_to_ltf(prices, df_1d, r5)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    s5_aligned = align_htf_to_ltf(prices, df_1d, s5)
+    close_1d_s = pd.Series(close_1d)
+    delta = close_1d_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d_values = rsi_14_1d.values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d_values)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r5_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(s5_aligned[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        
-        # Trend filters
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
-        
         if position == 1:  # Long position
-            # Exit: price touches daily R3 or breaks above R5 (failed breakout)
-            if close[i] <= r3_aligned[i] or close[i] >= r5_aligned[i]:
+            # Exit: price crosses below 4h EMA or RSI > 70 (overbought)
+            if close[i] < ema_21_4h_aligned[i] or rsi_14_1d_aligned[i] > 70:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price touches daily S3 or breaks below S5 (failed breakout)
-            if close[i] >= s3_aligned[i] or close[i] <= s5_aligned[i]:
+            # Exit: price crosses above 4h EMA or RSI < 30 (oversold)
+            if close[i] > ema_21_4h_aligned[i] or rsi_14_1d_aligned[i] < 30:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Check for daily breakout with volume and trend alignment
-            bullish_breakout = (close[i] > r4_aligned[i]) and volume_confirmed and uptrend
-            bearish_breakout = (close[i] < s4_aligned[i]) and volume_confirmed and downtrend
+            # Check for pullback to 4h EMA with RSI extreme
+            near_ema = abs(close[i] - ema_21_4h_aligned[i]) / ema_21_4h_aligned[i] < 0.005  # Within 0.5%
+            oversold = rsi_14_1d_aligned[i] < 30
+            overbought = rsi_14_1d_aligned[i] > 70
             
-            if bullish_breakout:
+            if near_ema and oversold:
                 position = 1
-                signals[i] = 0.25
-            elif bearish_breakout:
+                signals[i] = 0.20
+            elif near_ema and overbought:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
