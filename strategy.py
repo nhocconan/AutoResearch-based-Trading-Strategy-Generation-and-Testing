@@ -3,23 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR trailing stop
-# - Uses 1d Camarilla levels (H3/L3) as significant support/resistance from institutional order flow
-# - Breaks above H3 or below L3 with 1d volume > 2.0x 20-period average indicate strong participation
-# - ATR(14) trailing stop: exits when price retraces 2.5x ATR from extreme to manage risk
-# - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Works in bull markets (breakouts continue trends) and bear markets (breakdowns continue trends)
-# - Camarilla levels derived from prior day's range provide objective institutional levels
-# - Volume filter reduces false breakouts, ATR stop manages risk without look-ahead
+# Hypothesis: 6h Elder Ray Index with 1d Williams %R regime filter
+# - Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength
+# - Williams %R on 1d identifies overbought/oversold conditions
+# - Long when Bull Power > 0 AND Williams %R < -80 (oversold in downtrend = bounce)
+# - Short when Bear Power > 0 AND Williams %R > -20 (overbought in uptrend = pullback)
+# - Uses EMA13 for trend reference (fast enough for 6h, smooth enough for noise)
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in bull markets (buy oversold dips) and bear markets (sell overbought rallies)
+# - Williams %R regime filter prevents trading against strong momentum
+# - Discrete position size: 0.25 to minimize fee churn
 
-name = "4h_1d_camarilla_breakout_atr_v1"
-timeframe = "4h"
+name = "6h_1d_elderray_williamsr_v3"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -27,93 +28,68 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d indicators
+    # Pre-compute 1d Williams %R
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 1d True Range for ATR
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr_1d[0]
+    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r_1d = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when high == low)
+    williams_r_1d = np.where(highest_high_14 == lowest_low_14, -50, williams_r_1d)
     
-    # 1d ATR(14) for volatility and stoploss
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Align 1d Williams %R to 6h
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
     
-    # 1d Volume > 2.0x 20-period average (stricter for fewer trades)
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * avg_volume_20)
-    
-    # 1d Camarilla levels: H3/L3 = close +- 1.1*(high-low)/2
-    camarilla_high = close_1d + 1.1 * (high_1d - low_1d) / 2.0
-    camarilla_low = close_1d - 1.1 * (high_1d - low_1d) / 2.0
-    
-    # Align 1d indicators to 4h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    
-    # 4h price data
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # 6h EMA(13) for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(20, n):  # Start after EMA warmup
         # Skip if any required data is invalid
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(volume_spike_1d_aligned[i]) or
-            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
-            atr_1d_aligned[i] <= 0):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(williams_r_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            if high[i] > highest_since_entry:
-                highest_since_entry = high[i]
-            
-            # Exit conditions: price retraces 2.5x ATR from high
-            if low[i] <= highest_since_entry - (2.5 * atr_1d_aligned[i]):
+            # Exit when Bull Power turns negative OR Williams %R becomes overbought
+            if bull_power[i] <= 0 or williams_r_1d_aligned[i] > -20:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if low[i] < lowest_since_entry:
-                lowest_since_entry = low[i]
-            
-            # Exit conditions: price retraces 2.5x ATR from low
-            if high[i] >= lowest_since_entry + (2.5 * atr_1d_aligned[i]):
+            # Exit when Bear Power turns negative OR Williams %R becomes oversold
+            if bear_power[i] <= 0 or williams_r_1d_aligned[i] < -80:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with volume confirmation
-            if (high[i] >= camarilla_high_aligned[i] and    # Break above H3
-                volume_spike_1d_aligned[i]):               # Volume confirmation
+            # Look for entry conditions
+            # Long: Bull Power positive AND Williams %R oversold (< -80)
+            # Short: Bear Power positive AND Williams %R overbought (> -20)
+            if bull_power[i] > 0 and williams_r_1d_aligned[i] < -80:
                 position = 1
-                entry_price = high[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = high[i]  # Initialize for shorts
                 signals[i] = 0.25
-            elif (low[i] <= camarilla_low_aligned[i] and    # Break below L3
-                  volume_spike_1d_aligned[i]):             # Volume confirmation
+            elif bear_power[i] > 0 and williams_r_1d_aligned[i] > -20:
                 position = -1
-                entry_price = low[i]
-                highest_since_entry = low[i]  # Initialize for longs
-                lowest_since_entry = low[i]
                 signals[i] = -0.25
     
     return signals
