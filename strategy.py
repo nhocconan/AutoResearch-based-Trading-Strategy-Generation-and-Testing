@@ -3,171 +3,175 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h/1d HTF for signal direction and 1h for entry timing
-# Uses 4h Donchian channel breakout with volume confirmation and 1d chop regime filter
-# In choppy markets (CHOP > 61.8): mean reversion at Donchian bands
-# In trending markets (CHOP < 38.2): breakout continuation
-# Position size 0.20 to limit drawdown
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag
-# Session filter: 08-20 UTC to avoid low-volume periods
-# Works in both bull/bear: adapts to regime via chop filter
+# Hypothesis: 6h Supertrend + 1w/1d HTF filter using EMA crossover
+# Supertrend(ATR=10, mult=3) on 6h for trend direction and entry timing
+# 1w EMA(34) vs 1d EMA(89) for HTF regime: bullish when weekly > daily
+# In bullish HTF regime: only take Supertrend longs
+# In bearish HTF regime: only take Supertrend shorts
+# Position size 0.25 to limit drawdown
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Works in both bull/bear: adapts via HTF EMA crossover filter
 
-name = "1h_4h_1d_donchian_chop_vol_v1"
-timeframe = "1h"
+name = "6h_1w_1d_supertrend_ema_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Load 1d data ONCE before loop for chop regime
+    # Load 1w and 1d data ONCE before loop for EMA
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate 1w EMA(34)
+    close_1w = df_1w['close'].values
+    ema_34_1w = np.full(len(df_1w), np.nan)
+    multiplier_1w = 2 / (34 + 1)
+    ema_34_1w[0] = close_1w[0]
+    for i in range(1, len(df_1w)):
+        ema_34_1w[i] = (close_1w[i] * multiplier_1w) + (ema_34_1w[i-1] * (1 - multiplier_1w))
     
-    donchian_high = np.full(len(df_4h), np.nan)
-    donchian_low = np.full(len(df_4h), np.nan)
-    
-    for i in range(20, len(df_4h)):
-        donchian_high[i] = np.max(high_4h[i-19:i+1])
-        donchian_low[i] = np.min(low_4h[i-19:i+1])
-    
-    # Calculate 1d Chop Index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA(89)
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
+    ema_89_1d = np.full(len(df_1d), np.nan)
+    multiplier_1d = 2 / (89 + 1)
+    ema_89_1d[0] = close_1d[0]
     for i in range(1, len(df_1d)):
-        tr0 = high_1d[i] - low_1d[i]
-        tr1 = abs(high_1d[i] - close_1d[i-1])
-        tr2 = abs(low_1d[i] - close_1d[i-1])
+        ema_89_1d[i] = (close_1d[i] * multiplier_1d) + (ema_89_1d[i-1] * (1 - multiplier_1d))
+    
+    # Align HTF EMA values to 6h timeframe
+    ema_34_1w_6h = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    ema_89_1d_6h = align_htf_to_ltf(prices, df_1d, ema_89_1d)
+    
+    # Calculate Supertrend on 6h
+    # ATR(10)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr0 = high[i] - low[i]
+        tr1 = abs(high[i] - close[i-1])
+        tr2 = abs(low[i] - close[i-1])
         tr[i] = max(tr0, tr1, tr2)
     
-    # Sum of True Range over 14 periods
-    tr_sum_14 = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        tr_sum_14[i] = np.sum(tr[i-13:i+1])
+    atr_10 = np.full(n, np.nan)
+    for i in range(9, n):
+        if i == 9:
+            atr_10[i] = np.mean(tr[:10])
+        else:
+            atr_10[i] = (atr_10[i-1] * 9 + tr[i]) / 10
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = np.full(len(df_1d), np.nan)
-    ll_14 = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        hh_14[i] = np.max(high_1d[i-13:i+1])
-        ll_14[i] = np.min(low_1d[i-13:i+1])
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (3 * atr_10)
+    lower_band = hl2 - (3 * atr_10)
     
-    # Chop Index formula: 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    chop = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        if hh_14[i] > ll_14[i]:
-            chop[i] = 100 * np.log10(tr_sum_14[i] / (hh_14[i] - ll_14[i])) / np.log10(14)
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, np.nan)  # 1 for uptrend, -1 for downtrend
     
-    # Align HTF data to 1h timeframe
-    donchian_high_1h = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_1h = align_htf_to_ltf(prices, df_4h, donchian_low)
-    chop_1h = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=0)
-    
-    # Calculate volume moving average (20-period) on 1h
-    volume_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        volume_ma[i] = np.mean(volume[i-19:i+1])
+    for i in range(10, n):
+        if np.isnan(atr_10[i]) or np.isnan(hl2[i]):
+            continue
+            
+        # Upper band logic
+        if i == 10:
+            upper_band[i] = hl2[i] + (3 * atr_10[i])
+            lower_band[i] = hl2[i] - (3 * atr_10[i])
+        else:
+            if upper_band[i-1] > close[i-1]:
+                upper_band[i] = min(upper_band[i], upper_band[i-1])
+            else:
+                upper_band[i] = hl2[i] + (3 * atr_10[i])
+                
+            if lower_band[i-1] < close[i-1]:
+                lower_band[i] = max(lower_band[i], lower_band[i-1])
+            else:
+                lower_band[i] = hl2[i] - (3 * atr_10[i])
+        
+        # Supertrend logic
+        if i == 10:
+            if close[i] > upper_band[i]:
+                supertrend[i] = lower_band[i]
+                direction[i] = -1  # downtrend
+            else:
+                supertrend[i] = upper_band[i]
+                direction[i] = 1   # uptrend
+        else:
+            if supertrend[i-1] == upper_band[i-1]:
+                if close[i] <= upper_band[i]:
+                    supertrend[i] = upper_band[i]
+                    direction[i] = 1
+                else:
+                    supertrend[i] = lower_band[i]
+                    direction[i] = -1
+            else:  # supertrend[i-1] == lower_band[i-1]
+                if close[i] >= lower_band[i]:
+                    supertrend[i] = lower_band[i]
+                    direction[i] = 1
+                else:
+                    supertrend[i] = upper_band[i]
+                    direction[i] = -1
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute session hours for efficiency
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    for i in range(50, n):  # Start after warmup
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_1h[i]) or 
-            np.isnan(donchian_low_1h[i]) or 
-            np.isnan(chop_1h[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_1w_6h[i]) or 
+            np.isnan(ema_89_1d_6h[i]) or 
+            np.isnan(supertrend[i]) or 
+            np.isnan(direction[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5 * 20-period MA
-        vol_confirm = volume[i] > 1.5 * volume_ma[i]
+        # HTF regime: bullish when weekly EMA > daily EMA
+        htf_bullish = ema_34_1w_6h[i] > ema_89_1d_6h[i]
         
         if position == 1:  # Long position
-            # Exit conditions based on regime
-            if chop_1h[i] > 61.8:  # Choppy regime - mean reversion
-                # Exit when price reaches middle of Donchian channel
-                mid = (donchian_high_1h[i] + donchian_low_1h[i]) / 2
-                if close[i] >= mid:
+            # Exit conditions
+            if htf_bullish:
+                # In bullish HTF: exit when Supertrend turns down
+                if direction[i] == -1:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.20
-            else:  # Trending regime - breakout continuation
-                # Exit when price closes below Donchian low
-                if close[i] < donchian_low_1h[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
+            else:
+                # In bearish HTF: exit long immediately (shouldn't happen, but safety)
+                position = 0
+                signals[i] = 0.0
                     
         elif position == -1:  # Short position
-            # Exit conditions based on regime
-            if chop_1h[i] > 61.8:  # Choppy regime - mean reversion
-                # Exit when price reaches middle of Donchian channel
-                mid = (donchian_high_1h[i] + donchian_low_1h[i]) / 2
-                if close[i] <= mid:
+            # Exit conditions
+            if not htf_bullish:
+                # In bearish HTF: exit when Supertrend turns up
+                if direction[i] == 1:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.20
-            else:  # Trending regime - breakout continuation
-                # Exit when price closes above Donchian high
-                if close[i] > donchian_high_1h[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
+            else:
+                # In bullish HTF: exit short immediately (shouldn't happen, but safety)
+                position = 0
+                signals[i] = 0.0
         else:  # Flat
-            # Entry logic based on regime and volume confirmation
-            if vol_confirm:
-                if chop_1h[i] > 61.8:  # Choppy regime - mean reversion
-                    # Go long at Donchian low with rejection
-                    # Go short at Donchian high with rejection
-                    if low[i] <= donchian_low_1h[i] and close[i] > donchian_low_1h[i]:
-                        position = 1
-                        signals[i] = 0.20
-                    elif high[i] >= donchian_high_1h[i] and close[i] < donchian_high_1h[i]:
-                        position = -1
-                        signals[i] = -0.20
-                else:  # Trending regime - breakout continuation
-                    # Go long on breakout above Donchian high
-                    # Go short on breakdown below Donchian low
-                    if high[i] > donchian_high_1h[i]:
-                        position = 1
-                        signals[i] = 0.20
-                    elif low[i] < donchian_low_1h[i]:
-                        position = -1
-                        signals[i] = -0.20
+            # Entry logic based on HTF regime and Supertrend
+            if htf_bullish:
+                # Bullish HTF: only take longs when Supertrend is up
+                if direction[i] == 1:
+                    position = 1
+                    signals[i] = 0.25
+            else:
+                # Bearish HTF: only take shorts when Supertrend is down
+                if direction[i] == -1:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
