@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 12h_camarilla_pivot_volume_v2
-# Hypothesis: 12h strategy using weekly Camarilla pivot levels with volume confirmation and ADX regime filter.
-# Long: Price breaks above weekly R3 with volume > 1.3x 20-period average and ADX < 25 (range regime).
-# Short: Price breaks below weekly S3 with volume > 1.3x 20-period average and ADX < 25 (range regime).
-# Exit: Price returns to weekly pivot point (PP).
-# Uses weekly Camarilla pivots from 1w timeframe as structure levels.
-# Volume confirmation filters breakouts. ADX < 25 ensures we only trade in ranging markets.
-# Target: 12-37 trades/year (50-150 total over 4 years).
+# 4h_donchian_breakout_volume_chop_regime_v1
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and choppiness regime filter.
+# Long: Price breaks above Donchian(20) upper band with volume > 1.5x 20-period average and chop > 61.8 (range regime).
+# Short: Price breaks below Donchian(20) lower band with volume > 1.5x 20-period average and chop > 61.8.
+# Exit: Price returns to Donchian midpoint for both long and short.
+# Uses 1d timeframe for choppiness regime filter to avoid noise on lower timeframe.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_v2"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_chop_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,96 +25,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Donchian channel (20-period) for breakout
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # ADX for regime filter (14-period)
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-    
-    tr = np.zeros(n)
-    for i in range(n):
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1]) if i > 0 else hl
-        lc = abs(low[i] - close[i-1]) if i > 0 else hl
-        tr[i] = max(hl, hc, lc)
-    
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Get 1w data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for choppiness regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each 1w bar
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    # Range = High - Low
-    range_1w = high_1w - low_1w
+    # Calculate choppiness index (14-period) on 1d
+    # True Range = max(high-low, abs(high-close_prev), abs(low-close_prev))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar TR = high-low
     
-    # Resistance levels
-    r3 = pp + (range_1w * 3.0 / 8.0)
+    # Sum of TR over 14 periods
+    tr_s = pd.Series(tr)
+    tr_sum_14 = tr_s.rolling(window=14, min_periods=14).sum().values
     
-    # Support levels
-    s3 = pp - (range_1w * 3.0 / 8.0)
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Align Camarilla levels to 12h
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Choppiness Index = 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
+    # Avoid division by zero
+    hh_ll_diff = hh_14 - ll_14
+    chop = np.full_like(tr_sum_14, 50.0, dtype=float)  # default to neutral
+    mask = (hh_ll_diff > 0) & (~np.isnan(tr_sum_14)) & (~np.isnan(hh_ll_diff))
+    chop[mask] = 100 * np.log10(tr_sum_14[mask] / hh_ll_diff[mask]) / np.log10(14)
+    
+    # Align choppiness to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
             np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(adx[i])):
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
-        # Regime filter: ADX < 25 (ranging market)
-        ranging_regime = adx[i] < 25
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Regime filter: chop > 61.8 indicates ranging market (good for mean reversion at extremes)
+        regime_filter = chop_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: Price returns to pivot point (PP)
-            if close[i] <= pp_aligned[i]:
+            # Exit: Price returns to Donchian midpoint
+            if close[i] <= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to pivot point (PP)
-            if close[i] >= pp_aligned[i]:
+            # Exit: Price returns to Donchian midpoint
+            if close[i] >= donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: Price breaks above weekly R3 with volume confirmation and ranging regime
-            if (close[i] > r3_aligned[i] and volume_confirmed and ranging_regime):
+            # Long entry: Price breaks above Donchian high with volume confirmation and regime filter
+            if (close[i] > donchian_high[i] and volume_confirmed and regime_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below weekly S3 with volume confirmation and ranging regime
-            elif (close[i] < s3_aligned[i] and volume_confirmed and ranging_regime):
+            # Short entry: Price breaks below Donchian low with volume confirmation and regime filter
+            elif (close[i] < donchian_low[i] and volume_confirmed and regime_filter):
                 position = -1
                 signals[i] = -0.25
     
