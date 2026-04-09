@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX trend filter + volume confirmation
-# - Primary signal: 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
-#   Long when Bull Power > 0 and rising, Short when Bear Power < 0 and falling
-# - Trend filter: 1d ADX > 25 ensures we only trade in trending markets (avoid chop)
-# - Volume confirmation: 6h volume > 20-period median volume (avoid low-participation signals)
+# Hypothesis: 12h Camarilla pivot breakout + 1d volume confirmation + choppiness regime filter
+# - Primary signal: 12h price breaks above/below 1d Camarilla pivot levels (H3/L3)
+# - Volume confirmation: 12h volume > 20-period median volume (avoid low-participation breakouts)
+# - Regime filter: 1d choppiness index > 61.8 (range market) for mean reversion at pivot levels
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
-# - Works in bull/bear: Elder Ray captures momentum shifts, ADX filter ensures
-#   trades align with strong trends, reducing false signals in ranging markets
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - Works in bull/bear: Camarilla pivots act as support/resistance in ranging markets,
+#   volume confirms breakout validity, chop filter ensures we trade in appropriate regimes
 
-name = "6h_1d_elderray_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,52 +30,40 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d EMA14 for ADX calculation
-    ema_14_1d = pd.Series(close_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # 1d Camarilla pivot levels (based on previous day)
+    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # 1d True Range and ATR14 for ADX
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # First period has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align 1d Camarilla levels to 12h timeframe (completed 1d bar only)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 1d +DI and -DI for ADX
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # 1d Choppiness Index (CHOP) - range/trend regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low) / log10(14)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = np.maximum(tr1, tr2)
+    tr = np.concatenate([[np.max(high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]))], tr])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    hh14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = np.where(
+        (hh14 - ll14) == 0,
+        50.0,  # neutral when range is zero
+        100 * np.log10(np.sum(atr14) / np.log10(hh14 - ll14) / np.log10(14))
+    )
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14_1d
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14_1d
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx_14_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe (completed 1d bar only)
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
-    
-    # 6h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # 6h Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = low - ema_13   # Low - EMA13
-    
-    # 6h Elder Ray slope (1-period change)
-    bull_power_slope = bull_power - np.roll(bull_power, 1)
-    bear_power_slope = bear_power - np.roll(bear_power, 1)
-    bull_power_slope[0] = bear_power_slope[0] = 0
-    
-    # 6h volume regime: volume > 20-period median volume
+    # 12h volume regime: volume > 20-period median volume
     median_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
     volume_regime = volume > median_volume_20
     
@@ -85,42 +72,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_14_aligned[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(bull_power_slope[i]) or
-            np.isnan(bear_power_slope[i]) or
+        if (np.isnan(camarilla_h3_aligned[i]) or
+            np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
             np.isnan(volume_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Elder Ray turns bearish OR ADX weakens (<25) OR volume dries up
-            if (bull_power[i] <= 0 or bull_power_slope[i] <= 0 or
-                adx_14_aligned[i] < 25.0 or not volume_regime[i]):
+            # Exit: price breaks below L3 (support) OR chop < 38.2 (trending regime)
+            if close[i] < camarilla_l3_aligned[i] or chop_aligned[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Elder Ray turns bullish OR ADX weakens (<25) OR volume dries up
-            if (bear_power[i] >= 0 or bear_power_slope[i] >= 0 or
-                adx_14_aligned[i] < 25.0 or not volume_regime[i]):
+            # Exit: price breaks above H3 (resistance) OR chop < 38.2 (trending regime)
+            if close[i] > camarilla_h3_aligned[i] or chop_aligned[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Elder Ray extremes with volume confirmation and ADX filter
-            # Long: Bull Power > 0 AND rising AND ADX > 25 AND volume regime
-            if (bull_power[i] > 0.0 and bull_power_slope[i] > 0.0 and
-                adx_14_aligned[i] > 25.0 and volume_regime[i]):
+            # Look for Camarilla breakouts with volume confirmation and chop > 61.8 (range regime)
+            # Long: price breaks above H3 (resistance becomes support) AND volume regime AND chop > 61.8
+            if close[i] > camarilla_h3_aligned[i] and volume_regime[i] and chop_aligned[i] > 61.8:
                 position = 1
                 signals[i] = 0.25
-            # Short: Bear Power < 0 AND falling AND ADX > 25 AND volume regime
-            elif (bear_power[i] < 0.0 and bear_power_slope[i] < 0.0 and
-                  adx_14_aligned[i] > 25.0 and volume_regime[i]):
+            # Short: price breaks below L3 (support becomes resistance) AND volume regime AND chop > 61.8
+            elif close[i] < camarilla_l3_aligned[i] and volume_regime[i] and chop_aligned[i] > 61.8:
                 position = -1
                 signals[i] = -0.25
     
