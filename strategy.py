@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Camarilla pivot levels with volume confirmation and ATR filter
-# Weekly Camarilla levels (R3/S3, R4/S4) act as major support/resistance that work in both bull and bear markets
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation
+# Weekly Camarilla levels (R3/S3, R4/S4) act as major support/resistance in both bull and bear markets
 # Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation (current 12h volume > 1.3x 20-period average) filters false signals
+# Volume confirmation (current 1d volume > 1.5x 20-period average) filters false signals
 # ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
-# Position size scales with volatility (inverse ATR) to maintain consistent risk
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Position size fixed at 0.25 to minimize fee churn
+# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
 
-name = "12h_1w_camarilla_atr_volume_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_atr_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,7 +48,7 @@ def generate_signals(prices):
     s3_1w = close_1w - range_1w * 1.1 / 4.0
     s4_1w = close_1w - range_1w * 1.1 / 2.0
     
-    # Calculate 1w ATR (14-period) for volatility filtering and position sizing
+    # Calculate 1w ATR (14-period) for volatility filtering
     tr1 = high_1w - low_1w
     tr2 = np.abs(high_1w - np.roll(close_1w, 1))
     tr3 = np.abs(low_1w - np.roll(close_1w, 1))
@@ -56,14 +56,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period has no previous close
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 12h timeframe
+    # Align Camarilla levels and ATR to 1d timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
     r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
     s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     atr_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
     
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Pre-compute volume confirmation (20-period average for 1d)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -78,8 +78,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.3x average 12h volume
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 1.5x average 1d volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low-vol chop)
         atr_ma_50 = pd.Series(atr_aligned).rolling(window=50, min_periods=50).mean()
@@ -92,14 +92,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Dynamic position size: inverse volatility scaling (target ~0.25 at median ATR)
-        # Clamp ATR to reasonable range to avoid extreme position sizes
-        atr_clamped = np.clip(atr_aligned[i], 0.001, 0.10)  # Avoid division by zero or tiny ATR
-        base_size = 0.25
-        vol_scaling = 0.01 / atr_clamped  # Scale so 1% ATR gives ~0.25 size
-        vol_scaling = np.clip(vol_scaling, 0.5, 2.0)  # Clamp scaling to reasonable range
-        position_size = base_size * vol_scaling
-        position_size = np.clip(position_size, 0.15, 0.35)  # Final clamp to 0.15-0.35
+        # Fixed position size to minimize fee churn
+        position_size = 0.25
         
         if position == 1:  # Long position
             # Exit on retracement to S3 or stop at S4 breakdown
