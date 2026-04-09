@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 1d_ema_bull_bear_flip_v1
-# Hypothesis: Uses 1-day EMA trend with 21/55 crossover for trend detection, combined with
-# 1-week RSI for overbought/oversold conditions and volume confirmation. In bull markets
-# (price > EMA21), looks for RSI pullbacks to go long. In bear markets (price < EMA55),
-# looks for RSI bounces to go short. Designed to work in both bull and bear regimes by
-# adapting strategy based on longer-term trend.
+# 6d_ewo_volume_v1
+# Hypothesis: Uses Elder's Force Index (EFI) with volume confirmation on 6h timeframe.
+# EFI measures buying/selling pressure by combining price change and volume.
+# Long when EFI crosses above zero with volume > 1.5x average; short when EFI crosses below zero.
+# Designed to work in both bull and bear markets by capturing momentum shifts.
+# Target: 15-25 trades/year (60-100 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_ema_bull_bear_flip_v1"
-timeframe = "1d"
+name = "6d_ewo_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,29 +24,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1. 1-day EMA21 and EMA55 for trend determination
-    close_series = pd.Series(close)
-    ema21 = close_series.ewm(span=21, adjust=False, min_periods=21).values
-    ema55 = close_series.ewm(span=55, adjust=False, min_periods=55).values
+    # 1. Elder's Force Index (EFI) - 13 period EMA of price change * volume
+    price_change = np.diff(close, prepend=close[0])
+    efi_raw = price_change * volume
     
-    # 2. 1-week RSI for overbought/oversold conditions
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
+    # EMA of EFI
+    efi = np.zeros(n)
+    efi[0] = efi_raw[0]
+    alpha = 2.0 / (13 + 1)  # 13-period EMA
+    for i in range(1, n):
+        efi[i] = alpha * efi_raw[i] + (1 - alpha) * efi[i-1]
     
-    # Calculate RSI on weekly data
-    rsi_period = 14
-    delta = pd.Series(df_1w['close']).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Align weekly RSI to daily timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi_values)
-    
-    # 3. Volume confirmation (20-day average)
+    # 2. Volume confirmation - 20 period average
     vol_ma_20 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
@@ -59,45 +48,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(55, n):  # Start after EMA55 warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema21[i]) or np.isnan(ema55[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if np.isnan(efi[i]) or np.isnan(efi[i-1]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
+        # Volume confirmation: current volume > 1.5x 20-period average
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 1:  # Long position
-            # Exit: price closes below EMA21 OR RSI becomes overbought (>70)
-            if close[i] < ema21[i] or rsi_aligned[i] > 70:
+            # Exit: EFI crosses below zero
+            if efi[i] < 0 and efi[i-1] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above EMA55 OR RSI becomes oversold (<30)
-            if close[i] > ema55[i] or rsi_aligned[i] < 30:
+            # Exit: EFI crosses above zero
+            if efi[i] > 0 and efi[i-1] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Determine market regime based on EMA relationship
-            bull_market = ema21[i] > ema55[i]
-            bear_market = ema21[i] < ema55[i]
-            
-            # Enter long in bull market: price pulls back to EMA21 with RSI oversold
-            if bull_market and vol_ok:
-                if close[i] <= ema21[i] * 1.01 and rsi_aligned[i] < 35:
-                    position = 1
-                    signals[i] = 0.25
-            # Enter short in bear market: price bounces to EMA55 with RSI overbought
-            elif bear_market and vol_ok:
-                if close[i] >= ema55[i] * 0.99 and rsi_aligned[i] > 65:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long: EFI crosses above zero with volume confirmation
+            if efi[i] > 0 and efi[i-1] <= 0 and vol_ok:
+                position = 1
+                signals[i] = 0.25
+            # Enter short: EFI crosses below zero with volume confirmation
+            elif efi[i] < 0 and efi[i-1] >= 0 and vol_ok:
+                position = -1
+                signals[i] = -0.25
     
     return signals
