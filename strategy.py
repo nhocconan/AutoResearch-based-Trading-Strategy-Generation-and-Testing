@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# 4h_trix_volume_chop_v1
-# Hypothesis: 4h strategy using TRIX (15-period) for momentum, volume confirmation (>1.5x 20-period average),
-# and Choppiness Index regime filter (CHOP > 61.8 = ranging market for mean reversion).
-# Long when TRIX crosses above zero in choppy market with volume confirmation.
-# Short when TRIX crosses below zero in choppy market with volume confirmation.
-# Uses 1d HTF data for Choppiness Index to avoid look-ahead, called ONCE before loop.
-# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 20-30 trades/year.
+# 12h_daily_camarilla_pivot_volume_chop_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels (S3/S4 for shorts, R3/R4 for longs) 
+# with volume confirmation (>1.3x 20-period average) and choppiness regime filter (CHOP > 61.8 for mean reversion).
+# Daily pivots act as strong support/resistance; mean reversion in choppy markets captures reversals at extremes.
+# Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 12-25 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_trix_volume_chop_v1"
-timeframe = "4h"
+name = "12h_daily_camarilla_pivot_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,84 +23,120 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Choppiness Index
+    # 1d HTF data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for CHOP calculation
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_d = df_1d['high'].values
     low_d = df_1d['low'].values
     close_d = df_1d['close'].values
     
-    # Daily Choppiness Index (14-period)
-    atr_d = np.zeros(len(high_d))
-    for i in range(1, len(high_d)):
-        tr = max(high_d[i] - low_d[i], abs(high_d[i] - close_d[i-1]), abs(low_d[i] - close_d[i-1]))
-        atr_d[i] = (atr_d[i-1] * 13 + tr) / 14 if i > 1 else tr
+    # Daily Camarilla pivot levels (based on previous day)
+    # Pivot = (high + low + close) / 3
+    pivot = (high_d + low_d + close_d) / 3.0
+    # Range = high - low
+    rng = high_d - low_d
+    # Resistance levels
+    r4 = close_d + rng * 1.500
+    r3 = close_d + rng * 1.250
+    r2 = close_d + rng * 1.166
+    r1 = close_d + rng * 1.083
+    # Support levels
+    s1 = close_d - rng * 1.083
+    s2 = close_d - rng * 1.166
+    s3 = close_d - rng * 1.250
+    s4 = close_d - rng * 1.500
     
-    # Sum of ATR over 14 periods
-    sum_atr_d = pd.Series(atr_d).rolling(window=14, min_periods=14).sum().values
+    # Align daily Camarilla data to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Highest high and lowest low over 14 periods
-    max_high_d = pd.Series(high_d).rolling(window=14, min_periods=14).max().values
-    min_low_d = pd.Series(low_d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(ATR) / (max_high - min_low)) / log10(14)
-    chop_raw = 100 * np.log10(sum_atr_d / (max_high_d - min_low_d + 1e-10)) / np.log10(14)
-    
-    # Align daily Choppiness Index to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
-    
-    # 4h TRIX (15-period): triple EMA of 1-period ROC
-    roc = np.diff(close, prepend=close[0]) / close  # 1-period ROC
-    ema1 = pd.Series(roc).ewm(span=15, min_periods=15, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, min_periods=15, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, min_periods=15, adjust=False).mean().values
-    trix = ema3 * 100  # TRIX value
-    
-    # 4h volume average for confirmation (20-period)
+    # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness Index (14-period) for regime filter
+    def true_range(h, l, c_prev):
+        tr1 = h - l
+        tr2 = np.abs(h - c_prev)
+        tr3 = np.abs(l - c_prev)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate true range
+    close_shift = np.roll(close, 1)
+    close_shift[0] = close[0]
+    tr = true_range(high, low, close_shift)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate directional movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    # Handle first element
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=1).sum().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=1).sum().values
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Calculate DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # Calculate DX and CHOP
+    dx = np.where((di_plus + di_minus) != 0, 
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    chop = np.where(dx != 0, 
+                    100 * np.log10(tr_smooth / np.sqrt(14)) / np.log10(dx), 50)
+    # Handle edge cases
+    chop = np.where(np.isnan(chop) | np.isinf(chop), 50, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(trix[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
-        # Choppiness regime filter: CHOP > 61.8 = ranging market (mean reversion zone)
-        chop_regime = chop_aligned[i] > 61.8
+        # Choppiness regime: CHOP > 61.8 indicates ranging market (good for mean reversion)
+        chop_regime = chop[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: TRIX crosses below zero OR chop regime ends
-            if trix[i] < 0 or not chop_regime:
+            # Exit: price falls below R3 OR chop regime ends
+            if close[i] < r3_aligned[i] or not chop_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: TRIX crosses above zero OR chop regime ends
-            if trix[i] > 0 or not chop_regime:
+            # Exit: price rises above S3 OR chop regime ends
+            if close[i] > s3_aligned[i] or not chop_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             if volume_confirmed and chop_regime:
-                # Long entry: TRIX crosses above zero
-                if i > 0 and trix[i-1] <= 0 and trix[i] > 0:
+                # Long entry: price above R4 AND choppy market (mean reversion from extreme)
+                if close[i] > r4_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: TRIX crosses below zero
-                elif i > 0 and trix[i-1] >= 0 and trix[i] < 0:
+                # Short entry: price below S4 AND choppy market (mean reversion from extreme)
+                elif close[i] < s4_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
