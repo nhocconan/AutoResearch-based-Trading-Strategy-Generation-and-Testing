@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Hypothesis: 12-hour breakouts at daily Camarilla pivot levels (H3/L3) with volume confirmation (>1.5x 20-bar average volume).
+# 4h_1d_camarilla_breakout_v2
+# Hypothesis: 4-hour breakouts at daily Camarilla pivot levels (H3/L3) with volume confirmation (>1.5x 20-bar average volume).
 # Daily Camarilla levels act as strong support/resistance; breaks signal momentum continuation.
-# Designed for 12h timeframe to capture medium-term moves with low trade frequency (target: 12-37/year) and avoid fee drag.
+# Designed for 4h timeframe to capture medium-term moves with controlled trade frequency (target: 20-50/year).
 # Works in bull markets (upward breaks above resistance) and bear markets (downward breaks below support).
+# Uses daily data for support/resistance levels, avoiding look-ahead bias via mtf_data helpers.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,7 +38,7 @@ def generate_signals(prices):
     camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 2
     camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
