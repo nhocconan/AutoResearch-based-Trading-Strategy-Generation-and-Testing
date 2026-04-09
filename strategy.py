@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Williams %R extreme readings with volume confirmation and ATR trailing stop
-# Williams %R(14) from 1d identifies overbought/oversold conditions - >-20 = overbought, <-80 = oversold
-# Volume confirmation (current 4h volume > 2.0x 20-period average) filters false signals
+# Hypothesis: 1d strategy using 1w Donchian channel breakouts with volume confirmation and ATR trailing stop
+# Donchian(20) from 1w provides clear weekly trend structure with proven edge across market regimes
+# Volume confirmation (current 1d volume > 2.0x 20-period average) filters false breakouts
 # ATR trailing stop (2.5x ATR) manages risk and adapts to volatility
-# Designed for 4h timeframe targeting 25-50 trades/year (100-200 over 4 years)
-# Works in bull/bear: mean reversion from extremes with volume confirmation, ATR stop controls drawdown
+# Designed for 1d timeframe targeting 15-25 trades/year (60-100 over 4 years)
+# Works in bull/bear: price reacts to weekly structure, volume confirms validity, ATR stop controls drawdown
 
-name = "4h_1d_williamsr_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,29 +24,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 1d Williams %R(14)
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close_1d) / (highest_high - lowest_low)) * -100,
-        -50.0  # neutral when range is zero
-    )
+    # Calculate 1w Donchian channels (20-period)
+    # Upper band = highest high of last 20 weeks
+    # Lower band = lowest low of last 20 weeks
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Williams %R to 4h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align 1w Donchian channels to 1d timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Pre-compute ATR(14) for 4h timeframe
+    # Pre-compute ATR(14) for 1d timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -66,12 +62,12 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 2.0x average 4h volume
+        # Volume confirmation: current 1d volume > 2.0x average 1d volume
         volume_confirmed = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 1:  # Long position
@@ -84,7 +80,7 @@ def generate_signals(prices):
                 highest_since_long = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Update lowest low since entry
@@ -96,19 +92,18 @@ def generate_signals(prices):
                 lowest_since_short = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
-            # Mean reversion from Williams %R extremes with volume confirmation
-            # Long when oversold (< -80) and volume confirmed
-            # Short when overbought (> -20) and volume confirmed
+            # Breakout trading with volume confirmation
+            # Long on Donchian high breakout, Short on Donchian low breakout
             if volume_confirmed:
-                if williams_r_aligned[i] < -80.0:
+                if close[i] > donchian_high_aligned[i]:
                     position = 1
                     highest_since_long = close[i]
-                    signals[i] = 0.25
-                elif williams_r_aligned[i] > -20.0:
+                    signals[i] = 0.30
+                elif close[i] < donchian_low_aligned[i]:
                     position = -1
                     lowest_since_short = close[i]
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
