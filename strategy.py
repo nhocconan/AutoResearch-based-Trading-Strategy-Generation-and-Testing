@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels from 1d + volume spike + choppiness regime filter
-# Camarilla pivots provide strong support/resistance levels from prior day
-# Volume spike confirms breakout authenticity; chop filter avoids false signals in ranging markets
-# Works in bull/bear: mean reversion at pivots in chop, breakouts in trend
-# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.30
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(50) trend + volume confirmation
+# Donchian captures breakouts; 1d HMA confirms higher timeframe trend direction
+# Volume ensures breakout authenticity; discrete sizing 0.20 limits drawdown
+# Session filter (08-20 UTC) reduces noise trades
+# Target: 60-150 total trades over 4 years (15-37/year) with discrete sizing
+# Works in bull/bear: trend filter adapts, breakouts work in both directions
 
-name = "4h_1d_camarilla_volume_chop_v1"
-timeframe = "4h"
+name = "4h_1d_donchian_hma_volume_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,42 +24,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla calculation
+    # Pre-compute session hours for efficiency
+    hours = prices.index.hour
+    
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior 1d bar
-    camarilla_h4 = np.full(n, np.nan)  # Resistance
-    camarilla_l4 = np.full(n, np.nan)  # Support
+    # Calculate 4h Donchian channels (20-period)
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    for i in range(n):
-        if i < 1:  # Need at least one prior 1d bar
-            camarilla_h4[i] = np.nan
-            camarilla_l4[i] = np.nan
+    donchian_high_4h = np.full(len(close_4h), np.nan)
+    donchian_low_4h = np.full(len(close_4h), np.nan)
+    
+    for i in range(len(close_4h)):
+        if i < 20:
+            donchian_high_4h[i] = np.nan
+            donchian_low_4h[i] = np.nan
         else:
-            # Get prior completed 1d bar (index i-1 in 1d data)
-            # Since we're on 4h timeframe, we need to map to 1d index
-            # Use align_htf_to_ltf approach: get prior 1d bar's OHLC
-            if i < 96:  # Need ~4 days of 4h data to get first 1d bar (96 periods = 4 days * 24h/4h)
-                camarilla_h4[i] = np.nan
-                camarilla_l4[i] = np.nan
-            else:
-                # Simplified: use rolling window of 96 periods (4 days) to approximate prior day
-                # More precise would require HTF index mapping, but this avoids look-ahead
-                start_idx = max(0, i - 96)
-                if start_idx < i:
-                    prior_high = np.max(high[start_idx:i])
-                    prior_low = np.min(low[start_idx:i])
-                    prior_close = np.mean(close[start_idx:i])  # approximation
-                    
-                    # Camarilla levels
-                    range_val = prior_high - prior_low
-                    camarilla_h4[i] = prior_close + range_val * 1.1 / 4
-                    camarilla_l4[i] = prior_close - range_val * 1.1 / 4
-                else:
-                    camarilla_h4[i] = np.nan
-                    camarilla_l4[i] = np.nan
+            donchian_high_4h[i] = np.max(high_4h[i-20:i])
+            donchian_low_4h[i] = np.min(low_4h[i-20:i])
+    
+    # Align 4h Donchian to 1h timeframe (wait for 4h bar close)
+    donchian_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
+    donchian_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
+    
+    # Calculate 1d HMA(50)
+    close_1d = df_1d['close'].values
+    half_len = 50 // 2
+    sqrt_len = int(np.sqrt(50))
+    
+    # WMA function
+    def wma(values, window):
+        if len(values) < window:
+            return np.full(len(values), np.nan)
+        weights = np.arange(1, window + 1)
+        wma_vals = np.full(len(values), np.nan)
+        for i in range(window - 1, len(values)):
+            wma_vals[i] = np.dot(values[i - window + 1:i + 1], weights) / weights.sum()
+        return wma_vals
+    
+    wma_half = wma(close_1d, half_len)
+    wma_full = wma(close_1d, 50)
+    hma_1d = 2 * wma_half - wma_full
+    hma_1d = wma(hma_1d, sqrt_len)
+    
+    # Align 1d HMA to 1h timeframe (wait for 1d bar close)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -68,89 +84,50 @@ def generate_signals(prices):
         else:
             avg_volume[i] = np.mean(volume[i-20:i])
     
-    # Calculate choppiness index regime filter (14-period)
-    chop = np.full(n, np.nan)
-    for i in range(n):
-        if i < 14:
-            chop[i] = np.nan
-        else:
-            # True range calculation
-            tr1 = high[i] - low[i]
-            tr2 = abs(high[i] - close[i-1])
-            tr3 = abs(low[i] - close[i-1])
-            tr = max(tr1, max(tr2, tr3))
-            
-            # Sum of true ranges over 14 periods
-            atr_sum = 0
-            for j in range(14):
-                idx = i - j
-                if idx >= 0:
-                    tr1_j = high[idx] - low[idx]
-                    tr2_j = abs(high[idx] - close[idx-1]) if idx > 0 else 0
-                    tr3_j = abs(low[idx] - close[idx-1]) if idx > 0 else 0
-                    tr_j = max(tr1_j, max(tr2_j, tr3_j))
-                    atr_sum += tr_j
-            
-            if atr_sum > 0:
-                # Choppiness index formula
-                chop[i] = 100 * np.log10(atr_sum / np.log(14)) / np.log(14)
-            else:
-                chop[i] = 50.0  # neutral
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or
-            np.isnan(avg_volume[i]) or np.isnan(chop[i])):
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirmed = volume[i] > 2.0 * avg_volume[i]
+        # Skip if any required data is invalid
+        if (np.isnan(donchian_high_4h_aligned[i]) or np.isnan(donchian_low_4h_aligned[i]) or
+            np.isnan(hma_1d_aligned[i]) or np.isnan(avg_volume[i])):
+            signals[i] = 0.0
+            continue
         
-        # Choppiness regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
-        is_ranging = chop[i] > 61.8
-        is_trending = chop[i] < 38.2
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price < Camarilla L4 OR (trending and price < prior low)
-            if close[i] < camarilla_l4[i] or (is_trending and i >= 2 and close[i] < low[i-2]):
+            # Exit: price < 4h Donchian low OR price < 1d HMA (trend change)
+            if close[i] < donchian_low_4h_aligned[i] or close[i] < hma_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price > Camarilla H4 OR (trending and price > prior high)
-            if close[i] > camarilla_h4[i] or (is_trending and i >= 2 and close[i] > high[i-2]):
+            # Exit: price > 4h Donchian high OR price > 1d HMA (trend change)
+            if close[i] > donchian_high_4h_aligned[i] or close[i] > hma_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
         else:  # Flat
-            # Entry logic
+            # Entry logic with volume confirmation and 4h Donchian breakout + 1d HMA filter
             if volume_confirmed:
-                if is_ranging:
-                    # Mean reversion in ranging market
-                    if close[i] < camarilla_l4[i] and i >= 2 and close[i-1] >= camarilla_l4[i-1]:
-                        # Bullish bounce off L4
-                        position = 1
-                        signals[i] = 0.30
-                    elif close[i] > camarilla_h4[i] and i >= 2 and close[i-1] <= camarilla_h4[i-1]:
-                        # Bearish rejection at H4
-                        position = -1
-                        signals[i] = -0.30
-                elif is_trending:
-                    # Breakout in trending market
-                    if close[i] > camarilla_h4[i] and i >= 2 and close[i-1] <= camarilla_h4[i-1]:
-                        # Bullish breakout above H4
-                        position = 1
-                        signals[i] = 0.30
-                    elif close[i] < camarilla_l4[i] and i >= 2 and close[i-1] >= camarilla_l4[i-1]:
-                        # Bearish breakdown below L4
-                        position = -1
-                        signals[i] = -0.30
+                # Long entry: price > 4h Donchian high AND price > 1d HMA (bullish alignment)
+                if close[i] > donchian_high_4h_aligned[i] and close[i] > hma_1d_aligned[i]:
+                    position = 1
+                    signals[i] = 0.20
+                # Short entry: price < 4h Donchian low AND price < 1d HMA (bearish alignment)
+                elif close[i] < donchian_low_4h_aligned[i] and close[i] < hma_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
