@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
-# 4h_camarilla_pivot_breakout_volume_v1
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation (>1.8x 20-period average) and 1d HTF trend filter (price > 50-period EMA). Enters long when price breaks above H3 level with volume confirmation and bullish 1d trend; short when price breaks below L3 level with volume confirmation and bearish 1d trend. Exits on opposite Camarilla level touch (L3 for long, H3 for short). Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 20-50 trades/year) to work in both bull and bear markets by following institutional volume-driven breakouts in alignment with higher timeframe trend.
+# 12h_hma_trend_volume_v1
+# Hypothesis: 12h strategy using Hull Moving Average (HMA) trend filter with volume confirmation (>1.5x 20-period average) and 1d HTF trend alignment (price > 20-period EMA). Enters long when price is above HMA(21) with volume confirmation and bullish 1d trend; short when price is below HMA(21) with volume confirmation and bearish 1d trend. Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 12-37 trades/year) to work in both bull and bear markets by following volume-confirmed trends aligned with higher timeframe direction.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_breakout_volume_v1"
-timeframe = "4h"
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    half_period = int(period / 2)
+    sqrt_period = int(np.sqrt(period))
+    wma1 = pd.Series(series).ewm(span=half_period, adjust=False, min_periods=half_period).mean()
+    wma2 = pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
+    return hma.values
+
+name = "12h_hma_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,63 +36,41 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Previous day's OHLC for Camarilla calculation (using 1d data)
+    # HMA(21) on primary timeframe
+    hma_21 = calculate_hma(close, 21)
+    
+    # 1d HTF trend filter: 20-period EMA on 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # H4 = C + 1.5*(H-L), H3 = C + 1.0*(H-L), H2 = C + 0.5*(H-L), H1 = C + 0.25*(H-L)
-    # L1 = C - 0.25*(H-L), L2 = C - 0.5*(H-L), L3 = C - 1.0*(H-L), L4 = C - 1.5*(H-L)
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    
-    # True range for the day
-    day_range = prev_high - prev_low
-    
-    # Camarilla levels
-    H3 = prev_close + 1.0 * day_range
-    L3 = prev_close - 1.0 * day_range
-    H4 = prev_close + 1.5 * day_range
-    L4 = prev_close - 1.5 * day_range
-    
-    # Align Camarilla levels to 4h timeframe (using previous day's close as anchor)
-    # The Camarilla levels are valid for the entire day following the previous day's close
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # 1d HTF trend filter: 50-period EMA on 1d timeframe
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
-            np.isnan(volume[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(hma_21[i]) or
+            np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price touches or breaks L3 level (or stoploss at L4)
-            if close[i] <= L3_aligned[i]:
+            # Exit: price crosses below HMA
+            if close[i] < hma_21[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches or breaks H3 level (or stoploss at H4)
-            if close[i] >= H3_aligned[i]:
+            # Exit: price crosses above HMA
+            if close[i] > hma_21[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -88,17 +78,17 @@ def generate_signals(prices):
         else:  # Flat
             # Enter only with volume confirmation and 1d trend alignment
             if volume_confirmed:
-                # Bullish 1d trend: price above 50-period EMA
-                bullish_trend = close[i] > ema_50_1d_aligned[i]
-                # Bearish 1d trend: price below 50-period EMA
-                bearish_trend = close[i] < ema_50_1d_aligned[i]
+                # Bullish 1d trend: price above 20-period EMA
+                bullish_trend = close[i] > ema_20_1d_aligned[i]
+                # Bearish 1d trend: price below 20-period EMA
+                bearish_trend = close[i] < ema_20_1d_aligned[i]
                 
-                # Long: price breaks above H3 level with volume and bullish 1d trend
-                if close[i] > H3_aligned[i] and bullish_trend:
+                # Long: price above HMA with volume and bullish 1d trend
+                if close[i] > hma_21[i] and bullish_trend:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below L3 level with volume and bearish 1d trend
-                elif close[i] < L3_aligned[i] and bearish_trend:
+                # Short: price below HMA with volume and bearish 1d trend
+                elif close[i] < hma_21[i] and bearish_trend:
                     position = -1
                     signals[i] = -0.25
     
