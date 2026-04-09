@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and 4h volume spike confirmation
-# - Uses 4h Donchian channel breakout (20-period) for trend-following entries
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and 12h volume spike confirmation
+# - Uses 12h Donchian channel breakout (20-period) for trend-following entries
 # - Filters by 1d EMA(50) direction: only long when price > EMA50, short when price < EMA50
-# - Requires 4h volume > 2.0x its 20-period average for confirmation (reduces false breakouts)
+# - Requires 12h volume > 2.0x its 20-period average for confirmation (reduces false breakouts)
 # - Uses ATR(14) trailing stop: exits when price retraces 3.0x ATR from extreme
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 # - Donchian breakouts capture strong trends, volume filter improves quality, EMA50 avoids counter-trend trades
 # - Works in both bull (breakouts with volume) and bear (short breakdowns) markets
 
-name = "4h_donchian_ema_volume_atr_v1"
-timeframe = "4h"
+name = "12h_donchian_ema_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,21 +34,21 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
+    # 12h Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h volume > 2.0x 20-period average (volume confirmation)
+    # 12h volume > 2.0x 20-period average (volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * avg_volume_20)
     
-    # 4h ATR(14) for trailing stop
+    # 12h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
