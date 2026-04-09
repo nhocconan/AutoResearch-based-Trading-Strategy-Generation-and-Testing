@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Camarilla pivot levels with volume confirmation
-# In low volatility regimes (choppy markets): fade at R3/S3 levels for mean reversion
-# In high volatility regimes (trending markets): breakout continuation at R4/S4 levels
-# Uses 1d ADX to filter regimes and 12h volume spike for confirmation
-# Discrete position sizing 0.25 to limit trades to 12-37/year and reduce fee drag
-# Works in bull/bear markets: mean reversion in ranging, breakout in trending
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and 1w ADX regime filter
+# In trending markets (ADX > 25): breakout long when price > H3 with volume > 1.5x average volume
+# In ranging markets (ADX < 20): mean revert at H3/L3 levels with volume confirmation
+# Uses discrete position sizing 0.25 to limit trades to ~20-50/year and reduce fee drag
+# Works in bull/bear markets: trend following in strong trends, mean reversion in ranging markets
 
-name = "6h_12h_1d_camarilla_adx_volume_v1"
-timeframe = "6h"
+name = "4h_1d_1w_camarilla_pivot_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,35 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    # Camarilla: R4 = Close + ((High - Low) * 1.1/2), R3 = Close + ((High - Low) * 1.1/4)
-    #          S3 = Close - ((High - Low) * 1.1/4), S4 = Close - ((High - Low) * 1.1/2)
-    # We use the previous bar's levels to avoid look-ahead
-    high_shift = np.concatenate([[np.nan], high_12h[:-1]])
-    low_shift = np.concatenate([[np.nan], low_12h[:-1]])
-    close_shift = np.concatenate([[np.nan], close_12h[:-1]])
-    
-    rangep = high_shift - low_shift
-    r4 = close_shift + rangep * 1.1 / 2
-    r3 = close_shift + rangep * 1.1 / 4
-    s3 = close_shift - rangep * 1.1 / 4
-    s4 = close_shift - rangep * 1.1 / 2
-    
-    # Calculate 12h volume spike (volume > 1.5 * 20-period average)
-    vol_ma = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_12h > (vol_ma * 1.5)
-    
-    # Load 1d data for ADX regime filter
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -61,23 +32,53 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ADX(14) for regime filtering
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
+    # Calculate 1d Camarilla pivot levels
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # H4 = Close + Range * 1.1/2
+    # H3 = Close + Range * 1.1/4
+    # H2 = Close + Range * 1.1/6
+    # H1 = Close + Range * 1.1/12
+    # L1 = Close - Range * 1.1/12
+    # L2 = Close - Range * 1.1/6
+    # L3 = Close - Range * 1.1/4
+    # L4 = Close - Range * 1.1/2
     
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    h3_1d = close_1d + range_1d * 1.1 / 4.0
+    l3_1d = close_1d - range_1d * 1.1 / 4.0
+    h4_1d = close_1d + range_1d * 1.1 / 2.0
+    l4_1d = close_1d - range_1d * 1.1 / 2.0
+    
+    # Load 1w data for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w ADX(14)
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = np.abs(high[1:] - low[:-1])
         tr2 = np.abs(high[1:] - close[:-1])
         tr3 = np.abs(low[1:] - close[:-1])
         tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        def wilders_smoothing(values, period):
+            if len(values) < period:
+                return np.full(len(values), np.nan)
+            alpha = 1.0 / period
+            result = np.full(len(values), np.nan)
+            result[period-1] = np.nanmean(values[:period])
+            for i in range(period, len(values)):
+                result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+            return result
+        
         atr = wilders_smoothing(tr, period)
         
         # Directional Movement
@@ -100,44 +101,59 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
     
-    # Align 12h indicators to 6h timeframe
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4)
-    volume_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
+    # Calculate average volume for confirmation (20-period SMA)
+    def sma(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        result = np.full(len(values), np.nan)
+        for i in range(period-1, len(values)):
+            result[i] = np.mean(values[i-period+1:i+1])
+        return result
     
-    # Align 1d ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    avg_volume_1d = sma(volume, 20)  # Using current timeframe volume as proxy for 1d volume confirmation
+    
+    # Align 1d indicators to 4h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Align 1w ADX to 4h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Align volume average to 4h timeframe
+    avg_volume_aligned = align_htf_to_ltf(prices, prices, avg_volume_1d)  # Self-align for same timeframe
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(volume_spike_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(adx_1w_aligned[i]) or np.isnan(avg_volume_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter based on 1d ADX
-        trending_regime = adx_1d_aligned[i] > 25
-        ranging_regime = adx_1d_aligned[i] < 20
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_aligned[i]
+        
+        # Regime filter based on 1w ADX
+        trending_regime = adx_1w_aligned[i] > 25
+        ranging_regime = adx_1w_aligned[i] < 20
         
         if position == 1:  # Long position
             if trending_regime:
-                # Exit long if price breaks below R3 in trending market
-                if close[i] <= r3_12h_aligned[i]:
+                # Exit long if price falls below H3
+                if close[i] <= h3_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price returns above S3 in ranging market
-                if close[i] >= s3_12h_aligned[i]:
+                # Exit long if price returns from H3 level
+                if close[i] >= h3_1d_aligned[i] * 0.995:  # Slight buffer to avoid whipsaw
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -145,34 +161,35 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             if trending_regime:
-                # Exit short if price breaks above S3 in trending market
-                if close[i] >= s3_12h_aligned[i]:
+                # Exit short if price rises above L3
+                if close[i] >= l3_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price returns below R3 in ranging market
-                if close[i] <= r3_12h_aligned[i]:
+                # Exit short if price returns from L3 level
+                if close[i] <= l3_1d_aligned[i] * 1.005:  # Slight buffer to avoid whipsaw
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            if trending_regime and volume_spike_12h_aligned[i]:
-                # Breakout continuation in trending market with volume confirmation
-                if close[i] > r4_12h_aligned[i]:
+            if trending_regime and volume_confirmed:
+                # Breakout long when price > H3 with volume confirmation
+                if close[i] > h3_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < s4_12h_aligned[i]:
+                # Breakout short when price < L3 with volume confirmation
+                elif close[i] < l3_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
-            elif ranging_regime:
-                # Mean reversion at extreme levels in ranging market
-                if close[i] < s3_12h_aligned[i]:
+            elif ranging_regime and volume_confirmed:
+                # Mean revert at extreme levels: long at L3, short at H3
+                if close[i] <= l3_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] > r3_12h_aligned[i]:
+                elif close[i] >= h3_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
