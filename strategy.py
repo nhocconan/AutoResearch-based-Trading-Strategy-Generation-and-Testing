@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_donchian_volume_pullback_v1
-# Hypothesis: 6h strategy using daily Donchian channel breakout with volume confirmation and pullback entry.
-# Long: Price breaks above daily Donchian(20) high, pulls back to touch or cross above the 20-period EMA on 6h, with volume > 1.5x 20-period average.
-# Short: Price breaks below daily Donchian(20) low, pulls back to touch or cross below the 20-period EMA on 6h, with volume > 1.5x 20-period average.
+# 12h_1d_donchian_volume_pullback_v1
+# Hypothesis: 12h strategy using daily Donchian channel breakout with volume confirmation and pullback entry.
+# Long: Price breaks above daily Donchian(20) high, pulls back to touch or cross above the 20-period EMA on 12h, with volume > 1.5x 20-period average.
+# Short: Price breaks below daily Donchian(20) low, pulls back to touch or cross below the 20-period EMA on 12h, with volume > 1.5x 20-period average.
 # Exit: Opposite Donchian breakout or ATR trailing stop (2.0x ATR from extreme).
-# Uses daily Donchian for structure, 6h EMA for pullback entry, volume for confirmation, ATR for dynamic stops.
+# Uses daily Donchian for structure, 12h EMA for pullback entry, volume for confirmation, ATR for dynamic stops.
 # Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_volume_pullback_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_pullback_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,13 +51,13 @@ def generate_signals(prices):
     donchian_high = high_1d.rolling(window=20, min_periods=20).max().values
     donchian_low = low_1d.rolling(window=20, min_periods=20).min().values
     
-    # Align HTF Donchian levels to 6h timeframe (wait for completed 1d bar)
+    # Align HTF Donchian levels to 12h timeframe (wait for completed 1d bar)
     donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
     donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Calculate 6h EMA(20) for pullback entry
+    # Calculate 12h EMA(20) for pullback entry
     close_s = pd.Series(close)
-    ema20_6h = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,7 +70,7 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
-            np.isnan(open_price[i]) or np.isnan(volume[i]) or np.isnan(ema20_6h[i])):
+            np.isnan(open_price[i]) or np.isnan(volume[i]) or np.isnan(ema20_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -125,13 +125,13 @@ def generate_signals(prices):
                 long_triggered = False
             
             # Long entry: after bullish breakout, price pulls back to EMA20 or above
-            if long_triggered and close[i] >= ema20_6h[i]:
+            if long_triggered and close[i] >= ema20_12h[i]:
                 position = 1
                 long_high = high[i]
                 long_triggered = False
                 signals[i] = 0.25
             # Short entry: after bearish breakout, price pulls back to EMA20 or below
-            elif short_triggered and close[i] <= ema20_6h[i]:
+            elif short_triggered and close[i] <= ema20_12h[i]:
                 position = -1
                 short_low = low[i]
                 short_triggered = False
