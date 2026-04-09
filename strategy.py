@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume spike
-# Uses 6h Williams %R(14) for mean reversion signals: long when %R < -80, short when %R > -20
-# Filters trades by 1d EMA(50) trend: only long when price > EMA50, short when price < EMA50
-# Requires volume > 1.5x 20-period 6h average for confirmation
-# Exits when Williams %R returns to -50 (mean reversion completion)
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR filter
+# Uses 4h Donchian(20) breakout with volume > 1.5x 20-period average
+# Enters only when 1d ATR rank < 30 (low volatility environment) to avoid chop
+# Exits when price closes opposite Donchian band
 # Position size 0.25 to limit drawdown
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag
-# Works in both bull/bear: mean reversion in ranging markets, trend filter avoids counter-trend trades
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag
+# Works in both bull/bear: Donchian captures breakouts, low vol filter avoids whipsaws in ranging markets
 
-name = "6h_1d_williamsr_trend_vol_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,46 +25,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 6h data ONCE before loop (primary timeframe)
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 20:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop (HTF filter)
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 6h Williams %R (14-period)
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Calculate 4h Donchian channel (20-period)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    williams_r = np.full(len(df_6h), np.nan)
-    for i in range(13, len(df_6h)):
-        highest_high = np.max(high_6h[i-13:i+1])
-        lowest_low = np.min(low_6h[i-13:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_6h[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    donch_high_4h = np.full(len(df_4h), np.nan)
+    donch_low_4h = np.full(len(df_4h), np.nan)
     
-    # Align 6h Williams %R to 6h timeframe (same timeframe, no shift needed)
-    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
+    for i in range(20, len(df_4h)):
+        donch_high_4h[i] = np.max(high_4h[i-20:i])
+        donch_low_4h[i] = np.min(low_4h[i-20:i])
     
-    # Calculate 1d EMA(50) for trend filter
+    # Align 4h Donchian to 4h timeframe (only use completed 4h bars)
+    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
+    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
+    
+    # Calculate 1d ATR (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(df_1d), np.nan)
-    if len(df_1d) >= 50:
-        multiplier = 2 / (50 + 1)
-        ema_50_1d[49] = np.mean(close_1d[:50])  # SMA seed
-        for i in range(50, len(df_1d)):
-            ema_50_1d[i] = (close_1d[i] * multiplier) + (ema_50_1d[i-1] * (1 - multiplier))
     
-    # Align 1d EMA50 to 6h timeframe (use completed daily candles)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    tr_1d = np.zeros(len(df_1d))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
+        tr0 = high_1d[i] - low_1d[i]
+        tr1 = abs(high_1d[i] - close_1d[i-1])
+        tr2 = abs(low_1d[i] - close_1d[i-1])
+        tr_1d[i] = max(tr0, tr1, tr2)
     
-    # Volume confirmation: 20-period average on 6h (~5 days)
+    atr_1d = np.zeros(len(df_1d))
+    atr_1d[0] = tr_1d[0]
+    for i in range(1, len(df_1d)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+    
+    # ATR percentile rank (200-day lookback ~ 10 months)
+    atr_rank_1d = np.zeros(len(df_1d))
+    for i in range(200, len(df_1d)):
+        window = atr_1d[i-200:i]
+        atr_rank_1d[i] = np.sum(window < atr_1d[i]) / len(window) * 100
+    
+    # Align ATR rank to 4h timeframe (only use completed daily bars)
+    atr_rank_4h = align_htf_to_ltf(prices, df_1d, atr_rank_1d)
+    
+    # Volume confirmation: 20-period average on 4h (~10 days)
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -78,42 +90,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after EMA warmup
+    for i in range(200, n):  # Start after ATR rank warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(donch_high_4h_aligned[i]) or 
+            np.isnan(donch_low_4h_aligned[i]) or 
+            np.isnan(atr_rank_4h[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Only trade in low volatility environment (ATR rank < 30 = bottom 30% volatility)
+        if atr_rank_4h[i] >= 30:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 1:  # Long position
-            # Exit: Williams %R returns to -50 (mean reversion complete)
-            if williams_r_aligned[i] >= -50:
+            # Exit: price closes below 4h Donchian low
+            if close[i] <= donch_low_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R returns to -50 (mean reversion complete)
-            if williams_r_aligned[i] <= -50:
+            # Exit: price closes above 4h Donchian high
+            if close[i] >= donch_high_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Volume confirmation
+            # Enter long: price closes above 4h Donchian high with volume confirmation
             vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            
-            # Enter long: Williams %R oversold (< -80) + uptrend (price > EMA50) + volume spike
-            if (williams_r_aligned[i] < -80 and 
-                close[i] > ema_50_aligned[i] and 
+            if (close[i] > donch_high_4h_aligned[i] and 
                 vol_ratio > 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: Williams %R overbought (> -20) + downtrend (price < EMA50) + volume spike
-            elif (williams_r_aligned[i] > -20 and 
-                  close[i] < ema_50_aligned[i] and 
+            # Enter short: price closes below 4h Donchian low with volume confirmation
+            elif (close[i] < donch_low_4h_aligned[i] and 
                   vol_ratio > 1.5):
                 position = -1
                 signals[i] = -0.25
