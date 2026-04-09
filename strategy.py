@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR trailing stop
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR trailing stop
 # - Uses 1d HTF for prior day's Camarilla pivot levels (H3/L3) and volume average
-# - Long when price closes above H3 with 12h volume > 1.5x 20-period 1d average volume (scaled to 12h)
+# - Long when price closes above H3 with 4h volume > 1.2x 20-period 1d average volume (scaled to 4h)
 # - Short when price closes below L3 with same volume confirmation
-# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry
+# - ATR(14) trailing stop: exit long at 2.0x ATR below highest high since entry
 # - Fixed position size 0.25 to control drawdown
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
 # - Camarilla levels provide strong support/resistance; volume confirms breakout validity
 # - Works in both bull and bear markets by capturing institutional breakout attempts
 
-name = "12h_1d_camarilla_breakout_volume_atr_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_atr_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,15 +51,15 @@ def generate_signals(prices):
     camarilla_h3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
     camarilla_l3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
     
-    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
     h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Pre-compute 1d volume average (20-period) scaled for 12h comparison
+    # Pre-compute 1d volume average (20-period) scaled for 4h comparison
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    # Scale daily average to 12h equivalent: daily volume / 2 (2x 12h bars in 1d)
-    vol_ma_20_12h_equiv = vol_ma_20_1d_aligned / 2.0
+    # Scale daily average to 4h equivalent: daily volume / 6 (6x 4h bars in 1d)
+    vol_ma_20_4h_equiv = vol_ma_20_1d_aligned / 6.0
     
     # Pre-compute ATR (14-period) for stoploss
     tr1 = high - low
@@ -77,20 +77,20 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_ma_20_12h_equiv[i]) or np.isnan(atr[i]) or
-            vol_ma_20_12h_equiv[i] <= 0 or atr[i] <= 0):
+            np.isnan(vol_ma_20_4h_equiv[i]) or np.isnan(atr[i]) or
+            vol_ma_20_4h_equiv[i] <= 0 or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x scaled 1d average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20_12h_equiv[i]
+        # Volume confirmation: current 4h volume > 1.2x scaled 1d average
+        volume_confirmed = volume[i] > 1.2 * vol_ma_20_4h_equiv[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -102,8 +102,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
