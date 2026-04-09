@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike confirmation and ATR-based volatility filter
-# Donchian breakout captures strong momentum moves in both bull and bear markets
-# 1d volume spike (>2x 20-period average) confirms institutional participation
-# ATR(20) volatility filter: only trade when volatility is elevated (ATR > 20-period median ATR)
-# This reduces false breakouts during low volatility periods and focuses on high-momentum scenarios
-# Uses discrete position sizing (0.25) to minimize fee churn
-# Target: 75-200 total trades over 4 years (19-50/year)
+# Hypothesis: 6h Elder Ray Index + 1d volume confirmation + 1w trend filter
+# Elder Ray measures bull/bear power via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d volume > 1.5x 20-period average
+# Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d volume > 1.5x 20-period average
+# 1w trend filter: only take longs when price > 1w EMA50, only shorts when price < 1w EMA50
+# Works in bull/bear: volume confirmation avoids fakeouts, 1w trend filter aligns with higher timeframe momentum
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "4h_1d_donchian_volume_atr_filter_v1"
-timeframe = "4h"
+name = "6h_1d_1w_elder_ray_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,98 +25,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d data ONCE before loop for volume and Elder Ray
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Calculate 1d EMA13 for Elder Ray
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
     # Calculate 1d average volume (20-period)
     volume_1d = df_1d['volume'].values
     volume_s_1d = pd.Series(volume_1d)
     avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ATR(20) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # ATR(20) using Wilder's smoothing
-    def wilders_smoothing(values, period):
-        if len(values) < period:
-            return np.full(len(values), np.nan)
-        alpha = 1.0 / period
-        result = np.full(len(values), np.nan)
-        result[period-1] = np.nanmean(values[:period])
-        for i in range(period, len(values)):
-            result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_1d = wilders_smoothing(tr, 20)
-    # Median ATR over 50 periods for volatility regime
-    atr_s_1d = pd.Series(atr_1d)
-    median_atr_1d = atr_s_1d.rolling(window=50, min_periods=50).median().values
-    
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 6h timeframe (wait for 1d bar close)
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
-    median_atr_1d_aligned = align_htf_to_ltf(prices, df_1d, median_atr_1d)
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 4h ATR(20) for exit logic
-    tr_4h1 = np.abs(high[1:] - low[:-1])
-    tr_4h2 = np.abs(high[1:] - close[:-1])
-    tr_4h3 = np.abs(low[1:] - close[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))])
-    atr_4h = wilders_smoothing(tr_4h, 20)
+    # Align 1w EMA50 to 6h timeframe (wait for 1w bar close)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(median_atr_1d_aligned[i]) or
-            np.isnan(atr_4h[i])):
+        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or
+            np.isnan(avg_volume_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 2x 1d average volume
-        volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
-        
-        # Volatility filter: current 4h ATR > 1d median ATR (elevated volatility regime)
-        vol_filter = atr_4h[i] > median_atr_1d_aligned[i]
+        # Volume confirmation: current 6h volume > 1.5x 1d average volume
+        volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR 2x ATR stop from entry
-            # Simplified: exit on Donchian break (more reliable than intrabar stop)
-            if close[i] < lowest_low[i]:
+            # Exit: Bear Power becomes negative (market turning bearish) OR volume dries up
+            if bear_power_1d_aligned[i] < 0 or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR 2x ATR stop from entry
-            if close[i] > highest_high[i]:
+            # Exit: Bull Power becomes positive (market turning bullish) OR volume dries up
+            if bull_power_1d_aligned[i] > 0 or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Donchian breakout with volume and volatility confirmation
-            if volume_confirmed and vol_filter:
-                if close[i] > highest_high[i]:
+            # Entry logic with 1w trend filter
+            if close[i] > ema50_1w_aligned[i]:  # Uptrend on 1w
+                # Long: Bull Power positive AND rising (improving) AND volume confirmed
+                if (bull_power_1d_aligned[i] > 0 and 
+                    i > 100 and bull_power_1d_aligned[i] > bull_power_1d_aligned[i-1] and
+                    volume_confirmed):
                     position = 1
                     signals[i] = 0.25
-                elif close[i] < lowest_low[i]:
+            else:  # Downtrend on 1w
+                # Short: Bear Power negative AND falling (worsening) AND volume confirmed
+                if (bear_power_1d_aligned[i] < 0 and 
+                    i > 100 and bear_power_1d_aligned[i] < bear_power_1d_aligned[i-1] and
+                    volume_confirmed):
                     position = -1
                     signals[i] = -0.25
     
