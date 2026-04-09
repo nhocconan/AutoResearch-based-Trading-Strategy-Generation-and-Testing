@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_v2
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation.
-# Long: price touches L3 support with volume spike. Short: price touches H3 resistance with volume spike.
-# Exit: opposite pivot level touch or mean reversion to pivot point.
-# Uses 12h EMA200 as trend filter to avoid counter-trend trades in strong trends.
-# Target: 20-50 trades/year (80-200 total over 4 years).
+# 1d_donchian_breakout_weekly_volume_v1
+# Hypothesis: 1d strategy using Donchian channel breakouts with weekly trend filter and volume confirmation.
+# Long: price breaks above Donchian(20) high, close > weekly EMA50, volume > 1.5x 20-day average.
+# Short: price breaks below Donchian(20) low, close < weekly EMA50, volume > 1.5x 20-day average.
+# Exit: opposite Donchian breakout or volume divergence.
+# Weekly trend filter avoids counter-trend trades. Volume confirmation filters weak breakouts.
+# Target: 7-25 trades/year (30-100 total over 4 years) as per 1d timeframe limits.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_v2"
-timeframe = "4h"
+name = "1d_donchian_breakout_weekly_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,84 +25,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Donchian channels (20-period)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # H4 = P + 1.1 * Range / 2
-    # H3 = P + 1.1 * Range / 4
-    # H2 = P + 1.1 * Range / 6
-    # H1 = P + 1.1 * Range / 12
-    # L1 = P - 1.1 * Range / 12
-    # L2 = P - 1.1 * Range / 6
-    # L3 = P - 1.1 * Range / 4
-    # L4 = P - 1.1 * Range / 2
-    
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
-    
-    pivot_1d = (h_1d + l_1d + c_1d) / 3.0
-    range_1d = h_1d - l_1d
-    
-    h3_1d = pivot_1d + 1.1 * range_1d / 4.0
-    l3_1d = pivot_1d - 1.1 * range_1d / 4.0
-    
-    # Align HTF levels to LTF (wait for completed 1d bar)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # 12h EMA200 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema200_12h = pd.Series(close_12h).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
-    
-    # Volume confirmation (20-period average)
+    # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Weekly EMA50 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    close_1w_s = pd.Series(close_1w)
+    ema50_1w = close_1w_s.ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(ema200_12h_aligned[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
-            np.isnan(volume[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
+            np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-day average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price reaches H3 (mean reversion) or volume divergence
-            if high[i] >= h3_1d_aligned[i] or (close[i] > close[i-1] and volume[i] < volume[i-1]):
+            # Exit: price breaks below Donchian low OR volume divergence (price up but volume down)
+            if close[i] < donchian_low[i] or (close[i] > close[i-1] and volume[i] < volume[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches L3 (mean reversion) or volume divergence
-            if low[i] <= l3_1d_aligned[i] or (close[i] < close[i-1] and volume[i] < volume[i-1]):
+            # Exit: price breaks above Donchian high OR volume divergence (price down but volume down)
+            if close[i] > donchian_high[i] or (close[i] < close[i-1] and volume[i] < volume[i-1]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long entry: price touches L3 with volume confirmation and above 12h EMA200
-            if (low[i] <= l3_1d_aligned[i] and volume_confirmed and 
-                close[i] > ema200_12h_aligned[i]):
+            # Long entry: price breaks above Donchian high, close > weekly EMA50, volume confirmed
+            if (close[i] > donchian_high[i] and close[i] > ema50_1w_aligned[i] and volume_confirmed):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price touches H3 with volume confirmation and below 12h EMA200
-            elif (high[i] >= h3_1d_aligned[i] and volume_confirmed and 
-                  close[i] < ema200_12h_aligned[i]):
+            # Short entry: price breaks below Donchian low, close < weekly EMA50, volume confirmed
+            elif (close[i] < donchian_low[i] and close[i] < ema50_1w_aligned[i] and volume_confirmed):
                 position = -1
                 signals[i] = -0.25
     
