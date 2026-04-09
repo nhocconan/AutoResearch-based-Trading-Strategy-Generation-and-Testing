@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_htfema_v2
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x 20-bar avg volume) and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
+# 6h_elder_ray_alligator_regime_v1
+# Hypothesis: 6h strategy combining Elder Ray (Bull/Bear Power) with Williams Alligator for trend confirmation and regime filtering.
+# Uses 1d HTF EMA(50) for higher timeframe alignment. Long when Bull Power > 0, price above Alligator teeth, and EMA50 uptrend.
+# Short when Bear Power < 0, price below Alligator teeth, and EMA50 downtrend.
+# Designed to work in both bull (trend following) and bear (counter-trend retracements) markets via regime adaptation.
+# Target: 50-150 total trades over 4 years (12-37/year). Discrete sizing: 0.25.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_htfema_v2"
-timeframe = "4h"
+name = "6h_elder_ray_alligator_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,33 +22,29 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Volume average for confirmation (20-period)
-    volume_s = pd.Series(volume)
-    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) - all SMMA
+    def smma(src, length):
+        # Smoothed Moving Average: first value is SMA, then recursive
+        result = np.full_like(src, np.nan, dtype=float)
+        if len(src) < length:
+            return result
+        # First value: simple moving average
+        result[length-1] = np.mean(src[:length])
+        # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT_SRC) / length
+        for i in range(length, len(src)):
+            result[i] = (result[i-1] * (length-1) + src[i]) / length
+        return result
     
-    # Choppiness Index regime filter (14-period)
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr_series = pd.Series(tr)
-    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
-    highest_high = high_series.rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = low_series.rolling(window=atr_period, min_periods=atr_period).min().values
-    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
-    denominator = np.log10(atr_period) * (highest_high - lowest_low)
-    denominator = np.where(denominator == 0, np.nan, denominator)
-    chop = 100 * np.log10(atr_sum / denominator)
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)   # Red line
+    lips = smma(close, 5)    # Green line
     
     # Multi-timeframe: 1d EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -56,47 +56,60 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup (max of 13, 50)
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(close[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: chop < 61.8 indicates trending market
-        trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 1d EMA(50)
+        # Alligator alignment: Teeth above/below Jaw indicates trend direction
+        # In uptrend: Lips > Teeth > Jaw; in downtrend: Lips < Teeth < Jaw
+        # We use Teeth vs Jaw for trend, Lips for momentum confirmation
+        teeth_above_jaw = teeth[i] > jaw[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
+        
+        # Elder Ray conditions
+        bullish_pressure = bull_power[i] > 0
+        bearish_pressure = bear_power[i] < 0
+        
+        # HTF trend filter
         htf_uptrend = close[i] > ema_50_1d_aligned[i]
         htf_downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian low (20)
-            if close[i] < donchian_low[i]:
+            # Exit: Bear Power turns negative OR price closes below Teeth
+            if bear_power[i] < 0 or close[i] < teeth[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian high (20)
-            if close[i] > donchian_high[i]:
+            # Exit: Bull Power turns positive OR price closes above Teeth
+            if bull_power[i] > 0 or close[i] > teeth[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for Donchian breakout with volume, regime, and HTF confirmation
-            bullish_breakout = (close[i] > donchian_high[i-1]) and volume_confirmed and trending_market and htf_uptrend
-            bearish_breakout = (close[i] < donchian_low[i-1]) and volume_confirmed and trending_market and htf_downtrend
+            # Enter long: Bull Power positive, price above Teeth, Teeth above Jaw, HTF uptrend
+            bullish_entry = (bullish_pressure and 
+                           close[i] > teeth[i] and 
+                           teeth_above_jaw and 
+                           htf_uptrend)
+                           
+            # Enter short: Bear Power negative, price below Teeth, Teeth below Jaw, HTF downtrend
+            bearish_entry = (bearish_pressure and 
+                           close[i] < teeth[i] and 
+                           teeth_below_jaw and 
+                           htf_downtrend)
             
-            if bullish_breakout:
+            if bullish_entry:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_entry:
                 position = -1
                 signals[i] = -0.25
     
