@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v5
-# Hypothesis: Breakout above/below 1-day Camarilla pivot levels (H3/L3) on 12h chart with volume confirmation and volatility filter.
+# 4h_1d_camarilla_breakout_v5
+# Hypothesis: Breakout above/below 1-day Camarilla pivot levels (H3/L3) on 4h chart with volume confirmation and volatility filter.
 # Only take long when price breaks above H3 level, short when breaks below L3 level.
 # Exit when price returns to Pivot Point (PP) level.
 # Uses volatility filter (ATR < 3.5% of price) and volume confirmation (volume > 1.3x 20-period avg).
-# Target: 12-37 trades/year (50-150 total over 4 years) with strict entry conditions.
+# Reduced trade frequency by tightening volume confirmation to 1.5x and adding ADX(14) > 20 filter to avoid chop.
+# Target: 20-35 trades/year (80-140 total over 4 years) with strict entry conditions.
 # Works in both bull and bear markets due to pivot levels adapting to volatility and volume/vol filters reducing whipsaw.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v5"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,6 +40,47 @@ def generate_signals(prices):
     for i in range(1, n):
         atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
+    # Calculate ADX(14) for trend strength filter
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    for i in range(1, n):
+        up = high[i] - high[i-1]
+        down = low[i-1] - low[i]
+        if up > down and up > 0:
+            plus_dm[i] = up
+        else:
+            plus_dm[i] = 0
+        if down > up and down > 0:
+            minus_dm[i] = down
+        else:
+            minus_dm[i] = 0
+    
+    tr_ma = np.zeros(n)
+    plus_dm_ma = np.zeros(n)
+    minus_dm_ma = np.zeros(n)
+    # Initial values
+    tr_ma[0] = tr[0]
+    plus_dm_ma[0] = plus_dm[0]
+    minus_dm_ma[0] = minus_dm[0]
+    # Smoothing
+    for i in range(1, n):
+        tr_ma[i] = 0.9 * tr_ma[i-1] + 0.1 * tr[i]
+        plus_dm_ma[i] = 0.9 * plus_dm_ma[i-1] + 0.1 * plus_dm[i]
+        minus_dm_ma[i] = 0.9 * minus_dm_ma[i-1] + 0.1 * minus_dm[i]
+    
+    # Avoid division by zero
+    dx = np.zeros(n)
+    for i in range(n):
+        if tr_ma[i] != 0:
+            dx[i] = abs(plus_dm_ma[i] - minus_dm_ma[i]) / (tr_ma[i] + 1e-10) * 100
+        else:
+            dx[i] = 0
+    
+    adx = np.zeros(n)
+    adx[0] = dx[0]
+    for i in range(1, n):
+        adx[i] = 0.9 * adx[i-1] + 0.1 * dx[i]
+    
     # Load 1d data ONCE before loop for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
@@ -53,22 +95,16 @@ def generate_signals(prices):
     pp_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
-    # Resistance levels
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
+    # Resistance levels (H3)
     r3_1d = close_1d + (range_1d * 1.1 / 4)
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
     
-    # Support levels
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
+    # Support levels (L3)
     s3_1d = close_1d - (range_1d * 1.1 / 4)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)  # S3 is L3 in Camarilla
+    l3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.full(n, np.nan)
@@ -85,15 +121,18 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
         # Volatility filter: avoid extremely high volatility
         vol_filter = atr[i] < 0.035 * close[i]  # ATR less than 3.5% of price
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_ok = volume[i] > vol_ma_20[i] * 1.3
+        # Volume confirmation: current volume > 1.5x 20-period average (tightened from 1.3x)
+        vol_ok = volume[i] > vol_ma_20[i] * 1.5
+        
+        # Trend strength filter: ADX > 20 to avoid chop
+        trend_ok = adx[i] > 20
         
         if position == 1:  # Long position
             # Exit: price returns to or below Pivot Point
@@ -112,11 +151,11 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Enter long: price breaks above R3 level with volume confirmation and volatility filter
-            if close[i] > r3_aligned[i] and vol_ok and vol_filter:
+            if close[i] > r3_aligned[i] and vol_ok and vol_filter and trend_ok:
                 position = 1
                 signals[i] = 0.25
             # Enter short: price breaks below S3 level with volume confirmation and volatility filter
-            elif close[i] < l3_aligned[i] and vol_ok and vol_filter:
+            elif close[i] < l3_aligned[i] and vol_ok and vol_filter and trend_ok:
                 position = -1
                 signals[i] = -0.25
     
