@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and ATR-based position sizing
-# 1d Camarilla levels (R3/S3, R4/S4) act as key support/resistance on daily chart
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and ATR filter
+# Daily Camarilla levels (R3/S3, R4/S4) act as major support/resistance that work in both bull and bear markets
 # Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation (current 12h volume > 1.4x 20-period average) filters false signals
+# Volume confirmation (current 4h volume > 1.3x 20-period average) filters false signals
 # ATR filter ensures sufficient volatility (avoid choppy low-vol periods)
 # Position size scales with volatility (inverse ATR) to maintain consistent risk
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "12h_1d_camarilla_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -56,14 +56,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First period has no previous close
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 12h timeframe
+    # Align Camarilla levels and ATR to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Pre-compute volume confirmation (20-period average for 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -78,8 +78,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.4x average 12h volume
-        volume_confirmed = volume[i] > 1.4 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 1.3x average 4h volume
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
         # Volatility filter: only trade when ATR is above its 50-period average (avoid low-vol chop)
         atr_ma_50 = pd.Series(atr_aligned).rolling(window=50, min_periods=50).mean()
