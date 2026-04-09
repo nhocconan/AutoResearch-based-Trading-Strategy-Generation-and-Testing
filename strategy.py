@@ -1,56 +1,18 @@
 #!/usr/bin/env python3
-# 6h_supertrend_donchian_volume_v1
-# Hypothesis: 6h Supertrend(ATR=10, mult=3.0) for trend direction + 6h Donchian(20) breakout for entry timing + volume confirmation.
-# Uses 6h timeframe to balance responsiveness and noise reduction. Supertrend provides clear trend state with built-in ATR-based stops,
-# Donchian breakouts capture momentum in direction of trend, volume spike filters weak breakouts. Designed for 12-37 trades/year.
-# Works in bull/bear markets: Supertrend adapts to volatility, Donchian breakouts work in both directions, volume confirmation avoids fakeouts.
+# 12h_donchian_1d_camarilla_volume_v1
+# Hypothesis: 12h Donchian(20) breakout with 1d Camarilla H4/L4 filter and volume confirmation.
+# Uses 12h timeframe for lower trade frequency (target: 12-37/year). Donchian breakout captures momentum,
+# Camarilla H4/L4 acts as strong bias filter from daily pivot structure (only trade in direction of daily extremes),
+# volume spike confirms institutional participation. Designed to work in both bull and bear markets by
+# avoiding counter-trend trades during ranging conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_supertrend_donchian_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_1d_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_atr(high, low, close, period):
-    """Calculate Average True Range"""
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    high_close[0] = 0
-    low_close[0] = 0
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
-    
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upperband[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > upperband[i-1]:
-            direction[i] = 1
-        elif close[i] < lowerband[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            
-        if direction[i] == 1:
-            supertrend[i] = max(lowerband[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upperband[i], supertrend[i-1])
-            
-    return supertrend, direction, atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -62,69 +24,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for indicator calculation
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 30:  # Need enough for Supertrend(10) and Donchian(20)
+    # Get 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:  # Need enough for Donchian(20)
         return np.zeros(n)
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-    volume_6h = df_6h['volume'].values
+    # Calculate 12h Donchian(20) channels
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h Supertrend(10, 3.0)
-    supertrend_6h, direction_6h, atr_6h = calculate_supertrend(high_6h, low_6h, close_6h, 10, 3.0)
+    # Align 12h Donchian levels to 12h timeframe (completed 12h candle only)
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
     
-    # Align 6h Supertrend and direction to 6h timeframe (completed 6h candle only)
-    supertrend_6h_aligned = align_htf_to_ltf(prices, df_6h, supertrend_6h)
-    direction_6h_aligned = align_htf_to_ltf(prices, df_6h, direction_6h)
+    # Get 1d HTF data ONCE before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate 6h Donchian(20) channels
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Donchian channels to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_6h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_6h, donchian_low)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Volume spike detection (20-period volume average on 6h)
-    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_6h > (vol_ma_20 * 2.0)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_6h, vol_spike)
+    # Camarilla H4/L4 levels (strong bias filter from daily extremes)
+    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 12h timeframe (completed daily candle only)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Volume spike detection (20-period volume average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_6h_aligned[i]) or np.isnan(direction_6h_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Supertrend (trend reversal)
-            if close[i] < supertrend_6h_aligned[i]:
+            # Exit: price closes below 12h lower Donchian
+            if close[i] < lower_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Supertrend (trend reversal)
-            if close[i] > supertrend_6h_aligned[i]:
+            # Exit: price closes above 12h upper Donchian
+            if close[i] > upper_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high, Supertrend uptrend, with volume spike
-            if (close[i] > donchian_high_aligned[i]) and (direction_6h_aligned[i] == 1) and vol_spike_aligned[i]:
+            # Enter long: price closes above 12h upper Donchian, above 1d H4, with volume spike
+            if (close[i] > upper_12h_aligned[i]) and (close[i] > h4_1d_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low, Supertrend downtrend, with volume spike
-            elif (close[i] < donchian_low_aligned[i]) and (direction_6h_aligned[i] == -1) and vol_spike_aligned[i]:
+            # Enter short: price closes below 12h lower Donchian, below 1d L4, with volume spike
+            elif (close[i] < lower_12h_aligned[i]) and (close[i] < l4_1d_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
