@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
+# 12h_1d_camarilla_breakout_v3
+# Hypothesis: 12-hour breakout of daily Camarilla pivot levels with volume confirmation and ATR volatility filter.
+# Long when price closes above R4 resistance with volume > 1.5x 24-period average and ATR > 0.
+# Short when price closes below S4 support with volume > 1.5x 24-period average and ATR > 0.
+# Exit when price closes back inside the previous day's range (H-L band).
+# Daily Camarilla levels: PP=(H+L+C)/3, R4=C+(H-L)*1.1/2, S4=C-(H-L)*1.1/2.
+# ATR filter prevents trading in extremely low volatility conditions.
+# Target: 50-150 total trades over 4 years (12-37/year). Position size: 0.25.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_weekly_pivot_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,91 +28,96 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 20:
+    if len(df_d) < 10:
         return np.zeros(n)
     
-    # Calculate weekly pivot levels (using prior week's OHLC)
-    weekly_high = np.full(len(df_d), np.nan)
-    weekly_low = np.full(len(df_d), np.nan)
-    weekly_close = np.full(len(df_d), np.nan)
-    weekly_pivot = np.full(len(df_d), np.nan)
-    weekly_r1 = np.full(len(df_d), np.nan)
-    weekly_s1 = np.full(len(df_d), np.nan)
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    pp = np.full(len(df_d), np.nan)
+    r4 = np.full(len(df_d), np.nan)
+    s4 = np.full(len(df_d), np.nan)
+    prev_high = np.full(len(df_d), np.nan)
+    prev_low = np.full(len(df_d), np.nan)
+    for i in range(1, len(df_d)):
+        ph = df_d['high'].iloc[i-1]
+        pl = df_d['low'].iloc[i-1]
+        pc = df_d['close'].iloc[i-1]
+        pp[i] = (ph + pl + pc) / 3.0
+        r4[i] = pc + (ph - pl) * 1.1 / 2
+        s4[i] = pc - (ph - pl) * 1.1 / 2
+        prev_high[i] = ph
+        prev_low[i] = pl
     
-    # Calculate weekly aggregation from daily data
-    for i in range(len(df_d)):
-        if i >= 7:  # Need at least 7 days for weekly
-            week_high = np.max(df_d['high'].iloc[i-7:i])
-            week_low = np.min(df_d['low'].iloc[i-7:i])
-            week_close = df_d['close'].iloc[i-1]
-            weekly_high[i] = week_high
-            weekly_low[i] = week_low
-            weekly_close[i] = week_close
-            weekly_pivot[i] = (week_high + week_low + week_close) / 3.0
-            weekly_r1[i] = 2 * weekly_pivot[i] - week_low
-            weekly_s1[i] = 2 * weekly_pivot[i] - week_high
+    # Align daily values to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_d, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_d, s4)
+    prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Calculate Donchian channel (20-period) on 6h data
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Calculate ATR (14-period) for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    tr_sum = 0
     for i in range(n):
-        if i >= 20:
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
+        if not np.isnan(tr[i]):
+            tr_sum += tr[i]
+            if i >= 14:
+                tr_sum -= tr[i-14]
+            if i >= 13:
+                atr[i] = tr_sum / 14
     
-    # Align weekly pivot levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_d, weekly_s1)
-    
-    # Volume confirmation: 20-period average
-    vol_ma_20 = np.full(n, np.nan)
+    # Volume confirmation: 24-period average (24*12h = 12 days)
+    vol_ma_24 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+        if i >= 24:
+            vol_sum -= volume[i-24]
+        if i >= 23:
+            vol_ma_24[i] = vol_sum / 24
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or 
+            np.isnan(vol_ma_24[i]) or 
+            np.isnan(atr[i]) or
+            atr[i] <= 0):  # ATR filter: only trade when volatility > 0
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below weekly pivot
-            if close[i] < weekly_pivot_aligned[i]:
+            # Exit: price closes back inside previous day's range
+            if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly pivot
-            if close[i] > weekly_pivot_aligned[i]:
+            # Exit: price closes back inside previous day's range
+            if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian high with volume confirmation
-            if (close[i] > donchian_high[i] and 
-                volume[i] > vol_ma_20[i] * 1.5):
+            # Enter long: price closes above R4 with volume confirmation and ATR filter
+            if (close[i] > r4_aligned[i] and 
+                volume[i] > vol_ma_24[i] * 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian low with volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  volume[i] > vol_ma_20[i] * 1.5):
+            # Enter short: price closes below S4 with volume confirmation and ATR filter
+            elif (close[i] < s4_aligned[i] and 
+                  volume[i] > vol_ma_24[i] * 1.5):
                 position = -1
                 signals[i] = -0.25
     
