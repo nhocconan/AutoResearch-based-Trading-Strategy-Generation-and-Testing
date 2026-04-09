@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels for structure, volume confirmation, and trend filter.
-# Uses discrete position sizing (±0.30) to minimize fee churn. Volume > 1.8x 20-period average filters weak moves.
+# 4h_camarilla_1d_trend_volume_v5
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels for structure, volume confirmation, and trend filter.
+# Uses discrete position sizing (±0.30) to minimize fee churn. Volume > 2.0x 20-period average filters weak moves.
 # Long: price above daily pivot + volume spike + close > H3
 # Short: price below daily pivot + volume spike + close < L3
-# Exits on close < L3 (long) or close > H3 (short). Target: 50-150 total trades over 4 years (12-37/year).
+# Exits on close < L3 (long) or close > H3 (short). Target: 75-200 total trades over 4 years (19-50/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_1d_trend_volume_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -53,14 +53,14 @@ def generate_signals(prices):
     L3 = pivot - (range_ * 1.1 / 4)
     L4 = pivot - (range_ * 1.1 / 2)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -91,7 +91,7 @@ def generate_signals(prices):
                 signals[i] = -0.30
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
             
             if volume_confirmed:
                 # Long: price above pivot + close > H3 (breakout)
