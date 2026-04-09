@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d Williams %R + volume confirmation
-# Donchian breakouts capture momentum; 1d Williams %R identifies overbought/oversold extremes
+# Hypothesis: 4h Donchian(20) breakout + 1d Williams Alligator (Jaw/Teeth/Lips) + volume confirmation
+# Donchian breakouts capture momentum; 1d Alligator shows trend alignment across timeframes
 # Volume confirmation ensures breakout authenticity with conviction
-# Works in bull/bear: Williams %R adapts to higher timeframe momentum extremes
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Works in bull/bear: Alligator adapts to higher timeframe trend strength and direction
+# Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
 
-name = "12h_1d_williamsr_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_alligator_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +23,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Williams %R calculation
+    # Load 1d data ONCE before loop for Alligator calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 14-period Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - df_1d['close'].values) / (highest_high - lowest_low)) * -100,
-        -50  # neutral when range is zero
-    )
+    # Calculate Williams Alligator on 1d timeframe
+    # Jaw (blue): 13-period SMMA, offset 8 bars
+    # Teeth (red): 8-period SMMA, offset 5 bars  
+    # Lips (green): 5-period SMMA, offset 3 bars
+    close_1d = df_1d['close'].values
     
-    # Align Williams %R data to 12h timeframe (wait for daily close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full(len(arr), np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_CLOSE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate 12h Donchian channels (20-period)
+    jaw = smma(close_1d, 13)  # 13-period SMMA
+    teeth = smma(close_1d, 8)  # 8-period SMMA
+    lips = smma(close_1d, 5)   # 5-period SMMA
+    
+    # Apply offsets: Jaw offset 8, Teeth offset 5, Lips offset 3
+    jaw_offset = np.full_like(jaw, np.nan)
+    teeth_offset = np.full_like(teeth, np.nan)
+    lips_offset = np.full_like(lips, np.nan)
+    
+    if len(jaw) > 8:
+        jaw_offset[8:] = jaw[:-8]
+    if len(teeth) > 5:
+        teeth_offset[5:] = teeth[:-5]
+    if len(lips) > 3:
+        lips_offset[3:] = lips[:-3]
+    
+    # Align Alligator lines to 4h timeframe (wait for daily close)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_offset)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_offset)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_offset)
+    
+    # Calculate 4h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -66,37 +93,43 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(williams_r_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
+        # Alligator alignment: Lips > Teeth > Jaw = bullish alignment
+        # Alligator alignment: Lips < Teeth < Jaw = bearish alignment
+        bullish_aligned = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
+        bearish_aligned = lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: price < Donchian low OR Williams %R > -20 (overbought)
-            if close[i] < donchian_low[i] or williams_r_aligned[i] > -20:
+            # Exit: price < Donchian low OR Alligator loses bullish alignment
+            if close[i] < donchian_low[i] or not bullish_aligned:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Donchian high OR Williams %R < -80 (oversold)
-            if close[i] > donchian_high[i] or williams_r_aligned[i] < -80:
+            # Exit: price > Donchian high OR Alligator loses bearish alignment
+            if close[i] > donchian_high[i] or not bearish_aligned:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Donchian breakout + Williams %R filter
+            # Entry logic with volume confirmation and Donchian breakout + Alligator filter
             if volume_confirmed:
-                # Long entry: price > Donchian high AND Williams %R < -50 (not overbought)
-                if close[i] > donchian_high[i] and williams_r_aligned[i] < -50:
+                # Long entry: price > Donchian high AND bullish Alligator alignment
+                if close[i] > donchian_high[i] and bullish_aligned:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Donchian low AND Williams %R > -50 (not oversold)
-                elif close[i] < donchian_low[i] and williams_r_aligned[i] > -50:
+                # Short entry: price < Donchian low AND bearish Alligator alignment
+                elif close[i] < donchian_low[i] and bearish_aligned:
                     position = -1
                     signals[i] = -0.25
     
