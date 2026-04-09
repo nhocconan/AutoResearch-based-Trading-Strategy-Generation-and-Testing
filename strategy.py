@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_cci_mean_reversion_v1
-# Hypothesis: 6h mean reversion strategy using CCI(20) extremes (>100 long entry, <-100 short entry) with volume confirmation (>1.5x 20-bar avg volume) and trend alignment via 12h EMA(50). Enters long when CCI crosses above -100 from below with volume and price > 12h EMA(50); enters short when CCI crosses below 100 from above with volume and price < 12h EMA(50). Exits on CCI crossing zero (mean reversion completion). Uses discrete sizing (0.25) to limit fee churn. Target: 12-37 trades/year (50-150 total over 4 years). CCI captures overbought/oversold conditions; volume confirms reversal conviction; 12h EMA filters counter-trend noise in both bull and bear markets.
+# 4h_donchian_breakout_volume_chop_regime_v1
+# Hypothesis: 4h strategy using Donchian(20) breakouts with volume confirmation (>1.5x 20-bar avg volume) and choppiness regime filter (CHOP(14) > 61.8 for ranging markets). Enters long when price breaks above Donchian upper channel with volume confirmation and chop > 61.8 (mean reversion setup). Enters short when price breaks below Donchian lower channel with volume confirmation and chop > 61.8. Uses discrete sizing (0.25) to limit fee churn. Target: 20-50 trades/year (80-200 total over 4 years). Choppiness filter ensures we only trade in ranging markets where mean reversion works, avoiding strong trends that cause false breakouts. Works in both bull and bear markets as ranging regimes persist across cycles.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_cci_mean_reversion_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_chop_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,69 +20,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Donchian channels (20-period)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
+    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # CCI calculation (20-period)
-    tp = (high + low + close) / 3  # Typical Price
-    tp_s = pd.Series(tp)
-    ma_tp = tp_s.rolling(window=20, min_periods=20).mean().values
-    mad = tp_s.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # Avoid division by zero
-    mad = np.where(mad == 0, 1e-10, mad)
-    cci = (tp - ma_tp) / (0.015 * mad)
-    
-    # Multi-timeframe: 12h EMA(50) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    close_12h_s = pd.Series(close_12h)
-    ema_50_12h = close_12h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Choppiness Index (14-period) - measures ranging vs trending markets
+    # CHOP = 100 * log10(sum(ATR(1)) / (n * log(n))) / log10(n)
+    # Simplified: CHOP > 61.8 = ranging, CHOP < 38.2 = trending
+    tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
+    tr[0] = high[0] - low[0]  # First bar has no previous close
+    atr1 = pd.Series(tr).rolling(window=1, min_periods=1).sum().values  # ATR(1) = TR
+    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    atr_max = pd.Series(high - low).rolling(window=14, min_periods=14).max().values
+    atr_min = pd.Series(high - low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (14 * np.log10(14))) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(cci[i]) or np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(volume[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Trend filters
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Choppiness regime filter: only trade in ranging markets (CHOP > 61.8)
+        chop_filter = chop[i] > 61.8
         
         if position == 1:  # Long position
-            # Exit: CCI crosses above zero (mean reversion complete)
-            if cci[i] > 0:
+            # Exit: price touches Donchian lower channel (mean reversion target)
+            if close[i] <= donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI crosses below zero (mean reversion complete)
-            if cci[i] < 0:
+            # Exit: price touches Donchian upper channel (mean reversion target)
+            if close[i] >= donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for CCI mean reversion entry with volume and trend alignment
-            # Long: CCI crosses above -100 from below
-            cci_long_signal = (cci[i-1] <= -100) and (cci[i] > -100) and volume_confirmed and uptrend
-            # Short: CCI crosses below 100 from above
-            cci_short_signal = (cci[i-1] >= 100) and (cci[i] < 100) and volume_confirmed and downtrend
+            # Check for Donchian breakout with volume confirmation and chop filter
+            bullish_breakout = (close[i] > donchian_high[i]) and volume_confirmed and chop_filter
+            bearish_breakout = (close[i] < donchian_low[i]) and volume_confirmed and chop_filter
             
-            if cci_long_signal:
+            if bullish_breakout:
                 position = 1
                 signals[i] = 0.25
-            elif cci_short_signal:
+            elif bearish_breakout:
                 position = -1
                 signals[i] = -0.25
     
