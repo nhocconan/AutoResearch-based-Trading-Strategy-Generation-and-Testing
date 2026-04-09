@@ -1,87 +1,136 @@
 #!/usr/bin/env python3
-# 4h_russell_bull_bear_power_v1
-# Hypothesis: Russell's Bull/Bear Power oscillator with EMA13 and volume confirmation on 4h timeframe
-# captures institutional buying/selling pressure. Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Long when Bull Power > 0 and rising with volume > 1.5x 20-period average.
-# Short when Bear Power > 0 and rising with volume > 1.5x 20-period average.
-# Weekly EMA50 trend filter ensures alignment with higher timeframe trend.
-# Target: 20-30 trades/year (80-120 over 4 years) with controlled risk.
+# 4h_camarilla_volume_breakout_v2
+# Hypothesis: Camarilla pivot levels on 1d with volume spike and ADX trend filter capture breakouts in both bull and bear markets.
+# Uses L3/L3 and H3/H3 levels for entry, volume > 2x 20-period average, and ADX > 20 to avoid chop.
+# Target: 20-40 trades/year (80-160 over 4 years) with controlled risk.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_russell_bull_bear_power_v1"
+name = "4h_camarilla_volume_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA13
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate ADX(14) for trend strength
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = EMA13 - Low
-    bear_power = ema13 - low
+    atr = np.zeros(n)
+    atr[0] = tr[0]
+    for i in range(1, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Smooth the power indicators
-    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    for i in range(14, n):
+        plus_dm_sum = np.sum(plus_dm[i-13:i+1])
+        minus_dm_sum = np.sum(minus_dm[i-13:i+1])
+        tr_sum = np.sum(tr[i-13:i+1])
+        if tr_sum > 0:
+            plus_di[i] = 100 * plus_dm_sum / tr_sum
+            minus_di[i] = 100 * minus_dm_sum / tr_sum
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    
+    adx = np.zeros(n)
+    adx[13] = dx[13]
+    for i in range(14, n):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
     # Volume confirmation: 20-period average
-    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_threshold = vol_ma_20 * 1.5
+    vol_ma_20 = np.zeros(n)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
     
-    # Weekly trend filter: EMA50 on weekly data
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Get daily Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_h3 = np.zeros(len(df_1d))
+    camarilla_l3 = np.zeros(len(df_1d))
+    camarilla_h4 = np.zeros(len(df_1d))
+    camarilla_l4 = np.zeros(len(df_1d))
+    
+    for i in range(1, len(df_1d)):
+        range_ = high_1d[i-1] - low_1d[i-1]
+        close_prev = close_1d[i-1]
+        camarilla_h4[i] = close_prev + range_ * 1.1 / 2
+        camarilla_l4[i] = close_prev - range_ * 1.1 / 2
+        camarilla_h3[i] = close_prev + range_ * 1.1 / 4
+        camarilla_l3[i] = close_prev - range_ * 1.1 / 4
+    
+    # Align to 4h timeframe
+    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or \
-           np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(adx[i]) or np.isnan(vol_ma_20[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]):
             signals[i] = 0.0
             continue
         
+        # Volume spike condition
+        vol_spike = volume[i] > vol_ma_20[i] * 2.0
+        
+        # ADX trend filter
+        trending = adx[i] > 20
+        
         if position == 1:  # Long position
-            # Exit: Bull Power turns negative or weekly trend turns bearish
-            if bull_power_smooth[i] <= 0 or close[i] < ema_50_1w_aligned[i]:
+            # Exit: price below L3 or ADX drops
+            if close[i] < l3_4h[i] or adx[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bear Power turns negative or weekly trend turns bullish
-            if bear_power_smooth[i] <= 0 or close[i] > ema_50_1w_aligned[i]:
+            # Exit: price above H3 or ADX drops
+            if close[i] > h3_4h[i] or adx[i] < 15:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: Bull Power > 0 and rising with volume confirmation and weekly uptrend
-            if bull_power_smooth[i] > 0 and bull_power_smooth[i] > bull_power_smooth[i-1] and \
-               volume[i] > vol_threshold[i] and close[i] > ema_50_1w_aligned[i]:
+            # Enter long: price breaks above H3 with volume and trend
+            if close[i] > h3_4h[i] and vol_spike and trending:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: Bear Power > 0 and rising with volume confirmation and weekly downtrend
-            elif bear_power_smooth[i] > 0 and bear_power_smooth[i] > bear_power_smooth[i-1] and \
-                 volume[i] > vol_threshold[i] and close[i] < ema_50_1w_aligned[i]:
+            # Enter short: price breaks below L3 with volume and trend
+            elif close[i] < l3_4h[i] and vol_spike and trending:
                 position = -1
                 signals[i] = -0.25
     
