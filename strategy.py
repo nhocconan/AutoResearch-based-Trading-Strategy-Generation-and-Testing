@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_camarilla_pivot_volume_regime_v2
-# Hypothesis: 4h strategy using Camarilla pivot levels from 1d timeframe for entry, volume confirmation (>1.5x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). Uses price touch of Camarilla H3/L3 levels with confluence. Discrete position sizing (0.25) to minimize fee churn. Target: 20-50 trades/year (80-200 total over 4 years). Camarilla pivots provide statistically significant support/resistance levels, volume confirms institutional participation, chop filter avoids ranging market whipsaws. Works in bull/bear: breakouts from pivot levels capture institutional moves, mean reversion at extremes works in ranging regimes.
+# 6h_camarilla_pivot_breakout_volume_v1
+# Hypothesis: 6h strategy using Camarilla pivot levels from 1d HTF. Fade at R3/S3 levels (mean reversion) with volume confirmation (>1.3x 20-bar avg volume), breakout continuation at R4/S4 levels with volume and trend filter (price > 6h EMA50 for longs, < EMA50 for shorts). Works in bull/bear: mean reversion in ranging markets, breakout continuation in trending markets, volume confirms conviction. Uses discrete sizing (0.25) to limit fee churn. Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_pivot_volume_regime_v2"
-timeframe = "4h"
+name = "6h_camarilla_pivot_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,89 +24,84 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index regime filter (14-period)
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    tr_series = pd.Series(tr)
-    atr_series = tr_series.rolling(window=atr_period, min_periods=atr_period).mean()
-    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
-    atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
-    # Avoid division by zero or log of zero
-    denominator = np.log10(atr_period) * (highest_high - lowest_low)
-    denominator = np.where(denominator == 0, np.nan, denominator)
-    chop = 100 * np.log10(atr_sum / denominator)
+    # 6h EMA(50) for trend filter on breakouts
+    close_s = pd.Series(close)
+    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Multi-timeframe: 1d Camarilla pivot levels
+    # Multi-timeframe: 1d OHLC for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    # Calculate Camarilla pivots from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    # Camarilla levels
-    h3 = pivot + (range_hl * 1.1 / 4)
-    l3 = pivot - (range_hl * 1.1 / 4)
-    h4 = pivot + (range_hl * 1.1 / 2)
-    l4 = pivot - (range_hl * 1.1 / 2)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Camarilla pivot levels (based on previous 1d bar)
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_high = high_1d
+    camarilla_low = low_1d
+    camarilla_close = close_1d
+    camarilla_range = camarilla_high - camarilla_low
+    
+    r4 = camarilla_close + 1.5 * camarilla_range
+    r3 = camarilla_close + 1.1 * camarilla_range
+    s3 = camarilla_close - 1.1 * camarilla_range
+    s4 = camarilla_close - 1.5 * camarilla_range
+    
+    # Align 1d Camarilla levels to 6h timeframe (completed 1d bar only)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
-            np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i])):
+        if (np.isnan(volume_ma[i]) or np.isnan(ema_50[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-        # Regime filter: chop < 61.8 indicates trending market
-        trending_market = chop[i] < 61.8
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below L3 level
-            if close[i] < l3_aligned[i]:
+            # Exit: price closes below R3 (fade level) or stoploss via opposite signal
+            if close[i] < r3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H3 level
-            if close[i] > h3_aligned[i]:
+            # Exit: price closes above S3 (fade level) or stoploss via opposite signal
+            if close[i] > s3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for Camarilla level touch with volume and regime confirmation
-            # Long: price touches or crosses above L3 with volume in trending market
-            long_entry = ((close[i] >= l3_aligned[i] and close[i-1] < l3_aligned[i-1]) or
-                         (close[i] <= l4_aligned[i] and close[i-1] > l4_aligned[i-1])) and \
-                        volume_confirmed and trending_market
-            # Short: price touches or crosses below H3 with volume in trending market
-            short_entry = ((close[i] <= h3_aligned[i] and close[i-1] > h3_aligned[i-1]) or
-                          (close[i] >= h4_aligned[i] and close[i-1] < h4_aligned[i-1])) and \
-                         volume_confirmed and trending_market
+            # Fade at R3/S3 (mean reversion) with volume confirmation
+            fade_long = (close[i] <= r3_aligned[i]) and volume_confirmed
+            fade_short = (close[i] >= s3_aligned[i]) and volume_confirmed
             
-            if long_entry:
+            # Breakout continuation at R4/S4 with volume and trend filter
+            breakout_long = (close[i] >= r4_aligned[i]) and volume_confirmed and (close[i] > ema_50[i])
+            breakout_short = (close[i] <= s4_aligned[i]) and volume_confirmed and (close[i] < ema_50[i])
+            
+            if fade_long:
                 position = 1
                 signals[i] = 0.25
-            elif short_entry:
+            elif fade_short:
+                position = -1
+                signals[i] = -0.25
+            elif breakout_long:
+                position = 1
+                signals[i] = 0.25
+            elif breakout_short:
                 position = -1
                 signals[i] = -0.25
     
