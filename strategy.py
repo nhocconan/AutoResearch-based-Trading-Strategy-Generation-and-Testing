@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 1d_camarilla_1w_volume_v1
-# Hypothesis: Daily strategy using weekly Camarilla pivot levels with volume confirmation.
+# 12h_camarilla_1d_volume_v2
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume confirmation.
 # Enters long when price breaks above H3 level with volume spike, short when breaks below L3 level.
-# Uses weekly HTF for structural context and discrete sizing (±0.25) to minimize fee churn.
-# Target: 30-100 trades over 4 years. Works in bull/bear by using Camarilla levels as dynamic S/R.
+# Uses discrete sizing (±0.30) to minimize fee churn. Target: 50-150 trades over 4 years.
+# Works in bull/bear by using Camarilla levels as dynamic support/resistance from higher timeframe.
+# Avoids overtrading by requiring volume spike and strict breakout conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_camarilla_1w_volume_v1"
-timeframe = "1d"
+name = "12h_camarilla_1d_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,32 +24,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Calculate Camarilla pivot levels for 1d
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Camarilla levels (H3/L3 for entries, H4/L4 for stops)
-    h3 = pivot + (range_1w * 1.1 / 4)
-    l3 = pivot - (range_1w * 1.1 / 4)
-    h4 = pivot + (range_1w * 1.1 / 2)
-    l4 = pivot - (range_1w * 1.1 / 2)
+    # Camarilla levels
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
     
-    # Align weekly Camarilla levels to daily timeframe (completed weekly candle only)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    # Align Camarilla levels to 12h timeframe (completed 1d candle only)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Volume spike detection (20-period volume average on daily)
+    # Volume spike detection (20-period volume average on 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma_20 * 2.0)  # Volume at least 2x average
     
@@ -64,28 +65,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below L3 level (stoploss)
+            # Exit: price falls below L3 level
             if close[i] < l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
-            # Exit: price rises above H3 level (stoploss)
+            # Exit: price rises above H3 level
             if close[i] > h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
             # Enter long: price breaks above H3 level with volume spike
             if (close[i] > h3_aligned[i]) and vol_spike[i]:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             # Enter short: price breaks below L3 level with volume spike
             elif (close[i] < l3_aligned[i]) and vol_spike[i]:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
