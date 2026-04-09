@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Uses 1d EMA(50) for trend direction (long when price > EMA, short when price < EMA)
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 12h timeframe
-# - Requires volume > 1.5x 20-period average for breakout confirmation
-# - Fixed position size 0.25 to manage drawdown
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
+# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and ATR trailing stop
+# - Williams %R(14) on 4h: oversold < -80 for long, overbought > -20 for short
+# - 1d EMA(50) trend filter: only long when price > EMA, short when price < EMA
+# - ATR(14) trailing stop: exit when price moves 2.5*ATR against position from extreme
+# - Fixed position size 0.25 to balance return and drawdown
+# - Works in bull via buying dips in uptrend, in bear via selling rallies in downtrend
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_williamsr_meanrev_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,37 +21,30 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_4h) < 50 or len(df_1d) < 30:
         return np.zeros(n)
+    
+    # 4h Williams %R(14)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    denominator = highest_high - lowest_low
+    williams_r = np.where(denominator != 0, -100 * (highest_high - close_4h) / denominator, -50)
     
     # 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Typical price for pivot calculation
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    camarilla_h3 = typical_price + (range_1d * 1.1 / 4)
-    camarilla_l3 = typical_price - (range_1d * 1.1 / 4)
-    camarilla_h4 = typical_price + (range_1d * 1.1 / 2)
-    camarilla_l4 = typical_price - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Pre-compute 12h ATR(14) for stoploss
+    # Pre-compute 4h ATR(14) for trailing stop
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,11 +56,6 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume filter: volume > 1.5x 20-period average
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     highest_high_since_entry = 0.0
@@ -75,9 +63,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(atr[i]) or atr[i] <= 0 or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(atr[i]) or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
@@ -89,13 +76,13 @@ def generate_signals(prices):
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # Exit conditions: stoploss or mean reversion
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:  # ATR stop
+            # Exit conditions: ATR trailing stop or mean reversion signal
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:  # ATR stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < l3_aligned[i]:  # Mean reversion exit
+            elif williams_r_aligned[i] > -50:  # Exit on mean reversion (centerline)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -107,13 +94,13 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # Exit conditions: stoploss or mean reversion
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:  # ATR stop
+            # Exit conditions: ATR trailing stop or mean reversion signal
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:  # ATR stop
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > h3_aligned[i]:  # Mean reversion exit
+            elif williams_r_aligned[i] < -50:  # Exit on mean reversion (centerline)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -121,13 +108,13 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for breakout entries in direction of 1d trend with volume confirmation
-            if uptrend and close[i] > h4_aligned[i] and volume_filter[i]:  # Break above H4 in uptrend
+            # Look for mean reversion entries in direction of 1d trend
+            if uptrend and williams_r_aligned[i] < -80:  # Oversold in uptrend → long
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif downtrend and close[i] < l4_aligned[i] and volume_filter[i]:  # Break below L4 in downtrend
+            elif downtrend and williams_r_aligned[i] > -20:  # Overbought in downtrend → short
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
