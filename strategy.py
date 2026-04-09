@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR-normalized volume spike + chop regime filter
 # Donchian breakout captures medium-term trend structure proven on SOLUSDT test Sharpe 1.10-1.38
-# 1d volume spike confirms institutional participation reducing false breakouts
+# 1d volume spike normalized by ATR confirms institutional participation reducing false breakouts
 # Chop regime filter adapts: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert at bands)
 # Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year) with discrete sizing 0.25-0.30
 # Works in bull/bear: breakout catches trends, chop filter prevents whipsaws in ranging markets
