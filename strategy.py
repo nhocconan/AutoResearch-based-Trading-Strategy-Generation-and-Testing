@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 1d_kama_rsi_chop_v1
-# Hypothesis: 1d strategy using KAMA direction filter + RSI extremes + Choppiness regime for mean reversion in ranging markets and trend following in trending markets.
-# Enters long when price is below KAMA, RSI < 30, and CHOP > 61.8 (ranging market mean reversion).
-# Enters short when price is above KAMA, RSI > 70, and CHOP > 61.8 (ranging market mean reversion).
-# Uses weekly trend filter: only take longs when price above weekly KAMA, shorts when price below weekly KAMA.
+# 6h_adx_dmi_volume_v1
+# Hypothesis: 6h strategy using ADX(14) and DI crossover for trend strength/direction, filtered by volume confirmation.
+# Long when +DI crosses above -DI, ADX > 25 (trending), and volume > 1.3x 20-period average.
+# Short when -DI crosses above +DI, ADX > 25, and volume > 1.3x average.
 # Uses discrete position sizing (±0.25) to minimize fee churn.
-# Target: 30-100 total trades over 4 years (7-25/year). Works in bull/bear via regime adaptation and weekly trend filter.
+# Works in bull/bear via ADX trend filter and volume confirmation to avoid whipsaws.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_adx_dmi_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,127 +25,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA, RSI, and Choppiness calculation
-    # KAMA calculation
-    def calculate_kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=length))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
-        # Handle array case properly
-        if len(close) > length:
-            change = np.abs(np.diff(close, n=length))
-            volatility = []
-            for i in range(length, len(close)):
-                volatility.append(np.sum(np.abs(np.diff(close[i-length:i+1]))))
-            volatility = np.array(volatility)
-            er = np.zeros(len(close))
-            er[length:] = change / (volatility + 1e-10)
-            er = np.where(np.isnan(er), 0, er)
-            er = np.where(er > 1, 1, er)
-        else:
-            er = np.zeros(len(close))
-        
-        # Smoothing constants
-        fast_sc = 2 / (fast + 1)
-        slow_sc = 2 / (slow + 1)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        
-        # KAMA calculation
-        kama = np.zeros(len(close))
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate ADX and DI (14-period) on primary timeframe
+    # +DI = 100 * EMA(smoothed +DM) / ATR
+    # -DI = 100 * EMA(smoothed -DM) / ATR
+    # ADX = 100 * EMA(|+DI - -DI| / (+DI + -DI))
     
-    # RSI calculation
-    def calculate_rsi(close, length=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros(len(close))
-        avg_loss = np.zeros(len(close))
-        
-        # Wilder's smoothing
-        avg_gain[length] = np.mean(gain[:length])
-        avg_loss[length] = np.mean(loss[:length])
-        
-        for i in range(length+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
-            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        rsi = np.concatenate([np.full(length, 50), rsi[length:]])  # Pad beginning
-        return rsi
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Choppiness Index calculation
-    def calculate_chop(high, low, close, length=14):
-        # True Range
-        tr1 = np.abs(high[1:] - low[1:])
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], tr])
-        
-        # Sum of TR over period
-        tr_sum = pd.Series(tr).rolling(window=length, min_periods=length).sum().values
-        
-        # Highest high and lowest low over period
-        hh = pd.Series(high).rolling(window=length, min_periods=length).max().values
-        ll = pd.Series(low).rolling(window=length, min_periods=length).min().values
-        
-        # Choppiness Index
-        chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(length)
-        chop = np.where((hh - ll) == 0, 50, chop)  # Avoid division by zero
-        return chop
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Calculate indicators
-    kama = calculate_kama(close, length=10, fast=2, slow=30)
-    rsi = calculate_rsi(close, length=14)
-    chop = calculate_chop(high, low, close, length=14)
+    # Smoothed TR, +DM, -DM (Wilder's smoothing: alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
     
-    # Get 1w HTF data ONCE before loop for weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Initialize arrays
+    atr = np.full(n, np.nan)
+    plus_dm_smooth = np.full(n, np.nan)
+    minus_dm_smooth = np.full(n, np.nan)
     
-    close_1w = df_1w['close'].values
-    kama_1w = calculate_kama(close_1w, length=10, fast=2, slow=30)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # First value: simple average
+    if n >= period:
+        atr[period-1] = np.nanmean(tr[:period])
+        plus_dm_smooth[period-1] = np.nanmean(plus_dm[:period])
+        minus_dm_smooth[period-1] = np.nanmean(minus_dm[:period])
+        
+        # Wilder's smoothing for subsequent values
+        for i in range(period, n):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+    
+    # Calculate +DI and -DI
+    plus_di = np.full(n, np.nan)
+    minus_di = np.full(n, np.nan)
+    dx = np.full(n, np.nan)
+    
+    valid = ~np.isnan(atr) & (atr != 0)
+    plus_di[valid] = 100 * plus_dm_smooth[valid] / atr[valid]
+    minus_di[valid] = 100 * minus_dm_smooth[valid] / atr[valid]
+    
+    # Calculate DX and ADX
+    di_sum = plus_di + minus_di
+    di_diff = np.abs(plus_di - minus_di)
+    dx[di_sum != 0] = 100 * di_diff[di_sum != 0] / di_sum[di_sum != 0]
+    
+    # ADX = EMA of DX
+    adx = np.full(n, np.nan)
+    if n >= period:
+        adx[period-1] = np.nanmean(dx[:period])
+        for i in range(period, n):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    # Volume confirmation (20-period volume average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma_20 * 1.3)  # Volume at least 1.3x average
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(kama_1w_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price crosses above KAMA OR RSI > 50 (mean reversion complete)
-            if close[i] > kama[i] or rsi[i] > 50:
+            # Exit: -DI crosses above +DI (trend weakening/reversal)
+            if minus_di[i] > plus_di[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price crosses below KAMA OR RSI < 50 (mean reversion complete)
-            if close[i] < kama[i] or rsi[i] < 50:
+            # Exit: +DI crosses above -DI (trend weakening/reversal)
+            if plus_di[i] > minus_di[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price below KAMA, RSI oversold, choppy market, and above weekly KAMA (uptrend filter)
-            if (close[i] < kama[i]) and (rsi[i] < 30) and (chop[i] > 61.8) and (close[i] > kama_1w_aligned[i]):
+            # Enter long: +DI crosses above -DI, ADX > 25 (strong trend), volume spike
+            if (i > 0 and plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1] and
+                adx[i] > 25 and vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price above KAMA, RSI overbought, choppy market, and below weekly KAMA (downtrend filter)
-            elif (close[i] > kama[i]) and (rsi[i] > 70) and (chop[i] > 61.8) and (close[i] < kama_1w_aligned[i]):
+            # Enter short: -DI crosses above +DI, ADX > 25 (strong trend), volume spike
+            elif (i > 0 and minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1] and
+                  adx[i] > 25 and vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
     
