@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d ATR volume filter and chop regime filter
-# - Uses 12h Donchian(20) breakouts for entries in direction of 1d trend (EMA50)
-# - Volume confirmation: 12h volume > 1.3x 20-period average AND 1d volume > 1.2x 20-period average
-# - Regime filter: 12h Choppiness Index < 38.2 (trending) to avoid false breakouts in sideways markets
+# Hypothesis: 12h Bollinger Band breakout with 1d volume confirmation and ADX trend filter
+# - Uses 12h Bollinger Bands (20, 2.0) for breakout entries
+# - Volume confirmation: 12h volume > 1.5x 20-period average to ensure breakout strength
+# - Trend filter: 1d ADX > 25 to ensure we only trade in trending markets (avoid whipsaws in range)
 # - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
 # - Target: ~12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in both bull/bear: Donchian captures breakouts, chop filter avoids whipsaws, multi-timeframe volume confirms strength
+# - Works in both bull/bear: Bollinger Bands adapt to volatility, ADX filter ensures we only trade when trend is strong
 
-name = "12h_1d_donchian_volume_chop_v3"
+name = "12h_1d_bb_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,19 +27,44 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Pre-compute 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate 1d ADX(14) for trend filter
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr_1d[0]
     
-    # Calculate 1d volume > 1.2x 20-period average
-    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume_1d > (1.2 * avg_volume_20_1d)
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Align 1d indicators to 12h timeframe (completed 1d bar only)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d)
+    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def WilderSmooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_1d = WilderSmooth(tr_1d, 14)
+    plus_dm_14 = WilderSmooth(plus_dm, 14)
+    minus_dm_14 = WilderSmooth(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di_14 = np.where(atr_1d > 0, 100 * plus_dm_14 / atr_1d, 0)
+    minus_di_14 = np.where(atr_1d > 0, 100 * minus_dm_14 / atr_1d, 0)
+    dx_14 = np.where((plus_di_14 + minus_di_14) > 0, 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14), 0)
+    adx_1d = WilderSmooth(dx_14, 14)
+    
+    # Align ADX to 12h timeframe (completed 1d bar only)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # 12h price data
     high = prices['high'].values
@@ -47,13 +72,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h Bollinger Bands (20, 2.0)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + (2.0 * bb_std)
+    bb_lower = bb_middle - (2.0 * bb_std)
     
-    # 12h volume > 1.3x 20-period average
+    # 12h volume > 1.5x 20-period average (volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * avg_volume_20)
+    volume_spike = volume > (1.5 * avg_volume_20)
     
     # 12h ATR(14) for trailing stop
     tr1 = high - low
@@ -63,17 +91,6 @@ def generate_signals(prices):
     tr[0] = tr[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h Choppiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / (max(high,n) - min(low,n))) / log10(n)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    # Avoid division by zero
-    chop = np.where(range_14 > 0, 100 * np.log10(atr_14 / range_14) / np.log10(14), 50)
-    chop = np.where(np.isnan(chop), 50, chop)
-    chop_regime = chop < 38.2  # True when trending (avoid false breakouts in ranging markets)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     highest_since_entry = 0.0
@@ -81,14 +98,13 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or
+        if (np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(volume_confirm_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or
             np.isnan(atr[i]) or
-            np.isnan(chop_regime[i]) or
-            atr[i] <= 0):
+            atr[i] <= 0 or
+            adx_1d_aligned[i] < 25):  # ADX trend filter - only trade when trending
             signals[i] = 0.0
             continue
         
@@ -97,8 +113,9 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.0x ATR from high
-            if low[i] <= highest_since_entry - (2.0 * atr[i]):
+            # Exit conditions: price retraces 2.0x ATR from high OR touches BB middle (mean reversion)
+            if low[i] <= highest_since_entry - (2.0 * atr[i]) or \
+               low[i] <= bb_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -109,30 +126,23 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.0x ATR from low
-            if high[i] >= lowest_since_entry + (2.0 * atr[i]):
+            # Exit conditions: price retraces 2.0x ATR from low OR touches BB middle (mean reversion)
+            if high[i] >= lowest_since_entry + (2.0 * atr[i]) or \
+               high[i] >= bb_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with volume confirmation and trend filter
-            # Long: price breaks above Donchian upper band AND volume spike AND 1d volume confirm AND 1d price > EMA50 AND chop regime trending
-            if (high[i] >= highest_20[i] and 
-                volume_spike[i] and 
-                volume_confirm_1d_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and
-                chop_regime[i]):
+            # Look for Bollinger Band breakout with volume confirmation
+            # Long: price breaks above BB upper AND volume spike
+            if high[i] >= bb_upper[i] and volume_spike[i]:
                 position = 1
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]
                 signals[i] = 0.25
-            # Short: price breaks below Donchian lower band AND volume spike AND 1d volume confirm AND 1d price < EMA50 AND chop regime trending
-            elif (low[i] <= lowest_20[i] and 
-                  volume_spike[i] and 
-                  volume_confirm_1d_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  chop_regime[i]):
+            # Short: price breaks below BB lower AND volume spike
+            elif low[i] <= bb_lower[i] and volume_spike[i]:
                 position = -1
                 highest_since_entry = low[i]
                 lowest_since_entry = low[i]
