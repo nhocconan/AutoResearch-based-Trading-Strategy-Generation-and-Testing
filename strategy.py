@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume spike confirmation
-# - Uses 6h Williams %R(14) for overbought/oversold signals (%R < -80 long, %R > -20 short)
-# - Filters with 12h EMA(50) trend: only long when price > EMA50, short when price < EMA50
-# - Confirms with 6h volume > 2.0x 20-period average for institutional participation
-# - Exits when Williams %R reverts to mean (-50) or opposite extreme (%R > -20 for longs, %R < -80 for shorts)
-# - Position size: 0.25 (25% of capital) for controlled risk
-# - Target: 12-25 trades/year on 6h timeframe (48-100 total over 4 years) to minimize fee drag
+# Hypothesis: 4h Williams %R mean reversal with 1d volume spike and chop regime filter
+# - Uses 4h Williams %R(14) for mean reversion signals (long when %R < -80, short when %R > -20)
+# - Confirms with 1d volume > 1.8x 20-period average (strong institutional participation)
+# - Filters by 1d choppiness index: trade only when CHOP > 61.8 (range) OR CHOP < 38.2 (trend)
+# - Exits when price reverses to Williams %R midpoint (-50) or ATR-based stoploss (2.5x ATR)
+# - Position size: 0.25 (25% of capital) for balanced risk/return
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to minimize fee drag
 # - Works in bull markets (mean reversion in uptrend) and bear markets (mean reversion in downtrend)
-# - Williams %R identifies exhaustion points; trend filter prevents fighting strong moves
+# - Williams %R identifies overextended moves that tend to reverse, especially in choppy/range markets
 
-name = "6h_12h_williamsr_meanrev_v1"
-timeframe = "6h"
+name = "4h_1d_williamsr_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,68 +23,106 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h indicators
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Pre-compute HTF indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 6h price data
+    # 1d True Range for ATR and chop
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    # 1d ATR(14) for stoploss
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d Williams %R(14)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    denom = np.where((highest_high_14 - lowest_low_14) > 0, highest_high_14 - lowest_low_14, 1e-10)
+    williams_r = -100 * ((highest_high_14 - close_1d) / denom)
+    
+    # 1d Volume > 1.8x 20-period average (stricter for fewer trades)
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.8 * avg_volume_20)
+    
+    # 1d Choppiness Index(14)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.where((highest_14 - lowest_14) > 0, highest_14 - lowest_14, 1e-10)
+    chop = 100 * np.log10(sum_tr_14 / chop_denom) / np.log10(14)
+    chop_range = chop > 61.8  # range-bound market
+    chop_trend = chop < 38.2  # trending market
+    
+    # Align all 1d indicators to 4h
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
+    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range.astype(float))
+    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend.astype(float))
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # 6h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # 6h Volume > 2.0x 20-period average
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    atr_stop = 0.0
     
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(volume_spike[i]) or ema_50_12h_aligned[i] <= 0):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
+            np.isnan(chop_range_aligned[i]) or np.isnan(chop_trend_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or atr_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Williams %R reverts to mean (-50) or becomes overbought (> -20)
-            if williams_r[i] >= -50:
+            # Exit conditions: Williams %R reverses to -50 or ATR stoploss
+            if williams_r_aligned[i] >= -50:  # Reverse to midpoint
+                position = 0
+                signals[i] = 0.0
+            elif low[i] <= entry_price - (2.5 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Williams %R reverts to mean (-50) or becomes oversold (< -80)
-            if williams_r[i] <= -50:
+            # Exit conditions: Williams %R reverses to -50 or ATR stoploss
+            if williams_r_aligned[i] <= -50:  # Reverse to midpoint
+                position = 0
+                signals[i] = 0.0
+            elif high[i] >= entry_price + (2.5 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Williams %R extreme with volume confirmation and trend filter
-            if (williams_r[i] <= -80 and  # Oversold
-                volume_spike[i] and       # Volume confirmation
-                close[i] > ema_50_12h_aligned[i]):  # Uptrend filter
+            # Look for Williams %R extreme with volume confirmation and regime filter
+            if (williams_r_aligned[i] <= -80 and  # Oversold (long signal)
+                volume_spike_aligned[i] and         # Volume confirmation
+                (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = 1
+                entry_price = low[i]
+                atr_stop = atr_1d_aligned[i]
                 signals[i] = 0.25
-            elif (williams_r[i] >= -20 and   # Overbought
-                  volume_spike[i] and      # Volume confirmation
-                  close[i] < ema_50_12h_aligned[i]):  # Downtrend filter
+            elif (williams_r_aligned[i] >= -20 and   # Overbought (short signal)
+                  volume_spike_aligned[i] and         # Volume confirmation
+                  (chop_range_aligned[i] or chop_trend_aligned[i])):  # Either regime
                 position = -1
+                entry_price = high[i]
+                atr_stop = atr_1d_aligned[i]
                 signals[i] = -0.25
     
     return signals
