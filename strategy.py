@@ -1,161 +1,141 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v5
-# Hypothesis: Breakout above/below 1-day Camarilla pivot levels (H3/L3) on 4h chart with volume confirmation and volatility filter.
-# Only take long when price breaks above H3 level, short when breaks below L3 level.
-# Exit when price returns to Pivot Point (PP) level.
-# Uses volatility filter (ATR < 3.5% of price) and volume confirmation (volume > 1.3x 20-period avg).
-# Reduced trade frequency by tightening volume confirmation to 1.5x and adding ADX(14) > 20 filter to avoid chop.
-# Target: 20-35 trades/year (80-140 total over 4 years) with strict entry conditions.
-# Works in both bull and bear markets due to pivot levels adapting to volatility and volume/vol filters reducing whipsaw.
+# 6h_1d_adx_ema_trend_follow_v1
+# Hypothesis: Trend following on 6h using EMA(21) for direction and ADX(14) for strength, filtered by 1d EMA(50) trend.
+# Enter long when 6h EMA(21) > EMA(50) AND ADX > 25 AND 1d EMA(50) > prior 1d EMA(50).
+# Enter short when 6h EMA(21) < EMA(50) AND ADX > 25 AND 1d EMA(50) < prior 1d EMA(50).
+# Exit when EMA cross reverses or ADX falls below 20.
+# Designed to capture strong trends while avoiding choppy markets, works in both bull and bear via ADX filter.
+# Target: 60-100 total trades over 4 years (15-25/year) with strict trend strength requirements.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v5"
-timeframe = "4h"
+name = "6h_1d_adx_ema_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility filter
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1])
-        lc = abs(low[i] - close[i-1])
-        tr[i] = max(hl, hc, lc)
+    # Calculate EMA(21) and EMA(50) for 6h
+    def ema(arr, period):
+        result = np.full(n, np.nan)
+        multiplier = 2.0 / (period + 1)
+        sum_val = 0.0
+        count = 0
+        for i in range(n):
+            if np.isnan(arr[i]):
+                continue
+            if count == 0:
+                sum_val = arr[i]
+            else:
+                sum_val = arr[i] * multiplier + sum_val * (1 - multiplier)
+            count += 1
+            if count >= period:
+                result[i] = sum_val
+        return result
     
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
+    ema_21 = ema(close, 21)
+    ema_50 = ema(close, 50)
     
-    # Calculate ADX(14) for trend strength filter
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        if up > down and up > 0:
-            plus_dm[i] = up
-        else:
-            plus_dm[i] = 0
-        if down > up and down > 0:
-            minus_dm[i] = down
-        else:
-            minus_dm[i] = 0
+    # Calculate ADX(14)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+        tr[0] = high[0] - low[0]  # First period
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        def smooth(arr, period):
+            result = np.full(n, np.nan)
+            if n < period:
+                return result
+            # Initial average
+            result[period-1] = np.nansum(arr[1:period]) if period > 1 else arr[0]
+            # Wilder smoothing
+            for i in range(period, n):
+                if np.isnan(result[i-1]):
+                    result[i] = arr[i]
+                else:
+                    result[i] = (result[i-1] * (period - 1) + arr[i]) / period
+            return result
+        
+        tr_smooth = smooth(tr, period)
+        dm_plus_smooth = smooth(dm_plus, period)
+        dm_minus_smooth = smooth(dm_minus, period)
+        
+        # Directional Indicators
+        di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+        di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+        
+        # DX
+        dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+        
+        # ADX
+        adx = smooth(dx, period)
+        return adx
     
-    tr_ma = np.zeros(n)
-    plus_dm_ma = np.zeros(n)
-    minus_dm_ma = np.zeros(n)
-    # Initial values
-    tr_ma[0] = tr[0]
-    plus_dm_ma[0] = plus_dm[0]
-    minus_dm_ma[0] = minus_dm[0]
-    # Smoothing
-    for i in range(1, n):
-        tr_ma[i] = 0.9 * tr_ma[i-1] + 0.1 * tr[i]
-        plus_dm_ma[i] = 0.9 * plus_dm_ma[i-1] + 0.1 * plus_dm[i]
-        minus_dm_ma[i] = 0.9 * minus_dm_ma[i-1] + 0.1 * minus_dm[i]
+    adx = calculate_adx(high, low, close, 14)
     
-    # Avoid division by zero
-    dx = np.zeros(n)
-    for i in range(n):
-        if tr_ma[i] != 0:
-            dx[i] = abs(plus_dm_ma[i] - minus_dm_ma[i]) / (tr_ma[i] + 1e-10) * 100
-        else:
-            dx[i] = 0
-    
-    adx = np.zeros(n)
-    adx[0] = dx[0]
-    for i in range(1, n):
-        adx[i] = 0.9 * adx[i-1] + 0.1 * dx[i]
-    
-    # Load 1d data ONCE before loop for Camarilla pivot levels
+    # Load 1d data ONCE before loop for EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA(50) on 1d close
     close_1d = df_1d['close'].values
+    ema_50_1d = ema(close_1d, 50)
     
-    # Camarilla formulas
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Resistance levels (H3)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    
-    # Support levels (L3)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    
-    # Align 1d levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume confirmation - 20 period average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+    # Align 1d EMA to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i]):
+        if np.isnan(ema_21[i]) or np.isnan(ema_50[i]) or np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility
-        vol_filter = atr[i] < 0.035 * close[i]  # ATR less than 3.5% of price
-        
-        # Volume confirmation: current volume > 1.5x 20-period average (tightened from 1.3x)
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5
-        
-        # Trend strength filter: ADX > 20 to avoid chop
-        trend_ok = adx[i] > 20
+        # 1d EMA trend direction (rising/falling)
+        ema_1d_rising = ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] if i > 0 else False
+        ema_1d_falling = ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] if i > 0 else False
         
         if position == 1:  # Long position
-            # Exit: price returns to or below Pivot Point
-            if close[i] <= pp_aligned[i]:
+            # Exit: EMA cross down OR ADX weak (<20) OR 1d trend turns down
+            if ema_21[i] < ema_50[i] or adx[i] < 20 or not ema_1d_rising:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above Pivot Point
-            if close[i] >= pp_aligned[i]:
+            # Exit: EMA cross up OR ADX weak (<20) OR 1d trend turns up
+            if ema_21[i] > ema_50[i] or adx[i] < 20 or not ema_1d_falling:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above R3 level with volume confirmation and volatility filter
-            if close[i] > r3_aligned[i] and vol_ok and vol_filter and trend_ok:
+            # Enter long: EMA21 > EMA50 AND ADX > 25 AND 1d EMA rising
+            if ema_21[i] > ema_50[i] and adx[i] > 25 and ema_1d_rising:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below S3 level with volume confirmation and volatility filter
-            elif close[i] < l3_aligned[i] and vol_ok and vol_filter and trend_ok:
+            # Enter short: EMA21 < EMA50 AND ADX > 25 AND 1d EMA falling
+            elif ema_21[i] < ema_50[i] and adx[i] > 25 and ema_1d_falling:
                 position = -1
                 signals[i] = -0.25
     
