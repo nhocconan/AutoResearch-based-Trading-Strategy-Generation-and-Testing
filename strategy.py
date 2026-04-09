@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_camarilla_volume_breakout_v3
-# Hypothesis: Camarilla pivot levels (H3/L3) on 1d with volume spike and ADX trend filter capture breakouts in both bull and bear markets.
-# Uses tighter volume threshold (3x average) and higher ADX (25) to reduce trades and improve quality.
-# Target: 15-30 trades/year (60-120 over 4 years) to avoid fee drag.
+# 1d_ema_cross_volume_macd_v1
+# Hypothesis: Daily EMA(21) cross with MACD histogram and volume confirmation captures major trend moves in both bull and bear markets.
+# Uses EMA(9) and EMA(21) crossover, MACD(12,26,9) histogram > 0 for long/<0 for short, volume > 1.5x 20-day average.
+# Includes volatility filter (ATR(14) < 50-day ATR mean) to avoid chop. Target: 15-25 trades/year (60-100 total).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_volume_breakout_v3"
-timeframe = "4h"
+name = "1d_ema_cross_volume_macd_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,40 +22,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ADX(14) for trend strength
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    tr = np.zeros(n)
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
-        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # EMA(9) and EMA(21)
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # MACD(12,26,9)
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    macd_signal = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - macd_signal
     
-    plus_di = np.zeros(n)
-    minus_di = np.zeros(n)
-    dx = np.zeros(n)
-    for i in range(14, n):
-        plus_dm_sum = np.sum(plus_dm[i-13:i+1])
-        minus_dm_sum = np.sum(minus_dm[i-13:i+1])
-        tr_sum = np.sum(tr[i-13:i+1])
-        if tr_sum > 0:
-            plus_di[i] = 100 * plus_dm_sum / tr_sum
-            minus_di[i] = 100 * minus_dm_sum / tr_sum
-            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    adx = np.zeros(n)
-    adx[13] = dx[13]
-    for i in range(14, n):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-day average
     vol_ma_20 = np.zeros(n)
     vol_sum = 0
     for i in range(n):
@@ -65,66 +43,80 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
-    # Get daily Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # ATR(14) for volatility filter
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr14 = np.zeros(n)
+    atr14[0] = tr[0]
+    for i in range(1, n):
+        atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
+    
+    # 50-day average ATR for volatility regime
+    atr_ma_50 = np.zeros(n)
+    atr_sum = 0
+    for i in range(n):
+        atr_sum += atr14[i]
+        if i >= 50:
+            atr_sum -= atr14[i-50]
+        if i >= 49:
+            atr_ma_50[i] = atr_sum / 50
+    
+    # Weekly trend filter: EMA(21) on weekly
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_h3 = np.zeros(len(df_1d))
-    camarilla_l3 = np.zeros(len(df_1d))
-    
-    for i in range(1, len(df_1d)):
-        range_ = high_1d[i-1] - low_1d[i-1]
-        close_prev = close_1d[i-1]
-        camarilla_h3[i] = close_prev + range_ * 1.1 / 4
-        camarilla_l3[i] = close_prev - range_ * 1.1 / 4
-    
-    # Align to 4h timeframe
-    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    ema21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if np.isnan(adx[i]) or np.isnan(vol_ma_20[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]):
+        if np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(macd_hist[i]) or \
+           np.isnan(vol_ma_20[i]) or np.isnan(atr14[i]) or np.isnan(atr_ma_50[i]) or \
+           np.isnan(ema21_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition (3x average for tighter filter)
-        vol_spike = volume[i] > vol_ma_20[i] * 3.0
+        # Volatility filter: avoid high volatility chop
+        low_vol = atr14[i] < atr_ma_50[i] * 1.5
         
-        # ADX trend filter (higher threshold for stronger trends)
-        trending = adx[i] > 25
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema21_1w_aligned[i]
+        weekly_downtrend = close[i] < ema21_1w_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price below L3 or ADX drops
-            if close[i] < l3_4h[i] or adx[i] < 20:
+            # Exit: EMA cross down or MACD histogram negative
+            if ema9[i] < ema21[i] or macd_hist[i] < 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price above H3 or ADX drops
-            if close[i] > h3_4h[i] or adx[i] < 20:
+            # Exit: EMA cross up or MACD histogram positive
+            if ema9[i] > ema21[i] or macd_hist[i] > 0:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H3 with volume and trend
-            if close[i] > h3_4h[i] and vol_spike and trending:
+            # Enter long: EMA cross up + MACD hist positive + volume + low vol + weekly uptrend
+            if (ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1] and  # fresh cross
+                macd_hist[i] > 0 and 
+                volume[i] > vol_ma_20[i] * 1.5 and
+                low_vol and
+                weekly_uptrend):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L3 with volume and trend
-            elif close[i] < l3_4h[i] and vol_spike and trending:
+            # Enter short: EMA cross down + MACD hist negative + volume + low vol + weekly downtrend
+            elif (ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1] and  # fresh cross
+                  macd_hist[i] < 0 and 
+                  volume[i] > vol_ma_20[i] * 1.5 and
+                  low_vol and
+                  weekly_downtrend):
                 position = -1
                 signals[i] = -0.25
     
