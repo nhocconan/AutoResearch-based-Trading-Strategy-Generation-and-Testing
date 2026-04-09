@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 6h_market_structure_bounce_v1
-# Hypothesis: Combines 1-day market structure (higher highs/lows) with 6-hour pullbacks to EMA21 for trend continuation entries in both bull and bear markets.
-# Uses 1d swing points for trend direction, 6h EMA21 pullback for entry, and volume confirmation.
-# Target: 20-40 trades/year (80-160 over 4 years) with controlled risk.
+# 4h_triple_filter_breakout_v1
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1-day EMA trend filter for both bull and bear markets.
+# Uses only 3 conditions: price breakout above/below 20-period Donchian channel, volume > 1.5x 20-period average, and price above/below 1-day EMA50 for trend alignment.
+# Target: 20-30 trades/year (80-120 over 4 years) with low frequency to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_market_structure_bounce_v1"
-timeframe = "6h"
+name = "4h_triple_filter_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,59 +22,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA21 on 6h for pullback entries
-    alpha = 2 / (21 + 1)
-    ema21 = np.zeros(n)
-    ema21[0] = close[0]
-    for i in range(1, n):
-        ema21[i] = alpha * close[i] + (1 - alpha) * ema21[i-1]
+    # 20-period Donchian channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     
-    # Get daily data for market structure
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    for i in range(n):
+        if i >= 19:
+            high_max[i] = np.max(high[i-19:i+1])
+            low_min[i] = np.min(low[i-19:i+1])
     
-    # Identify swing highs and lows on daily
-    swing_high = np.zeros(len(df_1d), dtype=bool)
-    swing_low = np.zeros(len(df_1d), dtype=bool)
-    
-    for i in range(2, len(df_1d)-2):
-        # Swing high: higher than 2 bars before and after
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            swing_high[i] = True
-        # Swing low: lower than 2 bars before and after
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            swing_low[i] = True
-    
-    # Determine trend based on last two swing points
-    trend = np.zeros(len(df_1d))  # 1=uptrend, -1=downtrend, 0=undefined
-    last_swing_high_idx = -1
-    last_swing_low_idx = -1
-    
-    for i in range(len(df_1d)):
-        if swing_high[i]:
-            last_swing_high_idx = i
-        if swing_low[i]:
-            last_swing_low_idx = i
-        
-        if last_swing_high_idx != -1 and last_swing_low_idx != -1:
-            if last_swing_high_idx > last_swing_low_idx:
-                trend[i] = 1  # Uptrend: last swing high is more recent
-            else:
-                trend[i] = -1  # Downtrend: last swing low is more recent
-    
-    # Align trend to 6h timeframe
-    trend_6h = align_htf_to_ltf(prices, df_1d, trend)
+    donchian_high[19:] = high_max[19:]
+    donchian_low[19:] = low_min[19:]
     
     # Volume confirmation: 20-period average
-    vol_ma_20 = np.zeros(n)
-    vol_sum = 0
+    vol_ma_20 = np.full(n, np.nan)
+    vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
         if i >= 20:
@@ -82,12 +47,33 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
+    # Get daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    # Calculate EMA50 on daily
+    ema50_1d = np.full(len(df_1d), np.nan)
+    alpha = 2 / (50 + 1)
+    for i in range(len(df_1d)):
+        if i == 0:
+            ema50_1d[i] = close_1d[i]
+        elif np.isnan(ema50_1d[i-1]):
+            ema50_1d[i] = close_1d[i]
+        else:
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    
+    # Align daily EMA50 to 4h
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(ema21[i]) or np.isnan(trend_6h[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -95,33 +81,31 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
         if position == 1:  # Long position
-            # Exit: trend changes to downtrend or price breaks below EMA21
-            if trend_6h[i] == -1 or close[i] < ema21[i]:
+            # Exit: price breaks below Donchian low or trend changes
+            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend changes to uptrend or price breaks above EMA21
-            if trend_6h[i] == 1 or close[i] > ema21[i]:
+            # Exit: price breaks above Donchian high or trend changes
+            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: uptrend + pullback to EMA21 + volume
-            if (trend_6h[i] == 1 and 
-                low[i] <= ema21[i] * 1.005 and  # Allow small tolerance
-                close[i] > ema21[i] and
-                vol_ok):
+            # Enter long: price breaks above Donchian high + volume + above daily EMA50
+            if (close[i] > donchian_high[i] and 
+                vol_ok and 
+                close[i] > ema50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: downtrend + pullback to EMA21 + volume
-            elif (trend_6h[i] == -1 and 
-                  high[i] >= ema21[i] * 0.995 and  # Allow small tolerance
-                  close[i] < ema21[i] and
-                  vol_ok):
+            # Enter short: price breaks below Donchian low + volume + below daily EMA50
+            elif (close[i] < donchian_low[i] and 
+                  vol_ok and 
+                  close[i] < ema50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
