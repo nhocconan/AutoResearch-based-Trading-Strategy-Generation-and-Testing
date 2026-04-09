@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years) to avoid fee drag
 # - Combines trend-following (HTF) with mean reversion (LTF) for robustness in bull/bear markets
 
-name = "1h_4h_1d_supertrend_rsi_bb_meanrev_v1"
+name = "1h_4h_1d_supertrend_rsi_bb_meanrev_v2"
 timeframe = "1h"
 leverage = 1.0
 
