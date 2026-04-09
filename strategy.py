@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and ATR trailing stop
-# - Uses 1d HTF for Camarilla pivot calculation (based on completed daily candles)
-# - Long when price touches S3 level with volume > 1.5x 20-period average and RSI < 30
-# - Short when price touches R3 level with volume > 1.5x 20-period average and RSI > 70
-# - ATR(14) trailing stop: exit long at 2.0x ATR below highest high since entry, exit short at 2.0x ATR above lowest low since entry
+# Hypothesis: 4h strategy using 1d Donchian channel breakout with volume confirmation and ATR trailing stop
+# - Uses 1d HTF for Donchian(20) upper/lower channels (based on completed daily candles)
+# - Long when price breaks above Donchian upper channel with volume > 1.8x 20-period average
+# - Short when price breaks below Donchian lower channel with volume > 1.8x 20-period average
+# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry, exit short at 2.5x ATR above lowest low since entry
 # - Fixed position size 0.25 to control drawdown
-# - Works in bull/bear: Camarilla levels adapt to volatility, volume/RSI confirmation filters false signals
-# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
+# - Works in bull/bear: Donchian channels adapt to volatility, volume confirmation filters false breakouts
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
 
-name = "4h_1d_camarilla_volume_rsi_v1"
+name = "4h_1d_donchian_volume_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,39 +33,19 @@ def generate_signals(prices):
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # S3 = C - (Range * 1.1/2)
-    # S2 = C - (Range * 1.1/4)
-    # S1 = C - (Range * 1.1/6)
-    # R1 = C + (Range * 1.1/6)
-    # R2 = C + (Range * 1.1/4)
-    # R3 = C + (Range * 1.1/2)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    camarilla_s3 = close_1d - (range_1d * 1.1 / 2.0)
-    camarilla_r3 = close_1d + (range_1d * 1.1 / 2.0)
+    # Calculate 1d Donchian channel (20-period) - based on completed daily candles
+    # Upper channel = highest high of last 20 days
+    # Lower channel = lowest low of last 20 days
+    high_max_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    # Align Donchian levels to 4h timeframe (wait for completed 1d bar)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_max_20)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_min_20)
     
     # Pre-compute volume confirmation (20-period average for 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute RSI (14-period) for confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    rsi_values[:14] = np.nan  # First 14 values invalid
     
     # Pre-compute ATR (14-period) for stoploss
     tr1 = high - low
@@ -82,21 +62,21 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(rsi_values[i]) or np.isnan(atr[i]) or
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
             vol_ma_20[i] <= 0 or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 4h volume > 1.8x average
+        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
+            # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -108,8 +88,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
+            # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -117,16 +97,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Camarilla touch with volume and RSI confirmation
+            # Entry logic: Donchian breakout with volume confirmation
             if volume_confirmed:
-                # Long entry: price touches or goes below S3 level with RSI < 30 (oversold)
-                if low[i] <= camarilla_s3_aligned[i] and rsi_values[i] < 30:
+                # Long entry: price breaks above Donchian upper channel
+                if close[i] > donchian_high_aligned[i]:
                     position = 1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: price touches or goes above R3 level with RSI > 70 (overbought)
-                elif high[i] >= camarilla_r3_aligned[i] and rsi_values[i] > 70:
+                # Short entry: price breaks below Donchian lower channel
+                elif close[i] < donchian_low_aligned[i]:
                     position = -1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
