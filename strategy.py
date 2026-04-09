@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ATR-based volume confirmation and ADX regime filter
-# - Uses 6h Donchian channel breakouts for entries (structure-based)
-# - Volume confirmation: 1d ATR(14) ratio > 1.2 indicating elevated volatility (avoids low-vol breakouts)
-# - Regime filter: 1d ADX(14) > 20 to ensure trending market (avoid chop/range)
+# Hypothesis: 12h Donchian breakout with 1d ATR volume filter and chop regime filter
+# - Uses 12h Donchian(20) breakouts for entries in direction of 1d trend (EMA50)
+# - Volume confirmation: 12h volume > 1.3x 20-period average AND 1d volume > 1.2x 20-period average
+# - Regime filter: 12h Choppiness Index < 38.2 (trending) to avoid false breakouts in sideways markets
 # - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
-# - Works in both bull/bear: Donchian adapts to volatility, ADX filter ensures trending conditions,
-#   ATR volume confirmation avoids false breakouts in low-volatility environments
+# - Target: ~12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - Works in both bull/bear: Donchian captures breakouts, chop filter avoids whipsaws, multi-timeframe volume confirms strength
 
-name = "6h_1d_donchian_atr_adx_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_chop_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,70 +27,52 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Pre-compute 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR(14)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Calculate 1d ATR ratio: current ATR / 20-period average ATR
-    atr_avg_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1d / atr_avg_20
-    atr_ratio = np.where(np.isnan(atr_ratio), 1.0, atr_ratio)
+    # Calculate 1d volume > 1.2x 20-period average
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1d = volume_1d > (1.2 * avg_volume_20_1d)
     
-    # Calculate 1d ADX(14)
-    # +DM and -DM
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Align 1d indicators to 12h timeframe (completed 1d bar only)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d)
     
-    # Smoothed ATR, +DM, -DM
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_smoothed = pd.Series(atr_14).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smoothed = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smoothed = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * (plus_dm_smoothed / atr_14_smoothed)
-    minus_di = 100 * (minus_dm_smoothed / atr_14_smoothed)
-    plus_di = np.where(np.isnan(plus_di), 0, plus_di)
-    minus_di = np.where(np.isnan(minus_di), 0, minus_di)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where(np.isnan(dx), 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx = np.where(np.isnan(adx), 0, adx)
-    
-    # Align 1d indicators to 6h timeframe (completed 1d bar only)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 6h price data
+    # 12h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channel (20-period)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h ATR(14) for trailing stop
-    tr1_6h = high - low
-    tr2_6h = np.abs(high - np.roll(close, 1))
-    tr3_6h = np.abs(low - np.roll(close, 1))
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    tr_6h[0] = tr_6h[0]
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # 12h volume > 1.3x 20-period average
+    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.3 * avg_volume_20)
+    
+    # 12h ATR(14) for trailing stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 12h Choppiness Index (CHOP) for regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / (max(high,n) - min(low,n))) / log10(n)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_14 = max_high_14 - min_low_14
+    # Avoid division by zero
+    chop = np.where(range_14 > 0, 100 * np.log10(atr_14 / range_14) / np.log10(14), 50)
+    chop = np.where(np.isnan(chop), 50, chop)
+    chop_regime = chop < 38.2  # True when trending (avoid false breakouts in ranging markets)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -100,18 +81,16 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or
-            np.isnan(atr_ratio_aligned[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(atr_6h[i]) or
-            atr_6h[i] <= 0):
+        if (np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(volume_confirm_1d_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(chop_regime[i]) or
+            atr[i] <= 0):
             signals[i] = 0.0
             continue
-        
-        # Regime and volatility filters
-        volatile_enough = atr_ratio_aligned[i] > 1.2  # ATR > 1.2x average
-        trending = adx_aligned[i] > 20  # ADX > 20 indicates trending market
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -119,7 +98,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
             
             # Exit conditions: price retraces 2.0x ATR from high
-            if low[i] <= highest_since_entry - (2.0 * atr_6h[i]):
+            if low[i] <= highest_since_entry - (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -131,21 +110,29 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
             
             # Exit conditions: price retraces 2.0x ATR from low
-            if high[i] >= lowest_since_entry + (2.0 * atr_6h[i]):
+            if high[i] >= lowest_since_entry + (2.0 * atr[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with volume and regime confirmation
-            # Long: price breaks above Donchian high AND volatile AND trending
-            if high[i] >= highest_high_20[i] and volatile_enough and trending:
+            # Look for Donchian breakout with volume confirmation and trend filter
+            # Long: price breaks above Donchian upper band AND volume spike AND 1d volume confirm AND 1d price > EMA50 AND chop regime trending
+            if (high[i] >= highest_20[i] and 
+                volume_spike[i] and 
+                volume_confirm_1d_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and
+                chop_regime[i]):
                 position = 1
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]
                 signals[i] = 0.25
-            # Short: price breaks below Donchian low AND volatile AND trending
-            elif low[i] <= lowest_low_20[i] and volatile_enough and trending:
+            # Short: price breaks below Donchian lower band AND volume spike AND 1d volume confirm AND 1d price < EMA50 AND chop regime trending
+            elif (low[i] <= lowest_20[i] and 
+                  volume_spike[i] and 
+                  volume_confirm_1d_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and
+                  chop_regime[i]):
                 position = -1
                 highest_since_entry = low[i]
                 lowest_since_entry = low[i]
