@@ -1,83 +1,88 @@
 #!/usr/bin/env python3
-# 6h_1d_cci_momentum_v1
-# Hypothesis: 6-hour CCI momentum with 1-day trend filter. Uses CCI(20) > 100 for long momentum and < -100 for short momentum,
-# filtered by 1-day EMA(50) trend direction. Works in trending markets (both bull and bear) by aligning with higher timeframe trend.
+# 12h_1d_camarilla_breakout_v2
+# Hypothesis: 12-hour breakouts at Camarilla pivot levels (H3/L3) from daily timeframe with volume confirmation (>2x 20-bar average volume).
+# Camarilla levels act as intraday support/resistance; breaks signal momentum continuation.
+# Volume filter reduces false breakouts. Works in bull markets (upward breaks) and bear markets (downward breaks).
 # Target: 15-35 trades per year per symbol (~60-140 total over 4 years).
+# Uses 12h primary timeframe and 1h timeframe for HTF context.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_cci_momentum_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1-day EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily close for Camarilla levels
+    daily_close = df_1d['close'].values
     
-    # Calculate CCI(20) on 6h data
-    typical_price = (high + low + close) / 3.0
-    tp_mean = np.full(n, np.nan)
-    tp_dev = np.full(n, np.nan)
+    # Camarilla levels: H3/L3 = C ± (H-L)*1.1/2
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    camarilla_h3 = daily_close + (daily_high - daily_low) * 1.1 / 2
+    camarilla_l3 = daily_close - (daily_high - daily_low) * 1.1 / 2
     
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume confirmation: 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    vol_sum = 0
     for i in range(n):
-        if i >= 19:  # 20-period lookback
-            tp_slice = typical_price[i-19:i+1]
-            tp_mean[i] = np.mean(tp_slice)
-            tp_dev[i] = np.mean(np.abs(tp_slice - tp_mean[i]))
-    
-    cci = np.full(n, np.nan)
-    for i in range(19, n):
-        if tp_dev[i] > 0:
-            cci[i] = (typical_price[i] - tp_mean[i]) / (0.015 * tp_dev[i])
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma_20[i] = vol_sum / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(cci[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: CCI falls below zero or trend turns bearish
-            if cci[i] < 0 or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price returns to or below L3 level
+            if close[i] <= camarilla_l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: CCI rises above zero or trend turns bullish
-            if cci[i] > 0 or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price returns to or above H3 level
+            if close[i] >= camarilla_h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: CCI > 100 and price above 1-day EMA(50) (bullish trend)
-            if cci[i] > 100 and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: price breaks above H3 with volume confirmation
+            if close[i] > camarilla_h3_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: CCI < -100 and price below 1-day EMA(50) (bearish trend)
-            elif cci[i] < -100 and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: price breaks below L3 with volume confirmation
+            elif close[i] < camarilla_l3_aligned[i] and volume[i] > vol_ma_20[i] * 2.0:
                 position = -1
                 signals[i] = -0.25
     
