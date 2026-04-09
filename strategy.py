@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-# 1h_rsi_mean_reversion_4h1d_filter_v1
-# Hypothesis: On 1h timeframe, use RSI(14) for mean reversion entries when RSI < 30 (long) or RSI > 70 (short).
-# Filter trades with 4h trend (price > 20-period EMA for long, price < 20-period EMA for short) and 1d regime (chop < 61.8 for ranging markets only).
-# Session filter: 08-20 UTC to avoid low-volume Asian session noise.
-# Discrete position sizing: 0.20 to limit fee drag. Target: 15-37 trades/year (60-150 over 4 years).
-# Works in bull markets via 4h trend filter and in bear markets via 1d chop regime (mean reversion in ranging markets).
+# 6h_weekly_pivot_donchian_breakout_volume_v1
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation (>2.0x 20-period average). Enters long when price breaks above 6h Donchian(20) high with volume confirmation and bullish weekly trend (price > weekly VWAP); short when price breaks below 6h Donchian(20) low with volume confirmation and bearish weekly trend (price < weekly VWAP). Uses discrete position sizing (0.25) to limit fee drag. Designed for low turnover (target: 12-37 trades/year) to work in both bull and bear markets by following institutional volume-driven breakouts in alignment with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_mean_reversion_4h1d_filter_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_donchian_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,93 +20,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # RSI(14) on 1h close
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral RSI when insufficient data
-    
-    # 4h HTF trend filter: 20-period EMA
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly HTF data for pivot and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # 1d HTF regime filter: Chopiness Index (14) for ranging markets
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Previous week's OHLC for pivot calculation (using weekly data)
+    prev_week_close = df_1w['close'].values
+    prev_week_high = df_1w['high'].values
+    prev_week_low = df_1w['low'].values
+    prev_week_volume = df_1w['volume'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
+    # True range for the week
+    week_range = prev_week_high - prev_week_low
     
-    # ATR(14)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Weekly pivot levels (standard calculation)
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - prev_week_low
+    weekly_s1 = 2 * weekly_pivot - prev_week_high
+    weekly_r2 = weekly_pivot + (prev_week_high - prev_week_low)
+    weekly_s2 = weekly_pivot - (prev_week_high - prev_week_low)
+    weekly_r3 = weekly_r2 + (prev_week_high - prev_week_low)
+    weekly_s3 = weekly_s2 - (prev_week_high - prev_week_low)
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Align weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
     
-    # Chopiness Index: 100 * log10(sum(atr)/log(hh-ll)) / log10(14)
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    hh_ll = hh - ll
-    # Avoid division by zero or log of zero
-    chop = np.where((hh_ll > 0) & (sum_atr > 0), 
-                    100 * np.log10(sum_atr) / np.log10(14) / np.log10(hh_ll), 
-                    50.0)  # neutral when invalid
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Weekly VWAP for trend filter (using typical price * volume)
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+    vwap_numerator = (typical_price * df_1w['volume']).cumsum().values
+    vwap_denominator = df_1w['volume'].cumsum().values
+    vwap = vwap_numerator / vwap_denominator
+    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
+    
+    # 6h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(rsi[i]) or np.isnan(ema_20_4h_aligned[i]) or np.isnan(chop_aligned[i]) or
-            not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
+            np.isnan(volume[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_vwap_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: RSI returns to neutral (50) or 4h trend turns bearish
-            if rsi[i] >= 50 or close[i] < ema_20_4h_aligned[i]:
+            # Exit: price touches or breaks below weekly S1 level
+            if close[i] <= weekly_s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI returns to neutral (50) or 4h trend turns bullish
-            if rsi[i] <= 50 or close[i] > ema_20_4h_aligned[i]:
+            # Exit: price touches or breaks above weekly R1 level
+            if close[i] >= weekly_r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Enter only in ranging market (chop > 61.8) with RSI extreme and 4h trend alignment
-            if chop_aligned[i] > 61.8:  # Ranging market regime
-                # Long: RSI oversold and 4h trend bullish
-                if rsi[i] < 30 and close[i] > ema_20_4h_aligned[i]:
+            # Enter only with volume confirmation and weekly trend alignment
+            if volume_confirmed:
+                # Bullish weekly trend: price above weekly VWAP
+                bullish_trend = close[i] > weekly_vwap_aligned[i]
+                # Bearish weekly trend: price below weekly VWAP
+                bearish_trend = close[i] < weekly_vwap_aligned[i]
+                
+                # Long: price breaks above 6h Donchian high with volume and bullish weekly trend
+                if close[i] > highest_high[i] and bullish_trend:
                     position = 1
-                    signals[i] = 0.20
-                # Short: RSI overbought and 4h trend bearish
-                elif rsi[i] > 70 and close[i] < ema_20_4h_aligned[i]:
+                    signals[i] = 0.25
+                # Short: price breaks below 6h Donchian low with volume and bearish weekly trend
+                elif close[i] < lowest_low[i] and bearish_trend:
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
