@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Hypothesis: 12-hour breakout of daily Camarilla levels with 1-day EMA50 trend filter and volume confirmation.
-# Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
-# Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
-# Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
+# 1d_1w_vwap_trend_v1
+# Hypothesis: Daily VWAP with weekly trend filter and volume confirmation. Long when price crosses above VWAP with weekly close above weekly open (bullish week) and volume > 1.5x 20-day average. Short when price crosses below VWAP with weekly close below weekly open (bearish week) and volume > 1.5x 20-day average. Exit on opposite VWAP cross. Works in bull via trend continuation and in bear via mean reversion at VWAP.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "1d_1w_vwap_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,41 +20,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema = close_1d[49]  # Initialize with first 50-period average
-        multiplier = 2 / (50 + 1)
-        ema_50_1d[49] = ema
-        for i in range(50, len(close_1d)):
-            ema = (close_1d[i] - ema) * multiplier + ema
-            ema_50_1d[i] = ema
+    # Calculate weekly trend: bullish if close > open, bearish if close < open
+    weekly_bullish = df_1w['close'] > df_1w['open']
+    weekly_bearish = df_1w['close'] < df_1w['open']
     
-    # Align 1d EMA50 to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly trend to daily
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        c = df_1d['close'].iloc[i]
-        h = df_1d['high'].iloc[i]
-        l = df_1d['low'].iloc[i]
-        camarilla_h4[i] = c + 1.1 * (h - l) / 2
-        camarilla_l4[i] = c - 1.1 * (h - l) / 2
+    # Calculate daily VWAP (typical price * volume) cumulative
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-day average
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
@@ -74,38 +54,38 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
+        if (np.isnan(weekly_bullish_aligned[i]) or 
+            np.isnan(weekly_bearish_aligned[i]) or 
+            np.isnan(vwap[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L4 level
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit: price crosses below VWAP
+            if close[i] < vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H4 level
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit: price crosses above VWAP
+            if close[i] > vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 with trend and volume filters
-            if (close[i] > camarilla_h4_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Enter long: price crosses above VWAP with bullish week and volume
+            if (close[i] > vwap[i] and 
+                weekly_bullish_aligned[i] > 0.5 and 
                 volume[i] > vol_ma_20[i] * 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 with trend and volume filters
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Enter short: price crosses below VWAP with bearish week and volume
+            elif (close[i] < vwap[i] and 
+                  weekly_bearish_aligned[i] > 0.5 and 
                   volume[i] > vol_ma_20[i] * 1.5):
                 position = -1
                 signals[i] = -0.25
