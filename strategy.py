@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d strategy using weekly Camarilla pivot levels with volume confirmation and ATR filter
-# Weekly Camarilla levels (R3/S3, R4/S4) act as major support/resistance that work in both bull and bear markets
-# Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation (current 1d volume > 1.5x 20-period average) filters false signals
-# ATR filter ensures sufficient volatility (ATR > 50-period average) to avoid choppy low-vol periods
+# Hypothesis: 6h strategy using 1d Ichimoku Cloud with TK cross and volume confirmation
+# Ichimoku Cloud from 1d timeframe provides major support/resistance and trend direction
+# TK cross (Tenkan/Kijun) on 6h for entry timing with cloud filter from 1d
+# Volume confirmation (current 6h volume > 1.5x 20-period average) filters false signals
+# Works in both bull and bear markets: cloud acts as dynamic support/resistance
 # Position size fixed at 0.25 to balance return and drawdown
-# Target: 15-30 trades/year on 1d timeframe (60-120 total over 4 years)
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "1d_1w_camarilla_atr_volume_v1"
-timeframe = "1d"
+name = "6h_1d_ichimoku_tk_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,110 +26,108 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r4_1w = close_1w + range_1w * 1.1 / 2.0
-    r3_1w = close_1w + range_1w * 1.1 / 4.0
-    s3_1w = close_1w - range_1w * 1.1 / 4.0
-    s4_1w = close_1w - range_1w * 1.1 / 2.0
+    # Calculate 1d Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (high_9_1d + low_9_1d) / 2.0
     
-    # Calculate weekly ATR (14-period) for volatility filtering
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (high_26_1d + low_26_1d) / 2.0
     
-    # Align all HTF data to 1d timeframe
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2.0
     
-    # Pre-compute volume confirmation (20-period average for 1d)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
+    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = (high_52_1d + low_52_1d) / 2.0
+    
+    # Chikou Span (Lagging Span): Close plotted 26 periods behind (not used for signals)
+    
+    # Align 1d Ichimoku data to 6h timeframe (no additional delay needed for Senkou spans as they're already plotted ahead)
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    
+    # Calculate 6h TK cross (Tenkan/Kijun) for entry timing
+    # Tenkan-sen (6h): (9-period high + 9-period low)/2
+    high_9_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_6h = (high_9_6h + low_9_6h) / 2.0
+    
+    # Kijun-sen (6h): (26-period high + 26-period low)/2
+    high_26_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_6h = (high_26_6h + low_26_6h) / 2.0
+    
+    # TK cross signals
+    tk_cross_above = tenkan_6h > kijun_6h  # Bullish cross
+    tk_cross_below = tenkan_6h < kijun_6h  # Bearish cross
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if any required data is invalid
-        if (np.isnan(r4_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
-            np.isnan(s3_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
-            np.isnan(atr_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            atr_1w_aligned[i] <= 0):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or
+            np.isnan(vol_ma_20[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x average 1d volume
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Volatility filter: only trade when weekly ATR is above its 50-period average
-        atr_ma_50_1w = pd.Series(atr_1w_aligned).rolling(window=50, min_periods=50).mean()
-        if len(atr_ma_50_1w) > i:
-            vol_filter = atr_1w_aligned[i] > atr_ma_50_1w.iloc[i]
-        else:
-            vol_filter = True  # Not enough data for MA, allow trading
-            
-        if not vol_filter:
-            signals[i] = 0.0
-            continue
-        
-        # Fixed position size to minimize fee churn
-        position_size = 0.25
+        # Determine cloud boundaries and color
+        cloud_top = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_bottom = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_bullish = senkou_a_1d_aligned[i] > senkou_b_1d_aligned[i]  # Green cloud
         
         if position == 1:  # Long position
-            # Exit on retracement to S3 or stop at S4 breakdown
-            if close[i] < s3_1w_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] < s4_1w_aligned[i]:  # Stop loss at S4 breakdown
+            # Exit on TK cross below OR price breaks below cloud bottom
+            if tk_cross_below[i] or close[i] < cloud_bottom:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = position_size
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit on retracement to R3 or stop at R4 breakout
-            if close[i] > r3_1w_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] > r4_1w_aligned[i]:  # Stop loss at R4 breakout
+            # Exit on TK cross above OR price breaks above cloud top
+            if tk_cross_above[i] or close[i] > cloud_top:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.25
         else:  # Flat
-            # Camarilla pivot trading with volume and volatility confirmation
-            # Fade at R3/S3 (mean reversion), breakout at R4/S4 (trend following)
+            # Enter long: TK bullish cross AND price above cloud AND volume confirmed
+            # Enter short: TK bearish cross AND price below cloud AND volume confirmed
             if volume_confirmed:
-                # Fade at R3 (sell at resistance, expect reversion to pivot)
-                if close[i] > r3_1w_aligned[i] and close[i] < r4_1w_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
-                # Fade at S3 (buy at support, expect reversion to pivot)
-                elif close[i] < s3_1w_aligned[i] and close[i] > s4_1w_aligned[i]:
+                if tk_cross_above[i] and close[i] > cloud_top:
                     position = 1
-                    signals[i] = position_size
-                # Breakout continuation at R4 (buy break above resistance)
-                elif close[i] > r4_1w_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Breakout continuation at S4 (sell break below support)
-                elif close[i] < s4_1w_aligned[i]:
+                    signals[i] = 0.25
+                elif tk_cross_below[i] and close[i] < cloud_bottom:
                     position = -1
-                    signals[i] = -position_size
+                    signals[i] = -0.25
     
     return signals
