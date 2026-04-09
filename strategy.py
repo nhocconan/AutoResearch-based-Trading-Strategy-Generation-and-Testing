@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v1
-# Hypothesis: 12h strategy using Camarilla pivot levels from 1d for trend structure,
-# volume confirmation, and discrete position sizing (±0.30). Long when price > H3 and
-# volume confirmed, short when price < L3 and volume confirmed. Exit on opposite
-# H4/L4 touch or volume drop. Designed for low trade frequency (12-37/year) to
-# minimize fee drag and work in both bull and bear markets via mean-reversion
-# at extreme intraday levels.
+# 4h_donchian_1d_volume_chop_v3
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and 1d chop regime filter.
+# Long: price breaks above 20-period Donchian high + 1d volume > 1.5x 20-period average + 1d chop < 61.8
+# Short: price breaks below 20-period Donchian low + 1d volume > 1.5x 20-period average + 1d chop < 61.8
+# Exit: opposite Donchian breakout or chop > 61.8 (range regime)
+# Uses discrete sizing (±0.25) to minimize fee churn. Target: 75-200 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_1d_volume_chop_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,73 +24,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots
+    # 1d HTF data for volume and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # 1d volume confirmation: current volume > 1.5x 20-period average
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # 1d chop regime: CHOP(14) = 100 * log10(sum(ATR(1),14) / (log10(14) * (max(high,14)-min(low,14))))
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot levels (based on previous 1d bar)
-    # H4 = close + 1.5*(high - low)
-    # H3 = close + 1.1*(high - low)
-    # L3 = close - 1.1*(high - low)
-    # L4 = close - 1.5*(high - low)
-    hl_range = high_1d - low_1d
-    H4 = close_1d + 1.5 * hl_range
-    H3 = close_1d + 1.1 * hl_range
-    L3 = close_1d - 1.1 * hl_range
-    L4 = close_1d - 1.5 * hl_range
+    # True Range for 1d
+    tr1 = np.zeros(len(high_1d))
+    tr1[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr1[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).mean().values  # ATR(1) = TR
+    sum_tr14 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
+    max_high14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    denominator = np.log10(14) * (max_high14 - min_low14)
+    denominator = np.where(denominator == 0, 1e-10, denominator)  # avoid division by zero
+    chop = 100 * np.log10(sum_tr14 / denominator)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 4h Donchian channels (20-period)
+    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(H4_aligned[i]) or np.isnan(H3_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current 4h volume > 1.5x 1d volume MA (aligned)
+        volume_confirmed = volume[i] > 1.5 * vol_ma_1d_aligned[i]
+        
+        # Chop regime: trending when CHOP < 61.8
+        trending_regime = chop_aligned[i] < 61.8
+        
         if position == 1:  # Long position
-            # Exit: price touches L4 (mean reversion) OR volume drops below average
-            if close[i] <= L4_aligned[i] or volume[i] < volume_ma[i]:
+            # Exit: price breaks below Donchian low OR chop > 61.8 (range regime)
+            if close[i] < period20_low[i] or not trending_regime:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price touches H4 (mean reversion) OR volume drops below average
-            if close[i] >= H4_aligned[i] or volume[i] < volume_ma[i]:
+            # Exit: price breaks above Donchian high OR chop > 61.8 (range regime)
+            if close[i] > period20_high[i] or not trending_regime:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
-            # Need volume confirmation
-            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
-            
-            if volume_confirmed:
-                # Long: price above H3
-                if close[i] > H3_aligned[i]:
+            # Enter only in trending regime with volume confirmation
+            if volume_confirmed and trending_regime:
+                # Long: price breaks above Donchian high
+                if close[i] > period20_high[i]:
                     position = 1
-                    signals[i] = 0.30
-                # Short: price below L3
-                elif close[i] < L3_aligned[i]:
+                    signals[i] = 0.25
+                # Short: price breaks below Donchian low
+                elif close[i] < period20_low[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
