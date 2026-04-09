@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
-# Uses breakout of H4/L4 levels (stronger breakout than H3/L3) for higher probability moves.
-# Exit when price returns to the daily pivot point (PP).
-# Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
+# 6h_1d_adx_trend_follow_v1
+# Hypothesis: 6-hour trend following using daily ADX trend strength and price position relative to daily EMA200.
+# Enters long when ADX > 25 (strong trend) and price above daily EMA200, short when ADX > 25 and price below daily EMA200.
+# Uses ADX to filter ranging markets and capture trending moves in both bull and bear markets.
+# Exit when trend weakens (ADX < 20) or price crosses back below/above EMA200.
 # Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
-# This version is adapted for 12h timeframe with optimized parameters for lower frequency.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_ata, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "6h_1d_adx_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,96 +22,101 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate ATR(20) for volatility filter
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1])
-        lc = abs(low[i] - close[i-1])
-        tr[i] = max(hl, hc, lc)
-    
-    atr = np.full(n, np.nan)
-    if n >= 20:
-        atr[19] = np.mean(tr[:20])
-        for i in range(20, n):
-            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
-    
-    # Load 1d data ONCE before loop for Camarilla pivot levels
+    # Calculate ADX(14) on daily timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formulas
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # True Range
+    tr = np.zeros(len(high_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        hl = high_1d[i] - low_1d[i]
+        hc = abs(high_1d[i] - close_1d[i-1])
+        lc = abs(low_1d[i] - close_1d[i-1])
+        tr[i] = max(hl, hc, lc)
     
-    # H4 and L4 levels (stronger breakout levels)
-    h4_1d = close_1d + (range_1d * 1.1 / 2)  # Same as R4
-    l4_1d = close_1d - (range_1d * 1.1 / 2)  # Same as S4
+    # Directional Movement
+    plus_dm = np.zeros(len(high_1d))
+    minus_dm = np.zeros(len(high_1d))
+    for i in range(1, len(high_1d)):
+        up = high_1d[i] - high_1d[i-1]
+        down = low_1d[i-1] - low_1d[i]
+        if up > down and up > 0:
+            plus_dm[i] = up
+        if down > up and down > 0:
+            minus_dm[i] = down
     
-    # Align 1d levels to 12h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Smoothed values
+    def smooth(values, period):
+        smoothed = np.full_like(values, np.nan)
+        if len(values) < period:
+            return smoothed
+        smoothed[period-1] = np.sum(values[:period])
+        for i in range(period, len(values)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+        return smoothed
     
-    # Volume confirmation - 20 period average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+    atr = smooth(tr, 14)
+    plus_di = 100 * smooth(plus_dm, 14) / atr
+    minus_di = 100 * smooth(minus_dm, 14) / atr
     
-    # Volume spike: current volume > 2.0x 20-period average (optimized for 12h)
-    vol_spike = volume > vol_ma_20 * 2.0
+    # Avoid division by zero
+    dx = np.full_like(plus_di, np.nan)
+    denom = plus_di + minus_di
+    dx[denom != 0] = 100 * np.abs(plus_di[denom != 0] - minus_di[denom != 0]) / denom[denom != 0]
+    adx = smooth(dx, 14)
+    
+    # Calculate EMA200 on daily timeframe
+    ema200 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 200:
+        ema200[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema200[i] = (close_1d[i] * 2 + ema200[i-1] * 198) / 200
+    
+    # Align to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
-        # Skip if any required data is invalid
-        if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]):
+    for i in range(50, n):
+        if np.isnan(adx_aligned[i]) or np.isnan(ema200_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: avoid extremely high volatility (optimized for 12h)
-        vol_filter = atr[i] < 0.03 * close[i]  # ATR less than 3% of price
-        
-        # Volume confirmation: current volume > 1.8x 20-period average (optimized for 12h)
-        vol_ok = volume[i] > vol_ma_20[i] * 1.8
+        # Trend filter: ADX > 25 for strong trend
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20
         
         if position == 1:  # Long position
-            # Exit: price returns to or below Pivot Point
-            if close[i] <= pp_aligned[i]:
+            # Exit: trend weakens or price crosses below EMA200
+            if weak_trend or close[i] <= ema200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above Pivot Point
-            if close[i] >= pp_aligned[i]:
+            # Exit: trend weakens or price crosses above EMA200
+            if weak_trend or close[i] >= ema200_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 level with volume confirmation and volatility filter
-            if close[i] > h4_aligned[i] and vol_ok and vol_filter:
+            # Enter long: strong trend and price above EMA200
+            if strong_trend and close[i] > ema200_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 level with volume confirmation and volatility filter
-            elif close[i] < l4_aligned[i] and vol_ok and vol_filter:
+            # Enter short: strong trend and price below EMA200
+            elif strong_trend and close[i] < ema200_aligned[i]:
                 position = -1
                 signals[i] = -0.25
     
