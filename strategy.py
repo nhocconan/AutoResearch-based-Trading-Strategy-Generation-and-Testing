@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR volume spike and chop regime filter
-# In trending regimes (CHOP < 38.2): breakout above/below Donchian(20) with volume confirmation
-# In ranging regimes (CHOP > 61.8): mean reversion at Donchian mid-point with volume confirmation
-# Uses discrete position sizing 0.25 to limit trades to ~20-50/year and reduce fee drag
-# Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
+# Hypothesis: 4h Williams %R + 1d Volume Spike + Chop Regime Filter
+# Williams %R identifies overbought/oversold conditions with mean reversion bias
+# Volume spike confirms institutional participation
+# Chop regime filter (CHOP > 61.8) ensures mean reversion only in ranging markets
+# Discrete sizing 0.25 limits trades to ~20-40/year to minimize fee drag
+# Works in bull/bear markets: mean reversion in ranges, avoids false breakouts in trends
 
-name = "4h_1d_donchian_breakout_volume_chop_v1"
+name = "4h_1d_williamsr_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,7 +34,16 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR(14) for volume normalization
+    # Calculate 1d Williams %R (14-period)
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d + 1e-10)
+    
+    # Calculate 1d average volume (20-period)
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (2.0 * avg_volume_1d)
+    
+    # Calculate 1d Choppiness Index (CHOP)
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -50,14 +60,6 @@ def generate_signals(prices):
         return result
     
     atr_1d = wilders_smoothing(tr, 14)
-    
-    # Calculate 1d average volume (20-period) normalized by ATR
-    volume_s_1d = pd.Series(volume_1d)
-    avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.where(atr_1d > 0, avg_volume_1d / atr_1d, np.nan)
-    avg_vol_ratio_1d = pd.Series(vol_ratio_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d Choppiness Index (CHOP)
     hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
@@ -67,60 +69,50 @@ def generate_signals(prices):
                        50)
     
     # Align 1d indicators to 4h timeframe
-    avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
+    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Calculate 4h Donchian channels (20-period) from prior bar to avoid look-ahead
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    donchian_mid = (highest_high + lowest_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(williams_r_1d_aligned[i]) or 
+            np.isnan(volume_spike_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0 * 20-period average volume (aligned)
-        avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-        avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
-        volume_confirmed = volume[i] > 2.0 * avg_volume_1d_aligned[i]
+        # Volume confirmation: aligned volume spike
+        volume_confirmed = volume_spike_1d_aligned[i] > 0.5
         
-        # Regime filter
-        trending_regime = chop_1d_aligned[i] < 38.2
+        # Regime filter: only trade in ranging markets (CHOP > 61.8)
         ranging_regime = chop_1d_aligned[i] > 61.8
         
         if position == 1:  # Long position
-            if close[i] < donchian_mid[i] or ranging_regime:
+            # Exit when Williams %R recovers from oversold
+            if williams_r_1d_aligned[i] > -20 or not ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            if close[i] > donchian_mid[i] or ranging_regime:
+            # Exit when Williams %R declines from overbought
+            if williams_r_1d_aligned[i] < -80 or not ranging_regime:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if trending_regime:
-                if close[i] > highest_high[i] and volume_confirmed:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < lowest_low[i] and volume_confirmed:
-                    position = -1
-                    signals[i] = -0.25
-            elif ranging_regime:
-                if close[i] <= donchian_mid[i] and volume_confirmed:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] >= donchian_mid[i] and volume_confirmed:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long when oversold with volume confirmation in ranging market
+            if williams_r_1d_aligned[i] < -80 and volume_confirmed and ranging_regime:
+                position = 1
+                signals[i] = 0.25
+            # Enter short when overbought with volume confirmation in ranging market
+            elif williams_r_1d_aligned[i] > -20 and volume_confirmed and ranging_regime:
+                position = -1
+                signals[i] = -0.25
     
     return signals
