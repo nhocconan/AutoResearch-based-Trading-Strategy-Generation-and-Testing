@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 12h_donchian_volume_v1
-# Hypothesis: 12h Donchian channel breakout with volume confirmation and 1d ADX trend filter.
-# Long when price breaks above 20-period upper band with volume > 1.5x average and ADX > 25.
-# Short when price breaks below 20-period lower band with volume > 1.5x average and ADX > 25.
-# Uses 1d ADX to filter for trending markets, avoiding range-bound whipsaws.
-# Designed for low trade frequency (~15-25 trades/year) to minimize fee drag on 12h timeframe.
+# 4h_vwap_std_breakout_v1
+# Hypothesis: Price breaking above/below VWAP + 1 standard deviation on 4h timeframe with volume confirmation.
+# VWAP bands act as dynamic support/resistance. Breakouts with high volume indicate strong momentum.
+# Works in bull/bear markets by capturing momentum shifts at key levels.
+# Target: 20-40 trades/year (80-160 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_volume_v1"
-timeframe = "12h"
+name = "4h_vwap_std_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,109 +23,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1. Donchian channels (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate Typical Price
+    tp = (high + low + close) / 3.0
     
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
-    
-    # 2. Volume confirmation (20-period average)
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0
+    # VWAP calculation (cumulative)
+    vwap = np.zeros(n)
+    tpv_sum = 0.0
+    vol_sum = 0.0
     for i in range(n):
+        tpv_sum += tp[i] * volume[i]
         vol_sum += volume[i]
+        if vol_sum > 0:
+            vwap[i] = tpv_sum / vol_sum
+        else:
+            vwap[i] = tp[i]
+    
+    # Calculate standard deviation of price from VWAP
+    squared_diff = (tp - vwap) ** 2
+    variance = np.zeros(n)
+    var_sum = 0.0
+    for i in range(n):
+        var_sum += squared_diff[i] * volume[i]
+        if vol_sum > 0:
+            variance[i] = var_sum / vol_sum
+        else:
+            variance[i] = 0.0
+    std_dev = np.sqrt(variance)
+    
+    # Upper and lower bands (VWAP ± 1 std dev)
+    upper_band = vwap + std_dev
+    lower_band = vwap - std_dev
+    
+    # Volume confirmation (20-period average)
+    vol_ma_20 = np.zeros(n)
+    vol_sum_ma = 0
+    for i in range(n):
+        vol_sum_ma += volume[i]
         if i >= 20:
-            vol_sum -= volume[i-20]
+            vol_sum_ma -= volume[i-20]
         if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
-    
-    # 3. 1d ADX for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Calculate ADX components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smooth TR, +DM, -DM (14-period Wilder smoothing)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period]) / period
-        # Subsequent values: smoothed
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smooth(tr, 14)
-    plus_di = 100 * wilders_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smooth(dx, 14)
-    
-    # Align ADX to 12h timeframe
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
+            vol_ma_20[i] = vol_sum_ma / 20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(adx_12h[i])):
+        if np.isnan(vwap[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_ok = volume[i] > vol_ma_20[i] * 1.5
         
-        # ADX trend filter: ADX > 25 indicates trending market
-        trend_ok = adx_12h[i] > 25
-        
         if position == 1:  # Long position
-            # Exit: price breaks below lower Donchian band
-            if close[i] < lowest_low[i]:
+            # Exit: price closes below VWAP
+            if close[i] < vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above upper Donchian band
-            if close[i] > highest_high[i]:
+            # Exit: price closes above VWAP
+            if close[i] > vwap[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above upper band with volume and trend confirmation
-            if close[i] > highest_high[i] and vol_ok and trend_ok:
+            # Enter long: price closes above upper band with volume confirmation
+            if close[i] > upper_band[i] and vol_ok:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below lower band with volume and trend confirmation
-            elif close[i] < lowest_low[i] and vol_ok and trend_ok:
+            # Enter short: price closes below lower band with volume confirmation
+            elif close[i] < lower_band[i] and vol_ok:
                 position = -1
                 signals[i] = -0.25
     
