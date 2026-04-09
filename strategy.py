@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and choppiness regime filter
-# - Uses 1d HTF for Camarilla pivot levels (H3, L3, H4, L4) as key support/resistance
-# - Breakout above H3 or below L3 with volume > 1.5x 20-period average signals entry
-# - Choppiness regime filter: CHOP(14) > 61.8 = range (mean revert at H3/L3), CHOP < 38.2 = trending (breakout)
-# - In trending regime (CHOP < 38.2): breakout continues in direction of breakout
-# - In ranging regime (CHOP > 61.8): mean reversion at opposite H3/L3 level
+# Hypothesis: 6h strategy using 12h Donchian breakout with 1d ADX trend filter and volume confirmation
+# - Uses 12h HTF for Donchian channel (20-period) to identify breakouts
+# - Uses 1d HTF for ADX (14-period) to filter only strong trends (ADX > 25)
+# - Volume confirmation: current 6h volume > 1.5x 20-period average to avoid low-quality breakouts
+# - Long when price breaks above 12h Donchian upper band in strong uptrend (ADX > 25)
+# - Short when price breaks below 12h Donchian lower band in strong downtrend (ADX > 25)
+# - Exit when price returns to the middle of the Donchian channel or trend weakens (ADX < 20)
 # - Fixed position size 0.25 to control drawdown
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_camarilla_breakout_v26"
-timeframe = "4h"
+name = "6h_12h_1d_donchian_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,146 +27,106 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    # Typical price = (high + low + close) / 3
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    # Range = high - low
-    rng = high_1d - low_1d
+    # Calculate 12h Donchian channel (20 periods)
+    period20_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_upper = period20_high
+    donchian_lower = period20_low
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Camarilla levels
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # H2 = close + 0.55 * (high - low)
-    # L2 = close - 0.55 * (high - low)
-    # H1 = close + 0.275 * (high - low)
-    # L1 = close - 0.275 * (high - low)
-    # Pivot = (high + low + close) / 3
+    # Calculate 1d ADX (14 periods)
+    # True Range
+    tr1 = pd.Series(high_1d).rolling(window=2).max().values - pd.Series(low_1d).rolling(window=2).min().values
+    tr2 = np.abs(pd.Series(high_1d).rolling(window=2).shift(1).values - pd.Series(close_1d).rolling(window=2).shift(1).values)
+    tr3 = np.abs(pd.Series(low_1d).rolling(window=2).shift(1).values - pd.Series(close_1d).rolling(window=2).shift(1).values)
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    h4 = close_1d + 1.5 * rng
-    l4 = close_1d - 1.5 * rng
-    h3 = close_1d + 1.1 * rng
-    l3 = close_1d - 1.1 * rng
-    h2 = close_1d + 0.55 * rng
-    l2 = close_1d - 0.55 * rng
-    h1 = close_1d + 0.275 * rng
-    l1 = close_1d - 0.275 * rng
-    pivot = typical_price
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff().values
+    down_move = -pd.Series(low_1d).diff().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Align all HTF data to 4h timeframe (wait for completed HTF bar)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume confirmation (20-period average for 4h)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all HTF data to 6h timeframe (wait for completed HTF bar)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_12h, donchian_middle)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute choppiness index (14-period) for regime filter
-    # CHOP = 100 * log10(sum(ATR(1)) / (max(high) - min(low))) / log10(N)
-    # Simplified: CHOP = 100 * log10(ATR_sum / (HHV - LLV)) / log10(14)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr1[0] = high[0] - low[0]  # First period TR
-    atr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    hhvs = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    llvs = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hhvs - llvs + 1e-10)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop[i]) or
-            vol_ma_20[i] <= 0):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average
+        # Volume confirmation: current 6h volume > 1.5x average
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Regime filter: CHOP < 38.2 = trending, CHOP > 61.8 = ranging
-        trending_regime = chop[i] < 38.2
-        ranging_regime = chop[i] > 61.8
+        # ADX trend strength filters
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20
         
         # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit conditions
-            if trending_regime:
-                # In trending regime: exit when price reaches H4 or trend weakens
-                if close[i] >= h4_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-            elif ranging_regime:
-                # In ranging regime: exit when price reaches L3 (mean reversion target)
-                if close[i] <= l3_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-            else:
-                # Neutral regime: exit
+            # Exit conditions: price returns to middle or trend weakens
+            if close[i] <= donchian_middle_aligned[i] or weak_trend:
                 position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit conditions
-            if trending_regime:
-                # In trending regime: exit when price reaches L4 or trend weakens
-                if close[i] <= l4_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
-            elif ranging_regime:
-                # In ranging regime: exit when price reaches H3 (mean reversion target)
-                if close[i] >= h3_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
-            else:
-                # Neutral regime: exit
+            # Exit conditions: price returns to middle or trend weakens
+            if close[i] >= donchian_middle_aligned[i] or weak_trend:
                 position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = -position_size
         else:  # Flat
-            # Entry logic based on regime and price action
-            if volume_confirmed:
-                if trending_regime:
-                    # In trending regime: breakout entries
-                    if close[i] > h3_aligned[i]:
-                        # Breakout above H3: long
-                        position = 1
-                        signals[i] = position_size
-                    elif close[i] < l3_aligned[i]:
-                        # Breakout below L3: short
-                        position = -1
-                        signals[i] = -position_size
-                elif ranging_regime:
-                    # In ranging regime: mean reversion entries
-                    if close[i] <= l3_aligned[i]:
-                        # Price at L3: long mean reversion
-                        position = 1
-                        signals[i] = position_size
-                    elif close[i] >= h3_aligned[i]:
-                        # Price at H3: short mean reversion
-                        position = -1
-                        signals[i] = -position_size
+            # Entry logic: Donchian breakout with strong trend and volume confirmation
+            if volume_confirmed and strong_trend:
+                if close[i] > donchian_upper_aligned[i]:
+                    # Break above upper band: long
+                    position = 1
+                    signals[i] = position_size
+                elif close[i] < donchian_lower_aligned[i]:
+                    # Break below lower band: short
+                    position = -1
+                    signals[i] = -position_size
     
     return signals
