@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout + 1d volume confirmation
-# Camarilla levels calculated from prior 1d OHLC: H4/L4 = breakout levels
-# In strong volume (>1.5x 20-period average): breakout continuation
-# In weak volume: fade at H3/L3 levels
-# Works in both bull/bear: adapts to volume context
+# Hypothesis: 12h Williams %R + 1w ADX regime filter
+# Williams %R(14) identifies overbought/oversold conditions
+# 1w ADX > 25 indicates strong trend (use for regime)
+# In trending regime (1w ADX > 25): trade pullbacks - long when %R crosses above -80 from below, short when %R crosses below -20 from above
+# In ranging regime (1w ADX <= 25): mean reversion - long when %R < -80, short when %R > -20
+# Uses 1w ADX(14) for regime detection, 12h for Williams %R and entry timing
 # Position size 0.25 to limit drawdown
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
+# Works in both bull/bear: adapts to regime via ADX filter
 
-name = "6h_1d_camarilla_vol_breakout_v1"
-timeframe = "6h"
+name = "12h_1w_williams_r_adx_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,92 +25,155 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 1w data ONCE before loop for ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels from prior day OHLC
-    # Camarilla: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
-    #            H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w ADX(14) for regime detection
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
+    # True Range
+    tr = np.zeros(len(df_1w))
+    tr[0] = high_1w[0] - low_1w[0]
+    for i in range(1, len(df_1w)):
+        tr0 = high_1w[i] - low_1w[i]
+        tr1 = abs(high_1w[i] - close_1w[i-1])
+        tr2 = abs(low_1w[i] - close_1w[i-1])
+        tr[i] = max(tr0, tr1, tr2)
     
-    for i in range(1, len(df_1d)):
-        # Use prior day's OHLC
-        rng = high_1d[i-1] - low_1d[i-1]
-        camarilla_h4[i] = close_1d[i-1] + 1.5 * rng
-        camarilla_l4[i] = close_1d[i-1] - 1.5 * rng
-        camarilla_h3[i] = close_1d[i-1] + 1.125 * rng
-        camarilla_l3[i] = close_1d[i-1] - 1.125 * rng
+    # Directional Movement
+    plus_dm = np.zeros(len(df_1w))
+    minus_dm = np.zeros(len(df_1w))
+    for i in range(1, len(df_1w)):
+        up_move = high_1w[i] - high_1w[i-1]
+        down_move = low_1w[i-1] - low_1w[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        else:
+            plus_dm[i] = 0
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+        else:
+            minus_dm[i] = 0
     
-    # Align Camarilla levels to 6h timeframe
-    h4_6h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_6h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_6h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_6h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Wilder's smoothing function
+    def wilders_smoothing(data, period):
+        result = np.full(len(data), np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Calculate 1d volume average for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_20_6h = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Calculate smoothed values
+    tr_14 = wilders_smoothing(tr, 14)
+    plus_dm_14 = wilders_smoothing(plus_dm, 14)
+    minus_dm_14 = wilders_smoothing(minus_dm, 14)
+    
+    # Calculate DI and DX
+    plus_di_14 = np.full(len(df_1w), np.nan)
+    minus_di_14 = np.full(len(df_1w), np.nan)
+    dx_14 = np.full(len(df_1w), np.nan)
+    
+    for i in range(14, len(df_1w)):
+        if tr_14[i] != 0:
+            plus_di_14[i] = (plus_dm_14[i] / tr_14[i]) * 100
+            minus_di_14[i] = (minus_dm_14[i] / tr_14[i]) * 100
+            if (plus_di_14[i] + minus_di_14[i]) != 0:
+                dx_14[i] = (abs(plus_di_14[i] - minus_di_14[i]) / (plus_di_14[i] + minus_di_14[i])) * 100
+    
+    # Calculate ADX (smoothed DX)
+    adx_14 = wilders_smoothing(dx_14, 14)
+    
+    # Align 1w data to 12h timeframe
+    adx_1w_12h = align_htf_to_ltf(prices, df_1w, adx_14)
+    
+    # Calculate Williams %R on 12h
+    def williams_r(high, low, close, period):
+        highest_high = np.full(len(high), np.nan)
+        lowest_low = np.full(len(low), np.nan)
+        for i in range(period-1, len(high)):
+            highest_high[i] = np.max(high[i-(period-1):i+1])
+            lowest_low[i] = np.min(low[i-(period-1):i+1])
+        wr = np.full(len(high), np.nan)
+        for i in range(period-1, len(high)):
+            if highest_high[i] - lowest_low[i] != 0:
+                wr[i] = ((highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])) * -100
+        return wr
+    
+    wr = williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h4_6h[i]) or np.isnan(l4_6h[i]) or 
-            np.isnan(h3_6h[i]) or np.isnan(l3_6h[i]) or
-            np.isnan(vol_ma_20_6h[i])):
+        if (np.isnan(adx_1w_12h[i]) or 
+            np.isnan(wr[i])):
             signals[i] = 0.0
             continue
         
-        vol_ratio = volume[i] / vol_ma_20_6h[i] if vol_ma_20_6h[i] > 0 else 1.0
+        adx = adx_1w_12h[i]
+        wr_val = wr[i]
         
         if position == 1:  # Long position
             # Exit conditions
-            if close[i] <= h3_6h[i]:  # Exit at H3 level
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.25
-                
+            if adx > 25:  # Trending regime
+                # Exit when Williams %R crosses below -80 (end of pullback)
+                if wr_val < -80:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            else:  # Ranging regime
+                # Exit when Williams %R returns to neutral range (> -50)
+                if wr_val > -50:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                    
         elif position == -1:  # Short position
             # Exit conditions
-            if close[i] >= l3_6h[i]:  # Exit at L3 level
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
-        else:  # Flat
-            # Entry logic based on volume context
-            if vol_ratio > 1.5:  # Strong volume - breakout continuation
-                # Go long on break above H4
-                if close[i] > h4_6h[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Go short on break below L4
-                elif close[i] < l4_6h[i]:
-                    position = -1
+            if adx > 25:  # Trending regime
+                # Exit when Williams %R crosses above -20 (end of pullback)
+                if wr_val > -20:
+                    position = 0
+                    signals[i] = 0.0
+                else:
                     signals[i] = -0.25
-            else:  # Weak volume - fade at extremes
-                # Go long at L3 support
-                if close[i] < l3_6h[i]:
+            else:  # Ranging regime
+                # Exit when Williams %R returns to neutral range (< -50)
+                if wr_val < -50:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+        else:  # Flat
+            # Entry logic based on regime
+            if adx > 25:  # Trending regime - trade pullbacks
+                # Go long when Williams %R crosses above -80 from below (end of oversold pullback)
+                # Go short when Williams %R crosses below -20 from above (end of overbought pullback)
+                if i > 30:
+                    wr_prev = wr[i-1]
+                    if wr_val > -80 and wr_prev <= -80:
+                        position = 1
+                        signals[i] = 0.25
+                    elif wr_val < -20 and wr_prev >= -20:
+                        position = -1
+                        signals[i] = -0.25
+            else:  # Ranging regime - mean reversion at extremes
+                # Go long when Williams %R is deeply oversold (< -80)
+                # Go short when Williams %R is deeply overbought (> -20)
+                if wr_val < -80:
                     position = 1
                     signals[i] = 0.25
-                # Go short at H3 resistance
-                elif close[i] > h3_6h[i]:
+                elif wr_val > -20:
                     position = -1
                     signals[i] = -0.25
     
