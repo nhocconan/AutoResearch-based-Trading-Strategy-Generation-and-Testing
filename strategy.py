@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-# 4h_hma_volume_chop_regime_v1
-# Hypothesis: 4h strategy using Hull Moving Average (HMA) for trend direction, volume confirmation, and chop regime filter.
-# Long when price > HMA(21) with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Short when price < HMA(21) with volume > 1.5x 20-period average and chop < 61.8 (trending).
-# Exit when price crosses back through HMA(21).
-# Uses discrete position sizing (0.30) to minimize fee churn.
-# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL to avoid overtrading and fee drag.
-# Works in both bull and bear markets: HMA captures trend with less lag, volume confirms conviction, chop filter avoids whipsaws in ranging markets.
-# Multi-timeframe: 12h HMA trend filter for higher timeframe confirmation.
+# 1h_ema_volume_regime_v1
+# Hypothesis: 1h strategy using 50-period EMA for trend direction, volume confirmation (>1.5x 20-period average),
+# and chop regime filter (chop < 61.8 = trending) for entries. Uses 4h EMA(50) as HTF trend filter.
+# Long when price > 1h EMA(50) AND price > 4h EMA(50) with volume confirmation in trending market.
+# Short when price < 1h EMA(50) AND price < 4h EMA(50) with volume confirmation in trending market.
+# Exit on opposite EMA cross. Position size = 0.20 to limit drawdown.
+# Designed for 1h timeframe: targets 15-30 trades/year (60-120 total over 4 years) by requiring
+# confluence of 1h/4h trend, volume, and regime filters to avoid overtrading and fee drag.
+# Works in bull/bear markets: EMA captures trend, volume confirms conviction, chop filter avoids whipsaws.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_hma_volume_chop_regime_v1"
-timeframe = "4h"
+name = "1h_ema_volume_regime_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,23 +31,9 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Hull Moving Average (HMA) calculation
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    # 1h EMA(50) for trend and signals
     close_s = pd.Series(close)
-    n_half = int(21 / 2)
-    n_sqrt = int(np.sqrt(21))
-    
-    wma_half = close_s.rolling(window=n_half, min_periods=n_half).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    wma_full = close_s.rolling(window=21, min_periods=21).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    
-    raw_hma = 2 * wma_half - wma_full
-    hma = pd.Series(raw_hma).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
+    ema_50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Choppiness Index regime filter (14-period)
     atr_period = 14
@@ -64,31 +50,22 @@ def generate_signals(prices):
     atr_sum = tr_series.rolling(window=atr_period, min_periods=atr_period).sum().values
     chop = 100 * np.log10(atr_sum / np.log10(atr_period) / (highest_high - lowest_low))
     
-    # Multi-timeframe: 12h HMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    close_12h_s = pd.Series(close_12h)
-    wma_half_12h = close_12h_s.rolling(window=n_half, min_periods=n_half).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    wma_full_12h = close_12h_s.rolling(window=21, min_periods=21).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    raw_hma_12h = 2 * wma_half_12h - wma_full_12h
-    hma_12h = pd.Series(raw_hma_12h).rolling(window=n_sqrt, min_periods=n_sqrt).apply(
-        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
-    ).values
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Multi-timeframe: 4h EMA(50) trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    close_4h_s = pd.Series(close_4h)
+    ema_50_4h = close_4h_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(hma[i]) or np.isnan(hma[i-1]) or 
+        if (np.isnan(ema_50[i]) or np.isnan(ema_50[i-1]) or 
             np.isnan(volume_ma[i]) or np.isnan(chop[i]) or
             np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(hma_12h_aligned[i])):
+            np.isnan(ema_50_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -96,35 +73,35 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         # Regime filter: chop < 61.8 indicates trending market
         trending_market = chop[i] < 61.8
-        # HTF trend filter: price above/below 12h HMA
-        htf_uptrend = close[i] > hma_12h_aligned[i]
-        htf_downtrend = close[i] < hma_12h_aligned[i]
+        # HTF trend filter: price above/below 4h EMA(50)
+        htf_uptrend = close[i] > ema_50_4h_aligned[i]
+        htf_downtrend = close[i] < ema_50_4h_aligned[i]
         
         if position == 1:  # Long position
-            # Exit: price crosses below HMA(21)
-            if close[i] < hma[i] and close[i-1] >= hma[i-1]:
+            # Exit: price crosses below 1h EMA(50)
+            if close[i] < ema_50[i] and close[i-1] >= ema_50[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price crosses above HMA(21)
-            if close[i] > hma[i] and close[i-1] <= hma[i-1]:
+            # Exit: price crosses above 1h EMA(50)
+            if close[i] > ema_50[i] and close[i-1] <= ema_50[i-1]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
         else:  # Flat
-            # Check for price/HMA cross with volume, regime, and HTF confirmation
-            bullish_cross = (close[i] > hma[i] and close[i-1] <= hma[i-1]) and volume_confirmed and trending_market and htf_uptrend
-            bearish_cross = (close[i] < hma[i] and close[i-1] >= hma[i-1]) and volume_confirmed and trending_market and htf_downtrend
+            # Check for price/EMA cross with volume, regime, and HTF confirmation
+            bullish_cross = (close[i] > ema_50[i] and close[i-1] <= ema_50[i-1]) and volume_confirmed and trending_market and htf_uptrend
+            bearish_cross = (close[i] < ema_50[i] and close[i-1] >= ema_50[i-1]) and volume_confirmed and trending_market and htf_downtrend
             
             if bullish_cross:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.20
             elif bearish_cross:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
