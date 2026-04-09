@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v8
-# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
-# Uses tighter entry conditions (volume > 3x 20-period average) to reduce trades and avoid fee drag.
+# 12h_1d_camarilla_breakout_v1
+# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
+# Uses tight entry conditions (volume > 2.5x 20-period average) to reduce trades and avoid fee drag.
 # Works in bull markets by catching breakouts, in bear markets by fading false breaks via pivot reversion.
-# Target: 15-40 trades per year per symbol.
+# Target: 15-35 trades per year per symbol (60-140 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v8"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     h4_1d = close_1d + (range_1d * 1.1 / 2)
     l4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d levels to 4h timeframe
+    # Align 1d levels to 12h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
@@ -82,11 +82,11 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Enter long: price breaks above H4 level with volume confirmation
-            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 3.0:
+            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 2.5:
                 position = 1
                 signals[i] = 0.25
             # Enter short: price breaks below L4 level with volume confirmation
-            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 3.0:
+            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 2.5:
                 position = -1
                 signals[i] = -0.25
     
