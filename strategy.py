@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# 4h_camarilla_1d_trend_volume_v5
-# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
-# Reduced trade frequency by tightening volume confirmation (2.5x) and requiring close beyond pivot.
-# Uses discrete position sizing (0.0, ±0.30) to minimize fee churn. Target: 20-40 trades/year.
+# 12h_camarilla_1d_trend_volume_v6
+# Hypothesis: 12h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
+# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 12-37 trades/year.
 # Works in bull/bear by aligning with 1d trend via EMA50. Volume confirms institutional participation.
 # Added ATR-based volatility filter to reduce whipsaws and overtrading.
 
@@ -10,8 +9,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_camarilla_1d_trend_volume_v5"
-timeframe = "4h"
+name = "12h_camarilla_1d_trend_volume_v6"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -60,7 +59,7 @@ def generate_signals(prices):
     h3 = pivot_point + (range_1d * 1.1 / 4)
     l3 = pivot_point - (range_1d * 1.1 / 4)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
@@ -90,7 +89,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit: price closes above L3 OR trend turns bullish
@@ -98,7 +97,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
             volume_confirmed = volume[i] > 2.5 * volume_ma[i]
@@ -107,10 +106,10 @@ def generate_signals(prices):
                 # Long: price breaks above H3 with bullish trend
                 if close[i] > h3_aligned[i] and close[i] > ema50_1d_aligned[i]:
                     position = 1
-                    signals[i] = 0.30
+                    signals[i] = 0.25
                 # Short: price breaks below L3 with bearish trend
                 elif close[i] < l3_aligned[i] and close[i] < ema50_1d_aligned[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
