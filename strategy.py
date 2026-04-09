@@ -1,14 +1,11 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 12h_1w_donchian_volume_v1
+# Hypothesis: 12-hour Donchian channel breakout with volume confirmation and weekly trend filter.
+# In bull markets, buy breakouts above weekly trend; in bear markets, sell breakdowns below weekly trend.
+# Uses weekly higher timeframe to filter direction and avoid counter-trend trades.
+# Target: 15-30 trades/year to minimize fee drag while capturing strong moves.
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and choppiness filter
-# Works in bull/bear by using mean-reversion at extreme levels (S4/R4) with volume confirmation
-# Target: 20-40 trades/year to avoid fee drag, focusing on high-probability breakouts
-
-name = "4h_1d_camarilla_breakout_v30"
-timeframe = "4h"
+name = "12h_1w_donchian_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,33 +18,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    r4 = np.full(len(df_1d), np.nan)
-    s4 = np.full(len(df_1d), np.nan)
-    prev_high = np.full(len(df_1d), np.nan)
-    prev_low = np.full(len(df_1d), np.nan)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema = close_1w.copy()
+        alpha = 2 / (20 + 1)
+        for i in range(1, len(close_1w)):
+            ema[i] = alpha * close_1w[i] + (1 - alpha) * ema[i-1]
+        ema_20_1w = ema
     
-    for i in range(1, len(df_1d)):
-        ph = float(df_1d['high'].iloc[i-1])
-        pl = float(df_1d['low'].iloc[i-1])
-        pc = float(df_1d['close'].iloc[i-1])
-        r4[i] = pc + (ph - pl) * 1.1 / 2
-        s4[i] = pc - (ph - pl) * 1.1 / 2
-        prev_high[i] = ph
-        prev_low[i] = pl
+    # Align weekly EMA to 12h timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Align 1d values to 4h timeframe
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
-    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Calculate Donchian channels (20-period) on 12h data
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 4-period average (16h)
+    # Volume confirmation: 4-period average (48h)
     vol_ma_4 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -57,65 +53,45 @@ def generate_signals(prices):
         if i >= 3:
             vol_ma_4[i] = vol_sum / 4
     
-    # Choppiness regime filter (14-period) - optimized version
-    chop = np.full(n, np.nan)
-    for i in range(13, n):
-        high_max = np.max(high[i-13:i+1])
-        low_min = np.min(low[i-13:i+1])
-        if high_max <= low_min:
-            chop[i] = np.nan
-            continue
-        sum_true_range = 0.0
-        for j in range(14):
-            idx = i - j
-            tr = high[idx] - low[idx]
-            if idx > 0:
-                tr = max(tr, abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
-            sum_true_range += tr
-        if sum_true_range > 0:
-            chop[i] = 100 * np.log10(sum_true_range / (high_max - low_min)) / np.log10(14)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_4h[i]) or 
-            np.isnan(s4_4h[i]) or 
-            np.isnan(prev_high_4h[i]) or 
-            np.isnan(prev_low_4h[i]) or 
-            np.isnan(vol_ma_4[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(vol_ma_4[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes back inside previous day's range OR chop > 61.8 (trending ends)
-            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
+            # Exit: price closes below Donchian lower band OR weekly trend turns bearish
+            if close[i] < lowest_low[i] or close[i] < ema_20_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes back inside previous day's range OR chop > 61.8
-            if (close[i] <= prev_high_4h[i] and close[i] >= prev_low_4h[i]) or chop[i] > 61.8:
+            # Exit: price closes above Donchian upper band OR weekly trend turns bullish
+            if close[i] > highest_high[i] or close[i] > ema_20_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation AND chop < 61.8 (not too choppy)
+            # Enter long: price closes above Donchian upper band with volume confirmation AND price above weekly EMA (bullish)
             vol_ratio = volume[i] / vol_ma_4[i] if vol_ma_4[i] > 0 else 0
-            if (close[i] > r4_4h[i] and 
+            if (close[i] > highest_high[i] and 
                 vol_ratio > 2.0 and 
-                chop[i] < 61.8):
+                close[i] > ema_20_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation AND chop < 61.8
-            elif (close[i] < s4_4h[i] and 
+            # Enter short: price closes below Donchian lower band with volume confirmation AND price below weekly EMA (bearish)
+            elif (close[i] < lowest_low[i] and 
                   vol_ratio > 2.0 and 
-                  chop[i] < 61.8):
+                  close[i] < ema_20_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
     
