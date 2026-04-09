@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v1
-# Hypothesis: 12h strategy using 1d Camarilla H3/L3 levels with 12h trend filter and volume confirmation.
+# 4h_camarilla_1d_trend_volume_v7
+# Hypothesis: 4h strategy using 1d Camarilla H3/L3 levels with 4h trend filter and volume confirmation.
 # In ranging markets, price tends to revert from H3/L3 levels; in trending markets, breaks above/below
-# these levels with volume continuation signal strong moves. 12h EMA(50) determines trend bias.
+# these levels with volume continuation signal strong moves. 4h EMA(50) determines trend bias.
 # Volume > 1.3x 20-period average filters weak breakouts. Discrete sizing (±0.25) minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in both bull and bear via trend alignment.
+# Target: 75-200 total trades over 4 years (19-50/year). Works in both bull and bear via trend alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_1d_trend_volume_v7"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,15 +24,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h HTF data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # 4h HTF data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 60:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    # 12h EMA(50) for trend bias
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    # 4h EMA(50) for trend bias
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # 1d HTF data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
@@ -60,7 +60,7 @@ def generate_signals(prices):
     h3 = pivot_point + (range_1d * 1.1 / 4)
     l3 = pivot_point - (range_1d * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
@@ -72,7 +72,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
@@ -97,12 +97,12 @@ def generate_signals(prices):
             volume_confirmed = volume[i] > 1.3 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price crosses above H3 with 12h bullish bias (price above EMA50)
-                if close[i] > h3_aligned[i] and close[i] > ema_50_12h_aligned[i]:
+                # Long: price crosses above H3 with 4h bullish bias (price above EMA50)
+                if close[i] > h3_aligned[i] and close[i] > ema_50_4h_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price crosses below L3 with 12h bearish bias (price below EMA50)
-                elif close[i] < l3_aligned[i] and close[i] < ema_50_12h_aligned[i]:
+                # Short: price crosses below L3 with 4h bearish bias (price below EMA50)
+                elif close[i] < l3_aligned[i] and close[i] < ema_50_4h_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
