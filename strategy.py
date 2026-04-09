@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h volume confirmation and ATR trailing stop
-# - Uses 12h Camarilla pivot levels (H4/L4) for breakout signals
-# - Confirms with 4h volume > 2.0x its 20-period average (strong participation)
-# - Uses ATR(14) trailing stop: exits when price retraces 2.5x ATR from extreme
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and ATR(14) trailing stop
+# - Uses 4h Donchian channel (20-period high/low) for breakout signals
+# - Confirms with 12h volume > 1.8x its 20-period average (strong participation)
+# - Uses ATR(14) trailing stop: exits when price retraces 2.0x ATR from extreme
 # - Position size: 0.25 (25% of capital) to balance return and drawdown
 # - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# - Camarilla pivots work in ranging markets (mean reversion at S3/R3) and trending markets (breakout at H4/L4)
-# - Volume filter reduces false breakouts, ATR stop manages risk in volatile markets
+# - Donchian breakouts capture trends; volume filter reduces false signals; ATR stop manages risk
 
-name = "4h_12h_camarilla_volume_atr_v1"
+name = "4h_12h_donchian_volume_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,9 +41,9 @@ def generate_signals(prices):
     # 12h ATR(14) for volatility and stoploss
     atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
-    # 12h Volume > 2.0x 20-period average (stricter for fewer trades)
+    # 12h Volume > 1.8x 20-period average (volume confirmation)
     avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_spike_12h = volume_12h > (2.0 * avg_volume_20)
+    volume_spike_12h = volume_12h > (1.8 * avg_volume_20)
     
     # Align 12h indicators to 4h
     atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
@@ -55,6 +54,11 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
+    # 4h Donchian(20) - upper and lower bands
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
@@ -64,6 +68,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(atr_12h_aligned[i]) or np.isnan(volume_spike_12h_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             atr_12h_aligned[i] <= 0):
             signals[i] = 0.0
             continue
@@ -73,8 +78,8 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.5x ATR from high
-            if low[i] <= highest_since_entry - (2.5 * atr_12h_aligned[i]):
+            # Exit conditions: price retraces 2.0x ATR from high
+            if low[i] <= highest_since_entry - (2.0 * atr_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -85,73 +90,23 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.5x ATR from low
-            if high[i] >= lowest_since_entry + (2.5 * atr_12h_aligned[i]):
+            # Exit conditions: price retraces 2.0x ATR from low
+            if high[i] >= lowest_since_entry + (2.0 * atr_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Calculate 12h Camarilla pivot levels using previous 12h bar
-            # Need at least 1 previous 12h bar
-            if i < 2:  # Need at least 2 bars to get previous 12h bar
-                signals[i] = 0.0
-                continue
-                
-            # Get previous 12h bar's high, low, close
-            prev_idx_12h = (i // 3) - 1  # 3x 4h bars = 1x 12h bar, subtract 1 for previous
-            if prev_idx_12h < 0:
-                signals[i] = 0.0
-                continue
-                
-            # Get the actual previous 12h bar values
-            ph = high_12h[prev_idx_12h]
-            pl = low_12h[prev_idx_12h]
-            pc = close_12h[prev_idx_12h]
-            
-            # Calculate Camarilla levels
-            range_ = ph - pl
-            if range_ <= 0:
-                signals[i] = 0.0
-                continue
-                
-            # Camarilla H4 and L4 levels (breakout levels)
-            h4 = pc + (range_ * 1.1 / 2)
-            l4 = pc - (range_ * 1.1 / 2)
-            
-            # Align H4/L4 to 4h timeframe (they're constant within the 12h bar)
-            # Create arrays of H4/L4 values for each 12h bar, then align
-            h4_array = np.full_like(high_12h, np.nan)
-            l4_array = np.full_like(low_12h, np.nan)
-            
-            for j in range(len(high_12h)):
-                ph_j = high_12h[j]
-                pl_j = low_12h[j]
-                pc_j = close_12h[j]
-                range_j = ph_j - pl_j
-                if range_j > 0:
-                    h4_array[j] = pc_j + (range_j * 1.1 / 2)
-                    l4_array[j] = pc_j - (range_j * 1.1 / 2)
-            
-            # Align to 4h
-            h4_aligned = align_htf_to_ltf(prices, df_12h, h4_array)
-            l4_aligned = align_htf_to_ltf(prices, df_12h, l4_array)
-            
-            if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-                np.isnan(volume_spike_12h_aligned[i])):
-                signals[i] = 0.0
-                continue
-            
-            # Look for Camarilla breakout with volume confirmation
-            if (high[i] >= h4_aligned[i] and    # Break above H4
-                volume_spike_12h_aligned[i]):   # Volume confirmation
+            # Look for Donchian breakout with volume confirmation
+            if (high[i] >= highest_high[i] and    # Break above upper band
+                volume_spike_12h_aligned[i]):     # Volume confirmation
                 position = 1
                 entry_price = high[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = high[i]  # Initialize for shorts
                 signals[i] = 0.25
-            elif (low[i] <= l4_aligned[i] and    # Break below L4
-                  volume_spike_12h_aligned[i]):  # Volume confirmation
+            elif (low[i] <= lowest_low[i] and     # Break below lower band
+                  volume_spike_12h_aligned[i]):   # Volume confirmation
                 position = -1
                 entry_price = low[i]
                 highest_since_entry = low[i]  # Initialize for longs
