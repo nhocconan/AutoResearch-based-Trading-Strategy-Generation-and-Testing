@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation and ATR stoploss
-# - Uses 1w Camarilla pivot levels (based on previous week's range) for breakout entries on 1d
-# - Requires volume > 1.5 * 20-period volume average for confirmation (balanced filter)
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ATR(14) stoploss
+# - Uses 12h Donchian channels (20-period high/low) for breakout entries
+# - Requires 1d volume > 1.5 * 20-period volume average for confirmation
 # - Uses ATR(14) for dynamic stoploss (2.0 * ATR) and position sizing (0.25)
-# - Works in bull markets via breakouts above resistance (H3/H4), in bear via breakdowns below support (L3/L4)
-# - Target: 15-30 trades/year on 1d timeframe (60-120 total over 4 years) to avoid fee drag
-# - Weekly timeframe provides stable pivot levels that reduce whipsaw vs daily pivots
+# - Works in bull markets via breakouts above resistance, in bear via breakdowns below support
+# - Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years) to avoid fee drag
+# - Donchian channels provide adaptive volatility-based support/resistance
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,36 +21,20 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1w Camarilla pivot levels (based on previous week's OHLC)
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_close = df_1w['close'].shift(1).values
-    
-    # Calculate pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    h4 = pivot + range_hl * 1.1 / 2
-    h3 = pivot + range_hl * 1.1 / 4
-    l3 = pivot - range_hl * 1.1 / 4
-    l4 = pivot - range_hl * 1.1 / 2
-    
-    # Align Camarilla levels to 1d timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    
-    # Pre-compute 1d ATR(14) for stoploss
+    # Pre-compute 12h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    # Donchian channels: 20-period high/low
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 12h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,10 +42,11 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume confirmation: volume > 1.5 * 20-period average
-    volume = prices['volume'].values
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    # Pre-compute 1d volume confirmation: volume > 1.5 * 20-period average
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1d = volume_1d > (1.5 * vol_ma_1d)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,10 +55,9 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or
-            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(atr[i]) or atr[i] <= 0 or
-            np.isnan(volume_confirm[i])):
+            np.isnan(volume_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -87,7 +71,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] < l3_aligned[i]:  # Mean reversion exit (break below L3)
+            elif close[i] < donchian_low[i]:  # Mean reversion exit (break below Donchian low)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -105,7 +89,7 @@ def generate_signals(prices):
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
                 signals[i] = 0.0
-            elif close[i] > h3_aligned[i]:  # Mean reversion exit (break above H3)
+            elif close[i] > donchian_high[i]:  # Mean reversion exit (break above Donchian high)
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -114,12 +98,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Look for breakout entries with volume confirmation
-            if close[i] > h4_aligned[i] and volume_confirm[i]:  # Break above H4
+            if close[i] > donchian_high[i] and volume_confirm_aligned[i] > 0.5:  # Break above Donchian high
                 position = 1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
                 signals[i] = 0.25
-            elif close[i] < l4_aligned[i] and volume_confirm[i]:  # Break below L4
+            elif close[i] < donchian_low[i] and volume_confirm_aligned[i] > 0.5:  # Break below Donchian low
                 position = -1
                 highest_high_since_entry = high[i]
                 lowest_low_since_entry = low[i]
