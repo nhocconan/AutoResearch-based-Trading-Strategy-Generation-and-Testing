@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# 1h_ema_rsi_pullback_4h1d_v1
-# Hypothesis: 1h strategy using 4h EMA21 trend direction and daily RSI(14) for mean reversion entries.
-# Long: 4h EMA21 uptrend, price pulls back to 1h EMA50 with RSI(14) < 30, volume > 1.2x 20-period average.
-# Short: 4h EMA21 downtrend, price pulls back to 1h EMA50 with RSI(14) > 70, volume > 1.2x 20-period average.
-# Exit: Opposite EMA50 cross or RSI reaches extreme (RSI>70 for long, RSI<30 for short).
-# Uses 4h EMA for trend filter (aligns with experiment's HTF preference) and daily RSI for timing.
-# Session filter: 08-20 UTC to reduce noise trades.
-# Position size: 0.20 (discrete level to minimize fee churn).
-# Target: 15-37 trades/year (60-150 total over 4 years) on BTC/ETH/SOL.
+# 6h_weekly_pivot_donchian_volume_v5
+# Hypothesis: 6h strategy using weekly pivot points (from 1w) for structure, combined with 6h Donchian channel breakout and volume confirmation.
+# Long: Price breaks above weekly R1 pivot AND above 6h Donchian upper channel (20), with volume > 1.5x 20-period average.
+# Short: Price breaks below weekly S1 pivot AND below 6h Donchian lower channel (20), with volume > 1.5x 20-period average.
+# Exit: Price crosses weekly main pivot (PP) or Donchian middle line.
+# Uses weekly pivots for major support/resistance, Donchian for breakout confirmation, volume to filter false breakouts.
+# Designed to work in both bull (breakouts) and bear (breakdowns) markets with tight entries to minimize fee drag.
+# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_ema_rsi_pullback_4h1d_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_donchian_volume_v5"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,102 +26,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 1h EMA50 for pullback target
-    close_s = pd.Series(close)
-    ema50 = close_s.ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # 1h RSI(14) for entry timing
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # Neutral RSI when undefined
+    # Donchian channel (20-period) for 6h
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    donchian_upper = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_s.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 4h data for EMA21 trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) == 0:
+    # Get 1w data for weekly pivot points (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
     
-    # 4h EMA21 for trend direction
-    close_4h = pd.Series(df_4h['close'].values)
-    ema21_4h = close_4h.ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for RSI(14) momentum filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
-        return np.zeros(n)
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pp - low_1w
+    s1 = 2 * pp - high_1w
     
-    # 1d RSI(14) for momentum filter
-    close_1d = pd.Series(df_1d['close'].values)
-    delta_1d = close_1d.diff()
-    gain_1d = delta_1d.where(delta_1d > 0, 0.0)
-    loss_1d = (-delta_1d).where(delta_1d < 0, 0.0)
-    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1d = avg_gain_1d / avg_loss_1d.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d = rsi_1d.fillna(50).values  # Neutral RSI when undefined
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align HTF weekly pivot points to 6h timeframe (wait for completed 1w bar)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
-        # Skip if any required data is NaN or outside session
-        if (not in_session[i] or
-            np.isnan(ema50[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]) or
-            np.isnan(ema21_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or
+            np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(high[i]) or np.isnan(low[i]) or
             np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.2x 20-period average
-        volume_confirmed = volume[i] > 1.2 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Price crosses below EMA50 OR RSI reaches overbought (70)
-            if close[i] < ema50[i] or rsi[i] > 70:
+            # Exit: Price crosses below weekly PP OR below Donchian middle
+            if close[i] < pp_aligned[i] or close[i] < donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above EMA50 OR RSI reaches oversold (30)
-            if close[i] > ema50[i] or rsi[i] < 30:
+            # Exit: Price crosses above weekly PP OR above Donchian middle
+            if close[i] > pp_aligned[i] or close[i] > donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Long entry: 4h EMA21 uptrend, 1d RSI < 50 (bullish momentum), price at EMA50, RSI < 30, volume confirmed
-            if (ema21_4h_aligned[i] > ema21_4h_aligned[i-1] and  # 4h EMA21 rising
-                rsi_1d_aligned[i] < 50 and                      # 1d RSI not overbought
-                abs(close[i] - ema50[i]) / ema50[i] < 0.005 and  # Price near EMA50 (within 0.5%)
-                rsi[i] < 30 and                                 # 1h RSI oversold
-                volume_confirmed):
+            # Long entry: Price breaks above weekly R1 AND above Donchian upper, volume confirmed
+            if (high[i] > r1_aligned[i] and close[i] > donchian_upper[i] and volume_confirmed):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: 4h EMA21 downtrend, 1d RSI > 50 (bearish momentum), price at EMA50, RSI > 70, volume confirmed
-            elif (ema21_4h_aligned[i] < ema21_4h_aligned[i-1] and  # 4h EMA21 falling
-                  rsi_1d_aligned[i] > 50 and                      # 1d RSI not oversold
-                  abs(close[i] - ema50[i]) / ema50[i] < 0.005 and  # Price near EMA50 (within 0.5%)
-                  rsi[i] > 70 and                                 # 1h RSI overbought
-                  volume_confirmed):
+                signals[i] = 0.25
+            # Short entry: Price breaks below weekly S1 AND below Donchian lower, volume confirmed
+            elif (low[i] < s1_aligned[i] and close[i] < donchian_lower[i] and volume_confirmed):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
