@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Supertrend + 1w/1d HTF filter using EMA crossover
-# Supertrend(ATR=10, mult=3) on 6h for trend direction and entry timing
-# 1w EMA(34) vs 1d EMA(89) for HTF regime: bullish when weekly > daily
-# In bullish HTF regime: only take Supertrend longs
-# In bearish HTF regime: only take Supertrend shorts
+# Hypothesis: 12h Williams %R + 1d ADX regime filter
+# Williams %R(14): overbought > -20, oversold < -80
+# ADX > 25 indicates trending market (use 1d ADX for regime)
+# In trending regime (ADX > 25): trade pullbacks - long when %R crosses above -80 from below, short when crosses below -20 from above
+# In ranging regime (ADX <= 25): mean reversion - long when %R < -80 and turning up, short when %R > -20 and turning down
+# Uses 1d ADX(14) for regime detection, 12h for Williams %R and entries
 # Position size 0.25 to limit drawdown
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Works in both bull/bear: adapts via HTF EMA crossover filter
 
-name = "6h_1w_1d_supertrend_ema_regime_v1"
-timeframe = "6h"
+name = "12h_1d_williams_r_adx_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,152 +25,154 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Load 1w and 1d data ONCE before loop for EMA
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34)
-    close_1w = df_1w['close'].values
-    ema_34_1w = np.full(len(df_1w), np.nan)
-    multiplier_1w = 2 / (34 + 1)
-    ema_34_1w[0] = close_1w[0]
-    for i in range(1, len(df_1w)):
-        ema_34_1w[i] = (close_1w[i] * multiplier_1w) + (ema_34_1w[i-1] * (1 - multiplier_1w))
-    
-    # Calculate 1d EMA(89)
+    # Calculate 1d ADX(14) for regime detection
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_89_1d = np.full(len(df_1d), np.nan)
-    multiplier_1d = 2 / (89 + 1)
-    ema_89_1d[0] = close_1d[0]
+    
+    # True Range
+    tr = np.zeros(len(df_1d))
+    tr[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
-        ema_89_1d[i] = (close_1d[i] * multiplier_1d) + (ema_89_1d[i-1] * (1 - multiplier_1d))
-    
-    # Align HTF EMA values to 6h timeframe
-    ema_34_1w_6h = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    ema_89_1d_6h = align_htf_to_ltf(prices, df_1d, ema_89_1d)
-    
-    # Calculate Supertrend on 6h
-    # ATR(10)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr0 = high[i] - low[i]
-        tr1 = abs(high[i] - close[i-1])
-        tr2 = abs(low[i] - close[i-1])
+        tr0 = high_1d[i] - low_1d[i]
+        tr1 = abs(high_1d[i] - close_1d[i-1])
+        tr2 = abs(low_1d[i] - close_1d[i-1])
         tr[i] = max(tr0, tr1, tr2)
     
-    atr_10 = np.full(n, np.nan)
-    for i in range(9, n):
-        if i == 9:
-            atr_10[i] = np.mean(tr[:10])
+    # Directional Movement
+    plus_dm = np.zeros(len(df_1d))
+    minus_dm = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        up_move = high_1d[i] - high_1d[i-1]
+        down_move = low_1d[i-1] - low_1d[i]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
         else:
-            atr_10[i] = (atr_10[i-1] * 9 + tr[i]) / 10
-    
-    # Supertrend calculation
-    hl2 = (high + low) / 2
-    upper_band = hl2 + (3 * atr_10)
-    lower_band = hl2 - (3 * atr_10)
-    
-    supertrend = np.full(n, np.nan)
-    direction = np.full(n, np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(10, n):
-        if np.isnan(atr_10[i]) or np.isnan(hl2[i]):
-            continue
-            
-        # Upper band logic
-        if i == 10:
-            upper_band[i] = hl2[i] + (3 * atr_10[i])
-            lower_band[i] = hl2[i] - (3 * atr_10[i])
+            plus_dm[i] = 0
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
         else:
-            if upper_band[i-1] > close[i-1]:
-                upper_band[i] = min(upper_band[i], upper_band[i-1])
-            else:
-                upper_band[i] = hl2[i] + (3 * atr_10[i])
-                
-            if lower_band[i-1] < close[i-1]:
-                lower_band[i] = max(lower_band[i], lower_band[i-1])
-            else:
-                lower_band[i] = hl2[i] - (3 * atr_10[i])
-        
-        # Supertrend logic
-        if i == 10:
-            if close[i] > upper_band[i]:
-                supertrend[i] = lower_band[i]
-                direction[i] = -1  # downtrend
-            else:
-                supertrend[i] = upper_band[i]
-                direction[i] = 1   # uptrend
-        else:
-            if supertrend[i-1] == upper_band[i-1]:
-                if close[i] <= upper_band[i]:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = 1
-                else:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = -1
-            else:  # supertrend[i-1] == lower_band[i-1]
-                if close[i] >= lower_band[i]:
-                    supertrend[i] = lower_band[i]
-                    direction[i] = 1
-                else:
-                    supertrend[i] = upper_band[i]
-                    direction[i] = -1
+            minus_dm[i] = 0
+    
+    # Smoothed DM and TR (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full(len(data), np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    # Calculate smoothed values
+    tr_14 = wilders_smoothing(tr, 14)
+    plus_dm_14 = wilders_smoothing(plus_dm, 14)
+    minus_dm_14 = wilders_smoothing(minus_dm, 14)
+    
+    # Calculate DI and DX
+    plus_di_14 = np.full(len(df_1d), np.nan)
+    minus_di_14 = np.full(len(df_1d), np.nan)
+    dx_14 = np.full(len(df_1d), np.nan)
+    
+    for i in range(14, len(df_1d)):
+        if tr_14[i] != 0:
+            plus_di_14[i] = (plus_dm_14[i] / tr_14[i]) * 100
+            minus_di_14[i] = (minus_dm_14[i] / tr_14[i]) * 100
+            if (plus_di_14[i] + minus_di_14[i]) != 0:
+                dx_14[i] = (abs(plus_di_14[i] - minus_di_14[i]) / (plus_di_14[i] + minus_di_14[i])) * 100
+    
+    # Calculate ADX (smoothed DX)
+    adx_14 = wilders_smoothing(dx_14, 14)
+    
+    # Align 1d ADX to 12h timeframe
+    adx_14_12h = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate Williams %R on 12h
+    def calculate_williams_r(high, low, close, period):
+        highest_high = np.full(len(high), np.nan)
+        lowest_low = np.full(len(low), np.nan)
+        for i in range(period-1, len(high)):
+            highest_high[i] = np.max(high[i-(period-1):i+1])
+            lowest_low[i] = np.min(low[i-(period-1):i+1])
+        wr = np.full(len(high), np.nan)
+        for i in range(period-1, len(high)):
+            if highest_high[i] - lowest_low[i] != 0:
+                wr[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        return wr
+    
+    wr = calculate_williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_34_1w_6h[i]) or 
-            np.isnan(ema_89_1d_6h[i]) or 
-            np.isnan(supertrend[i]) or 
-            np.isnan(direction[i])):
+        if (np.isnan(adx_14_12h[i]) or 
+            np.isnan(wr[i])):
             signals[i] = 0.0
             continue
         
-        # HTF regime: bullish when weekly EMA > daily EMA
-        htf_bullish = ema_34_1w_6h[i] > ema_89_1d_6h[i]
+        adx = adx_14_12h[i]
+        wr_val = wr[i]
         
         if position == 1:  # Long position
             # Exit conditions
-            if htf_bullish:
-                # In bullish HTF: exit when Supertrend turns down
-                if direction[i] == -1:
+            if adx > 25:  # Trending regime
+                # Exit when Williams %R crosses below -50 (momentum loss)
+                if wr_val < -50:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            else:
-                # In bearish HTF: exit long immediately (shouldn't happen, but safety)
-                position = 0
-                signals[i] = 0.0
+            else:  # Ranging regime
+                # Exit when Williams %R returns to mean (-50)
+                if wr_val > -50:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
                     
         elif position == -1:  # Short position
             # Exit conditions
-            if not htf_bullish:
-                # In bearish HTF: exit when Supertrend turns up
-                if direction[i] == 1:
+            if adx > 25:  # Trending regime
+                # Exit when Williams %R crosses above -50 (momentum loss)
+                if wr_val > -50:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            else:
-                # In bullish HTF: exit short immediately (shouldn't happen, but safety)
-                position = 0
-                signals[i] = 0.0
+            else:  # Ranging regime
+                # Exit when Williams %R returns to mean (-50)
+                if wr_val < -50:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            # Entry logic based on HTF regime and Supertrend
-            if htf_bullish:
-                # Bullish HTF: only take longs when Supertrend is up
-                if direction[i] == 1:
+            # Entry logic based on regime
+            if adx > 25:  # Trending regime - trade pullbacks
+                # Go long when Williams %R crosses above -80 from below (oversold bounce)
+                # Go short when Williams %R crosses below -20 from above (overbought rejection)
+                if i > 30:
+                    wr_prev = wr[i-1]
+                    if wr_val > -80 and wr_prev <= -80:
+                        position = 1
+                        signals[i] = 0.25
+                    elif wr_val < -20 and wr_prev >= -20:
+                        position = -1
+                        signals[i] = -0.25
+            else:  # Ranging regime - mean reversion
+                # Go long when Williams %R is deeply oversold (< -80)
+                # Go short when Williams %R is deeply overbought (> -20)
+                if wr_val < -80:
                     position = 1
                     signals[i] = 0.25
-            else:
-                # Bearish HTF: only take shorts when Supertrend is down
-                if direction[i] == -1:
+                elif wr_val > -20:
                     position = -1
                     signals[i] = -0.25
     
