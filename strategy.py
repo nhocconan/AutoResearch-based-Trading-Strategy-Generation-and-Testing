@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + choppiness regime filter
-# Uses 1d OHLC to calculate Camarilla levels (H3/L3 for entries, H4/L4 for stops)
-# Entry on 12h close touching H3/L3 with volume > 2x 20-period average
-# Choppiness regime: only trade when CHOP(14) > 61.8 (ranging market) for mean reversion
-# Designed for 12h timeframe to target 12-37 trades/year (50-150 over 4 years)
-# Works in bull/bear: Camarilla provides adaptive support/resistance, chop filter avoids trending markets
+# Hypothesis: 6h Donchian(20) breakout with 1d HMA50 trend filter and volume confirmation
+# Uses Donchian channels from 6h data: breakout above upper band = long, below lower band = short
+# 1d HMA50 filter ensures trades align with higher timeframe trend (more stable than 12h)
+# Volume confirmation reduces false breakouts
+# Designed for 6h timeframe to target 12-37 trades/year (50-150 over 4 years)
+# Works in bull/bear: HMA50 adapts to trend, Donchian provides robust structure
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "6h_1d_donchian_hma_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,63 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels and chop
+    # Load 1d data ONCE before loop for Donchian channels and HMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d OHLC for Camarilla
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) from 6h data
+    high_6h = high
+    low_6h = low
+    close_6h = close
     
-    # Calculate Camarilla levels (based on previous day's range)
-    # H3/L3: entry levels, H4/L4: stop levels
-    camarilla_h3 = np.full(len(df_1d), np.nan)
-    camarilla_l3 = np.full(len(df_1d), np.nan)
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
+    # Upper band: highest high of last 20 periods
+    upper_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    lower_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    for i in range(1, len(df_1d)):
-        high_val = high_1d[i-1]
-        low_val = low_1d[i-1]
-        close_val = close_1d[i-1]
-        range_val = high_val - low_val
-        
-        camarilla_h3[i] = close_val + range_val * 1.1 / 4
-        camarilla_l3[i] = close_val - range_val * 1.1 / 4
-        camarilla_h4[i] = close_val + range_val * 1.1 / 2
-        camarilla_l4[i] = close_val - range_val * 1.1 / 2
+    # Calculate 1d HMA50 trend filter
+    df_1d_close = df_1d['close'].values
+    half_n = int(50/2 + 0.5)
+    wma_half = pd.Series(df_1d_close).rolling(window=half_n, min_periods=half_n).mean()
+    wma_full = pd.Series(df_1d_close).rolling(window=50, min_periods=50).mean()
+    hma_50_1d = (2 * wma_half - wma_full).values
     
-    # Align 1d Camarilla levels to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align 1d HMA50 to 6h timeframe
+    hma_50_6h = align_htf_to_ltf(prices, df_1d, hma_50_1d)
     
-    # Calculate 12h Choppiness Index (CHOP) for regime filter
-    # CHOP > 61.8 = ranging (good for mean reversion), CHOP < 38.2 = trending
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        # True range
-        tr1 = high[i] - low[i]
-        tr2 = abs(high[i] - close[i-1])
-        tr3 = abs(low[i] - close[i-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        # Sum of true range over 14 periods
-        atr_sum = np.sum(tr[i-13:i+1])
-        
-        # Highest high and lowest low over 14 periods
-        hh = np.max(high[i-13:i+1])
-        ll = np.min(low[i-13:i+1])
-        
-        if hh - ll > 0:
-            chop[i] = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when no range
-    
-    # Calculate 20-period average volume for volume confirmation
+    # Calculate 20-period average volume for volume confirmation (6h volume)
     avg_volume = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
@@ -93,42 +62,38 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or
-            np.isnan(chop[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
+            np.isnan(hma_50_6h[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        volume_confirm = volume[i] > 2.0 * avg_volume[i]
-        
-        # Regime filter: only trade in ranging market (CHOP > 61.8)
-        chop_filter = chop[i] > 61.8
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below L3 (profit target) OR above H4 (stop loss)
-            if close[i] < l3_12h[i] or close[i] > h4_12h[i]:
+            # Exit: price closes below Donchian lower band OR trend turns bearish
+            if close[i] < lower_20[i] or close[i] < hma_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H3 (profit target) OR below L4 (stop loss)
-            if close[i] > h3_12h[i] or close[i] < l4_12h[i]:
+            # Exit: price closes above Donchian upper band OR trend turns bullish
+            if close[i] > upper_20[i] or close[i] > hma_50_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume and regime confirmation
-            if volume_confirm and chop_filter:
-                # Long entry: price touches or crosses below L3 (mean reversion long)
-                if close[i] <= l3_12h[i]:
+            # Entry logic with volume confirmation
+            if volume_confirm:
+                # Long breakout: price closes above Donchian upper band AND price > 1d HMA50 (bullish trend)
+                if close[i] > upper_20[i] and close[i] > hma_50_6h[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price touches or crosses above H3 (mean reversion short)
-                elif close[i] >= h3_12h[i]:
+                # Short breakout: price closes below Donchian lower band AND price < 1d HMA50 (bearish trend)
+                elif close[i] < lower_20[i] and close[i] < hma_50_6h[i]:
                     position = -1
                     signals[i] = -0.25
     
