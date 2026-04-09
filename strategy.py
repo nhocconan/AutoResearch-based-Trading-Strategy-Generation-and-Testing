@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation and ATR regime filter
-# Camarilla R3/S3 act as mean reversion zones in ranging markets, R4/S4 as breakout levels in trending markets
-# Volume confirmation ensures institutional participation
-# ATR regime filter (current ATR > 20-period mean) avoids low volatility chop
-# Works in both bull and bear markets by adapting to regime (mean reversion in range, breakout in trend)
-# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and choppiness regime filter
+# Camarilla pivots from 1d provide intraday support/resistance levels that work in ranging and trending markets
+# Volume confirmation (current 12h volume > 1.3x 20-period average) filters false breakouts
+# Choppiness regime (CHOP > 61.8 = ranging, CHOP < 38.2 = trending) adapts strategy to market conditions
+# In ranging markets (CHOP > 61.8): mean reversion at H3/L3 levels
+# In trending markets (CHOP < 38.2): breakout continuation at H4/L4 levels
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "6h_1d_camarilla_atr_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,50 +34,42 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR (14-period) for regime filter
+    # Calculate 1d Camarilla pivot levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_hl = high_1d - low_1d
+    
+    # Camarilla levels
+    h4 = pivot + (range_hl * 1.1 / 2)
+    h3 = pivot + (range_hl * 1.1 / 4)
+    h2 = pivot + (range_hl * 1.1 / 6)
+    h1 = pivot + (range_hl * 1.1 / 12)
+    l1 = pivot - (range_hl * 1.1 / 12)
+    l2 = pivot - (range_hl * 1.1 / 6)
+    l3 = pivot - (range_hl * 1.1 / 4)
+    l4 = pivot - (range_hl * 1.1 / 2)
+    
+    # Calculate 1d Choppiness Index (14-period)
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    # Handle division by zero and invalid values
+    chop = np.where((highest_high - lowest_low) > 0, chop, 50.0)
+    chop = np.where(np.isnan(chop), 50.0, chop)
     
-    # Calculate 1d Camarilla pivot levels
-    pivot = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3.0
-    range_ = high_1d[-1] - low_1d[-1]
-    r4 = close_1d[-1] + range_ * 1.1 / 2
-    r3 = close_1d[-1] + range_ * 1.1 / 4
-    s3 = close_1d[-1] - range_ * 1.1 / 4
-    s4 = close_1d[-1] - range_ * 1.1 / 2
+    # Align Camarilla levels and Choppiness to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # For historical Camarilla levels, we need to calculate for each day
-    # Use rolling window to get daily high/low/close for each point in time
-    df_1d_df = pd.DataFrame({'high': high_1d, 'low': low_1d, 'close': close_1d}, index=df_1d.index)
-    rolling_high = df_1d_df['high'].rolling(window=1, min_periods=1).max()
-    rolling_low = df_1d_df['low'].rolling(window=1, min_periods=1).min()
-    rolling_close = df_1d_df['close'].rolling(window=1, min_periods=1).last()
-    
-    # Calculate Camarilla for each day using previous day's OHLC
-    prev_high = rolling_high.shift(1)
-    prev_low = rolling_low.shift(1)
-    prev_close = rolling_close.shift(1)
-    
-    pivot_daily = (prev_high + prev_low + prev_close) / 3.0
-    range_daily = prev_high - prev_low
-    r4_daily = prev_close + range_daily * 1.1 / 2
-    r3_daily = prev_close + range_daily * 1.1 / 4
-    s3_daily = prev_close - range_daily * 1.1 / 4
-    s4_daily = prev_close - range_daily * 1.1 / 2
-    
-    # Align Camarilla levels and ATR regime to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_daily.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_daily.values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_daily.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_daily.values)
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, (atr_14 > atr_ma_20).astype(float).values)
-    
-    # Pre-compute volume confirmation (20-period average for 6h)
+    # Pre-compute volume confirmation (20-period average for 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -84,66 +77,67 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_regime_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or
+            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.3x average 6h volume
+        # Volume confirmation: current 12h volume > 1.3x average 12h volume
         volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
-        # ATR regime filter: only trade when current ATR > 20-period average (avoid low-vol chop)
-        atr_regime = bool(atr_regime_aligned[i])
-        
-        if not volume_confirmed or not atr_regime:
+        if not volume_confirmed:
             signals[i] = 0.0
             continue
         
-        # Fixed position size to minimize fee churn
-        position_size = 0.25
+        chop_value = chop_aligned[i]
         
         if position == 1:  # Long position
-            # Exit on retracement to S3 or stop at S4 breakdown
-            if close[i] < s3_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] < s4_aligned[i]:  # Stop loss
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_size
-                
+            # Exit conditions based on regime
+            if chop_value > 61.8:  # Ranging market: mean reversion at L3
+                if close[i] < l3_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+            else:  # Trending market: trail with L4 break
+                if close[i] < l4_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.25
+                    
         elif position == -1:  # Short position
-            # Exit on retracement to R3 or stop at R4 breakout
-            if close[i] > r3_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] > r4_aligned[i]:  # Stop loss
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -position_size
+            # Exit conditions based on regime
+            if chop_value > 61.8:  # Ranging market: mean reversion at H3
+                if close[i] > h3_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
+            else:  # Trending market: trail with H4 break
+                if close[i] > h4_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25
         else:  # Flat
-            # Mean reversion at R3/S3 with volume confirmation
-            # Breakout continuation at R4/S4 with volume confirmation
-            if volume_confirmed:
-                if close[i] <= r3_aligned[i] and close[i] >= s3_aligned[i]:
-                    # In range between R3 and S3 - look for mean reversion signals
-                    # Long near S3, short near R3
-                    if close[i] <= s3_aligned[i] * 1.002:  # Near S3 (0.2% buffer)
-                        position = 1
-                        signals[i] = position_size
-                    elif close[i] >= r3_aligned[i] * 0.998:  # Near R3 (0.2% buffer)
-                        position = -1
-                        signals[i] = -position_size
-                elif close[i] > r4_aligned[i]:
-                    # Breakout above R4 - go long
+            # Entry logic based on regime and volume confirmation
+            if chop_value > 61.8:  # Ranging market: mean reversion
+                # Long at L3, Short at H3
+                if close[i] < l3_aligned[i]:
                     position = 1
-                    signals[i] = position_size
-                elif close[i] < s4_aligned[i]:
-                    # Breakdown below S4 - go short
+                    signals[i] = 0.25
+                elif close[i] > h3_aligned[i]:
                     position = -1
-                    signals[i] = -position_size
+                    signals[i] = -0.25
+            else:  # Trending market: breakout continuation
+                # Long at H4 breakout, Short at L4 breakout
+                if close[i] > h4_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                elif close[i] < l4_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
