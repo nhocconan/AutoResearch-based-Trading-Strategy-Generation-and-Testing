@@ -3,24 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
-# - Uses 1d Camarilla pivot levels (H3/L3) as structure for breakout entries
-# - Volume confirmation: 4h volume > 2.0x 20-period average to ensure strong breakout
-# - Regime filter: 1d Choppiness Index > 61.8 (range) for mean reversion, < 38.2 (trend) for trend following
-# - In ranging markets (CHOP > 61.8): fade extreme touches of H3/L3 (mean reversion)
-# - In trending markets (CHOP < 38.2): breakout of H3/L3 continues trend
-# - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter
+# - Elder Ray (Bull/Bear Power) from 6h: measures buying/selling pressure vs EMA13
+# - ADX from 1d: trend strength filter (ADX > 25 = trending market)
+# - Entry: Long when Bull Power > 0 AND Bear Power < 0 AND ADX > 25
+# - Exit: Reverse signal or ADX < 20 (trend weakening)
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~20-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
-# - Works in both bull/bear: adapts to regime via chop filter, avoids whipsaws in ranging markets
+# - Target: ~12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Novelty: Combines Elder Ray momentum with 1d ADX regime to avoid whipsaws in ranging markets
+# - Works in both bull/bear: Elder Ray captures momentum shifts, ADX filter ensures trades only in trending conditions
 
-name = "4h_1d_camarilla_breakout_regime_v1"
-timeframe = "4h"
+name = "6h_1d_elderray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -33,121 +32,102 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d ATR(14) for Camarilla pivots
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d ADX(14) for trend regime filter
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr[0]
     
-    # Calculate Camarilla pivot levels (H3, L3) from previous day
-    # H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
-    camarilla_h3 = close_1d + (1.1 * (high_1d - low_1d) / 2)
-    camarilla_l3 = close_1d - (1.1 * (high_1d - low_1d) / 2)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Calculate 1d Choppiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(n)) / log10(n)
-    atr_sum = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    n_period = 14
-    chop = 100 * np.log10(atr_sum) / np.log10(n_period)
-    # Regime: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending (trend follow)
-    chop_regime_ranging = chop > 61.8
-    chop_regime_trending = chop < 38.2
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
+    def WilderSmoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value: simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+        # Rest: Wilder's smoothing
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]):
+                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+        return result
     
-    # Align 1d indicators to 4h timeframe (completed 1d bar only)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    chop_regime_ranging_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_ranging)
-    chop_regime_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_trending)
+    atr_1d = WilderSmoothing(tr, 14)
+    dm_plus_smooth = WilderSmoothing(dm_plus, 14)
+    dm_minus_smooth = WilderSmoothing(dm_minus, 14)
     
-    # 4h price data
+    # DI+ and DI-
+    di_plus = np.where(atr_1d > 0, (dm_plus_smooth / atr_1d) * 100, 0)
+    di_minus = np.where(atr_1d > 0, (dm_minus_smooth / atr_1d) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx_1d = WilderSmoothing(dx, 14)
+    
+    # Trend regime: ADX > 25 = trending market
+    trending_regime = adx_1d > 25
+    
+    # Align 1d trend regime to 6h timeframe (completed 1d bar only)
+    trending_regime_aligned = align_htf_to_ltf(prices, df_1d, trending_regime)
+    
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 4h volume > 2.0x 20-period average (volume confirmation)
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * avg_volume_20)
+    # Calculate 6h EMA(13) for Elder Ray
+    close_s = pd.Series(close)
+    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 4h ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Elder Ray components
+    bull_power = high - ema_13  # Buying pressure
+    bear_power = low - ema_13   # Selling pressure (negative values indicate selling)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(chop_regime_ranging_aligned[i]) or
-            np.isnan(chop_regime_trending_aligned[i]) or
-            atr[i] <= 0):
+        if (np.isnan(ema_13[i]) or 
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(trending_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            if high[i] > highest_since_entry:
-                highest_since_entry = high[i]
-            
-            # Exit conditions: price retraces 2.0x ATR from high
-            if low[i] <= highest_since_entry - (2.0 * atr[i]):
+            # Exit conditions: reverse signal OR trend weakening (ADX < 20)
+            if (bull_power[i] <= 0 and bear_power[i] >= 0) or trending_regime_aligned[i] == False:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            if low[i] < lowest_since_entry:
-                lowest_since_entry = low[i]
-            
-            # Exit conditions: price retraces 2.0x ATR from low
-            if high[i] >= lowest_since_entry + (2.0 * atr[i]):
+            # Exit conditions: reverse signal OR trend weakening (ADX < 20)
+            if (bull_power[i] >= 0 and bear_power[i] <= 0) or trending_regime_aligned[i] == False:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Regime-dependent entry logic
-            if chop_regime_ranging_aligned[i]:
-                # Ranging market: mean reversion at extreme levels
-                # Short when price touches/breaks above H3 (overbought)
-                if high[i] >= camarilla_h3_aligned[i] and volume_spike[i]:
-                    position = -1
-                    highest_since_entry = high[i]
-                    lowest_since_entry = high[i]
-                    signals[i] = -0.25
-                # Long when price touches/breaks below L3 (oversold)
-                elif low[i] <= camarilla_l3_aligned[i] and volume_spike[i]:
-                    position = 1
-                    highest_since_entry = low[i]
-                    lowest_since_entry = low[i]
-                    signals[i] = 0.25
-            elif chop_regime_trending_aligned[i]:
-                # Trending market: breakout continuation
-                # Long when price breaks above H3 with volume
-                if high[i] >= camarilla_h3_aligned[i] and volume_spike[i]:
-                    position = 1
-                    highest_since_entry = high[i]
-                    lowest_since_entry = high[i]
-                    signals[i] = 0.25
-                # Short when price breaks below L3 with volume
-                elif low[i] <= camarilla_l3_aligned[i] and volume_spike[i]:
-                    position = -1
-                    highest_since_entry = low[i]
-                    lowest_since_entry = low[i]
-                    signals[i] = -0.25
+            # Look for Elder Ray signals with trend regime filter
+            # Long: Bull Power > 0 (buying pressure) AND Bear Power < 0 (weak selling) AND trending market
+            if bull_power[i] > 0 and bear_power[i] < 0 and trending_regime_aligned[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short: Bull Power < 0 (weak buying) AND Bear Power > 0 (selling pressure) AND trending market
+            elif bull_power[i] < 0 and bear_power[i] > 0 and trending_regime_aligned[i]:
+                position = -1
+                signals[i] = -0.25
     
     return signals
