@@ -1,10 +1,18 @@
+# 6h Camarilla Breakout with Volume Confirmation
+# Hypothesis: Breakouts beyond daily Camarilla R4/S4 levels with volume confirmation capture
+# strong momentum moves. Works in both bull/bear markets as it follows price expansion.
+# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
+# Uses 1d Camarilla levels (R4/S4) calculated from prior day OHLC, aligned to 6b bars.
+# Volume filter requires current volume > 1.5x 2-period average to avoid false breakouts.
+# Exits when price re-enters prior day's range (mean reversion within the day's bounds).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_camarilla_breakout_v2"
-timeframe = "1h"
+name = "6h_1d_camarilla_breakout_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -16,10 +24,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate session filter: 8-20 UTC
-    hour = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hour >= 8) & (hour <= 20)
     
     # Load daily data ONCE before loop for Camarilla levels
     df_d = get_htf_data(prices, '1d')
@@ -42,14 +46,14 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to 1h timeframe
+    # Align daily values to 6h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_d, pp)
     r4_aligned = align_htf_to_ltf(prices, df_d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_d, s4)
     prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Volume confirmation: 2-period average (2*1h = 2h)
+    # Volume confirmation: 2-period average (2*6h = 12h ~ half day)
     vol_ma_2 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
@@ -63,13 +67,12 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if any required data is invalid or outside session
+        # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or 
             np.isnan(s4_aligned[i]) or 
             np.isnan(prev_high_aligned[i]) or 
             np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_2[i]) or 
-            not in_session[i]):
+            np.isnan(vol_ma_2[i])):
             signals[i] = 0.0
             continue
         
@@ -79,7 +82,7 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit: price closes back inside previous day's range
@@ -87,17 +90,17 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
             # Enter long: price closes above R4 with volume confirmation
             if (close[i] > r4_aligned[i] and 
                 volume[i] > vol_ma_2[i] * 1.5):
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             # Enter short: price closes below S4 with volume confirmation
             elif (close[i] < s4_aligned[i] and 
                   volume[i] > vol_ma_2[i] * 1.5):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
