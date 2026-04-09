@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Hypothesis: 12-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation.
-# Exit when price returns to the daily pivot point (PP). Uses breakout of H4/L4 levels for higher probability moves.
-# Works in both bull and bear markets as pivot levels adapt to volatility.
-# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+# 4h_1d_camarilla_breakout_v5
+# Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and trend filter.
+# Exit when price returns to the daily pivot point (PP). Uses only 4h timeframe for entry/exit to reduce trade frequency.
+# Works in both bull and bear markets as pivot levels adapt to volatility and trend filter avoids counter-trend trades.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -38,10 +38,10 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     
     # H4 and L4 levels (stronger breakout levels)
-    h4_1d = close_1d + (range_1d * 1.1 / 2)  # Same as R4
-    l4_1d = close_1d - (range_1d * 1.1 / 2)  # Same as S4
+    h4_1d = close_1d + (range_1d * 1.1 / 2)
+    l4_1d = close_1d - (range_1d * 1.1 / 2)
     
-    # Align 1d levels to 12h timeframe
+    # Align 1d levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
@@ -56,12 +56,16 @@ def generate_signals(prices):
         if i >= 19:
             vol_ma_20[i] = vol_sum / 20
     
+    # Trend filter: 50-period EMA on 4h
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(pp_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i]):
             signals[i] = 0.0
             continue
         
@@ -81,12 +85,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 level with volume confirmation
-            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
+            # Enter long: price breaks above H4 level with volume confirmation and uptrend
+            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 1.5 and close[i] > ema_50[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 level with volume confirmation
-            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 1.5:
+            # Enter short: price breaks below L4 level with volume confirmation and downtrend
+            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 1.5 and close[i] < ema_50[i]:
                 position = -1
                 signals[i] = -0.25
     
