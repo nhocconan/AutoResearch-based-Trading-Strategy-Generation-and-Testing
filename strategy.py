@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout for trend direction and 1d Williams %R for mean reversion timing
-# - Uses 4h HTF for Donchian channel (20-period): price above/below channel determines trend
-# - Uses 1d HTF for Williams %R (14-period): extreme readings (<20 oversold, >80 overbought) for entry timing
-# - In bullish 4h trend (price > upper Donchian): look for long entries when daily Williams %R < 20
-# - In bearish 4h trend (price < lower Donchian): look for short entries when daily Williams %R > 80
-# - Volume confirmation: current 1h volume > 1.5x 20-period average to avoid low-volume false signals
-# - Session filter: only trade between 08:00-20:00 UTC to reduce noise
-# - Fixed position size 0.20 to control drawdown and enable discrete sizing
-# - Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
-# - Uses discrete signal levels (0.0, ±0.20) to minimize fee churn from frequent small changes
+# Hypothesis: 6h strategy using 1d Supertrend for trend direction and 1w ATR-based volatility regime filter
+# - Uses 1d HTF for Supertrend (ATR=10, mult=3.0): price above/below determines trend
+# - Uses 1w HTF for ATR regime: current 1w ATR > 1.5x 20-period average = high volatility (trend follow), else low volatility (mean revert)
+# - In high volatility regime: follow 1d Supertrend trend (long if price > Supertrend, short if price < Supertrend)
+# - In low volatility regime: mean reversion from 6h Bollinger Bands (long at lower band, short at upper band)
+# - Volume confirmation: current 6h volume > 1.2x 20-period average to avoid low-volume false signals
+# - Fixed position size 0.25 to control drawdown
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "1h_4h_1d_donchian_williams_v1"
-timeframe = "1h"
+name = "6h_1d_1w_supertrend_atr_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,111 +26,154 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08:00-20:00 UTC) - avoids datetime conversion in loop
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channel (20-period)
-    period20_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper = period20_high
-    donchian_lower = period20_low
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    period14_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    period14_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (period14_high - close_1d) / (period14_high - period14_low + 1e-10) * -100
+    # Calculate 1d Supertrend (ATR=10, mult=3.0)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First element has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Align all HTF data to 1h timeframe (wait for completed HTF bar)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Supertrend calculation
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + (3.0 * atr_1d)
+    lower_band = hl2 - (3.0 * atr_1d)
     
-    # Pre-compute volume confirmation (20-period average for 1h)
+    supertrend = np.full_like(close_1d, np.nan)
+    direction = np.full_like(close_1d, 1)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1d)):
+        if close_1d[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close_1d[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Calculate 1w ATR for volatility regime
+    tr1w = np.abs(high_1w - low_1w)
+    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1w[0] = 0
+    tr2w[0] = 0
+    tr3w[0] = 0
+    tr_w = np.maximum(tr1w, np.maximum(tr2w, tr3w))
+    atr_1w = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
+    atr_ma_20w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF data to 6h timeframe (wait for completed HTF bar)
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    atr_ma_20w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_20w)
+    
+    # Pre-compute 6h Bollinger Bands (20, 2.0) for mean reversion
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma_20 + (2.0 * std_20)
+    lower_bb = ma_20 - (2.0 * std_20)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            vol_ma_20[i] <= 0):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
+            np.isnan(atr_1w_aligned[i]) or np.isnan(atr_ma_20w_aligned[i]) or
+            np.isnan(ma_20[i]) or np.isnan(std_20[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current 6h volume > 1.2x average
+        volume_confirmed = volume[i] > 1.2 * vol_ma_20[i]
         
-        # Determine 4h trend: price above/below Donchian channel
-        bullish_trend = close[i] > donchian_upper_aligned[i]
-        bearish_trend = close[i] < donchian_lower_aligned[i]
+        # Volatility regime: high volatility if current 1w ATR > 1.5x 20w average
+        high_volatility = atr_1w_aligned[i] > (1.5 * atr_ma_20w_aligned[i])
         
-        # Williams %R extremes: <20 = oversold, >80 = overbought
-        oversold = williams_r_aligned[i] < 20
-        overbought = williams_r_aligned[i] > 80
-        
-        # Fixed position size (discrete level for minimal fee churn)
-        position_size = 0.20
+        # Fixed position size
+        position_size = 0.25
         
         if position == 1:  # Long position
             # Exit conditions
-            if bullish_trend:
-                # In bullish 4h trend: exit when overbought or trend changes to bearish
-                if overbought or bearish_trend:
+            if high_volatility:
+                # In high volatility: follow trend - exit when trend turns bearish
+                if direction_aligned[i] == -1:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = position_size
             else:
-                # Not in bullish trend: exit
-                position = 0
-                signals[i] = 0.0
-                
+                # In low volatility: mean reversion - exit when price returns to mean
+                if close[i] >= ma_20[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = position_size
+                    
         elif position == -1:  # Short position
             # Exit conditions
-            if bearish_trend:
-                # In bearish 4h trend: exit when oversold or trend changes to bullish
-                if oversold or bullish_trend:
+            if high_volatility:
+                # In high volatility: follow trend - exit when trend turns bullish
+                if direction_aligned[i] == 1:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -position_size
             else:
-                # Not in bearish trend: exit
-                position = 0
-                signals[i] = 0.0
-        else:  # Flat
-            # Entry logic based on 4h trend and 1d Williams %R extremes
-            if volume_confirmed:
-                if bullish_trend and oversold:
-                    # In bullish 4h trend, daily oversold: long mean reversion
-                    position = 1
-                    signals[i] = position_size
-                elif bearish_trend and overbought:
-                    # In bearish 4h trend, daily overbought: short mean reversion
-                    position = -1
+                # In low volatility: mean reversion - exit when price returns to mean
+                if close[i] <= ma_20[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
                     signals[i] = -position_size
+        else:  # Flat
+            # Entry logic based on volatility regime
+            if volume_confirmed:
+                if high_volatility:
+                    # High volatility: trend following
+                    if direction_aligned[i] == 1 and close[i] > supertrend_aligned[i]:
+                        position = 1
+                        signals[i] = position_size
+                    elif direction_aligned[i] == -1 and close[i] < supertrend_aligned[i]:
+                        position = -1
+                        signals[i] = -position_size
+                else:
+                    # Low volatility: mean reversion from Bollinger Bands
+                    if close[i] <= lower_bb[i]:
+                        position = 1
+                        signals[i] = position_size
+                    elif close[i] >= upper_bb[i]:
+                        position = -1
+                        signals[i] = -position_size
     
     return signals
