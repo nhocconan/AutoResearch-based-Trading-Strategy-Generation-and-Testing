@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and chop regime filter
-# Camarilla pivots provide structured support/resistance levels based on previous day's range
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and chop regime filter
 # Long when price breaks above H3 with volume confirmation in low chop (trending) regime
 # Short when price breaks below L3 with volume confirmation in low chop regime
 # In high chop (ranging) regime, fade extremes: long at L3, short at H3
-# Uses discrete position sizing 0.25 to target ~20-50 trades/year and minimize fee drag
+# Uses discrete position sizing 0.25 to target ~12-37 trades/year and minimize fee drag
 # Works in bull/bear markets: breakout follows trends in trending regimes, mean reversion at pivots in ranging regimes
 
-name = "4h_1d_camarilla_breakout_v27"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,15 +35,13 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values if 'volume' in df_1d.columns else np.zeros_like(close_1d)
     
     # Calculate 1d Camarilla pivot levels
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), 
-    #            L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
     range_1d = high_1d - low_1d
     camarilla_h3 = close_1d + 1.1 * range_1d
     camarilla_l3 = close_1d - 1.1 * range_1d
     camarilla_h4 = close_1d + 1.5 * range_1d
     camarilla_l4 = close_1d - 1.5 * range_1d
     
-    # Calculate 1d ATR(10) for volatility filter
+    # Calculate 1d ATR(14) for volatility filter
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -60,7 +57,7 @@ def generate_signals(prices):
             result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    atr_10_1d = wilders_smoothing(tr, 10)
+    atr_10_1d = wilders_smoothing(tr, 10)  # For volatility filter
     
     # Calculate 1d average volume (20-period)
     vol_s_1d = pd.Series(volume_1d)
@@ -75,7 +72,7 @@ def generate_signals(prices):
     bb_width_1d = (upper_bb_1d - lower_bb_1d) / basis_1d
     bb_width_1d = np.where(basis_1d != 0, bb_width_1d, 0)
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
@@ -90,17 +87,15 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(avg_vol_1d_aligned[i]) or np.isnan(bb_width_1d_aligned[i]) or
-            np.isnan(atr_10_1d_aligned[i])):
+            np.isnan(avg_vol_1d_aligned[i]) or np.isnan(bb_width_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period MA
+        # Volume confirmation: current 12h volume > 1.5x average volume
         vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_confirmed = not np.isnan(vol_ma_20[i]) and volume[i] > 1.5 * vol_ma_20[i]
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
         
         # Chop regime: low BB width = trending, high BB width = ranging
-        # Using 1d BB width aligned to 4h
         trending_regime = bb_width_1d_aligned[i] < 0.05  # Low volatility = trending
         ranging_regime = bb_width_1d_aligned[i] > 0.10   # High volatility = ranging
         
