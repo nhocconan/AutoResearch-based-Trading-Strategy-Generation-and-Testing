@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h EMA trend filter + volume confirmation
-# Uses 6h Bull Power (close - EMA13) and Bear Power (EMA13 - close) for momentum
-# 12h EMA50 determines trend direction: only take long signals when price > EMA50, short when price < EMA50
-# Volume confirmation requires current volume > 1.5x 20-period average to filter weak breakouts
-# Works in bull/bear: EMA filter ensures we trade with the higher timeframe trend, avoiding counter-trend whipsaws
+# Hypothesis: 12h Donchian(20) breakout + 1d ATR regime filter + volume confirmation
+# Donchian breakout provides clear structure-based entries/exits
+# 1d ATR regime filter: only trade when ATR(14) < ATR(50) (low volatility/chop regime) to avoid whipsaws
+# Volume confirmation requires current volume > 1.3x 20-period average to filter weak breakouts
+# Works in bull/bear: Donchian breakouts capture strong moves, ATR filter avoids choppy markets
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25
 
-name = "6h_12h_elder_ray_ema_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_atr_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +24,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for ATR regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend direction
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d ATR(14) and ATR(50) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 6h EMA13 for Elder Ray
-    ema_13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # True Range calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Elder Ray components
-    bull_power = close - ema_13_6h  # Close - EMA13
-    bear_power = ema_13_6h - close  # EMA13 - Close
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50_1d = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # ATR regime: low volatility when ATR(14) < ATR(50) (chop/trending filter)
+    atr_regime = atr_14_1d < atr_50_1d
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime)
+    
+    # Calculate 12h Donchian channels (20-period)
+    donchian_period = 20
+    upper_channel = np.full(n, np.nan)
+    lower_channel = np.full(n, np.nan)
+    
+    for i in range(n):
+        if i < donchian_period:
+            upper_channel[i] = np.nan
+            lower_channel[i] = np.nan
+        else:
+            upper_channel[i] = np.max(high[i-donchian_period:i])
+            lower_channel[i] = np.min(low[i-donchian_period:i])
     
     # Calculate 20-period average volume for volume confirmation
     avg_volume = np.full(n, np.nan)
@@ -54,38 +73,38 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(atr_regime_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirmed = volume[i] > 1.5 * avg_volume[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: Bear Power > 0 (momentum shift) OR price < 12h EMA50 (trend change)
-            if bear_power[i] > 0 or close[i] < ema_50_12h_aligned[i]:
+            # Exit: price closes below lower Donchian channel OR ATR regime fails (high volatility)
+            if close[i] < lower_channel[i] or not atr_regime_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bull Power > 0 (momentum shift) OR price > 12h EMA50 (trend change)
-            if bull_power[i] > 0 or close[i] > ema_50_12h_aligned[i]:
+            # Exit: price closes above upper Donchian channel OR ATR regime fails (high volatility)
+            if close[i] > upper_channel[i] or not atr_regime_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Elder Ray momentum
-            if volume_confirmed:
-                # Long entry: Bull Power > 0 AND price > 12h EMA50 (bullish momentum + uptrend)
-                if bull_power[i] > 0 and close[i] > ema_50_12h_aligned[i]:
+            # Entry logic with volume confirmation and ATR regime filter
+            if volume_confirmed and atr_regime_aligned[i]:
+                # Long entry: price closes above upper Donchian channel (breakout)
+                if close[i] > upper_channel[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: Bear Power > 0 AND price < 12h EMA50 (bearish momentum + downtrend)
-                elif bear_power[i] > 0 and close[i] < ema_50_12h_aligned[i]:
+                # Short entry: price closes below lower Donchian channel (breakdown)
+                elif close[i] < lower_channel[i]:
                     position = -1
                     signals[i] = -0.25
     
