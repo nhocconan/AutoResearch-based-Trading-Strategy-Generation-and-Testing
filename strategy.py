@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 12h timeframe
-# - Trend filter: 1d EMA(50) to align with primary trend and avoid counter-trend trades
-# - Volume confirmation: 12h volume > 2.0x 20-period average to ensure breakout strength
+# Hypothesis: 4h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
+# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries
+# - Trend filter: 1d EMA(50) to align with daily trend and avoid counter-trend trades
+# - Volume confirmation: volume > 2.0x 20-period average to ensure breakout strength
 # - ATR(14) trailing stop at 2.0x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~12-25 trades/year (50-100 total over 4 years) to stay well under fee drag threshold
-# - Designed to work in BOTH bull markets (long breakouts at H3/H4) and bear markets (short breakdowns at L3/L4)
-# - The 12h timeframe reduces noise while capturing significant moves, and 1d EMA filter ensures trend alignment
+# - Target: ~20-30 trades/year (80-120 total over 4 years) to stay under fee drag threshold
+# - Works in BOTH bull markets (long breakouts at H3/H4) and bear markets (short breakdowns at L3/L4)
+# - Daily EMA filter reduces whipsaws during counter-trend bounces
 
-name = "12h_1d_camarilla_ema_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_ema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,28 +32,30 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 1d Camarilla pivot levels (based on previous day's range)
+    # Pre-compute 1d Camarilla pivot levels (based on previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    # Camarilla levels: H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels: H3/L3 are the key breakout levels
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # 12h price data
+    # 4h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h volume > 2.0x 20-period average (volume confirmation)
+    # 4h volume > 2.0x 20-period average (strict volume confirmation)
     avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * avg_volume_20)
     
-    # 12h ATR(14) for trailing stop
+    # 4h ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
