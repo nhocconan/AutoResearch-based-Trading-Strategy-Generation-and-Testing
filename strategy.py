@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v2
-# Hypothesis: Breakout above/below 1d Camarilla H3/L3 levels on 12h chart with volume confirmation.
+# 4h_12h_camarilla_breakout_v3
+# Hypothesis: Breakout above/below 12h Camarilla H3/L3 levels on 4h chart with volume confirmation.
 # Long when price closes above H3 (bullish breakout), short when price closes below L3 (bearish breakout).
 # Exit when price returns to opposite side of pivot point (mean reversion).
-# Uses 1d trend filter: only take long trades when price > 1d EMA(50), only short trades when price < 1d EMA(50).
+# Uses 12h trend filter: only take long trades when price > 12h EMA(50), only short trades when price < 12h EMA(50).
 # Target: 15-35 trades/year (60-140 total over 4 years) with strict entry conditions.
 # Works in both bull and bear markets due to breakout logic + trend filter.
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,39 +39,39 @@ def generate_signals(prices):
     for i in range(1, n):
         atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # Load 1d data ONCE before loop for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data ONCE before loop for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for previous day (using H3/L3 for tighter entries)
-    ph = df_1d['high'].values  # previous day high
-    pl = df_1d['low'].values   # previous day low
-    pc = df_1d['close'].values # previous day close
+    # Calculate Camarilla levels for previous 12h period (using H3/L3 for tighter entries)
+    ph = df_12h['high'].values  # previous period high
+    pl = df_12h['low'].values   # previous period low
+    pc = df_12h['close'].values # previous period close
     
-    range_1d = ph - pl
+    range_12h = ph - pl
     # H3 = close + (high - low) * 1.1/4
     # L3 = close - (high - low) * 1.1/4
-    h3 = pc + range_1d * 1.1 / 4
-    l3 = pc - range_1d * 1.1 / 4
+    h3 = pc + range_12h * 1.1 / 4
+    l3 = pc - range_12h * 1.1 / 4
     # Pivot point = (high + low + close) / 3
     pp = (ph + pl + pc) / 3
     
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align Camarilla levels to 4h timeframe (wait for previous 12h period's close)
+    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
     
-    # Load 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = np.zeros_like(close_1d, dtype=float)
-    ema_1d[0] = close_1d[0]
+    # Load 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = np.zeros_like(close_12h, dtype=float)
+    ema_12h[0] = close_12h[0]
     alpha = 2.0 / (50 + 1)
-    for i in range(1, len(close_1d)):
-        ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
+    for i in range(1, len(close_12h)):
+        ema_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_12h[i-1]
     
-    # Align 1d EMA to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.zeros(n)
@@ -88,7 +88,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(atr[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -98,9 +98,9 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.25x 20-period average
         vol_ok = volume[i] > vol_ma_20[i] * 1.25
         
-        # Trend filter: price > 1d EMA for longs, price < 1d EMA for shorts
-        trend_long = close[i] > ema_1d_aligned[i]
-        trend_short = close[i] < ema_1d_aligned[i]
+        # Trend filter: price > 12h EMA for longs, price < 12h EMA for shorts
+        trend_long = close[i] > ema_12h_aligned[i]
+        trend_short = close[i] < ema_12h_aligned[i]
         
         if position == 1:  # Long position
             # Exit: price closes below pivot point (mean reversion)
