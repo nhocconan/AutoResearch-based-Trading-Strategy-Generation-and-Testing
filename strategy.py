@@ -1,19 +1,18 @@
-#!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v27
-# Hypothesis: 4-hour breakout of daily Camarilla pivot levels with volume confirmation.
+# 12h_1d_camarilla_breakout_v2
+# Hypothesis: 12-hour breakout of daily Camarilla pivot levels with volume confirmation.
 # Long when price closes above R4 resistance with volume > 1.5x 24-period average.
 # Short when price closes below S4 support with volume > 1.5x 24-period average.
 # Exit when price closes back inside the previous day's range (H-L band).
 # Daily Camarilla levels: PP=(H+L+C)/3, R4=C+(H-L)*1.1/2, S4=C-(H-L)*1.1/2.
 # Works in bull markets via breakout continuation and in bear markets via mean reversion at extremes.
-# Target: 75-200 total trades over 4 years (19-50/year). Position size: 0.25.
+# Target: 50-150 total trades over 4 years (12-37/year). Position size: 0.25.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v27"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,14 +46,14 @@ def generate_signals(prices):
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to 4h timeframe
+    # Align daily values to 12h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_d, pp)
     r4_aligned = align_htf_to_ltf(prices, df_d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_d, s4)
     prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Volume confirmation: 24-period average (24*4h = 4 days)
+    # Volume confirmation: 24-period average (24*12h = 12 days)
     vol_ma_24 = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
