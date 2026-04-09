@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 6h_daily_pivot_breakout_volume_v1
-# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation.
-# Long when price breaks above R4 with volume > 1.5x 20-period average.
-# Short when price breaks below S4 with volume > 1.5x 20-period average.
-# Exit on close back inside R3/S3 levels.
-# Uses daily structure for key levels, 6h for execution, volume for breakout confirmation.
-# Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
+# 12h_daily_camarilla_reversion_volume_v1
+# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation and mean reversion.
+# Long when price touches S3 with volume > 1.5x 20-period average (oversold bounce).
+# Short when price touches R3 with volume > 1.5x 20-period average (overbought rejection).
+# Exit on close back inside S2/R2 levels (mean reversion target).
+# Uses daily structure for key levels, 12h for execution, volume for confirmation.
+# Designed to work in both bull (buy dips) and bear (sell rallies) markets.
 # Target: 12-30 trades/year (50-120 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_daily_pivot_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_daily_camarilla_reversion_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,7 +55,7 @@ def generate_signals(prices):
     r4 = close_1d + (range_1d * 1.1 / 2)
     s4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Align all levels to 6h timeframe
+    # Align all levels to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -71,8 +71,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
             np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
@@ -81,29 +81,32 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Price closes back below R3 (take profit) or below S4 (stop)
-            if close[i] < r3_aligned[i] or close[i] < s4_aligned[i]:
+            # Exit: Price closes back above S2 (take profit) or below S4 (stop)
+            if close[i] > s2_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price closes back above S3 (take profit) or above R4 (stop)
-            if close[i] > s3_aligned[i] or close[i] > r4_aligned[i]:
+            # Exit: Price closes back below R2 (take profit) or above R4 (stop)
+            if close[i] < r2_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation
-            bullish_breakout = (close[i] > r4_aligned[i]) and volume_confirmed
-            bearish_breakout = (close[i] < s4_aligned[i]) and volume_confirmed
+            # Check for mean reversion touches with volume confirmation
+            touch_s3 = abs(close[i] - s3_aligned[i]) < (0.001 * close[i])  # Within 0.1% of S3
+            touch_r3 = abs(close[i] - r3_aligned[i]) < (0.001 * close[i])  # Within 0.1% of R3
             
-            if bullish_breakout:
+            bullish_setup = touch_s3 and volume_confirmed
+            bearish_setup = touch_r3 and volume_confirmed
+            
+            if bullish_setup:
                 position = 1
                 signals[i] = 0.25
-            elif bearish_breakout:
+            elif bearish_setup:
                 position = -1
                 signals[i] = -0.25
     
