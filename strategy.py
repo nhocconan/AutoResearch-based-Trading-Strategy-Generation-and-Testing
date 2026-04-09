@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d ADX regime filter and volume confirmation
-# - Uses 1d HTF for ADX regime: ADX > 25 = trending, ADX < 20 = ranging
-# - In trending regime (ADX > 25): trade breakouts in direction of 1d EMA50 trend
-# - In ranging regime (ADX < 20): mean revert at Camarilla H3/L3 levels
-# - Volume confirmation: current 4h volume > 1.5x 20-period average
-# - Fixed position size 0.25 to control drawdown
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# Hypothesis: 4h Donchian breakout with 1d ATR volatility filter and volume confirmation
+# - Uses 1d HTF for ATR-based volatility regime: ATR(14) > 20-period median = high volatility
+# - In high volatility: trade Donchian(20) breakouts with momentum filter (close > open)
+# - In low volatility: avoid breakouts to prevent false signals in choppy markets
+# - Volume confirmation: current 4h volume > 1.3x 20-period average to filter weak breakouts
+# - Fixed position size 0.25 to control drawdown and minimize fee churn
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Designed to work in both bull (breakouts continue) and bear (breakouts reverse) markets
+#   by using volatility filter to avoid false breakouts in ranging/low-vol periods
 
-name = "4h_1d_camarilla_adx_regime_v1"
+name = "4h_1d_donchian_vol_filter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,60 +36,30 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMAs for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Calculate 1d ADX for regime filter
+    # Calculate 1d ATR(14) for volatility regime filter
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first bar has no previous close
+    tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    atr_period = 14
+    atr_1d = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Smoothed values
-    tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    # Calculate 20-period median of 1d ATR for volatility regime threshold
+    atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / np.where(atr == 0, 1, atr)
-    di_minus = 100 * dm_minus_smooth / np.where(atr == 0, 1, atr)
+    # Align 1d ATR and median to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_median_20_aligned = align_htf_to_ltf(prices, df_1d, atr_median_20)
     
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    
-    # Calculate 1d Camarilla pivot levels from prior bar
-    typical_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    h3_1d = typical_1d + range_1d * 1.1 / 4
-    l3_1d = typical_1d - range_1d * 1.1 / 4
-    h4_1d = typical_1d + range_1d * 1.1 / 2
-    l4_1d = typical_1d - range_1d * 1.1 / 2
-    
-    # Align all 1d data to 4h timeframe (wait for completed 1d bar)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Calculate 4h Donchian channels (20-period)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # Pre-compute volume confirmation (20-period average for 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -97,79 +69,50 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(h3_1d_aligned[i]) or
-            np.isnan(l3_1d_aligned[i]) or np.isnan(h4_1d_aligned[i]) or
-            np.isnan(l4_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            vol_ma_20[i] <= 0):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(atr_median_20_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma_20[i]) or vol_ma_20[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average
-        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        # Volatility regime: 1d ATR > 20-period median = high volatility (good for breakouts)
+        high_volatility = atr_1d_aligned[i] > atr_median_20_aligned[i]
         
-        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
-        trending = adx_aligned[i] > 25
-        ranging = adx_aligned[i] < 20
+        # Volume confirmation: current 4h volume > 1.3x average
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
         
-        # Trend direction: 1d EMA50 > EMA200 = uptrend, < = downtrend
-        uptrend = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
-        downtrend = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
+        # Momentum filter: close > open for long, close < open for short (avoid weak breakouts)
+        bullish_momentum = close[i] > prices['open'].iloc[i]
+        bearish_momentum = close[i] < prices['open'].iloc[i]
         
         # Fixed position size
         position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit conditions
-            if trending:
-                # In trending regime: exit when trend changes or price < EMA50
-                if not uptrend or close[i] < ema_50_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-            else:  # ranging regime
-                # In ranging regime: exit when price > H3 (take profit) or < L3 (stop)
-                if close[i] > h3_1d_aligned[i] or close[i] < l3_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = position_size
-                    
+            # Exit when price breaks below Donchian low or volatility drops
+            if close[i] < donchian_low[i] or not high_volatility:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_size
+                
         elif position == -1:  # Short position
-            # Exit conditions
-            if trending:
-                # In trending regime: exit when trend changes or price > EMA50
-                if not downtrend or close[i] > ema_50_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
-            else:  # ranging regime
-                # In ranging regime: exit when price < L3 (take profit) or > H3 (stop)
-                if close[i] < l3_1d_aligned[i] or close[i] > h3_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -position_size
+            # Exit when price breaks above Donchian high or volatility drops
+            if close[i] > donchian_high[i] or not high_volatility:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -position_size
         else:  # Flat
-            # Entry logic based on regime
-            if volume_confirmed:
-                if trending:
-                    # In trending regime: trade breakouts in trend direction
-                    if uptrend and close[i] > h4_1d_aligned[i]:
-                        position = 1
-                        signals[i] = position_size
-                    elif downtrend and close[i] < l4_1d_aligned[i]:
-                        position = -1
-                        signals[i] = -position_size
-                elif ranging:
-                    # In ranging regime: mean revert at H3/L3
-                    if close[i] > h3_1d_aligned[i]:
-                        position = -1  # short at resistance
-                        signals[i] = -position_size
-                    elif close[i] < l3_1d_aligned[i]:
-                        position = 1   # long at support
-                        signals[i] = position_size
+            # Entry logic: only in high volatility with volume confirmation
+            if high_volatility and volume_confirmed:
+                # Long breakout: price above Donchian high with bullish momentum
+                if close[i] > donchian_high[i] and bullish_momentum:
+                    position = 1
+                    signals[i] = position_size
+                # Short breakout: price below Donchian low with bearish momentum
+                elif close[i] < donchian_low[i] and bearish_momentum:
+                    position = -1
+                    signals[i] = -position_size
     
     return signals
