@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# 1d_camarilla_1w_trend_volume_v1
-# Hypothesis: 1d Camarilla pivot levels from 1w HTF + volume confirmation + 1w EMA50 trend filter.
-# Camarilla pivots provide institutional support/resistance levels; volume confirms participation;
-# 1w EMA50 defines long-term trend to avoid counter-trend entries. Works in bull/bear by aligning with HTF trend.
-# Target: 7-25 trades/year (30-100 total over 4 years).
+# 6h_ichimoku_1d_trend_volume_v1
+# Hypothesis: 6h Ichimoku cloud with 1d HTF trend filter + volume confirmation.
+# Ichimoku provides dynamic support/resistance (cloud) and momentum (TK cross).
+# 1d EMA50 defines higher timeframe trend to avoid counter-trend entries.
+# Volume confirms participation at breakouts. Works in bull/bear by aligning with HTF trend.
+# Target: 12-37 trades/year (50-150 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_camarilla_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_ichimoku_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,53 +24,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for Camarilla pivots and EMA trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:  # Need sufficient data for EMA50
+    # 1d HTF data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:  # Need sufficient data for EMA50
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # 1w Camarilla pivot levels (based on previous week's range)
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # Calculated from previous week's high, low, close
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = np.nan  # First value has no previous
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    pivot_point = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    range_1w = prev_high_1w - prev_low_1w
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Camarilla levels
-    h4 = pivot_point + (range_1w * 1.1 / 2)
-    h3 = pivot_point + (range_1w * 1.1 / 4)
-    h2 = pivot_point + (range_1w * 1.1 / 6)
-    h1 = pivot_point + (range_1w * 1.1 / 12)
-    l1 = pivot_point - (range_1w * 1.1 / 12)
-    l2 = pivot_point - (range_1w * 1.1 / 6)
-    l3 = pivot_point - (range_1w * 1.1 / 4)
-    l4 = pivot_point - (range_1w * 1.1 / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Align Camarilla levels to 1d timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    h2_aligned = align_htf_to_ltf(prices, df_1w, h2)
-    h1_aligned = align_htf_to_ltf(prices, df_1w, h1)
-    l1_aligned = align_htf_to_ltf(prices, df_1w, l1)
-    l2_aligned = align_htf_to_ltf(prices, df_1w, l2)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    # Chikou Span (Lagging Span): Close plotted 26 periods behind
+    # Not used for signals as it requires future data
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Cloud top/bottom (current cloud)
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    # Fill first 26 values with NaN (no cloud data yet)
+    senkou_a_shifted[:26] = np.nan
+    senkou_b_shifted[:26] = np.nan
+    
+    cloud_top = np.maximum(senkou_a_shifted, senkou_b_shifted)
+    cloud_bottom = np.minimum(senkou_a_shifted, senkou_b_shifted)
+    
+    # TK cross signals
+    tk_cross_above = (tenkan > kijun) & (np.roll(tenkan, 1) <= np.roll(kijun, 1))
+    tk_cross_below = (tenkan < kijun) & (np.roll(tenkan, 1) >= np.roll(kijun, 1))
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -77,37 +77,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(tenkan[i]) or np.isnan(kijun[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below H3 (strong resistance) OR trend turns bearish
-            if close[i] < h3_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit: price closes below cloud OR TK cross bearish
+            if close[i] < cloud_bottom[i] or tk_cross_below[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above L3 (strong support) OR trend turns bullish
-            if close[i] > l3_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit: price closes above cloud OR TK cross bullish
+            if close[i] > cloud_top[i] or tk_cross_above[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Need volume confirmation
-            volume_confirmed = volume[i] > 1.8 * volume_ma[i]
+            # Need volume confirmation and HTF trend alignment
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
             
             if volume_confirmed:
-                # Long: price breaks above H3 with bullish trend (intraday continuation)
-                if close[i] > h3_aligned[i] and close[i] > ema50_1w_aligned[i]:
+                # Long: price breaks above cloud with bullish TK cross and bullish HTF trend
+                if (close[i] > cloud_top[i] and tk_cross_above[i] and 
+                    close[i] > ema50_1d_aligned[i]):
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below L3 with bearish trend (intraday continuation)
-                elif close[i] < l3_aligned[i] and close[i] < ema50_1w_aligned[i]:
+                # Short: price breaks below cloud with bearish TK cross and bearish HTF trend
+                elif (close[i] < cloud_bottom[i] and tk_cross_below[i] and 
+                      close[i] < ema50_1d_aligned[i]):
                     position = -1
                     signals[i] = -0.25
     
