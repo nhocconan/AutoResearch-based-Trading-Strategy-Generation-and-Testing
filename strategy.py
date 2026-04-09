@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h Camarilla pivot levels with volume confirmation and choppiness regime filter
-# Camarilla pivots from 12h provide intraday support/resistance that work in ranging markets
-# Volume confirmation (current 4h volume > 1.3x 20-period average) filters low-conviction breakouts
-# Choppiness regime filter: CHOP(14) > 61.8 = ranging (mean revert at H3/L3), CHOP < 38.2 = trending (breakout at H4/L4)
-# Position size: 0.25 for mean reversion, 0.30 for breakouts
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# Hypothesis: 1h strategy using 4h Donchian breakout with 1d trend filter and session filter (08-20 UTC)
+# 4h Donchian(20) provides major support/resistance levels that work in both bull and bear markets
+# 1d EMA(50) filter ensures we trade with the higher timeframe trend (avoid counter-trend whipsaws)
+# Session filter (08-20 UTC) reduces noise during low-liquidity periods
+# Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
 
-name = "4h_12h_camarilla_volume_chop_v1"
-timeframe = "4h"
+name = "1h_4h_1d_donchian_trend_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,111 +22,87 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 25:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # H4 = C + Range * 1.1/2
-    # L4 = C - Range * 1.1/2
-    # H3 = C + Range * 1.1/4
-    # L3 = C - Range * 1.1/4
-    # H2 = C + Range * 1.1/6
-    # L2 = C - Range * 1.1/6
-    # H1 = C + Range * 1.1/12
-    # L1 = C - Range * 1.1/12
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # Align 4h Donchian levels to 1h timeframe
+    dh_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    dl_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    dm_aligned = align_htf_to_ltf(prices, df_4h, donchian_mid)
     
-    h4 = close_12h + range_12h * 1.1 / 2.0
-    l4 = close_12h - range_12h * 1.1 / 2.0
-    h3 = close_12h + range_12h * 1.1 / 4.0
-    l3 = close_12h - range_12h * 1.1 / 4.0
-    h2 = close_12h + range_12h * 1.1 / 6.0
-    l2 = close_12h - range_12h * 1.1 / 6.0
-    h1 = close_12h + range_12h * 1.1 / 12.0
-    l1 = close_12h - range_12h * 1.1 / 12.0
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 55:
+        return np.zeros(n)
     
-    # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
+    close_1d = df_1d['close'].values
     
-    # Pre-compute volume confirmation (20-period average for 4h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Pre-compute choppiness index (14-period) for 4h
-    # CHOP = 100 * log10(sum(ATR(1)) / (HHV(high,14) - LLV(low,14))) / log10(14)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr_1 = pd.Series(tr).rolling(window=1, min_periods=1).sum().values
-    sum_atr_14 = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
-    hh_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_denom = hh_high_14 - ll_low_14
-    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # Avoid division by zero
-    chop = 100 * np.log10(sum_atr_14 / chop_denom) / np.log10(14)
+    # Align 1d EMA to 1h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or
+            np.isnan(dm_aligned[i]) or np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.3x average 4h volume
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
-        
-        if not volume_confirmed:
+        # Session filter: only trade during 08-20 UTC
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit on retracement to H3 or stoploss at L4
-            if close[i] < h3_aligned[i] or close[i] < l4_aligned[i]:
+            # Exit on retracement to Donchian midpoint
+            if close[i] < dm_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Mean reversion size
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit on retracement to L3 or stoploss at H4
-            if close[i] > l3_aligned[i] or close[i] > h4_aligned[i]:
+            # Exit on retracement to Donchian midpoint
+            if close[i] > dm_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Mean reversion size
+                signals[i] = -0.20
         else:  # Flat
-            # Determine regime based on choppiness
-            if chop[i] > 61.8:  # Ranging market - mean reversion at H3/L3
-                if volume_confirmed:
-                    if close[i] > h3_aligned[i]:
-                        position = -1
-                        signals[i] = -0.25  # Short at H3
-                    elif close[i] < l3_aligned[i]:
-                        position = 1
-                        signals[i] = 0.25   # Long at L3
-            else:  # Trending market - breakout at H4/L4
-                if volume_confirmed:
-                    if close[i] > h4_aligned[i]:
-                        position = 1
-                        signals[i] = 0.30   # Long breakout
-                    elif close[i] < l4_aligned[i]:
-                        position = -1
-                        signals[i] = -0.30  # Short breakout
+            # Breakout trading with 1d trend filter
+            # Long on Donchian high breakout when 1d EMA(50) is rising
+            # Short on Donchian low breakout when 1d EMA(50) is falling
+            if i >= 1:  # Need previous EMA to determine trend
+                ema_rising = ema_50_aligned[i] > ema_50_aligned[i-1]
+                ema_falling = ema_50_aligned[i] < ema_50_aligned[i-1]
+                
+                if close[i] > dh_aligned[i] and ema_rising:
+                    position = 1
+                    signals[i] = 0.20
+                elif close[i] < dl_aligned[i] and ema_falling:
+                    position = -1
+                    signals[i] = -0.20
     
     return signals
