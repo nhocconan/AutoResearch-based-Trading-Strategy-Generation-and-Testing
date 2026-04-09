@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Williams %R extremes with volume confirmation and ATR trailing stop
-# Williams %R identifies overbought/oversold conditions on 1d timeframe, effective in both bull/bear markets
-# Volume confirmation (current 12h volume > 1.8x 20-period average) filters false signals
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation and ATR trailing stop
+# Camarilla pivots from 1w provide strong support/resistance levels proven in ranging and trending markets
+# Volume confirmation (current 1d volume > 1.5x 20-period average) filters false breakouts
 # ATR trailing stop (2.0x ATR) manages risk and adapts to volatility
-# Target: 12-37 trades/year (50-150 total over 4 years) with controlled drawdown
+# Designed for 1d timeframe targeting 15-25 trades/year (60-100 over 4 years)
+# Works in bull/bear: price reacts to 1w structure, volume confirms validity, ATR stop controls drawdown
 
-name = "12h_1d_williamsr_volume_atr_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,25 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low + 1e-10) * -100
+    # Calculate 1w Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # Resistance levels: R1 = C + Range * 1.1/12, R2 = C + Range * 1.1/6, R3 = C + Range * 1.1/4, R4 = C + Range * 1.1/2
+    # Support levels: S1 = C - Range * 1.1/12, S2 = C - Range * 1.1/6, S3 = C - Range * 1.1/4, S4 = C - Range * 1.1/2
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    # Align Williams %R to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Key levels for trading: R3, R4, S3, S4 (stronger levels)
+    camarilla_r3 = close_1w + range_1w * 1.1 / 4.0
+    camarilla_r4 = close_1w + range_1w * 1.1 / 2.0
+    camarilla_s3 = close_1w - range_1w * 1.1 / 4.0
+    camarilla_s4 = close_1w - range_1w * 1.1 / 2.0
     
-    # Pre-compute ATR(14) for 12h timeframe
+    # Align Camarilla levels to 1d timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    
+    # Pre-compute ATR(14) for 1d timeframe
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -59,14 +71,16 @@ def generate_signals(prices):
     highest_since_long = 0.0
     lowest_since_short = 0.0
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.8x average 12h volume
-        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
+        # Volume confirmation: current 1d volume > 1.5x average 1d volume
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
@@ -92,14 +106,14 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Mean reversion trading with volume confirmation
-            # Long when Williams %R < -80 (oversold), Short when Williams %R > -20 (overbought)
+            # Breakout trading with volume confirmation
+            # Long on Camarilla R4 breakout, Short on Camarilla S4 breakout
             if volume_confirmed:
-                if williams_r_aligned[i] < -80:
+                if close[i] > r4_aligned[i]:
                     position = 1
                     highest_since_long = close[i]
                     signals[i] = 0.25
-                elif williams_r_aligned[i] > -20:
+                elif close[i] < s4_aligned[i]:
                     position = -1
                     lowest_since_short = close[i]
                     signals[i] = -0.25
