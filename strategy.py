@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v3
-# Hypothesis: 4-hour breakout of daily Camarilla levels with 1-day EMA50 trend filter and volume confirmation.
-# Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
-# Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
-# Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
+# 6h_1d_rsi_volume_reversal_v1
+# Hypothesis: 6-hour RSI mean reversion with volume confirmation and daily trend filter.
+# Long when RSI(14) < 30, price > daily EMA50, and volume > 1.5x 20-bar average.
+# Short when RSI(14) > 70, price < daily EMA50, and volume > 1.5x 20-bar average.
+# Exit when RSI returns to neutral zone (40-60).
+# Works in bull markets via pullbacks to EMA50 and in bear markets via bounces from oversold/overbought.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v3"
-timeframe = "4h"
+name = "6h_1d_rsi_volume_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,23 +41,30 @@ def generate_signals(prices):
             ema = (close_1d[i] - ema) * multiplier + ema
             ema_50_1d[i] = ema
     
-    # Align 1d EMA50 to 4h timeframe
+    # Align 1d EMA50 to 6h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        c = df_1d['close'].iloc[i]
-        h = df_1d['high'].iloc[i]
-        l = df_1d['low'].iloc[i]
-        camarilla_h4[i] = c + 1.1 * (h - l) / 2
-        camarilla_l4[i] = c - 1.1 * (h - l) / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Calculate RSI(14) on 6h close
+    rsi = np.full(n, np.nan)
+    if n >= 14:
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        # Initial average
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        
+        # Wilder's smoothing
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -74,37 +81,36 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L4 level
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit: RSI returns to neutral zone (>= 40)
+            if rsi[i] >= 40:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H4 level
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit: RSI returns to neutral zone (<= 60)
+            if rsi[i] <= 60:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 with trend and volume filters
-            if (close[i] > camarilla_h4_aligned[i] and 
+            # Enter long: RSI oversold with trend and volume filters
+            if (rsi[i] < 30 and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume[i] > vol_ma_20[i] * 1.5):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 with trend and volume filters
-            elif (close[i] < camarilla_l4_aligned[i] and 
+            # Enter short: RSI overbought with trend and volume filters
+            elif (rsi[i] > 70 and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume[i] > vol_ma_20[i] * 1.5):
                 position = -1
