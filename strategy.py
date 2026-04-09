@@ -1,124 +1,112 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_v3
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x 20-period average) and choppiness regime filter (CHOP(14) between 38.2 and 61.8 for ranging/mean reversion, outside for trending). Long when price breaks above DC(20) upper band with volume confirmation in trending market (CHOP < 38.2); short when price breaks below DC(20) lower band with volume confirmation in trending market (CHOP < 38.2). In ranging market (CHOP > 61.8), mean reversion: long when price touches DC(20) lower band, short when touches upper band. Uses 12h HTF for trend confirmation via HMA(21) alignment. Discrete position sizing 0.25. Designed for low turnover (target: 20-50 trades/year) by requiring confluence of breakout, volume, and regime. Works in both bull (trend following) and bear (mean reversion in ranging markets).
+# 1h_4h1d_trend_with_volume_and_session_filter_v1
+# Hypothesis: Use 4h EMA(21) for trend direction and 1d Donchian(20) for breakout structure, with 1h RSI(14) pullback entries and volume confirmation (>1.5x 20-period average). Trade only during 08-20 UTC session to reduce noise. Discrete position size 0.20. Target 60-150 trades over 4 years (15-37/year) by requiring 4h trend alignment, 1d breakout, RSI extreme, volume spike, and session filter. Works in bull (trend+breakout) and bear (mean reversion at extremes via RSI).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_choppiness(high, low, close, window=14):
-    """Calculate Choppiness Index (CHOP)"""
-    atr_sum = pd.Series(high - low).rolling(window=window, min_periods=window).sum()
-    highest_high = pd.Series(high).rolling(window=window, min_periods=window).max()
-    lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(window)
-    return chop.values
-
-def calculate_hma(values, window):
-    """Calculate Hull Moving Average"""
-    n = len(values)
-    if n < window:
-        return np.full(n, np.nan)
-    half = window // 2
-    sqrt = int(np.sqrt(window))
-    wma2 = pd.Series(values).rolling(window=half, min_periods=half).mean()
-    wma1 = pd.Series(values).rolling(window=window, min_periods=window).mean()
-    raw_hma = 2 * wma2 - wma1
-    hma = pd.Series(raw_hma).rolling(window=sqrt, min_periods=sqrt).mean()
-    return hma.values
-
-name = "4h_donchian_breakout_volume_chop_v3"
-timeframe = "4h"
+name = "1h_4h1d_trend_with_volume_and_session_filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
+    
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Donchian Channel (20)
-    dc_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    dc_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Choppiness Index (14)
-    chop = calculate_choppiness(high, low, close, 14)
-    
-    # 12h HTF HMA(21) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 4h EMA(21) for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
-    hma_12h = calculate_hma(df_12h['close'].values, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    ema_21_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    
+    # 1d Donchian(20) for breakout structure
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    highest_20_1d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    lowest_20_1d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    highest_20_1d_aligned = align_htf_to_ltf(prices, df_1d, highest_20_1d)
+    lowest_20_1d_aligned = align_htf_to_ltf(prices, df_1d, lowest_20_1d)
+    
+    # 1h RSI(14) for pullback entries
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(volume_ma[i]) or np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or
-            np.isnan(chop[i]) or np.isnan(hma_12h_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(ema_21_4h_aligned[i]) or
+            np.isnan(highest_20_1d_aligned[i]) or np.isnan(lowest_20_1d_aligned[i]) or
+            np.isnan(rsi_values[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Session filter
+        if not in_session[i]:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume confirmation
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Regime filters
-        is_trending = chop[i] < 38.2
-        is_ranging = chop[i] > 61.8
-        is_transition = 38.2 <= chop[i] <= 61.8  # neutral zone, no trades
-        
         if position == 1:  # Long position
-            # Exit conditions
-            if is_trending and close[i] < hma_12h_aligned[i]:  # trend reversal
-                position = 0
-                signals[i] = 0.0
-            elif is_ranging and close[i] >= (dc_upper[i] + dc_lower[i]) / 2:  # mean reversion to midpoint
+            # Exit: RSI > 70 (overbought) or price breaks below 4h EMA
+            if rsi_values[i] > 70 or close[i] < ema_21_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit conditions
-            if is_trending and close[i] > hma_12h_aligned[i]:  # trend reversal
-                position = 0
-                signals[i] = 0.0
-            elif is_ranging and close[i] <= (dc_upper[i] + dc_lower[i]) / 2:  # mean reversion to midpoint
+            # Exit: RSI < 30 (oversold) or price breaks above 4h EMA
+            if rsi_values[i] < 30 or close[i] > ema_21_4h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            if is_transition or not volume_confirmed:
-                signals[i] = 0.0
-                continue
-                
-            # Enter based on regime
-            if is_trending:
-                # Trend following: breakout in direction of HTF trend
-                if close[i] > dc_upper[i] and close[i] > hma_12h_aligned[i]:
+            # Enter only with volume confirmation and session
+            if volume_confirmed:
+                # Long: price breaks above 1d Donchian high AND 4h EMA uptrend AND RSI < 40 (pullback)
+                if (close[i] > highest_20_1d_aligned[i] and 
+                    ema_21_4h_aligned[i] > ema_21_4h_aligned[i-1] and  # EMA rising
+                    rsi_values[i] < 40):
                     position = 1
-                    signals[i] = 0.25
-                elif close[i] < dc_lower[i] and close[i] < hma_12h_aligned[i]:
+                    signals[i] = 0.20
+                # Short: price breaks below 1d Donchian low AND 4h EMA downtrend AND RSI > 60 (pullback)
+                elif (close[i] < lowest_20_1d_aligned[i] and 
+                      ema_21_4h_aligned[i] < ema_21_4h_aligned[i-1] and  # EMA falling
+                      rsi_values[i] > 60):
                     position = -1
-                    signals[i] = -0.25
-            elif is_ranging:
-                # Mean reversion: touch bands
-                if close[i] <= dc_lower[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] >= dc_upper[i]:
-                    position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
