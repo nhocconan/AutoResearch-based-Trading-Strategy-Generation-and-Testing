@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_daily_camarilla_breakout_volume_v1
-# Hypothesis: 12h strategy using 1d Camarilla pivot levels with volume confirmation.
-# Long when price breaks above R4 with volume > 2.0x 20-period average.
-# Short when price breaks below S4 with volume > 2.0x 20-period average.
+# 4h_camarilla_breakout_volume_v1
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation.
+# Long when price breaks above R4 with volume > 1.3x 20-period average.
+# Short when price breaks below S4 with volume > 1.3x 20-period average.
 # Exit when price closes back inside R3/S3 levels.
-# Uses strict volume filter (2.0x) to reduce overtrading and target 12-37 trades/year.
-# Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# Uses discrete position sizing (0.25) to minimize fee churn.
+# Designed to capture strong breakouts in both bull and bear markets while avoiding false signals.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_daily_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -56,7 +56,7 @@ def generate_signals(prices):
     r4 = close_1d + (range_1d * 1.1 / 2)
     s4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Align all levels to 12h timeframe
+    # Align all levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -79,8 +79,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict filter)
-        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
         
         if position == 1:  # Long position
             # Exit: Price closes back below R3 (take profit) or below S4 (stop)
@@ -98,7 +98,7 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Check for breakout with volume confirmation ONLY (removed candle direction to reduce trades)
+            # Check for breakout with volume confirmation
             bullish_breakout = (close[i] > r4_aligned[i]) and volume_confirmed
             bearish_breakout = (close[i] < s4_aligned[i]) and volume_confirmed
             
