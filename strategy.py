@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR filter
-# Uses 4h Donchian(20) breakout with volume > 1.5x 20-period average
-# Enters only when 1d ATR rank < 30 (low volatility environment) to avoid chop
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# Uses 1d Donchian breakout in direction of 1w HMA(21) trend
+# Enters only when volume > 1.5x 20-period average for confirmation
 # Exits when price closes opposite Donchian band
 # Position size 0.25 to limit drawdown
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years) to minimize fee drag
-# Works in both bull/bear: Donchian captures breakouts, low vol filter avoids whipsaws in ranging markets
+# Target: 7-25 trades/year per symbol (30-100 total over 4 years) to minimize fee drag
+# Works in both bull/bear: Donchian captures breakouts, 1w HMA filter avoids counter-trend trades
 
-name = "4h_1d_donchian_vol_filter_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,59 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
+        return np.zeros(n)
     
-    donch_high_4h = np.full(len(df_4h), np.nan)
-    donch_low_4h = np.full(len(df_4h), np.nan)
-    
-    for i in range(20, len(df_4h)):
-        donch_high_4h[i] = np.max(high_4h[i-20:i])
-        donch_low_4h[i] = np.min(low_4h[i-20:i])
-    
-    # Align 4h Donchian to 4h timeframe (only use completed 4h bars)
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    
-    # Calculate 1d ATR (14-period)
+    # Calculate 1d Donchian channel (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    tr_1d = np.zeros(len(df_1d))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr0 = high_1d[i] - low_1d[i]
-        tr1 = abs(high_1d[i] - close_1d[i-1])
-        tr2 = abs(low_1d[i] - close_1d[i-1])
-        tr_1d[i] = max(tr0, tr1, tr2)
+    donch_high_1d = np.full(len(df_1d), np.nan)
+    donch_low_1d = np.full(len(df_1d), np.nan)
     
-    atr_1d = np.zeros(len(df_1d))
-    atr_1d[0] = tr_1d[0]
-    for i in range(1, len(df_1d)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
+    for i in range(20, len(df_1d)):
+        donch_high_1d[i] = np.max(high_1d[i-20:i])
+        donch_low_1d[i] = np.min(low_1d[i-20:i])
     
-    # ATR percentile rank (200-day lookback ~ 10 months)
-    atr_rank_1d = np.zeros(len(df_1d))
-    for i in range(200, len(df_1d)):
-        window = atr_1d[i-200:i]
-        atr_rank_1d[i] = np.sum(window < atr_1d[i]) / len(window) * 100
+    # Align 1d Donchian to 1d timeframe (only use completed daily bars)
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Align ATR rank to 4h timeframe (only use completed daily bars)
-    atr_rank_4h = align_htf_to_ltf(prices, df_1d, atr_rank_1d)
+    # Calculate 1w HMA(21) for trend filter
+    close_1w = df_1w['close'].values
     
-    # Volume confirmation: 20-period average on 4h (~10 days)
+    # HMA calculation: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, 'valid') / weights.sum()
+    
+    hma_1w = np.full(len(df_1w), np.nan)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    
+    if len(close_1w) >= 21:
+        wma_half = wma(close_1w, half_len)
+        wma_full = wma(close_1w, 21)
+        wma_2x_diff = 2 * wma_half[-len(wma_full):] - wma_full
+        if len(wma_2x_diff) >= sqrt_len:
+            hma_values = wma(wma_2x_diff, sqrt_len)
+            hma_1w[half_len + sqrt_len - 1:] = hma_values
+    
+    # Align 1w HMA to 1d timeframe (only use completed weekly bars)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    
+    # Volume confirmation: 20-period average on 1d (~20 days)
     vol_ma_20 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -90,49 +86,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after ATR rank warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_4h_aligned[i]) or 
-            np.isnan(donch_low_4h_aligned[i]) or 
-            np.isnan(atr_rank_4h[i]) or 
+        if (np.isnan(donch_high_1d_aligned[i]) or 
+            np.isnan(donch_low_1d_aligned[i]) or 
+            np.isnan(hma_1w_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in low volatility environment (ATR rank < 30 = bottom 30% volatility)
-        if atr_rank_4h[i] >= 30:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price closes below 4h Donchian low
-            if close[i] <= donch_low_4h_aligned[i]:
+            # Exit: price closes below 1d Donchian low
+            if close[i] <= donch_low_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h Donchian high
-            if close[i] >= donch_high_4h_aligned[i]:
+            # Exit: price closes above 1d Donchian high
+            if close[i] >= donch_high_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 4h Donchian high with volume confirmation
+            # Determine trend direction from 1w HMA
+            # Need previous HMA value to determine slope
+            if i > 0 and not np.isnan(hma_1w_aligned[i-1]):
+                hma_rising = hma_1w_aligned[i] > hma_1w_aligned[i-1]
+                hma_falling = hma_1w_aligned[i] < hma_1w_aligned[i-1]
+            else:
+                hma_rising = False
+                hma_falling = False
+            
             vol_ratio = volume[i] / vol_ma_20[i] if vol_ma_20[i] > 0 else 0
-            if (close[i] > donch_high_4h_aligned[i] and 
-                vol_ratio > 1.5):
+            
+            # Enter long: price closes above 1d Donchian high with volume confirmation and uptrend
+            if (close[i] > donch_high_1d_aligned[i] and 
+                vol_ratio > 1.5 and 
+                hma_rising):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 4h Donchian low with volume confirmation
-            elif (close[i] < donch_low_4h_aligned[i] and 
-                  vol_ratio > 1.5):
+            # Enter short: price closes below 1d Donchian low with volume confirmation and downtrend
+            elif (close[i] < donch_low_1d_aligned[i] and 
+                  vol_ratio > 1.5 and 
+                  hma_falling):
                 position = -1
                 signals[i] = -0.25
     
