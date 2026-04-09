@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d Elder Ray (Bull/Bear Power) + volume confirmation
-# Donchian breakouts capture momentum; 1d Elder Ray shows institutional buying/selling pressure
+# Hypothesis: 12h Donchian(20) breakout + 1d Bollinger Band squeeze + volume confirmation
+# Donchian breakouts capture momentum; 1d BB squeeze identifies low volatility primed for expansion
 # Volume confirmation ensures breakout authenticity with conviction
-# Works in bull/bear: Elder Ray adapts to higher timeframe power balance
+# Works in bull/bear: BB squeeze precedes moves in both directions, Donchian captures the breakout
 # Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "6h_1d_elder_ray_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_bb_squeeze_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +23,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Elder Ray calculation
+    # Load 1d data ONCE before loop for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 13-period EMA for Elder Ray (standard)
+    # Calculate 1d Bollinger Bands (20, 2)
     close_1d = df_1d['close'].values
-    ema13 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 13:
-        multiplier = 2 / (13 + 1)
-        ema13[12] = np.mean(close_1d[:13])
-        for i in range(13, len(close_1d)):
-            ema13[i] = (close_1d[i] * multiplier) + (ema13[i-1] * (1 - multiplier))
+    sma_20 = np.full(len(close_1d), np.nan)
+    std_20 = np.full(len(close_1d), np.nan)
     
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema13
-    bear_power = df_1d['low'].values - ema13
+    for i in range(len(close_1d)):
+        if i < 19:
+            sma_20[i] = np.nan
+            std_20[i] = np.nan
+        else:
+            sma_20[i] = np.mean(close_1d[i-19:i+1])
+            std_20[i] = np.std(close_1d[i-19:i+1])
     
-    # Align Elder Ray data to 6h timeframe (wait for daily close)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    upper_band = sma_20 + 2 * std_20
+    lower_band = sma_20 - 2 * std_20
+    bb_width = (upper_band - lower_band) / sma_20
     
-    # Calculate 6h Donchian channels (20-period)
+    # BB squeeze: width < 20-period average width (low volatility)
+    avg_bb_width = np.full(len(bb_width), np.nan)
+    for i in range(len(bb_width)):
+        if i < 19:
+            avg_bb_width[i] = np.nan
+        else:
+            avg_bb_width[i] = np.mean(bb_width[i-19:i+1])
+    
+    squeeze = bb_width < 0.8 * avg_bb_width  # Squeeze when width is 20% below average
+    
+    # Align BB squeeze data to 12h timeframe (wait for daily close)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    
+    # Calculate 12h Donchian channels (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -71,8 +84,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(avg_volume[i])):
+            np.isnan(squeeze_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -80,29 +92,29 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price < Donchian low OR Bear Power > 0 (bulls losing control)
-            if close[i] < donchian_low[i] or bear_power_aligned[i] > 0:
+            # Exit: price < Donchian low OR BB squeeze ends (volatility expansion)
+            if close[i] < donchian_low[i] or not squeeze_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price > Donchian high OR Bull Power < 0 (bears losing control)
-            if close[i] > donchian_high[i] or bull_power_aligned[i] < 0:
+            # Exit: price > Donchian high OR BB squeeze ends (volatility expansion)
+            if close[i] > donchian_high[i] or not squeeze_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic with volume confirmation and Donchian breakout + Elder Ray filter
-            if volume_confirmed:
-                # Long entry: price > Donchian high AND Bull Power > 0 (bulls in control)
-                if close[i] > donchian_high[i] and bull_power_aligned[i] > 0:
+            # Entry logic with volume confirmation, BB squeeze, and Donchian breakout
+            if volume_confirmed and squeeze_aligned[i]:
+                # Long entry: price > Donchian high
+                if close[i] > donchian_high[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short entry: price < Donchian low AND Bear Power < 0 (bears in control)
-                elif close[i] < donchian_low[i] and bear_power_aligned[i] < 0:
+                # Short entry: price < Donchian low
+                elif close[i] < donchian_low[i]:
                     position = -1
                     signals[i] = -0.25
     
