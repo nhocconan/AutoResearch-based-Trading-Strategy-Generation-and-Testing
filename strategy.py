@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v4"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,17 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for trend context
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA(20) for trend filter
-    close_w = pd.Series(df_w['close'])
-    ema20_w = close_w.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_w_aligned = align_htf_to_ltf(prices, df_w, ema20_w)
-    
-    # Load daily data ONCE for Camarilla levels (using prior day's OHLC)
+    # Load daily data ONCE before loop for Camarilla levels (using prior day's OHLC)
     df_d = get_htf_data(prices, '1d')
     if len(df_d) < 2:
         return np.zeros(n)
@@ -38,23 +28,23 @@ def generate_signals(prices):
     prev_high = np.full(len(df_d), np.nan)
     prev_low = np.full(len(df_d), np.nan)
     for i in range(1, len(df_d)):
-        ph = df_d['high'].iloc[i-1]
-        pl = df_d['low'].iloc[i-1]
-        pc = df_d['close'].iloc[i-1]
+        ph = float(df_d['high'].iloc[i-1])
+        pl = float(df_d['low'].iloc[i-1])
+        pc = float(df_d['close'].iloc[i-1])
         r4[i] = pc + (ph - pl) * 1.1 / 2
         s4[i] = pc - (ph - pl) * 1.1 / 2
         prev_high[i] = ph
         prev_low[i] = pl
     
-    # Align daily values to 1d timeframe
+    # Align daily values to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_d, s4)
     prev_high_aligned = align_htf_to_ltf(prices, df_d, prev_high)
     prev_low_aligned = align_htf_to_ltf(prices, df_d, prev_low)
     
-    # Volume confirmation: 3-day average
+    # Volume confirmation: 3-period average (3*4h = 12h)
     vol_ma_3 = np.full(n, np.nan)
-    vol_sum = 0
+    vol_sum = 0.0
     for i in range(n):
         vol_sum += volume[i]
         if i >= 3:
@@ -65,14 +55,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or 
             np.isnan(s4_aligned[i]) or 
             np.isnan(prev_high_aligned[i]) or 
             np.isnan(prev_low_aligned[i]) or 
-            np.isnan(vol_ma_3[i]) or 
-            np.isnan(ema20_w_aligned[i])):
+            np.isnan(vol_ma_3[i])):
             signals[i] = 0.0
             continue
         
@@ -92,13 +81,13 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above R4 with volume confirmation AND above weekly EMA20
+            # Enter long: price closes above R4 with volume confirmation
             vol_ratio = volume[i] / vol_ma_3[i] if vol_ma_3[i] > 0 else 0
-            if close[i] > r4_aligned[i] and vol_ratio > 1.8 and close[i] > ema20_w_aligned[i]:
+            if close[i] > r4_aligned[i] and vol_ratio > 2.0:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below S4 with volume confirmation AND below weekly EMA20
-            elif close[i] < s4_aligned[i] and vol_ratio > 1.8 and close[i] < ema20_w_aligned[i]:
+            # Enter short: price closes below S4 with volume confirmation
+            elif close[i] < s4_aligned[i] and vol_ratio > 2.0:
                 position = -1
                 signals[i] = -0.25
     
