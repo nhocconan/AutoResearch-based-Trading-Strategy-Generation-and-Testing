@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed for 4h timeframe targeting 20-40 trades/year (80-160 over 4 years)
 # Works in bull/bear: price reacts to 1d structure, volume confirms validity, ATR stop controls drawdown
 
-name = "4h_1d_donchian_volume_atr_v1"
+name = "4h_1d_donchian_volume_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
