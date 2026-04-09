@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d ADX regime filter
-# Williams %R(14) measures overbought/oversold on 6h
-# 1d ADX(14) determines market regime: ADX > 25 = trending, ADX <= 25 = ranging
-# In trending regime (ADX > 25): trade pullbacks - long when %R crosses above -80 from below, short when %R crosses below -20 from above
-# In ranging regime (ADX <= 25): fade extremes - long when %R < -80 and turning up, short when %R > -20 and turning down
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d chop regime filter
+# In choppy markets (1d CHOP > 61.8): mean reversion at Donchian bands
+# In trending markets (1d CHOP < 38.2): breakout continuation
+# Uses 12h for entries/exits, 1d for regime detection
 # Position size 0.25 to limit drawdown
 # Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Works in both bull/bear: adapts to regime via ADX filter
+# Works in both bull/bear: adapts to volatility regime via chop filter
 
-name = "6h_1d_williamsr_adx_regime_v2"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,111 +23,108 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for ADX
+    # Load 1d data ONCE before loop for chop regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14) for regime detection
+    # Calculate 1d Chopiness Index (14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # True Range
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
+    tr_1d = np.zeros(len(df_1d))
+    tr_1d[0] = high_1d[0] - low_1d[0]
     for i in range(1, len(df_1d)):
         tr0 = high_1d[i] - low_1d[i]
         tr1 = abs(high_1d[i] - close_1d[i-1])
         tr2 = abs(low_1d[i] - close_1d[i-1])
-        tr[i] = max(tr0, tr1, tr2)
+        tr_1d[i] = max(tr0, tr1, tr2)
     
-    # Directional Movement
-    plus_dm = np.zeros(len(df_1d))
-    minus_dm = np.zeros(len(df_1d))
-    for i in range(1, len(df_1d)):
-        up_move = high_1d[i] - high_1d[i-1]
-        down_move = low_1d[i-1] - low_1d[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
+    # ATR(14) - sum of TR
+    atr_1d = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if i < 14:
+            atr_1d[i] = np.nan
+        elif i == 14:
+            atr_1d[i] = np.nansum(tr_1d[:15])
         else:
-            plus_dm[i] = 0
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
+            atr_1d[i] = atr_1d[i-1] - (atr_1d[i-1] / 14) + tr_1d[i]
+    
+    # Max/min high/low over 14 periods
+    max_high_1d = np.full(len(df_1d), np.nan)
+    min_low_1d = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if i < 14:
+            max_high_1d[i] = np.nan
+            min_low_1d[i] = np.nan
         else:
-            minus_dm[i] = 0
+            max_high_1d[i] = np.nanmax(high_1d[i-13:i+1])
+            min_low_1d[i] = np.nanmin(low_1d[i-13:i+1])
     
-    # Smoothed DM and TR (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full(len(data), np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    # Calculate smoothed values
-    tr_14 = wilders_smoothing(tr, 14)
-    plus_dm_14 = wilders_smoothing(plus_dm, 14)
-    minus_dm_14 = wilders_smoothing(minus_dm, 14)
-    
-    # Calculate DI and DX
-    plus_di_14 = np.full(len(df_1d), np.nan)
-    minus_di_14 = np.full(len(df_1d), np.nan)
-    dx_14 = np.full(len(df_1d), np.nan)
-    
+    # Chopiness Index
+    chop_1d = np.full(len(df_1d), np.nan)
     for i in range(14, len(df_1d)):
-        if tr_14[i] != 0:
-            plus_di_14[i] = (plus_dm_14[i] / tr_14[i]) * 100
-            minus_di_14[i] = (minus_dm_14[i] / tr_14[i]) * 100
-            if (plus_di_14[i] + minus_di_14[i]) != 0:
-                dx_14[i] = (abs(plus_di_14[i] - minus_di_14[i]) / (plus_di_14[i] + minus_di_14[i])) * 100
+        if atr_1d[i] > 0 and (max_high_1d[i] - min_low_1d[i]) > 0:
+            log_sum = np.log10(atr_1d[i] * 14) - np.log10(max_high_1d[i] - min_low_1d[i])
+            chop_1d[i] = 100 * log_sum / np.log10(14)
+        else:
+            chop_1d[i] = 50.0  # neutral
     
-    # Calculate ADX (smoothed DX)
-    adx_14 = wilders_smoothing(dx_14, 14)
+    # Align 1d chop to 12h
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Align 1d ADX to 6h timeframe
-    adx_14_6h = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Calculate 12h Donchian channels (20)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
+        else:
+            donchian_high[i] = np.nanmax(high[i-20:i+1])
+            donchian_low[i] = np.nanmin(low[i-20:i+1])
     
-    # Calculate Williams %R(14) on 6h
-    def williams_r(high, low, close, period):
-        wr = np.full(len(high), np.nan)
-        for i in range(period-1, len(high)):
-            highest_high = np.nanmax(high[i-period+1:i+1])
-            lowest_low = np.nanmin(low[i-period+1:i+1])
-            if highest_high - lowest_low != 0:
-                wr[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
-        return wr
-    
-    wr = williams_r(high, low, close, 14)
+    # Volume confirmation: 12h volume > 1.5 * 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            vol_ma[i] = np.nan
+        else:
+            vol_ma[i] = np.nanmean(volume[i-20:i+1])
+    volume_ok = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(adx_14_6h[i]) or 
-            np.isnan(wr[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(chop_12h[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        adx = adx_14_6h[i]
-        wr_val = wr[i]
+        chop = chop_12h[i]
+        vol_confirm = volume_ok[i]
         
         if position == 1:  # Long position
             # Exit conditions
-            if adx > 25:  # Trending regime
-                # Exit when Williams %R crosses below -80 (end of pullback)
-                if wr_val < -80:
+            if chop > 61.8:  # Choppy regime - mean reversion
+                # Exit when price reaches middle of channel
+                mid = (donchian_high[i] + donchian_low[i]) / 2
+                if close[i] >= mid:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            else:  # Ranging regime
-                # Exit when price returns from extreme (Williams %R > -50)
-                if wr_val > -50:
+            else:  # Trending regime - breakout continuation
+                # Exit when price closes below Donchian low
+                if close[i] <= donchian_low[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -136,41 +132,39 @@ def generate_signals(prices):
                     
         elif position == -1:  # Short position
             # Exit conditions
-            if adx > 25:  # Trending regime
-                # Exit when Williams %R crosses above -20 (end of pullback)
-                if wr_val > -20:
+            if chop > 61.8:  # Choppy regime - mean reversion
+                # Exit when price reaches middle of channel
+                mid = (donchian_high[i] + donchian_low[i]) / 2
+                if close[i] <= mid:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            else:  # Ranging regime
-                # Exit when price returns from extreme (Williams %R < -50)
-                if wr_val < -50:
+            else:  # Trending regime - breakout continuation
+                # Exit when price closes above Donchian high
+                if close[i] >= donchian_high[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            # Entry logic based on regime
-            if adx > 25:  # Trending regime - trade pullbacks
-                # Go long when Williams %R crosses above -80 from below (end of pullback)
-                # Go short when Williams %R crosses below -20 from above (end of pullback)
-                if i > 30:
-                    wr_prev = wr[i-1]
-                    if wr_val > -80 and wr_prev <= -80:
+            # Entry logic based on regime and volume
+            if vol_confirm:  # Only trade with volume confirmation
+                if chop > 61.8:  # Choppy regime - mean reversion
+                    # Go long at Donchian low, short at Donchian high
+                    if close[i] <= donchian_low[i]:
                         position = 1
                         signals[i] = 0.25
-                    elif wr_val < -20 and wr_prev >= -20:
+                    elif close[i] >= donchian_high[i]:
                         position = -1
                         signals[i] = -0.25
-            else:  # Ranging regime - fade extremes
-                # Go long when Williams %R is deeply oversold (< -80)
-                # Go short when Williams %R is deeply overbought (> -20)
-                if wr_val < -80:
-                    position = 1
-                    signals[i] = 0.25
-                elif wr_val > -20:
-                    position = -1
-                    signals[i] = -0.25
+                else:  # Trending regime - breakout continuation
+                    # Go long on breakout above, short on breakdown below
+                    if close[i] > donchian_high[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    elif close[i] < donchian_low[i]:
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
