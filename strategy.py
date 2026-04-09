@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-# 1d_volatility_breakout_volume_v1
-# Hypothesis: 1d strategy combining ATR-based volatility breakout with volume confirmation
-# and weekly trend filter. In ranging/bear markets (2025+), volatility expansions from
-# weekly pivot areas with volume confirmation capture meaningful moves while avoiding
-# false breakouts. Uses discrete sizing (0.0, ±0.30) to limit fee churn and target
-# 10-20 trades/year for sustainability.
+# 6h_weekly_pivot_breakout_v1
+# Hypothesis: 6h strategy using weekly pivot points for breakout continuation in trending markets.
+# In both bull and bear markets, price often breaks through weekly pivot resistance/support with volume.
+# Uses 1d HTF for trend filter (price above/below 20 EMA) to avoid counter-trend breakouts.
+# Discrete sizing (0.0, ±0.25) minimizes fee churn. Target: 12-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_volatility_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,26 +23,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w HTF data for weekly trend
+    # 1w HTF data for weekly pivot points
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
-    close_w = pd.Series(df_1w['close'].values)
-    ema_21_w = close_w.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_w)
+    # Calculate weekly pivot points (standard formula)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Daily ATR(14) for volatility breakout
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    pivot_point = (high_w + low_w + close_w) / 3.0
+    r1 = 2 * pivot_point - low_w
+    s1 = 2 * pivot_point - high_w
+    r2 = pivot_point + (high_w - low_w)
+    s2 = pivot_point - (high_w - low_w)
     
-    # Daily Donchian(20) breakout levels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align weekly pivots to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # 1d HTF for trend filter: 20 EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
@@ -54,8 +64,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_21_w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_20_aligned[i]) or
             np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
@@ -64,29 +74,29 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below weekly EMA(21) or volatility contraction
-            if close[i] < ema_21_w_aligned[i] or volume[i] < 0.8 * volume_ma[i]:
+            # Exit: price reaches R2 or volume dries up
+            if close[i] >= r2_aligned[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly EMA(21) or volatility contraction
-            if close[i] > ema_21_w_aligned[i] or volume[i] < 0.8 * volume_ma[i]:
+            # Exit: price reaches S2 or volume dries up
+            if close[i] <= s2_aligned[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
             if volume_confirmed:
-                # Long entry: price breaks above Donchian(20) high with volume
-                if high[i] > highest_high[i]:
+                # Long breakout: price breaks above R1 with volume AND trend filter (price > 20 EMA)
+                if close[i] > r1_aligned[i] and close[i] > ema_20_aligned[i]:
                     position = 1
-                    signals[i] = 0.30
-                # Short entry: price breaks below Donchian(20) low with volume
-                elif low[i] < lowest_low[i]:
+                    signals[i] = 0.25
+                # Short breakdown: price breaks below S1 with volume AND trend filter (price < 20 EMA)
+                elif close[i] < s1_aligned[i] and close[i] < ema_20_aligned[i]:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
