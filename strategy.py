@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_camarilla_1d_trend_volume_v1
-# Hypothesis: 6h strategy using 1d Camarilla pivot levels for structure, volume confirmation, and trend filter.
-# In bull markets: price above daily pivot + volume spike + close > H3 → long
-# In bear markets: price below daily pivot + volume spike + close < L3 → short
-# Camarilla levels (H3, L3, H4, L4) act as intraday support/resistance derived from prior day's range.
+# 12h_camarilla_1w_trend_volume_v1
+# Hypothesis: 12h strategy using weekly Camarilla pivot levels for structure, volume confirmation, and trend filter.
+# In bull markets: price above weekly pivot + volume spike + close > H3 → long
+# In bear markets: price below weekly pivot + volume spike + close < L3 → short
+# Camarilla levels (H3, L3, H4, L4) act as weekly support/resistance derived from prior week's range.
 # Volume > 1.5x 20-period average filters weak moves. Discrete sizing (±0.25) minimizes fee churn.
 # Target: 50-150 total trades over 4 years (12-37/year).
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_camarilla_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,23 +25,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1w HTF data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First bar: use same day's data (no look-ahead)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Previous week's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    # First bar: use same week's data (no look-ahead)
+    prev_high[0] = high_1w[0]
+    prev_low[0] = low_1w[0]
+    prev_close[0] = close_1w[0]
     
     # Camarilla pivot levels
     pivot = (prev_high + prev_low + prev_close) / 3
@@ -54,12 +54,12 @@ def generate_signals(prices):
     L3 = pivot - (range_ * 1.1 / 4)
     L4 = pivot - (range_ * 1.1 / 2)
     
-    # Align Camarilla levels to 6h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align Camarilla levels to 12h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
+    H4_aligned = align_htf_to_ltf(prices, df_1w, H4)
+    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1w, L4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
