@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 12h_weekly_donchian_breakout_volume_v1
-# Hypothesis: 12h strategy using weekly Donchian channels with volume confirmation.
-# Long when price breaks above weekly Donchian high (20) with volume > 1.5x 20-period average.
-# Short when price breaks below weekly Donchian low (20) with volume > 1.5x 20-period average.
-# Exit when price closes back inside weekly Donchian channels (10-period) to reduce whipsaw.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# Designed to capture strong breakouts in both bull and bear markets while avoiding false signals.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# 1h_ema_macd_vol_regime_v1
+# Hypothesis: 1h strategy using 4h EMA for trend direction, MACD histogram for momentum,
+# and volume spike for confirmation. Only trade during 08-20 UTC session.
+# Enters long when 4h EMA up, MACD histogram positive and rising, volume > 1.5x 20MA.
+# Enters short when 4h EMA down, MACD histogram negative and falling, volume > 1.5x 20MA.
+# Exits on opposite MACD crossover or volume dry-up.
+# Uses discrete position sizing (0.20) to minimize fee churn.
+# Target: 15-37 trades/year (60-150 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_weekly_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "1h_ema_macd_vol_regime_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,42 +27,45 @@ def generate_signals(prices):
     open_ = prices['open'].values
     volume = prices['volume'].values
     
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get weekly data for Donchian channels (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 4h data for trend direction (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 4h EMA(21) for trend
+    close_4h = pd.Series(df_4h['close'].values)
+    ema_4h = close_4h.ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # 20-period Donchian for breakout
-    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # MACD histogram on 1h
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=12, min_periods=12, adjust=False).mean()
+    ema_slow = close_s.ewm(span=26, min_periods=26, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    macd_signal = macd_line.ewm(span=9, min_periods=9, adjust=False).mean()
+    macd_hist = macd_line - macd_signal
+    macd_hist_values = macd_hist.values
     
-    # 10-period Donchian for exit (tighter channel)
-    high_10 = pd.Series(high_1w).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low_1w).rolling(window=10, min_periods=10).min().values
-    
-    # Align all levels to 12h timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
-    high_10_aligned = align_htf_to_ltf(prices, df_1w, high_10)
-    low_10_aligned = align_htf_to_ltf(prices, df_1w, low_10)
+    # MACD histogram slope (rising/falling)
+    macd_hist_slope = np.diff(macd_hist_values, prepend=macd_hist_values[0])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup
-        # Skip if any required data is NaN
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(high_10_aligned[i]) or np.isnan(low_10_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(open_[i])):
+    for i in range(50, n):  # Start after warmup
+        # Skip if not in session or any required data is NaN
+        if not in_session[i] or \
+           np.isnan(ema_4h_aligned[i]) or np.isnan(macd_hist_values[i]) or \
+           np.isnan(macd_hist_slope[i]) or np.isnan(volume_ma[i]) or \
+           np.isnan(close[i]) or np.isnan(volume[i]):
             signals[i] = 0.0
             continue
         
@@ -70,30 +73,37 @@ def generate_signals(prices):
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Price closes back below weekly Donchian high (10) to lock in profit
-            if close[i] < high_10_aligned[i]:
+            # Exit: MACD histogram crosses below zero or volume drops below average
+            if macd_hist_values[i] <= 0 or volume[i] < volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: Price closes back above weekly Donchian low (10) to lock in profit
-            if close[i] > low_10_aligned[i]:
+            # Exit: MACD histogram crosses above zero or volume drops below average
+            if macd_hist_values[i] >= 0 or volume[i] < volume_ma[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Check for breakout with volume confirmation
-            bullish_breakout = (close[i] > high_20_aligned[i]) and volume_confirmed
-            bearish_breakout = (close[i] < low_20_aligned[i]) and volume_confirmed
+            # Check for entry conditions
+            bullish = (ema_4h_aligned[i] > ema_4h_aligned[i-1] and  # 4h EMA rising
+                      macd_hist_values[i] > 0 and                  # MACD histogram positive
+                      macd_hist_slope[i] > 0 and                   # MACD histogram rising
+                      volume_confirmed)                            # Volume spike
             
-            if bullish_breakout:
+            bearish = (ema_4h_aligned[i] < ema_4h_aligned[i-1] and  # 4h EMA falling
+                      macd_hist_values[i] < 0 and                  # MACD histogram negative
+                      macd_hist_slope[i] < 0 and                   # MACD histogram falling
+                      volume_confirmed)                            # Volume spike
+            
+            if bullish:
                 position = 1
-                signals[i] = 0.25
-            elif bearish_breakout:
+                signals[i] = 0.20
+            elif bearish:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
