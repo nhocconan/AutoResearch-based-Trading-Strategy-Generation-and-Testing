@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 6h_camarilla_pivot_volume_v1
-# Hypothesis: 6h strategy using daily Camarilla pivot levels with volume confirmation.
+# 4h_camarilla_pivot_volume_v1
+# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation.
 # In ranging markets: fade at H3/L3 levels (short at H3 resistance, long at L3 support).
 # In breakout markets: continuation when price breaks H4/L4 with volume > 1.5x average.
 # Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
-# Target: 50-150 total trades over 4 years by requiring confluence of pivot level, volume, and price action.
+# Target: 75-200 total trades over 4 years by requiring confluence of pivot level, volume, and price action.
+# Primary timeframe: 4h, HTF: 1d for Camarilla pivot calculation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -63,7 +64,7 @@ def generate_signals(prices):
     l3 = pivot - rng * 1.1 / 4
     l4 = pivot - rng * 1.1 / 2
     
-    # Align HTF Camarilla levels to LTF (6h)
+    # Align HTF Camarilla levels to LTF (4h)
     h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4)
     h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3)
