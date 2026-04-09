@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 12h_donchian_breakout_volume_chop_v1
-# Hypothesis: 12h Donchian channel breakout with volume confirmation and choppiness regime filter.
-# Donchian(20) breakout captures trend continuation; volume > 1.5x 20-period average confirms institutional participation.
-# Choppiness Index (CHOP) > 61.8 indicates ranging market (avoid false breakouts), CHOP < 38.2 indicates trending market (favor breakouts).
-# Only trade breakouts in trending regimes (CHOP < 38.2) with volume confirmation.
-# Uses 1d HTF for choppiness calculation (more stable regime detection).
-# Discrete sizing (±0.25) to minimize fee churn. Target: 12-30 trades/year.
+# 4h_donchian_volume_chop_v4
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x 20-period MA) and
+# choppiness regime filter (CHOP(14) between 38.2 and 61.8 for ranging markets).
+# Long when price breaks above Donchian upper band in choppy/range regime with volume spike.
+# Short when price breaks below Donchian lower band in choppy/range regime with volume spike.
+# Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Target: 20-40 trades/year.
+# Daily HTF used only for choppiness calculation to avoid look-ahead.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "4h_donchian_volume_chop_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,95 +25,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for choppiness regime filter (more stable)
+    # Daily HTF data for choppiness calculation (regime filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
     
-    # True Range for 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr_1d = np.concatenate([[np.nan], tr_1d])  # align with index
+    # Calculate True Range for daily data
+    tr1 = high_d[1:] - low_d[1:]
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14) for 1d
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # ATR(14) for daily
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # +DM and -DM for 1d
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (max(HH) - min(LL))) / log10(14)
+    # where sum(ATR14) is over 14 periods, max(HH) is highest high over 14 periods,
+    # min(LL) is lowest low over 14 periods
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_d).rolling(window=14, min_periods=14).min().values
+    chop_denom = max_high_14 - min_low_14
+    chop_denom = np.where(chop_denom == 0, np.nan, chop_denom)
+    chop_raw = 100 * np.log10(sum_atr_14 / chop_denom) / np.log10(14)
+    chop_1d = chop_raw  # Already in correct orientation
     
-    # Smoothed +DM, -DM, ATR
-    atr_1d_smooth = pd.Series(atr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # +DI and -DI
-    plus_di_1d = 100 * plus_dm_smooth / atr_1d_smooth
-    minus_di_1d = 100 * minus_dm_smooth / atr_1d_smooth
-    
-    # DX and Choppiness Index (CHOP)
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    chop_1d = 100 * np.log10(pd.Series(dx_1d).rolling(window=14, min_periods=14).sum().values / np.log10(14)) / np.log10(14)
+    # Align daily choppiness to 4h timeframe
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # 12h Donchian breakout
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # 4h Donchian channels (20-period)
+    period = 20
+    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
     
-    # 12h volume confirmation
+    # 4h volume confirmation
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(donchian_window, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(volume_ma[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
+            continue
+        
+        # Regime filter: only trade in choppy/range markets (CHOP between 38.2 and 61.8)
+        chop = chop_1d_aligned[i]
+        if chop < 38.2 or chop > 61.8:
+            # In trending market, stay flat to avoid whipsaws
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
-        # Regime filter: only trade in trending markets (CHOP < 38.2)
-        trending_regime = chop_1d_aligned[i] < 38.2
-        
         if position == 1:  # Long position
-            # Exit: price falls below Donchian lower band OR regime becomes ranging
-            if close[i] < lowest_low[i] or not trending_regime:
+            # Exit: price falls below Donchian lower band OR volume drops
+            if close[i] < donchian_low[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian upper band OR regime becomes ranging
-            if close[i] > highest_high[i] or not trending_regime:
+            # Exit: price rises above Donchian upper band OR volume drops
+            if close[i] > donchian_high[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian upper band + volume + trending regime
-            if close[i] > highest_high[i] and volume_confirmed and trending_regime:
-                position = 1
-                signals[i] = 0.25
-            # Enter short: price breaks below Donchian lower band + volume + trending regime
-            elif close[i] < lowest_low[i] and volume_confirmed and trending_regime:
-                position = -1
-                signals[i] = -0.25
+            if volume_confirmed:
+                # Long entry: price breaks above Donchian upper band
+                if close[i] > donchian_high[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: price breaks below Donchian lower band
+                elif close[i] < donchian_low[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
