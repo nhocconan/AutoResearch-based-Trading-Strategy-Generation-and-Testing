@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter (HMA21) and volume confirmation
-# Uses Donchian channels from 4h data: breakout above upper band = long, below lower band = short
-# 12h HMA21 filter ensures trades align with higher timeframe trend
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter (HMA21) and volume confirmation
+# Uses Camarilla pivot levels from 4h data: breakout above H3 = long, below L3 = short
+# 4h HMA21 filter ensures trades align with higher timeframe trend
 # Volume confirmation reduces false breakouts
-# Designed for 4h timeframe to target 20-50 trades/year (75-200 over 4 years)
-# Works in bull/bear: HMA21 adapts to trend, Donchian provides robust structure
+# Designed for 1h timeframe to target 60-150 total trades over 4 years (15-37/year)
+# Session filter (08-20 UTC) reduces noise trades
+# Works in bull/bear: HMA21 adapts to trend, Camarilla provides robust support/resistance
 
-name = "4h_12h_donchian_hma_volume_v2"
-timeframe = "4h"
+name = "1h_4h_camarilla_hma_volume_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,36 +24,58 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Load 12h data ONCE before loop for Donchian channels and HMA21
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop for Camarilla pivots and HMA21
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) from 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h Camarilla pivot levels (based on previous day's OHLC)
+    # For intraday, we use the previous 4h bar's OHLC as proxy for "yesterday"
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Upper band: highest high of last 20 periods
-    upper_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    lower_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: based on previous period's range
+    # H3 = close + 1.1*(high-low)/2
+    # L3 = close - 1.1*(high-low)/2
+    # H4 = close + 1.1*(high-low)
+    # L4 = close - 1.1*(high-low)
+    # We'll use H3/L3 for entries, H4/L4 for stops (but we'll use trend for exits)
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align 12h Donchian bands to 4h timeframe
-    upper_20_4h = align_htf_to_ltf(prices, df_12h, upper_20)
-    lower_20_4h = align_htf_to_ltf(prices, df_12h, lower_20)
+    range_4h = prev_high - prev_low
+    h3 = prev_close + 1.1 * range_4h / 2
+    l3 = prev_close - 1.1 * range_4h / 2
+    h4 = prev_close + 1.1 * range_4h
+    l4 = prev_close - 1.1 * range_4h
     
-    # Calculate 12h HMA21 trend filter
+    # Align 4h Camarilla levels to 1h timeframe
+    h3_1h = align_htf_to_ltf(prices, df_4h, h3)
+    l3_1h = align_htf_to_ltf(prices, df_4h, l3)
+    h4_1h = align_htf_to_ltf(prices, df_4h, h4)
+    l4_1h = align_htf_to_ltf(prices, df_4h, l4)
+    
+    # Calculate 4h HMA21 trend filter
     half_n = int(21/2 + 0.5)
-    wma_half = pd.Series(close_12h).rolling(window=half_n, min_periods=half_n).mean()
-    wma_full = pd.Series(close_12h).rolling(window=21, min_periods=21).mean()
-    hma_21_12h = (2 * wma_half - wma_full).values
+    wma_half = pd.Series(close_4h).rolling(window=half_n, min_periods=half_n).mean()
+    wma_full = pd.Series(close_4h).rolling(window=21, min_periods=21).mean()
+    hma_21_4h = (2 * wma_half - wma_full).values
     
-    # Align 12h HMA21 to 4h timeframe
-    hma_21_4h = align_htf_to_ltf(prices, df_12h, hma_21_12h)
+    # Align 4h HMA21 to 1h timeframe
+    hma_21_1h = align_htf_to_ltf(prices, df_4h, hma_21_4h)
     
-    # Calculate 20-period average volume for volume confirmation (4h volume)
+    # Calculate 20-period average volume for volume confirmation (1h volume)
     avg_volume = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
@@ -64,9 +87,10 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Skip if any required data is invalid
-        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or
-            np.isnan(hma_21_4h[i]) or np.isnan(avg_volume[i])):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(h3_1h[i]) or np.isnan(l3_1h[i]) or
+            np.isnan(hma_21_1h[i]) or np.isnan(avg_volume[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
@@ -74,30 +98,30 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * avg_volume[i]
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower band OR trend turns bearish
-            if close[i] < lower_20_4h[i] or close[i] < hma_21_4h[i]:
+            # Exit: price closes below Camarilla L3 OR trend turns bearish
+            if close[i] < l3_1h[i] or close[i] < hma_21_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper band OR trend turns bullish
-            if close[i] > upper_20_4h[i] or close[i] > hma_21_4h[i]:
+            # Exit: price closes above Camarilla H3 OR trend turns bullish
+            if close[i] > h3_1h[i] or close[i] > hma_21_1h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Entry logic with volume confirmation
+            # Entry logic with volume confirmation and session filter
             if volume_confirm:
-                # Long breakout: price closes above Donchian upper band AND price > 12h HMA21 (bullish trend)
-                if close[i] > upper_20_4h[i] and close[i] > hma_21_4h[i]:
+                # Long breakout: price closes above Camarilla H3 AND price > 4h HMA21 (bullish trend)
+                if close[i] > h3_1h[i] and close[i] > hma_21_1h[i]:
                     position = 1
-                    signals[i] = 0.25
-                # Short breakout: price closes below Donchian lower band AND price < 12h HMA21 (bearish trend)
-                elif close[i] < lower_20_4h[i] and close[i] < hma_21_4h[i]:
+                    signals[i] = 0.20
+                # Short breakout: price closes below Camarilla L3 AND price < 4h HMA21 (bearish trend)
+                elif close[i] < l3_1h[i] and close[i] < hma_21_1h[i]:
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
