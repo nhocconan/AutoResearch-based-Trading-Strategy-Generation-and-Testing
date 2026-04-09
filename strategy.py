@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume regime and choppiness filter
-# - Uses 12h Camarilla pivot levels calculated from prior 1d candle (H1, L1, H2, L2, H3, L3, H4, L4)
-# - Volume regime filter: 1d volume > 20-period median volume to ensure participation
-# - Choppiness regime: 1d Choppiness Index > 61.8 (range) enables mean reversion at Camarilla levels
+# Hypothesis: 4h Donchian(20) breakout with 1d volume regime and choppiness filter
+# - Primary signal: 4h price breaks above/below 20-period Donchian channel
+# - Volume confirmation: 1d volume > 20-period median volume (ensures participation)
+# - Regime filter: 1d Choppiness Index > 61.8 (range) enables mean reversion at Donchian extremes
 # - In trending markets (CHOP < 38.2), only trade breakouts in direction of 1d EMA21 trend
 # - Position size: 0.25 (discrete level) to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Camarilla captures key levels, regime filter adapts to market state
+# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - Works in bull/bear: Donchian captures structure, regime filter adapts to market state
 
-name = "12h_1d_camarilla_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -61,52 +61,21 @@ def generate_signals(prices):
     # 1d EMA21 for trend direction in trending regimes
     ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Calculate 1d Camarilla pivot levels from prior day
-    # Camarilla levels: 
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.25 * (high - low)
-    # H2 = close + 1.166 * (high - low)
-    # H1 = close + 1.0833 * (high - low)
-    # L1 = close - 1.0833 * (high - low)
-    # L2 = close - 1.166 * (high - low)
-    # L3 = close - 1.25 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # Where high, low, close are from PRIOR day (shifted by 1)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev[0] = high_1d[0]  # fill first value
-    low_1d_prev[0] = low_1d[0]
-    close_1d_prev[0] = close_1d[0]
-    
-    camarilla_range = high_1d_prev - low_1d_prev
-    H1 = close_1d_prev + 1.0833 * camarilla_range
-    H2 = close_1d_prev + 1.166 * camarilla_range
-    H3 = close_1d_prev + 1.25 * camarilla_range
-    H4 = close_1d_prev + 1.5 * camarilla_range
-    L1 = close_1d_prev - 1.0833 * camarilla_range
-    L2 = close_1d_prev - 1.166 * camarilla_range
-    L3 = close_1d_prev - 1.25 * camarilla_range
-    L4 = close_1d_prev - 1.5 * camarilla_range
-    
-    # Align all 1d indicators to 12h timeframe (completed 1d bar only)
+    # Align all 1d indicators to 4h timeframe (completed 1d bar only)
     chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
     chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend)
     volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
     ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # 12h price data
+    # 4h price data for Donchian calculation
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    
+    # 4h Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -117,17 +86,17 @@ def generate_signals(prices):
             np.isnan(chop_trend_aligned[i]) or
             np.isnan(volume_regime_aligned[i]) or
             np.isnan(ema_21_aligned[i]) or
-            np.isnan(H4_aligned[i]) or
-            np.isnan(L4_aligned[i])):
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below L3 (strong support break) OR 
+            # Exit: price closes below Donchian low (breakdown) OR
             #         in trend regime, price closes below EMA21
             if chop_range_aligned[i]:
-                # In range: exit at L3 (mean reversion target)
-                if close[i] <= L3_aligned[i]:
+                # In range: exit at Donchian low (mean reversion)
+                if close[i] <= lowest_low[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -141,11 +110,11 @@ def generate_signals(prices):
                     signals[i] = 0.25
                     
         elif position == -1:  # Short position
-            # Exit: price closes above H3 (strong resistance break) OR
+            # Exit: price closes above Donchian high (breakout) OR
             #         in trend regime, price closes above EMA21
             if chop_range_aligned[i]:
-                # In range: exit at H3 (mean reversion target)
-                if close[i] >= H3_aligned[i]:
+                # In range: exit at Donchian high (mean reversion)
+                if close[i] >= highest_high[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -158,16 +127,16 @@ def generate_signals(prices):
                 else:
                     signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with volume confirmation
-            # Long: price breaks above H3 AND volume regime
-            if high[i] >= H3_aligned[i] and volume_regime_aligned[i]:
+            # Look for Donchian breakout with volume confirmation
+            # Long: price breaks above Donchian high AND volume regime
+            if high[i] >= highest_high[i] and volume_regime_aligned[i]:
                 # In chop regime (>61.8): only long if also in range (mean reversion setup)
                 # In trend regime (<38.2): only long if price above EMA21 (trend continuation)
                 if chop_range_aligned[i] or close[i] > ema_21_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-            # Short: price breaks below L3 AND volume regime
-            elif low[i] <= L3_aligned[i] and volume_regime_aligned[i]:
+            # Short: price breaks below Donchian low AND volume regime
+            elif low[i] <= lowest_low[i] and volume_regime_aligned[i]:
                 # In chop regime (>61.8): only short if also in range (mean reversion setup)
                 # In trend regime (<38.2): only short if price below EMA21 (trend continuation)
                 if chop_range_aligned[i] or close[i] < ema_21_aligned[i]:
