@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v2
-# Hypothesis: Breakout above/below 1d Camarilla pivot levels (H4/L4) on 12h chart with volume confirmation.
-# Long when price closes above H4 (bullish breakout), short when price closes below L4 (bearish breakout).
-# Exit when price returns to pivot point (mean reversion) or volatility filter fails.
+# 4h_1d_donchian_breakout_v1
+# Hypothesis: Breakout above/below 1d Donchian channel on 4h chart with volume confirmation and ATR stoploss.
+# Long when price closes above 1d Donchian high (bullish breakout), short when price closes below 1d Donchian low (bearish breakout).
+# Exit when price returns to 1d Donchian middle (mean reversion) or volatility filter fails.
 # Works in bull markets by capturing breakouts, in bear markets by fading false breakouts at key levels.
-# Target: 15-30 trades/year (60-120 total over 4 years) with strict entry conditions.
+# Target: 20-50 trades/year (80-200 total over 4 years) with strict entry conditions.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility filter
+    # Calculate ATR(14) for volatility filter and stoploss
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -38,28 +38,34 @@ def generate_signals(prices):
     for i in range(1, n):
         atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
     
-    # Load 1d data ONCE before loop for Camarilla pivots
+    # Load 1d data ONCE before loop for Donchian channel
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for previous day
-    ph = df_1d['high'].values  # previous day high
-    pl = df_1d['low'].values   # previous day low
-    pc = df_1d['close'].values # previous day close
+    # Calculate 1d Donchian channel (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    range_1d = ph - pl
-    # H4 = close + 1.5 * (high - low) * 1.1/2
-    # L4 = close - 1.5 * (high - low) * 1.1/2
-    h4 = pc + 1.5 * range_1d * 1.1 / 2
-    l4 = pc - 1.5 * range_1d * 1.1 / 2
-    # Pivot point = (high + low + close) / 3
-    pp = (ph + pl + pc) / 3
+    donchian_high = np.zeros(len(df_1d))
+    donchian_low = np.zeros(len(df_1d))
+    donchian_mid = np.zeros(len(df_1d))
     
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    for i in range(len(df_1d)):
+        if i < 19:  # Need 20 periods for Donchian
+            donchian_high[i] = np.nan
+            donchian_low[i] = np.nan
+            donchian_mid[i] = np.nan
+        else:
+            donchian_high[i] = np.max(high_1d[i-19:i+1])
+            donchian_low[i] = np.min(low_1d[i-19:i+1])
+            donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    
+    # Align Donchian levels to 4h timeframe (wait for previous day's close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
     # Volume confirmation - 20 period average
     vol_ma_20 = np.zeros(n)
@@ -76,7 +82,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(atr[i]) or np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(donchian_mid_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
@@ -87,27 +93,27 @@ def generate_signals(prices):
         vol_ok = volume[i] > vol_ma_20[i] * 1.25
         
         if position == 1:  # Long position
-            # Exit: price closes below pivot point (mean reversion)
-            if close[i] < pp_aligned[i]:
+            # Exit: price closes below Donchian middle (mean reversion)
+            if close[i] < donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above pivot point (mean reversion)
-            if close[i] > pp_aligned[i]:
+            # Exit: price closes above Donchian middle (mean reversion)
+            if close[i] > donchian_mid_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above H4 with volume confirmation and volatility filter
-            if close[i] > h4_aligned[i] and vol_ok and vol_filter:
+            # Enter long: price closes above 1d Donchian high with volume confirmation and volatility filter
+            if close[i] > donchian_high_aligned[i] and vol_ok and vol_filter:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below L4 with volume confirmation and volatility filter
-            elif close[i] < l4_aligned[i] and vol_ok and vol_filter:
+            # Enter short: price closes below 1d Donchian low with volume confirmation and volatility filter
+            elif close[i] < donchian_low_aligned[i] and vol_ok and vol_filter:
                 position = -1
                 signals[i] = -0.25
     
