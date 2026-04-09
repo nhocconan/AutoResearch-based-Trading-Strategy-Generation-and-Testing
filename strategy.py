@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 12h ATR-based volatility regime filter with Donchian(20) breakout
-# In low volatility regime (ATR ratio < 0.8), use Donchian breakout for trend following
-# In high volatility regime (ATR ratio > 1.2), use mean reversion at Donchian channels
-# Volume confirmation required for breakouts to avoid false signals
-# Discrete position sizing 0.25 to target ~30-60 trades/year and minimize fee drag
-# Works in bull/bear markets: breakout captures trends in low vol, mean reversion profits from reversals in high vol
+# Hypothesis: 1d strategy using 1w Camarilla pivot levels with volume confirmation and ATR-based volatility filter
+# Camarilla pivots from weekly data provide structured support/resistance levels
+# Long when price breaks above H3 with volume confirmation in normal volatility regime
+# Short when price breaks below L3 with volume confirmation in normal volatility regime
+# In high volatility regime (ATR > 1.5x ATR_mean), reduce position size to 0.15 to avoid whipsaw
+# Uses discrete position sizing (0.0, ±0.15, ±0.25) to target ~10-25 trades/year and minimize fee drag
+# Works in bull/bear markets: breakout follows trends, mean reversion at pivots during high volatility
 
-name = "4h_12h_atr_regime_donchian_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,21 +25,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values if 'volume' in df_1w.columns else np.zeros_like(close_1w)
     
-    # Calculate 12h ATR(20) for volatility regime
-    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1w Camarilla pivot levels
+    range_1w = high_1w - low_1w
+    camarilla_h3 = close_1w + 1.1 * range_1w
+    camarilla_l3 = close_1w - 1.1 * range_1w
+    camarilla_h4 = close_1w + 1.5 * range_1w
+    camarilla_l4 = close_1w - 1.5 * range_1w
+    
+    # Calculate 1w ATR(14) for volatility regime filter
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
     def wilders_smoothing(values, period):
         if len(values) < period:
@@ -50,84 +58,90 @@ def generate_signals(prices):
             result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    atr_20_12h = wilders_smoothing(tr_12h, 20)
-    atr_50_12h = wilders_smoothing(tr_12h, 50)
+    atr_1w = wilders_smoothing(tr, 14)
+    atr_mean_1w = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
     
-    # ATR ratio: short-term / long-term volatility
-    atr_ratio = np.where(atr_50_12h != 0, atr_20_12h / atr_50_12h, 1.0)
+    # Calculate 1w average volume (20-period)
+    vol_s_1w = pd.Series(volume_1w)
+    avg_vol_1w = vol_s_1w.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2
-    
-    # Calculate 4h average volume (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 12h indicators to 4h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
+    # Align 1w indicators to 1d timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    avg_vol_1w_aligned = align_htf_to_ltf(prices, df_1w, avg_vol_1w)
+    atr_mean_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_mean_1w)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_ratio_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(avg_vol_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]) or np.isnan(atr_mean_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x average volume
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.3x average weekly volume
+        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i] if not np.isnan(vol_ma_20[i]) else False
+        
+        # Volatility regime: normal vs high volatility
+        high_volatility = atr_1w_aligned[i] > 1.5 * atr_mean_1w_aligned[i]
         
         if position == 1:  # Long position
             # Exit conditions
-            if atr_ratio_aligned[i] < 0.8:  # Low vol regime - trend following
-                if close[i] < donchian_mid[i]:  # Exit at midpoint
+            if high_volatility:
+                # In high volatility, exit if price moves back below H3 (mean reversion)
+                if close[i] < camarilla_h3_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.15  # Reduced size in high vol
+            else:
+                # In normal volatility, follow trend: exit if price falls below L3
+                if close[i] < camarilla_l3_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            elif atr_ratio_aligned[i] > 1.2:  # High vol regime - mean reversion
-                if close[i] > lowest_20[i]:  # Exit when price returns above lower band
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # Neutral regime - hold
-                signals[i] = 0.25
                 
         elif position == -1:  # Short position
             # Exit conditions
-            if atr_ratio_aligned[i] < 0.8:  # Low vol regime - trend following
-                if close[i] > donchian_mid[i]:  # Exit at midpoint
+            if high_volatility:
+                # In high volatility, exit if price moves back above L3 (mean reversion)
+                if close[i] > camarilla_l3_aligned[i]:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.15  # Reduced size in high vol
+            else:
+                # In normal volatility, follow trend: exit if price rises above H3
+                if close[i] > camarilla_h3_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-            elif atr_ratio_aligned[i] > 1.2:  # High vol regime - mean reversion
-                if close[i] < highest_20[i]:  # Exit when price returns below upper band
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
-            else:  # Neutral regime - hold
-                signals[i] = -0.25
         else:  # Flat
             # Entry conditions
-            if atr_ratio_aligned[i] < 0.8 and volume_confirmed:  # Low vol regime - breakout
-                if close[i] > highest_20[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] < lowest_20[i]:
-                    position = -1
-                    signals[i] = -0.25
-            elif atr_ratio_aligned[i] > 1.2:  # High vol regime - mean reversion
-                if close[i] < lowest_20[i]:
-                    position = 1
-                    signals[i] = 0.25
-                elif close[i] > highest_20[i]:
-                    position = -1
-                    signals[i] = -0.25
+            if volume_confirmed:
+                if not high_volatility:
+                    # Normal volatility: breakout strategy
+                    if close[i] > camarilla_h3_aligned[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    elif close[i] < camarilla_l3_aligned[i]:
+                        position = -1
+                        signals[i] = -0.25
+                else:
+                    # High volatility: mean reversion at extremes
+                    if close[i] < camarilla_l3_aligned[i]:
+                        position = 1
+                        signals[i] = 0.15  # Reduced size in high vol
+                    elif close[i] > camarilla_h3_aligned[i]:
+                        position = -1
+                        signals[i] = -0.15  # Reduced size in high vol
     
     return signals
