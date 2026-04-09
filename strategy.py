@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h ADX trend filter and volume confirmation
-# Uses 4h Donchian(20) breakout with volume > 1.5x 24-period average
-# Only trades when 12h ADX > 25 (strong trend) to avoid chop
-# Exits when price closes opposite Donchian band
-# Position size 0.25 to limit drawdown
-# Target: 20-40 trades/year per symbol to minimize fee drag
+# Hypothesis: 6h Camarilla pivot reversal with weekly trend filter
+# Uses 1d Camarilla levels (H4/L4) for mean reversion entries
+# Filters by 1w trend: only take long when price > 1w EMA20, short when price < 1w EMA20
+# Volume confirmation: current volume > 1.5x 24-period average
+# Target: 15-30 trades/year per symbol to minimize fee drag
+# Works in bull/bear: mean reversion in range, trend filter avoids counter-trend trades
 
-name = "4h_12h_adx_vol_breakout_v2"
-timeframe = "4h"
+name = "6h_1w_camarilla_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,86 +24,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h ADX (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # True Range
-    tr_12h = np.zeros(len(df_12h))
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    for i in range(1, len(df_12h)):
-        tr0 = high_12h[i] - low_12h[i]
-        tr1 = abs(high_12h[i] - close_12h[i-1])
-        tr2 = abs(low_12h[i] - close_12h[i-1])
-        tr_12h[i] = max(tr0, tr1, tr2)
+    # Calculate 1d Camarilla levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Directional Movement
-    dm_plus_12h = np.zeros(len(df_12h))
-    dm_minus_12h = np.zeros(len(df_12h))
-    for i in range(1, len(df_12h)):
-        up_move = high_12h[i] - high_12h[i-1]
-        down_move = low_12h[i-1] - low_12h[i]
-        dm_plus_12h[i] = up_move if up_move > down_move and up_move > 0 else 0
-        dm_minus_12h[i] = down_move if down_move > up_move and down_move > 0 else 0
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
     
-    # Smoothed TR and DM
-    tr_14_12h = np.zeros(len(df_12h))
-    dm_plus_14_12h = np.zeros(len(df_12h))
-    dm_minus_14_12h = np.zeros(len(df_12h))
+    for i in range(1, len(df_1d)):
+        range_ = high_1d[i-1] - low_1d[i-1]
+        camarilla_h4[i] = close_1d[i-1] + range_ * 1.1 / 2
+        camarilla_l4[i] = close_1d[i-1] - range_ * 1.1 / 2
     
-    for i in range(len(df_12h)):
-        if i < 14:
-            tr_14_12h[i] = np.nan
-            dm_plus_14_12h[i] = np.nan
-            dm_minus_14_12h[i] = np.nan
-        elif i == 14:
-            tr_14_12h[i] = np.nansum(tr_12h[1:15])
-            dm_plus_14_12h[i] = np.nansum(dm_plus_12h[1:15])
-            dm_minus_14_12h[i] = np.nansum(dm_minus_12h[1:15])
-        else:
-            tr_14_12h[i] = tr_14_12h[i-1] - (tr_14_12h[i-1] / 14) + tr_12h[i]
-            dm_plus_14_12h[i] = dm_plus_14_12h[i-1] - (dm_plus_14_12h[i-1] / 14) + dm_plus_12h[i]
-            dm_minus_14_12h[i] = dm_minus_14_12h[i-1] - (dm_minus_14_12h[i-1] / 14) + dm_minus_12h[i]
+    # Align Camarilla levels to 6h timeframe
+    camarilla_h4_6h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_6h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # DI+ and DI-
-    di_plus_12h = np.full(len(df_12h), np.nan)
-    di_minus_12h = np.full(len(df_12h), np.nan)
-    for i in range(14, len(df_12h)):
-        if tr_14_12h[i] > 0:
-            di_plus_12h[i] = (dm_plus_14_12h[i] / tr_14_12h[i]) * 100
-            di_minus_12h[i] = (dm_minus_14_12h[i] / tr_14_12h[i]) * 100
+    # Calculate 1w EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full(len(df_1w), np.nan)
+    if len(df_1w) >= 20:
+        ema_20_1w[19] = np.mean(close_1w[:20])
+        for i in range(20, len(df_1w)):
+            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 18) / 20
     
-    # DX and ADX
-    dx_12h = np.full(len(df_12h), np.nan)
-    for i in range(14, len(df_12h)):
-        if di_plus_12h[i] + di_minus_12h[i] > 0:
-            dx_12h[i] = (abs(di_plus_12h[i] - di_minus_12h[i]) / (di_plus_12h[i] + di_minus_12h[i])) * 100
+    # Align 1w EMA20 to 6h timeframe
+    ema_20_1w_6h = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    adx_12h = np.full(len(df_12h), np.nan)
-    for i in range(27, len(df_12h)):  # 14 + 13 for smoothing
-        if i == 27:
-            adx_12h[i] = np.nanmean(dx_12h[14:28])
-        elif not np.isnan(dx_12h[i]):
-            adx_12h[i] = (adx_12h[i-1] * 13 + dx_12h[i]) / 14
-    
-    # Align 12h ADX to 4h timeframe (only use completed 12h bars)
-    adx_12h_4h = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Calculate 4h Donchian channel (20-period)
-    donch_high_4h = np.full(n, np.nan)
-    donch_low_4h = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donch_high_4h[i] = np.max(high[i-20:i])
-        donch_low_4h[i] = np.min(low[i-20:i])
-    
-    # Volume confirmation: 24-period average on 4h (6 days)
+    # Volume confirmation: 24-period average on 6h (4 days)
     vol_ma_24 = np.full(n, np.nan)
     vol_sum = 0.0
     for i in range(n):
@@ -116,49 +75,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(28, n):  # Start after ADX warmup
+    for i in range(24, n):  # Start after volume MA warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_4h[i]) or 
-            np.isnan(donch_low_4h[i]) or 
-            np.isnan(adx_12h_4h[i]) or 
+        if (np.isnan(camarilla_h4_6h[i]) or 
+            np.isnan(camarilla_l4_6h[i]) or 
+            np.isnan(ema_20_1w_6h[i]) or 
             np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in strong trend (ADX > 25)
-        if adx_12h_4h[i] <= 25:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: price closes below 4h Donchian low
-            if close[i] <= donch_low_4h[i]:
+            # Exit: price reaches Camarilla H4 or trend turns bearish
+            if close[i] >= camarilla_h4_6h[i] or close[i] < ema_20_1w_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above 4h Donchian high
-            if close[i] >= donch_high_4h[i]:
+            # Exit: price reaches Camarilla L4 or trend turns bullish
+            if close[i] <= camarilla_l4_6h[i] or close[i] > ema_20_1w_6h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price closes above 4h Donchian high with volume confirmation
+            # Enter long: price touches Camarilla L4 with volume confirmation, in bullish trend
             vol_ratio = volume[i] / vol_ma_24[i] if vol_ma_24[i] > 0 else 0
-            if (close[i] > donch_high_4h[i] and 
-                vol_ratio > 1.5):
+            if (close[i] <= camarilla_l4_6h[i] and 
+                vol_ratio > 1.5 and 
+                close[i] > ema_20_1w_6h[i]):
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price closes below 4h Donchian low with volume confirmation
-            elif (close[i] < donch_low_4h[i] and 
-                  vol_ratio > 1.5):
+            # Enter short: price touches Camarilla H4 with volume confirmation, in bearish trend
+            elif (close[i] >= camarilla_h4_6h[i] and 
+                  vol_ratio > 1.5 and 
+                  close[i] < ema_20_1w_6h[i]):
                 position = -1
                 signals[i] = -0.25
     
