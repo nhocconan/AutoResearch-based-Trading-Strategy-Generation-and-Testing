@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# 4h_daily_camarilla_pivot_volume_spike_v9
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume spike confirmation.
-# Long: Price breaks above H4 pivot with volume > 2.0x 20-period average and close > open (bullish candle)
-# Short: Price breaks below L4 pivot with volume > 2.0x 20-period average and close < open (bearish candle)
-# Exit: Price returns to H3/L3 levels
-# Uses 4h primary timeframe with 1d HTF for Camarilla pivot calculation.
-# Added stricter volume confirmation (2.5x instead of 2.0x) and minimum holding period (4 bars) to reduce trade frequency.
-# Target: 75-150 total trades over 4 years (19-38/year) to reduce fee drag.
-# Works in both bull and bear markets by capturing institutional breakouts with confirmation.
+# 1d_weekly_donchian_breakout_volume_chop_v4
+# Hypothesis: Daily Donchian(20) breakout with volume confirmation and weekly chop regime filter.
+# Long: Price breaks above 20-day high + volume > 2.0x 20-day average + weekly chop < 61.8 (trending)
+# Short: Price breaks below 20-day low + volume > 2.0x 20-day average + weekly chop < 61.8 (trending)
+# Exit: Price returns to opposite Donchian level (long exits at 20-day low, short exits at 20-day high)
+# Uses 1d primary timeframe with 1w HTF for chop regime.
+# Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag.
+# Works in bull markets via breakouts and in bear markets via short breakdowns with trend confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_daily_camarilla_pivot_volume_spike_v9"
-timeframe = "4h"
+name = "1d_weekly_donchian_breakout_volume_chop_v4"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,94 +25,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_prices = prices['open'].values
     
-    # Calculate volume average for confirmation (20-period)
+    # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Donchian channels (20-day)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    donchian_high = high_s.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_s.rolling(window=20, min_periods=20).min().values
+    
+    # Get 1w data for chop regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (High + Low + Close) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = High - Low
-    range_1d = high_1d - low_1d
-    # Camarilla levels
-    h3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    l3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    h4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    l4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # True Range for chop calculation
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Align 1d Camarilla levels to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # ATR(14) - smoothed TR
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Sum of absolute close changes (14-period)
+    abs_close_chg = np.abs(np.diff(close_1w, prepend=np.nan))
+    sum_abs_chg = pd.Series(abs_close_chg).rolling(window=14, min_periods=14).sum().values
+    
+    # Chopiness Index: 100 * log10(sum(atr14) / (atr14 * 14)) / log10(14)
+    chop_raw = 100 * (np.log10(sum_abs_chg) - np.log10(atr_1w * 14)) / np.log10(14)
+    chop = chop_raw  # Already in 0-100 range
+    
+    # Align weekly chop to daily timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    bars_since_entry = 0  # Track holding period
     
-    for i in range(30, n):  # Start after warmup period for all indicators
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
-            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i]) or
-            np.isnan(open_prices[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
-            bars_since_entry = 0
             continue
         
-        # Volume confirmation: current volume > 2.5x 20-period average (stricter)
-        volume_confirmed = volume[i] > 2.5 * volume_ma[i]
-        # Bullish candle: close > open
-        bullish_candle = close[i] > open_prices[i]
-        # Bearish candle: close < open
-        bearish_candle = close[i] < open_prices[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+        # Trending regime: weekly chop < 61.8
+        trending_regime = chop_aligned[i] < 61.8
         
         if position == 1:  # Long position
-            bars_since_entry += 1
-            # Minimum holding period: 4 bars (16 hours)
-            if bars_since_entry >= 4:
-                # Exit: Price returns to H3 level
-                if close[i] <= h3_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.25
+            # Exit: Price returns to 20-day low
+            if close[i] <= donchian_low[i]:
+                position = 0
+                signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Hold until minimum period
-                
+                signals[i] = 0.25
         elif position == -1:  # Short position
-            bars_since_entry += 1
-            # Minimum holding period: 4 bars (16 hours)
-            if bars_since_entry >= 4:
-                # Exit: Price returns to L3 level
-                if close[i] >= l3_1d_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                    bars_since_entry = 0
-                else:
-                    signals[i] = -0.25
+            # Exit: Price returns to 20-day high
+            if close[i] >= donchian_high[i]:
+                position = 0
+                signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Hold until minimum period
+                signals[i] = -0.25
         else:  # Flat
-            bars_since_entry = 0
-            # Long entry: Price breaks above H4 with volume confirmation and bullish candle
-            if close[i] > h4_1d_aligned[i] and volume_confirmed and bullish_candle:
+            # Long entry: Price breaks above 20-day high + volume + trending regime
+            if close[i] > donchian_high[i] and volume_confirmed and trending_regime:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L4 with volume confirmation and bearish candle
-            elif close[i] < l4_1d_aligned[i] and volume_confirmed and bearish_candle:
+            # Short entry: Price breaks below 20-day low + volume + trending regime
+            elif close[i] < donchian_low[i] and volume_confirmed and trending_regime:
                 position = -1
                 signals[i] = -0.25
     
