@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v5
+# 4h_1d_camarilla_breakout_v6
 # Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and volatility filter.
 # Uses breakout of H4/L4 levels (stronger breakout than H3/L3) for higher probability moves.
 # Exit when price returns to the daily pivot point (PP).
 # Works in both bull and bear markets as pivot levels adapt to volatility, and filters reduce whipsaw.
 # Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
-# This version further tightens filters to reduce trade frequency and improve win rate.
+# This version uses even tighter volume and volatility filters to reduce trade frequency.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v5"
+name = "4h_1d_camarilla_breakout_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -83,10 +83,10 @@ def generate_signals(prices):
             continue
         
         # Volatility filter: avoid extremely high volatility (more restrictive)
-        vol_filter = atr[i] < 0.02 * close[i]  # ATR less than 2.0% of price (tighter)
+        vol_filter = atr[i] < 0.020 * close[i]  # ATR less than 2.0% of price (was 2.5%)
         
         # Volume confirmation: current volume > 2.2x 20-period average (more restrictive)
-        vol_ok = volume[i] > vol_ma_20[i] * 2.2  # Tighter volume filter
+        vol_ok = volume[i] > vol_ma_20[i] * 2.2  # Was 1.8
         
         if position == 1:  # Long position
             # Exit: price returns to or below Pivot Point
