@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + chop regime filter
-# Donchian breakout captures momentum in both bull and bear markets
-# 1d volume spike confirms breakout authenticity (avoids false breakouts)
-# Choppiness index regime filter: CHOP > 61.8 = range (mean revert at bands), CHOP < 38.2 = trending (follow breakout)
-# Works in bull/bear: regime filter adapts, breakout captures strong moves
-# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike confirmation + chop regime filter
+# Donchian breakout captures momentum in trending markets, volume confirms breakout strength
+# Chop regime filter adapts: follow breakout when trending (CHOP < 38.2), mean revert at bands when ranging (CHOP > 61.8)
+# Uses discrete sizing (0.25) to minimize fee churn, targets 20-50 trades/year per symbol
+# Works in bull/bear: regime filter prevents false signals, breakout captures strong moves
 
-name = "12h_1d_donchian_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for volume and chop calculation
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -34,7 +33,7 @@ def generate_signals(prices):
     volume_s_1d = pd.Series(volume_1d)
     avg_volume_1d = volume_s_1d.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d Choppiness Index (CHOP)
+    # Calculate 1d Choppiness Index (CHOP) with proper Wilder's smoothing
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -45,7 +44,7 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # ATR(14) - smoothed TR
+    # Wilder's smoothing for ATR
     def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
@@ -70,11 +69,11 @@ def generate_signals(prices):
                        100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
                        50)  # neutral when range is zero
     
-    # Align 1d indicators to 12h timeframe (wait for 1d bar close)
+    # Align 1d indicators to 4h timeframe (wait for 1d bar close)
     avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -88,10 +87,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 1d average volume
+        # Volume confirmation: current 4h volume > 1.5x 1d average volume
         volume_confirmed = volume[i] > 1.5 * avg_volume_1d_aligned[i]
         
-        # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = range (mean revert)
+        # Regime filter: CHOP < 38.2 = trending (follow breakout), CHOP > 61.8 = ranging (mean revert)
         trending_regime = chop_1d_aligned[i] < 38.2
         ranging_regime = chop_1d_aligned[i] > 61.8
         
