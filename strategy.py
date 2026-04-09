@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 1d_kama_rsi_chop_regime_v1
-# Hypothesis: 1d strategy using KAMA trend direction with RSI mean reversion and chop regime filter.
-# In bull markets: KAMA up + RSI < 30 (oversold) in choppy regime → long
-# In bear markets: KAMA down + RSI > 70 (overbought) in choppy regime → short
-# Chop regime (CHOP > 61.8) filters trending markets to avoid false signals.
-# Volume confirmation ensures participation. Target: 30-100 trades over 4 years.
-# Primary timeframe: 1d, HTF: 1w for regime context.
+# 6h_ichimoku_cloud_breakout_v1
+# Hypothesis: 6h strategy using 1d Ichimoku cloud as trend filter and 6h price breakout from cloud boundaries.
+# In trending markets, price breaks above/below cloud with momentum; in ranging markets, cloud acts as support/resistance.
+# Uses 6h Donchian(20) breakout for entry timing, filtered by 1d Ichimoku cloud color and price position relative to cloud.
+# Volume confirmation ensures breakout validity. Discrete sizing (0.0, ±0.25) minimizes fee churn.
+# Target: 50-150 total trades over 4 years by requiring cloud alignment + breakout + volume.
+# Primary timeframe: 6h, HTF: 1d for Ichimoku cloud.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_regime_v1"
-timeframe = "1d"
+name = "6h_ichimoku_cloud_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,47 +25,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d HTF data for weekly regime context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d HTF data for Ichimoku cloud
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
         return np.zeros(n)
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend direction
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))  # simplified for 1-period
-    er_num = np.abs(np.diff(close, prepend=close[0]))
-    er_den = np.sum(np.abs(np.diff(close, prepend=close[0]))[:10])  # placeholder, will compute properly
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Proper KAMA calculation
-    close_s = pd.Series(close)
-    change = np.abs(close_s.diff()).values
-    volatility = pd.Series(close).rolling(window=10, min_periods=1).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
-    er = np.where(volatility > 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2.0
     
-    # Choppiness Index (14-period) - using daily data
-    high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    atr_14 = pd.Series(high - low).rolling(window=14, min_periods=14).sum().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2.0
     
-    # Avoid division by zero and log10 of zero
-    chop_denom = np.log10(np.where(atr_14 == 0, 1e-10, atr_14)) * np.log10(14)
-    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
-    chop = 100 * np.log10((high_14 - low_14) / chop_denom) / np.log10(14)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2.0
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # Not used for cloud calculation but needed for alignment
+    
+    # Cloud boundaries: Senkou Span A and B, shifted forward 26 periods
+    # For HTF alignment, we need the current cloud (values from 26 periods ago)
+    # So we use unshifted Senkou Span A/B and align normally (align_htf_to_ltf handles completed bar delay)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    
+    # Cloud color: green (bullish) when Span A > Span B, red (bearish) when Span A < Span B
+    cloud_bullish = senkou_span_a_aligned > senkou_span_b_aligned
+    
+    # 6h Donchian(20) for breakout detection
+    period20_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average for confirmation (20-period)
     volume_s = pd.Series(volume)
@@ -76,41 +82,51 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or 
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
-        
-        # Chop regime: only trade when market is ranging/choppy (chop > 61.8)
-        chop_regime = chop[i] > 61.8
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 (mean reversion complete) or trend changes
-            if rsi[i] > 50 or kama[i] < kama[i-1]:
+            # Exit: price breaks below cloud bottom or volume dries up
+            if close[i] < cloud_bottom[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 (mean reversion complete) or trend changes
-            if rsi[i] < 50 or kama[i] > kama[i-1]:
+            # Exit: price breaks above cloud top or volume dries up
+            if close[i] > cloud_top[i] or not volume_confirmed:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if volume_confirmed and chop_regime:
-                # Long entry: KAMA trending up AND RSI oversold (<30)
-                if kama[i] > kama[i-1] and rsi[i] < 30:
-                    position = 1
-                    signals[i] = 0.25
-                # Short entry: KAMA trending down AND RSI overbought (>70)
-                elif kama[i] < kama[i-1] and rsi[i] > 70:
-                    position = -1
-                    signals[i] = -0.25
+            if volume_confirmed:
+                # Long entry: price breaks above cloud top in bullish cloud OR price above cloud in bearish cloud with strong breakout
+                if close[i] > cloud_top[i] and high[i] > cloud_top[i]:
+                    # Stronger signal when cloud is bullish
+                    if cloud_bullish[i]:
+                        position = 1
+                        signals[i] = 0.25
+                    # In bearish cloud, require price to be significantly above cloud (avoid false breakouts)
+                    elif close[i] > cloud_top[i] * 1.01:  # 1% above cloud top
+                        position = 1
+                        signals[i] = 0.25
+                # Short entry: price breaks below cloud bottom in bearish cloud OR price below cloud in bullish cloud with strong breakout
+                elif close[i] < cloud_bottom[i] and low[i] < cloud_bottom[i]:
+                    # Stronger signal when cloud is bearish
+                    if not cloud_bullish[i]:
+                        position = -1
+                        signals[i] = -0.25
+                    # In bullish cloud, require price to be significantly below cloud (avoid false breakouts)
+                    elif close[i] < cloud_bottom[i] * 0.99:  # 1% below cloud bottom
+                        position = -1
+                        signals[i] = -0.25
     
     return signals
