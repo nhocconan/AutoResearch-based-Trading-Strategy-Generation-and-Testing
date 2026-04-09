@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d trend filter
-# - Uses 6h Williams %R(14) for oversold/overbought signals (long < -80, short > -20)
-# - Filters by 1d EMA(50) trend: only long when price > EMA50, short when price < EMA50
-# - Exits when Williams %R reverts to opposite extreme (> -20 for longs, < -80 for shorts)
-# - Position size: 0.25 (25% of capital) to balance return and drawdown
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag
-# - Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend)
-# - Williams %R identifies exhaustion points; 1d EMA ensures we trade with higher timeframe trend
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and chop regime filter
+# - Uses 12h Donchian channels for breakout signals (long above 20-period high, short below 20-period low)
+# - Confirms with 12h volume > 1.8x 20-period average (strong institutional participation)
+# - Filters by 12h choppiness index: trade only when CHOP < 38.2 (strong trend) to avoid whipsaws
+# - Exits when price touches opposite Donchian level or ATR-based stoploss (2.5x ATR)
+# - Position size: 0.28 (28% of capital) to balance return and drawdown
+# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to minimize fee drag
+# - Works in trending markets (breakouts continue) and avoids ranging markets via chop filter
+# - Donchian channels provide robust structure that adapts to volatility regimes
 
-name = "6h_1d_williamsr_meanrev_v1"
-timeframe = "6h"
+name = "4h_12h_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,66 +23,103 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
     # Pre-compute HTF indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # 1d EMA(50) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 12h True Range for ATR and chop
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Align 1d EMA to 6h
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h ATR(14) for stoploss
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h Williams %R(14)
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_6h) / (highest_high - lowest_low + 1e-10)
+    # 12h Volume > 1.8x 20-period average
+    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_12h > (1.8 * avg_volume_20)
+    
+    # 12h Choppiness Index(14)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.where((highest_14 - lowest_14) > 0, highest_14 - lowest_14, 1e-10)
+    chop = 100 * np.log10(sum_tr_14 / chop_denom) / np.log10(14)
+    chop_trend = chop < 38.2  # trending market only
+    
+    # Align all 12h indicators to 4h
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike.astype(float))
+    chop_trend_aligned = align_htf_to_ltf(prices, df_12h, chop_trend.astype(float))
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    
+    # 4h price data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    atr_stop = 0.0
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or
-            ema_50_1d_aligned[i] <= 0):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_trend_aligned[i]) or
+            np.isnan(atr_12h_aligned[i]) or atr_12h_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit when Williams %R reverts above -20 (overbought)
-            if williams_r[i] > -20:
+            # Exit conditions: opposite Donchian touch (low) or ATR stoploss
+            if low[i] <= donchian_low_aligned[i]:  # Touch opposite band
+                position = 0
+                signals[i] = 0.0
+            elif high[i] >= entry_price + (2.5 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 
         elif position == -1:  # Short position
-            # Exit when Williams %R reverts below -80 (oversold)
-            if williams_r[i] < -80:
+            # Exit conditions: opposite Donchian touch (high) or ATR stoploss
+            if high[i] >= donchian_high_aligned[i]:  # Touch opposite band
+                position = 0
+                signals[i] = 0.0
+            elif low[i] <= entry_price - (2.5 * atr_stop):  # ATR stoploss
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:  # Flat
-            # Look for Williams %R extremes with 1d trend filter
-            if (williams_r[i] < -80 and  # Oversold
-                close_6h[i] > ema_50_1d_aligned[i]):  # Uptrend filter
+            # Look for Donchian breakout with volume confirmation and trend regime filter
+            if (high[i] >= donchian_high_aligned[i] and  # Break above upper band
+                volume_spike_aligned[i] and         # Volume confirmation
+                chop_trend_aligned[i]):             # Trending regime only
                 position = 1
-                signals[i] = 0.25
-            elif (williams_r[i] > -20 and   # Overbought
-                  close_6h[i] < ema_50_1d_aligned[i]):  # Downtrend filter
+                entry_price = high[i]
+                atr_stop = atr_12h_aligned[i]
+                signals[i] = 0.28
+            elif (low[i] <= donchian_low_aligned[i] and   # Break below lower band
+                  volume_spike_aligned[i] and         # Volume confirmation
+                  chop_trend_aligned[i]):             # Trending regime only
                 position = -1
-                signals[i] = -0.25
+                entry_price = low[i]
+                atr_stop = atr_12h_aligned[i]
+                signals[i] = -0.28
     
     return signals
