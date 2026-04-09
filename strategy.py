@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# 12h_camarilla_1d_trend_volume_v2
-# Hypothesis: 12h Camarilla pivot breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses 1d HTF for signal direction, 12h only for entry timing. Discrete position sizing (0.0, ±0.25) to minimize fee churn.
-# Target: 12-25 trades/year on 12h timeframe. Designed to work in both bull and bear markets via trend filter.
+# 4h_camarilla_1d_trend_volume_v9
+# Hypothesis: 4h Camarilla pivot levels from 1d HTF + volume confirmation + 1d EMA50 trend filter.
+# Uses 1d HTF for signal direction (Camarilla H3/L3 levels + EMA50 trend), 4h only for execution.
+# Discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 20-50 trades/year.
+# Designed to work in both bull and bear markets via trend filter (EMA50) and volatility filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_1d_trend_volume_v2"
-timeframe = "12h"
+name = "4h_camarilla_1d_trend_volume_v9"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -58,11 +59,11 @@ def generate_signals(prices):
     h3 = pivot_point + (range_1d * 1.1 / 4)
     l3 = pivot_point - (range_1d * 1.1 / 4)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -77,7 +78,7 @@ def generate_signals(prices):
         
         # Volatility filter: avoid low volatility conditions that cause whipsaws
         atr_ma = pd.Series(atr14_1d_aligned).rolling(window=50, min_periods=50).mean().values
-        if np.isnan(atr_ma[i]) or atr14_1d_aligned[i] < 0.5 * atr_ma[i]:
+        if np.isnan(atr_ma[i]) or atr14_1d_aligned[i] < 0.4 * atr_ma[i]:
             signals[i] = 0.0
             continue
         
@@ -98,7 +99,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Need volume confirmation
-            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
             
             if volume_confirmed:
                 # Long: price breaks above H3 with bullish trend
