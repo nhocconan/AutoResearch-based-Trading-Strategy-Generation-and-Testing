@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_donchian_breakout_volume_chop_regime_v1
+# 4h_donchian_breakout_volume_chop_regime_v2
 # Hypothesis: 4h strategy using Donchian(20) breakouts for entry, volume confirmation (>1.5x 20-bar avg volume), and chop regime filter (CHOP<61.8 = trending). Uses 1d HTF EMA(50) for trend alignment. Discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year (75-200 total over 4 years). Works in bull/bear: Donchian captures breakouts, volume confirms conviction, chop filter avoids whipsaws in ranging markets, HTF EMA ensures alignment with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_volume_chop_regime_v1"
+name = "4h_donchian_breakout_volume_chop_regime_v2"
 timeframe = "4h"
 leverage = 1.0
 
