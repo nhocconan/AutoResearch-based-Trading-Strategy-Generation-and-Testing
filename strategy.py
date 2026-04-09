@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 1d_weekly_donchian_volume_regime_v1
-# Hypothesis: 1d timeframe strategy using weekly Donchian breakouts with volume confirmation and choppiness regime filter.
-# Long when price breaks above weekly Donchian high with volume > 1.5x average and chop < 61.8 (trending).
-# Short when price breaks below weekly Donchian low with volume > 1.5x average and chop < 61.8.
-# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Target: 15-25 trades/year.
-# Designed to work in both bull and bear markets via regime filter (avoid ranging markets) and volume confirmation.
+# 6h_adx_alligator_pivot_v1
+# Hypothesis: 6h strategy using ADX trend strength + Williams Alligator (smoothed medians) for direction + 12h pivot levels for entry/exit.
+# ADX > 25 filters for trending markets, Alligator jaw/teeth/lips alignment confirms trend strength.
+# Pivot breakouts provide precise entries with trend confirmation. Designed for low-frequency, high-conviction trades.
+# Works in bull/bear via ADX regime filter and pivot structure respecting institutional levels.
+# Target: 50-150 total trades over 4 years (12-37/year). Size: 0.25.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_donchian_volume_regime_v1"
-timeframe = "1d"
+name = "6h_adx_alligator_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,82 +24,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly HTF data for Donchian channels and choppiness
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 12h HTF data for pivot points and trend context
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Weekly Donchian channels (20-period)
-    highest_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # 12h Pivot points (standard floor pivot)
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h[0] = np.nan
+    prev_high_12h[0] = np.nan
+    prev_low_12h[0] = np.nan
     
-    # Align weekly Donchian levels to daily timeframe
-    highest_20_aligned = align_htf_to_ltf(prices, df_1w, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_1w, lowest_20)
+    pivot_point = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
+    prev_range = prev_high_12h - prev_low_12h
     
-    # Weekly ATR for choppiness calculation (ATR14)
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Key pivot levels: R1, S1 (primary), R2, S2 (secondary)
+    r1 = 2 * pivot_point - prev_low_12h
+    s1 = 2 * pivot_point - prev_high_12h
+    r2 = pivot_point + prev_range
+    s2 = pivot_point - prev_range
     
-    # Weekly true range sum for denominator (sum of TR over 14 periods)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Align pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
     
-    # Weekly choppiness index: CHOP = 100 * log10(TR_sum / (ATR * 14)) / log10(14)
-    # Avoid division by zero and log of zero
-    atr_times_14 = atr14_1w * 14
-    chop_ratio = np.where((tr_sum > 0) & (atr_times_14 > 0), tr_sum / atr_times_14, np.nan)
-    chop_1w = np.where((chop_ratio > 0) & ~np.isnan(chop_ratio), 100 * np.log10(chop_ratio) / np.log10(14), 50.0)
-    chop_1w = np.nan_to_num(chop_1w, nan=50.0)
+    # 6h Williams Alligator (smoothed medians)
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (Prev SMMA*(period-1) + Current Price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Align weekly choppiness to daily timeframe
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6h ADX for trend strength (14-period)
+    def calculate_adx(high, low, close, period=14):
+        """Average Directional Index"""
+        if len(high) < period + 1:
+            return np.full_like(high, np.nan)
+        
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_minus = np.concatenate([[0], dm_minus])
+        
+        # Smoothed TR, DM+
+        atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, adjust=False, min_periods=period).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, adjust=False, min_periods=period).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / atr
+        di_minus = 100 * dm_minus_smooth / atr
+        
+        # DX and ADX
+        dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
+        adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+        
+        return adx
+    
+    adx = calculate_adx(high, low, close)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):  # Warmup for Alligator and ADX
         # Skip if any required data is NaN
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or
-            np.isnan(chop_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(adx[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        alligator_bullish = lips[i] > teeth[i] > jaw[i]
+        alligator_bearish = lips[i] < teeth[i] < jaw[i]
+        
+        # ADX trend strength filter
+        strong_trend = adx[i] > 25
+        
         if position == 1:  # Long position
-            # Exit: price closes below weekly Donchian low OR chop > 61.8 (ranging market)
-            if close[i] < lowest_20_aligned[i] or chop_1w_aligned[i] > 61.8:
+            # Exit: Alligator turns bearish OR price breaks below S1
+            if not alligator_bullish or close[i] < s1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above weekly Donchian high OR chop > 61.8 (ranging market)
-            if close[i] > highest_20_aligned[i] or chop_1w_aligned[i] > 61.8:
+            # Exit: Alligator turns bullish OR price breaks above R1
+            if not alligator_bearish or close[i] > r1_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Need volume confirmation
-            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-            
-            if volume_confirmed:
-                # Long: price breaks above weekly Donchian high with trending market (chop < 61.8)
-                if close[i] > highest_20_aligned[i] and chop_1w_aligned[i] < 61.8:
+            # Need strong trend and Alligator alignment
+            if strong_trend:
+                # Long: Alligator bullish + price breaks above R1 with momentum
+                if alligator_bullish and close[i] > r1_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: price breaks below weekly Donchian low with trending market (chop < 61.8)
-                elif close[i] < lowest_20_aligned[i] and chop_1w_aligned[i] < 61.8:
+                # Short: Alligator bearish + price breaks below S1 with momentum
+                elif alligator_bearish and close[i] < s1_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
