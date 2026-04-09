@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 6h_donchian_weekly_pivot_volume_v2
-# Hypothesis: 6h Donchian channel breakout with weekly pivot direction and volume confirmation.
-# Enters long when price breaks above 6h Donchian(20) upper band with volume spike and weekly pivot > prior weekly pivot (uptrend).
-# Enters short when price breaks below 6h Donchian(20) lower band with volume spike and weekly pivot < prior weekly pivot (downtrend).
-# Uses discrete sizing (±0.25) to minimize fee churn. Target: 50-150 trades over 4 years.
-# Weekly pivot acts as trend filter: only trade breakouts in direction of weekly trend.
+# 12h_camarilla_1d_volumespike_v1
+# Hypothesis: 12h strategy using daily Camarilla pivot levels with volume spike confirmation.
+# Enters long when price breaks above H3 level with volume spike (>2x 20-bar average volume),
+# short when breaks below L3 level with volume spike.
+# Uses discrete sizing (±0.25) to minimize fee churn. Target: 50-150 total trades over 4 years.
+# Works in bull/bear markets as Camarilla levels adapt to volatility and volume confirms institutional interest.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian_weekly_pivot_volume_v2"
-timeframe = "6h"
+name = "12h_camarilla_1d_volumespike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,12 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # 1d HTF data for weekly pivot calculation
+    # 1d HTF data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -38,24 +33,21 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot point = (high + low + close) / 3
-    daily_pivot = (high_1d + low_1d + close_1d) / 3
+    # Calculate Camarilla pivot levels for 1d
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align daily pivot to 6h timeframe (completed 1d candle only)
-    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    # Camarilla levels: H3, L3, H4, L4
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
     
-    # Weekly pivot: average of daily pivots over prior 7 days (completed week)
-    # We need to calculate weekly pivot from completed weeks only
-    weekly_pivot_raw = pd.Series(daily_pivot).rolling(window=7, min_periods=7).mean().values
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot_raw)
-    
-    # Weekly trend: current weekly pivot > prior weekly pivot (uptrend) or < (downtrend)
-    # Use 1-period lag to avoid look-ahead (prior completed week)
-    weekly_prior_pivot = np.roll(weekly_pivot_aligned, 1)
-    weekly_prior_pivot[0] = np.nan  # First value has no prior
-    weekly_uptrend = weekly_pivot_aligned > weekly_prior_pivot
-    weekly_downtrend = weekly_pivot_aligned < weekly_prior_pivot
+    # Align Camarilla levels to 12h timeframe (completed 1d candle only)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     # Volume spike detection (20-period volume average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,40 +56,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_prior_pivot[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price falls below Donchian lower band
-            if close[i] < lowest_low[i]:
+            # Exit: price falls below L3 level
+            if close[i] < l3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above Donchian upper band
-            if close[i] > highest_high[i]:
+            # Exit: price rises above H3 level
+            if close[i] > h3_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above Donchian upper band with volume spike and weekly uptrend
-            if (close[i] > highest_high[i]) and \
-               (vol_spike[i]) and \
-               (weekly_uptrend[i]):
+            # Enter long: price breaks above H3 level with volume spike
+            if (close[i] > h3_aligned[i]) and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below Donchian lower band with volume spike and weekly downtrend
-            elif (close[i] < lowest_low[i]) and \
-                 (vol_spike[i]) and \
-                 (weekly_downtrend[i]):
+            # Enter short: price breaks below L3 level with volume spike
+            elif (close[i] < l3_aligned[i]) and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
     
