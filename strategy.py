@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v2
+# 4h_1d_camarilla_breakout_v3
 # Hypothesis: 4-hour breakouts above/below daily Camarilla pivot levels (H4/L4) with volume confirmation and exit at pivot point.
-# Uses tighter entry conditions (volume > 2.2x 20-period average) to reduce trades and avoid fee drag.
+# Uses tighter entry conditions (volume > 2.5x 20-period average) to reduce trades and avoid fee drag.
 # Works in bull markets by catching breakouts, in bear markets by fading false breaks via pivot reversion.
 # Target: 20-50 trades per year per symbol.
 
@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -82,11 +82,11 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Flat
             # Enter long: price breaks above H4 level with volume confirmation
-            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 2.2:
+            if close[i] > h4_aligned[i] and volume[i] > vol_ma_20[i] * 2.5:
                 position = 1
                 signals[i] = 0.25
             # Enter short: price breaks below L4 level with volume confirmation
-            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 2.2:
+            elif close[i] < l4_aligned[i] and volume[i] > vol_ma_20[i] * 2.5:
                 position = -1
                 signals[i] = -0.25
     
