@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Camarilla pivot levels with volume confirmation and session filter
-# 4h Camarilla levels (R3/S3, R4/S4) act as major support/resistance that work in both bull and bear markets
-# Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following)
-# Volume confirmation (current 1h volume > 1.5x 20-period average) filters false signals
-# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods
-# Position size fixed at 0.20 to minimize fee churn
-# Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years)
+# Hypothesis: 6h strategy using weekly EMA trend filter, daily Donchian breakout with volume confirmation
+# Weekly EMA(34) determines long-term trend direction (bull/bear/range)
+# Daily Donchian(20) breakout in direction of weekly trend captures momentum moves
+# Volume confirmation (current 6h volume > 1.5x 20-period average) filters false breakouts
+# Fixed position size 0.25 to balance return and drawdown
+# Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "1h_4h_camarilla_volume_session_v1"
-timeframe = "1h"
+name = "6h_1w_1d_donchian_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,30 +25,42 @@ def generate_signals(prices):
     volume = prices['volume'].values
     open_time = prices['open_time'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Load 1w and 1d data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1w) < 10 or len(df_1d) < 10:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h Camarilla pivot levels
-    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
-    range_4h = high_4h - low_4h
-    r4_4h = close_4h + range_4h * 1.1 / 2.0
-    r3_4h = close_4h + range_4h * 1.1 / 4.0
-    s3_4h = close_4h - range_4h * 1.1 / 4.0
-    s4_4h = close_4h - range_4h * 1.1 / 2.0
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align all HTF data to 1h timeframe
-    r4_4h_aligned = align_htf_to_ltf(prices, df_4h, r4_4h)
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
-    s4_4h_aligned = align_htf_to_ltf(prices, df_4h, s4_4h)
+    # Calculate weekly EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Pre-compute volume confirmation (20-period average for 1h)
+    # Calculate daily Donchian channels (20-period)
+    high_max_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate daily ATR(14) for volatility filtering (optional)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr1_1d[0]  # First period has no previous close
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all HTF data to 6h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    high_max_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_max_20_1d)
+    low_min_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_min_20_1d)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Pre-compute volume confirmation (20-period average for 6h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute session filter (08-20 UTC)
@@ -61,57 +72,49 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(r4_4h_aligned[i]) or np.isnan(r3_4h_aligned[i]) or
-            np.isnan(s3_4h_aligned[i]) or np.isnan(s4_4h_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or not in_session[i]):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(high_max_20_1d_aligned[i]) or
+            np.isnan(low_min_20_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or not in_session[i] or
+            atr_14_1d_aligned[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1h volume > 1.5x average 1h volume
+        # Volume confirmation: current 6h volume > 1.5x average 6h volume
         volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Fixed position size to minimize fee churn
-        position_size = 0.20
+        if not volume_confirmed:
+            signals[i] = 0.0
+            continue
+        
+        # Fixed position size
+        position_size = 0.25
         
         if position == 1:  # Long position
-            # Exit on retracement to S3 or stop at S4 breakdown
-            if close[i] < s3_4h_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] < s4_4h_aligned[i]:  # Stop loss at S4 breakdown
+            # Exit on retracement to weekly EMA or breakdown of daily Donchian low
+            if close[i] < ema_34_1w_aligned[i] or close[i] < low_min_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = position_size
                 
         elif position == -1:  # Short position
-            # Exit on retracement to R3 or stop at R4 breakout
-            if close[i] > r3_4h_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            elif close[i] > r4_4h_aligned[i]:  # Stop loss at R4 breakout
+            # Exit on retracement to weekly EMA or breakout above daily Donchian high
+            if close[i] > ema_34_1w_aligned[i] or close[i] > high_max_20_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -position_size
         else:  # Flat
-            # Camarilla pivot trading with volume and session confirmation
-            # Fade at R3/S3 (mean reversion), breakout at R4/S4 (trend following)
-            if volume_confirmed:
-                # Fade at R3 (sell at resistance, expect reversion to pivot)
-                if close[i] > r3_4h_aligned[i] and close[i] < r4_4h_aligned[i]:
-                    position = -1
-                    signals[i] = -position_size
-                # Fade at S3 (buy at support, expect reversion to pivot)
-                elif close[i] < s3_4h_aligned[i] and close[i] > s4_4h_aligned[i]:
+            # Only trade in direction of weekly trend
+            # Weekly trend: price above EMA = bullish, below EMA = bearish
+            if close[i] > ema_34_1w_aligned[i]:  # Weekly bullish trend
+                # Long breakout above daily Donchian high
+                if close[i] > high_max_20_1d_aligned[i]:
                     position = 1
                     signals[i] = position_size
-                # Breakout continuation at R4 (buy break above resistance)
-                elif close[i] > r4_4h_aligned[i]:
-                    position = 1
-                    signals[i] = position_size
-                # Breakout continuation at S4 (sell break below support)
-                elif close[i] < s4_4h_aligned[i]:
+            else:  # Weekly bearish trend
+                # Short breakdown below daily Donchian low
+                if close[i] < low_min_20_1d_aligned[i]:
                     position = -1
                     signals[i] = -position_size
     
