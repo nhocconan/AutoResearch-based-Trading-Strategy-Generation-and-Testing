@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-# 4h_donchian_12h_trend_volume_v1
-# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation.
-# Works in bull/bear: 12h EMA20 defines medium-term trend; Donchian(20) breakout captures
-# momentum; volume confirms institutional participation. Target: 20-50 trades/year.
+# 1d_weekly_ema_trend_v1
+# Hypothesis: Daily trend following with weekly EMA filter and ATR-based position sizing.
+# Uses 1d EMA50 for trend direction and 1w EMA20 for higher timeframe confirmation.
+# Position size scaled by ATR volatility (inverse volatility targeting) to maintain consistent risk.
+# Works in bull/bear: trend filter avoids counter-trend trades, ATR scaling reduces size in high volatility.
+# Target: 15-30 trades/year (60-120 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_12h_trend_volume_v1"
-timeframe = "4h"
+name = "1d_weekly_ema_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,73 +22,70 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 12h HTF data for EMA trend and Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need sufficient data for EMA20 and Donchian
+    # 1d EMA50 for trend direction
+    ema50_1d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # 1w HTF data for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need sufficient data for EMA20
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # 12h EMA20 for trend filter
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
-    
-    # 12h Donchian channels (20-period)
-    # Upper = max(high, lookback=20)
-    # Lower = min(low, lookback=20)
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 4h timeframe (completed 12h bar only)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ATR(14) for volatility-based position sizing
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_12h_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema50_1d[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian Lower OR trend turns bearish
-            if close[i] < donchian_lower_aligned[i] or close[i] < ema20_12h_aligned[i]:
+            # Exit: trend turns bearish (price below both EMAs)
+            if close[i] < ema50_1d[i] or close[i] < ema20_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                # Scale position by inverse ATR (volatility targeting)
+                atr_norm = atr[i] / np.nanmedian(atr[max(0, i-100):i+1])  # Normalize ATR
+                size = 0.30 / (1 + atr_norm)  # Reduce size in high volatility
+                signals[i] = np.clip(size, 0.10, 0.30)
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian Upper OR trend turns bullish
-            if close[i] > donchian_upper_aligned[i] or close[i] > ema20_12h_aligned[i]:
+            # Exit: trend turns bullish (price above both EMAs)
+            if close[i] > ema50_1d[i] or close[i] > ema20_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                # Scale position by inverse ATR (volatility targeting)
+                atr_norm = atr[i] / np.nanmedian(atr[max(0, i-100):i+1])  # Normalize ATR
+                size = 0.30 / (1 + atr_norm)  # Reduce size in high volatility
+                signals[i] = -np.clip(size, 0.10, 0.30)
         else:  # Flat
-            # Need volume confirmation
-            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
-            
-            if volume_confirmed:
-                # Long: price breaks above Donchian Upper with bullish trend
-                if close[i] > donchian_upper_aligned[i] and close[i] > ema20_12h_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short: price breaks below Donchian Lower with bearish trend
-                elif close[i] < donchian_lower_aligned[i] and close[i] < ema20_12h_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
+            # Enter long: price above both EMAs (bullish alignment)
+            if close[i] > ema50_1d[i] and close[i] > ema20_1w_aligned[i]:
+                position = 1
+                # Scale position by inverse ATR (volatility targeting)
+                atr_norm = atr[i] / np.nanmedian(atr[max(0, i-100):i+1])  # Normalize ATR
+                size = 0.30 / (1 + atr_norm)  # Reduce size in high volatility
+                signals[i] = np.clip(size, 0.10, 0.30)
+            # Enter short: price below both EMAs (bearish alignment)
+            elif close[i] < ema50_1d[i] and close[i] < ema20_1w_aligned[i]:
+                position = -1
+                # Scale position by inverse ATR (volatility targeting)
+                atr_norm = atr[i] / np.nanmedian(atr[max(0, i-100):i+1])  # Normalize ATR
+                size = 0.30 / (1 + atr_norm)  # Reduce size in high volatility
+                signals[i] = -np.clip(size, 0.10, 0.30)
     
     return signals
