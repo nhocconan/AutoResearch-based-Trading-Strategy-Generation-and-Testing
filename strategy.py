@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
-# In trending regimes (CHOP < 38.2): breakout above/below Camarilla H3/L3 levels with volume confirmation
-# In ranging regimes (CHOP > 61.8): mean reversion at Camarilla H3/L3 levels with volume confirmation
+# Hypothesis: 12h Williams Alligator + 1d volume spike + choppiness regime filter
+# In trending regimes (CHOP < 38.2): trade in direction of Alligator alignment (jaws < teeth < lips for long, reverse for short)
+# In ranging regimes (CHOP > 61.8): fade extremes when price touches Alligator lines with volume confirmation
 # Uses discrete position sizing 0.25 to limit trades to ~12-37/year and reduce fee drag
-# Works in bull/bear markets: breakout catches trends, chop filter avoids whipsaws in ranging markets
+# Williams Alligator is proven to work in both bull and bear markets by identifying trend strength and ranging conditions
 
-name = "12h_1d_camarilla_breakout_volume_chop_v3"
+name = "12h_1d_alligator_volume_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,7 +25,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -33,7 +33,35 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ATR(14) for volatility normalization
+    # Calculate 1d Williams Alligator (Smoothed Medians)
+    # Jaw: 13-period SMMA shifted 8 bars
+    # Teeth: 8-period SMMA shifted 5 bars  
+    # Lips: 5-period SMMA shifted 3 bars
+    def smma(values, period):
+        if len(values) < period:
+            return np.full(len(values), np.nan)
+        result = np.full(len(values), np.nan)
+        result[period-1] = np.mean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    # Calculate SMMA for median price (typical price)
+    median_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    jaw_raw = smma(median_price_1d, 13)
+    teeth_raw = smma(median_price_1d, 8)
+    lips_raw = smma(median_price_1d, 5)
+    
+    # Apply shifts (jaw: 8, teeth: 5, lips: 3)
+    jaw_1d = np.roll(jaw_raw, 8)
+    teeth_1d = np.roll(teeth_raw, 5)
+    lips_1d = np.roll(lips_raw, 3)
+    # Set NaN for shifted values
+    jaw_1d[:8] = np.nan
+    teeth_1d[:5] = np.nan
+    lips_1d[:3] = np.nan
+    
+    # Calculate 1d ATR(14) for volume normalization
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
@@ -66,21 +94,12 @@ def generate_signals(prices):
                        100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
                        50)
     
-    # Calculate 1d Camarilla pivot levels (based on prior day to avoid look-ahead)
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
-    range_1d = high_1d - low_1d
-    h3_1d = close_1d + 1.1 * range_1d
-    l3_1d = close_1d - 1.1 * range_1d
-    h4_1d = close_1d + 1.5 * range_1d
-    l4_1d = close_1d - 1.5 * range_1d
-    
     # Align 1d indicators to 12h timeframe
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     avg_vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_ratio_1d)
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
     # Pre-compute volume confirmation array
     avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -90,11 +109,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or np.isnan(lips_1d_aligned[i]) or
+            np.isnan(avg_vol_ratio_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
             np.isnan(volume_confirmed[i])):
             signals[i] = 0.0
             continue
@@ -105,15 +123,15 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             if trending_regime:
-                # Exit long if price breaks below H3 or we enter ranging regime
-                if close[i] < h3_1d_aligned[i] or ranging_regime:
+                # Exit long if Alligator loses alignment (jaws > teeth or teeth > lips)
+                if jaw_1d_aligned[i] > teeth_1d_aligned[i] or teeth_1d_aligned[i] > lips_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             elif ranging_regime:
-                # Exit long if price rises above H4 or drops below L3
-                if close[i] > h4_1d_aligned[i] or close[i] < l3_1d_aligned[i]:
+                # Exit long if price rises above lips or drops below jaw
+                if close[i] > lips_1d_aligned[i] or close[i] < jaw_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
@@ -121,35 +139,35 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             if trending_regime:
-                # Exit short if price breaks above L3 or we enter ranging regime
-                if close[i] > l3_1d_aligned[i] or ranging_regime:
+                # Exit short if Alligator loses alignment (jaws < teeth or teeth < lips)
+                if jaw_1d_aligned[i] < teeth_1d_aligned[i] or teeth_1d_aligned[i] < lips_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
             elif ranging_regime:
-                # Exit short if price drops below L4 or rises above H3
-                if close[i] < l4_1d_aligned[i] or close[i] > h3_1d_aligned[i]:
+                # Exit short if price drops below lips or rises above jaw
+                if close[i] < lips_1d_aligned[i] or close[i] > jaw_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -0.25
         else:  # Flat
             if trending_regime:
-                # Enter long on breakout above H3 with volume confirmation
-                if close[i] > h3_1d_aligned[i] and volume_confirmed[i]:
+                # Enter long on Alligator alignment (jaws < teeth < lips) with volume confirmation
+                if jaw_1d_aligned[i] < teeth_1d_aligned[i] and teeth_1d_aligned[i] < lips_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                # Enter short on breakout below L3 with volume confirmation
-                elif close[i] < l3_1d_aligned[i] and volume_confirmed[i]:
+                # Enter short on reverse alignment (jaws > teeth > lips) with volume confirmation
+                elif jaw_1d_aligned[i] > teeth_1d_aligned[i] and teeth_1d_aligned[i] > lips_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
             elif ranging_regime:
-                # Mean reversion: buy near L3, sell near H3
-                if close[i] <= l3_1d_aligned[i] and volume_confirmed[i]:
+                # Mean reversion: buy near jaw, sell near lips when price touches Alligator lines
+                if close[i] <= jaw_1d_aligned[i] and volume_confirmed[i]:
                     position = 1
                     signals[i] = 0.25
-                elif close[i] >= h3_1d_aligned[i] and volume_confirmed[i]:
+                elif close[i] >= lips_1d_aligned[i] and volume_confirmed[i]:
                     position = -1
                     signals[i] = -0.25
     
