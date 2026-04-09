@@ -1,126 +1,84 @@
 #!/usr/bin/env python3
-# 6h_adx_alligator_12h_trend_v1
-# Hypothesis: 6h strategy using Williams Alligator (Jaw/Teeth/Lips) for trend state,
-# filtered by 12h ADX > 25 for strong trend confirmation. Entries on Alligator alignment
-# with 12h trend direction. Exits on trend weakness or Alligator crossover reversal.
-# Works in bull/bear: 12h ADX filters ranging markets, Alligator captures momentum,
-# ADX > 25 ensures we only trade strong trends reducing whipsaw.
-# Target: 12-30 trades/year.
+# 4h_donchian_breakout_volume_chop_v7
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and choppiness regime filter.
+# Long when price breaks above 20-period upper band + volume spike + chop > 61.8 (range).
+# Short when price breaks below 20-period lower band + volume spike + chop > 61.8 (range).
+# Exits when price reverts to 20-period middle band or chop < 38.2 (trend).
+# Works in bull/bear: chop filter avoids whipsaws in trends, volume confirms breakout validity.
+# Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_adx_alligator_12h_trend_v1"
-timeframe = "6h"
+name = "4h_donchian_breakout_volume_chop_v7"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 12h HTF data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    upper = high_roll
+    lower = low_roll
+    middle = (upper + lower) / 2.0
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Choppiness Index (14-period)
+    atr = pd.Series(np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    ll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    chop = 100 * np.log10(atr_sum / np.log10(14) / (hh - ll)) / np.log10(14)
+    chop = np.where((hh - ll) > 0, chop, 50.0)  # avoid division by zero
     
-    # 12h ADX calculation
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            up_move = high[i] - high[i-1]
-            down_move = low[i-1] - low[i]
-            plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
-            minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(high)
-        plus_dm_smooth = np.zeros_like(high)
-        minus_dm_smooth = np.zeros_like(high)
-        
-        atr[period] = np.nansum(tr[1:period+1])
-        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nansum(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
-        minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = np.zeros_like(high)
-        adx[2*period-1] = np.nanmean(dx[period:2*period])
-        for i in range(2*period, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
-    
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Williams Alligator on 6h
-    # Jaw (blue): 13-period SMMA smoothed 8 bars ahead
-    # Teeth (red): 8-period SMMA smoothed 5 bars ahead  
-    # Lips (green): 5-period SMMA smoothed 3 bars ahead
-    def smma(data, period):
-        sma = np.zeros_like(data)
-        sma[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            sma[i] = (sma[i-1] * (period-1) + data[i]) / period
-        return sma
-    
-    jaw = smma(smma(close, 13), 8)  # SMMA(13) then smoothed 8
-    teeth = smma(smma(close, 8), 5)  # SMMA(8) then smoothed 5
-    lips = smma(smma(close, 5), 3)   # SMMA(5) then smoothed 3
+    # Volume confirmation: current volume > 2.0x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(adx_12h_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(chop[i]) or np.isnan(volume_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: ADX weakens (<20) OR Alligator reverses (lips < teeth)
-            if adx_12h_aligned[i] < 20 or lips[i] < teeth[i]:
+            # Exit: price reverts to middle band OR chop < 38.2 (trending)
+            if close[i] <= middle[i] or chop[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: ADX weakens (<20) OR Alligator reverses (lips > teeth)
-            if adx_12h_aligned[i] < 20 or lips[i] > teeth[i]:
+            # Exit: price reverts to middle band OR chop < 38.2 (trending)
+            if close[i] >= middle[i] or chop[i] < 38.2:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry conditions: strong trend (ADX > 25) + Alligator alignment
-            if adx_12h_aligned[i] > 25:
-                # Bullish alignment: Lips > Teeth > Jaw
-                if lips[i] > teeth[i] and teeth[i] > jaw[i]:
+            # Volume confirmation
+            volume_confirmed = volume[i] > 2.0 * volume_ma[i]
+            
+            if volume_confirmed and chop[i] > 61.8:  # range regime
+                # Check for breakout
+                if close[i] > upper[i]:
+                    # Breakout above upper band → long
                     position = 1
                     signals[i] = 0.25
-                # Bearish alignment: Lips < Teeth < Jaw
-                elif lips[i] < teeth[i] and teeth[i] < jaw[i]:
+                elif close[i] < lower[i]:
+                    # Breakout below lower band → short
                     position = -1
                     signals[i] = -0.25
     
