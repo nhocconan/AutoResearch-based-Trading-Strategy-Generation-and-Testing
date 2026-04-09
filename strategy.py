@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 12h_weekly_donchian_breakout_volume_v1
-# Hypothesis: 12h strategy using weekly Donchian channel breakouts with volume confirmation.
-# Long: Price breaks above weekly Donchian high (20-period) with volume > 1.3x 20-period average.
-# Short: Price breaks below weekly Donchian low (20-period) with volume > 1.3x 20-period average.
-# Exit: Price returns to weekly midpoint (average of Donchian high/low).
-# Uses weekly structure for major trend, 12h for execution, volume to avoid false breakouts.
-# Target: 12-37 trades/year (50-150 total over 4 years) on BTC/ETH/SOL.
+# 4h_daily_camarilla_breakout_volume_v1
+# Hypothesis: 4h strategy using daily Camarilla pivot levels with volume confirmation.
+# Long: Price breaks above daily R4 level with volume > 1.5x 20-period average.
+# Short: Price breaks below daily S4 level with volume > 1.5x 20-period average.
+# Exit: Price returns to daily pivot point (PP) or breaks opposite S4/R4 level.
+# Uses daily Camarilla for key support/resistance, 4h for execution, volume for confirmation.
+# Target: 20-50 trades/year (80-200 total over 4 years) on BTC/ETH/SOL.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_weekly_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_daily_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,60 +29,58 @@ def generate_signals(prices):
     volume_s = pd.Series(volume)
     volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Get weekly data for Donchian channels (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
+    # Get 1d data for Camarilla pivot levels (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian high: rolling max of highs
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    # Donchian low: rolling min of lows
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    # Weekly midpoint: average of Donchian high/low
-    weekly_midpoint = (donchian_high + donchian_low) / 2.0
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Align HTF indicators to LTF (12h)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint)
+    # Camarilla levels
+    r4 = close_1d + range_1d * 1.1 / 2.0
+    s4 = close_1d - range_1d * 1.1 / 2.0
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(weekly_midpoint_aligned[i]) or np.isnan(volume_ma[i]) or 
-            np.isnan(close[i]) or np.isnan(volume[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_confirmed = volume[i] > 1.3 * volume_ma[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
         
         if position == 1:  # Long position
-            # Exit: Price returns to weekly midpoint
-            if close[i] <= weekly_midpoint_aligned[i]:
+            # Exit: Price returns to daily pivot or breaks below S4
+            if close[i] <= pivot_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price returns to weekly midpoint
-            if close[i] >= weekly_midpoint_aligned[i]:
+            # Exit: Price returns to daily pivot or breaks above R4
+            if close[i] >= pivot_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Check for breakout with volume confirmation
-            bullish_breakout = (close[i] > donchian_high_aligned[i]) and volume_confirmed
-            bearish_breakout = (close[i] < donchian_low_aligned[i]) and volume_confirmed
+            bullish_breakout = (close[i] > r4_aligned[i]) and volume_confirmed
+            bearish_breakout = (close[i] < s4_aligned[i]) and volume_confirmed
             
             if bullish_breakout:
                 position = 1
