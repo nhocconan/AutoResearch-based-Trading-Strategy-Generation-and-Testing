@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v7
-# Hypothesis: 4-hour breakout of daily Camarilla levels with 1-day EMA50 trend filter and volume confirmation.
-# Long when price breaks above H4 resistance with price > daily EMA50 and volume > 1.5x 20-bar average.
-# Short when price breaks below L4 support with price < daily EMA50 and volume > 1.5x 20-bar average.
-# Exit when price returns to opposite Camarilla level (L4 for longs, H4 for shorts).
-# Position size fixed at 0.25 to limit drawdown. Target: 75-200 total trades over 4 years (19-50/year).
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at extreme levels.
+# 6h_1d_adx_trend_v1
+# Hypothesis: 6-hour trend following using 1-day ADX for trend strength and 6-hour price action for entry.
+# Long when ADX(14) > 25 (strong trend) and price crosses above 6h EMA(21) with bullish engulfing candle.
+# Short when ADX(14) > 25 and price crosses below 6h EMA(21) with bearish engulfing candle.
+# Exit when ADX drops below 20 (weakening trend) or opposite signal occurs.
+# Works in bull markets via trend continuation and in bear markets via short trends.
+# Uses discrete position sizes (0.25) to limit turnover and control drawdown.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v7"
-timeframe = "4h"
+name = "6h_1d_adx_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,90 +23,121 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d ADX(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema = close_1d[49]  # Initialize with first 50-period average
-        multiplier = 2 / (50 + 1)
-        ema_50_1d[49] = ema
-        for i in range(50, len(close_1d)):
-            ema = (close_1d[i] - ema) * multiplier + ema
-            ema_50_1d[i] = ema
     
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
     
-    # Calculate Camarilla levels from 1d OHLC
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    camarilla_h4 = np.full(len(df_1d), np.nan)
-    camarilla_l4 = np.full(len(df_1d), np.nan)
-    for i in range(len(df_1d)):
-        c = df_1d['close'].iloc[i]
-        h = df_1d['high'].iloc[i]
-        l = df_1d['low'].iloc[i]
-        camarilla_h4[i] = c + 1.1 * (h - l) / 2
-        camarilla_l4[i] = c - 1.1 * (h - l) / 2
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Smooth TR, DM+ and DM- using Wilder's smoothing (alpha = 1/14)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period])  # Skip index 0 (nan)
+        # Subsequent values: smoothed = prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+            else:
+                result[i] = np.nan
+        return result
     
-    # Volume confirmation: 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma_20[i] = vol_sum / 20
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align 1d ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 6h EMA(21)
+    ema_21 = np.full(n, np.nan)
+    if n >= 21:
+        multiplier = 2 / (21 + 1)
+        ema_21[20] = np.mean(open_price[0:21])  # Simple average of first 21 opens
+        for i in range(21, n):
+            ema_21[i] = (open_price[i] - ema_21[i-1]) * multiplier + ema_21[i-1]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(21, n):  # Start after EMA warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(ema_21[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price returns to or below L4 level
-            if close[i] <= camarilla_l4_aligned[i]:
+            # Exit: ADX weakens (<20) or bearish engulfing forms
+            if (adx_aligned[i] < 20 or 
+                (close[i] < open_price[i] and 
+                 open_price[i-1] < close[i-1] and  # Previous bullish
+                 close[i] <= open_price[i-1] and   # Current close below prev open
+                 open_price[i] >= close[i-1])):    # Current open above prev close
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price returns to or above H4 level
-            if close[i] >= camarilla_h4_aligned[i]:
+            # Exit: ADX weakens (<20) or bullish engulfing forms
+            if (adx_aligned[i] < 20 or 
+                (close[i] > open_price[i] and 
+                 open_price[i-1] > close[i-1] and  # Previous bearish
+                 close[i] >= open_price[i-1] and   # Current close above prev open
+                 open_price[i] <= close[i-1])):    # Current open below prev close
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Enter long: price breaks above H4 with trend and volume filters
-            if (close[i] > camarilla_h4_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > vol_ma_20[i] * 1.5):
+            # Enter long: strong trend (ADX>25) and bullish engulfing above EMA
+            if (adx_aligned[i] > 25 and 
+                close[i] > ema_21[i] and
+                close[i] > open_price[i] and  # Bullish candle
+                open_price[i-1] < close[i-1] and  # Previous bullish
+                close[i] <= open_price[i-1] and   # Current close below prev open
+                open_price[i] >= close[i-1]):    # Current open above prev close (engulfing)
                 position = 1
                 signals[i] = 0.25
-            # Enter short: price breaks below L4 with trend and volume filters
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > vol_ma_20[i] * 1.5):
+            # Enter short: strong trend (ADX>25) and bearish engulfing below EMA
+            elif (adx_aligned[i] > 25 and 
+                  close[i] < ema_21[i] and
+                  close[i] < open_price[i] and  # Bearish candle
+                  open_price[i-1] > close[i-1] and  # Previous bearish
+                  close[i] >= open_price[i-1] and   # Current close above prev open
+                  open_price[i] <= close[i-1]):    # Current open below prev close (engulfing)
                 position = -1
                 signals[i] = -0.25
     
