@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 1d_kama_rsi_chop_v1
-# Hypothesis: 1d strategy using KAMA trend direction, RSI extremes, and Choppiness Index regime filter.
-# KAMA adapts to market noise, providing reliable trend direction. RSI < 30 or > 70 identifies overextended conditions for mean reversion.
-# Choppiness Index > 61.8 confirms ranging market (mean reversion favorable). Works in both bull/bear by fading extremes in ranging regimes.
-# Discrete position sizing (±0.25) to minimize fee churn. Target: 30-100 total trades over 4 years (7-25/year).
+# 6h_adx_di_volume_v1
+# Hypothesis: 6h strategy using ADX(14) and +DI/-DI crossover for trend strength/direction, filtered by 1d EMA200 for higher timeframe bias, and volume > 1.5x 20-period average for confirmation.
+# ADX > 25 ensures we only trade in trending markets, reducing whipsaw in ranging conditions.
+# Works in both bull and bear markets by going long when +DI > -DI and short when -DI > +DI, aligned with 1d trend.
+# Discrete position sizing (±0.25) to minimize fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_adx_di_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,74 +21,108 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 1d data for indicators (primary timeframe)
-    close_s = pd.Series(close)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+    # 1d HTF data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     
-    # KAMA trend direction (ER=10, fast=2, slow=30)
-    change = abs(close_s.diff(10))
-    volatility = close_s.diff().abs().rolling(window=10, min_periods=1).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-    kama_dir = np.where(close > kama, 1, -1)  # 1=above KAMA (bullish bias), -1=below (bearish bias)
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # RSI(14)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # ADX and DI calculation (14-period)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Choppiness Index(14)
-    atr = np.maximum(high_s - low_s, np.maximum(high_s - close_s.shift(), close_s.shift() - low_s))
-    atr = atr.rolling(window=14, min_periods=14).sum()
-    highest_high = high_s.rolling(window=14, min_periods=14).max()
-    lowest_low = low_s.rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr / (highest_high - lowest_low)) / np.log10(14)
-    chop = chop.fillna(50).values  # neutral when undefined
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = down_move[0] = np.nan
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = np.zeros_like(tr)
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    
+    # Initialize first value with simple average
+    atr[period] = np.nansum(tr[1:period+1]) / period
+    plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1]) / period
+    minus_dm_smooth[period] = np.nansum(minus_dm[1:period+1]) / period
+    
+    # Wilder smoothing
+    for i in range(period+1, len(tr)):
+        atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
+        plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
+        minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, (plus_dm_smooth / atr) * 100, 0)
+    minus_di = np.where(atr != 0, (minus_dm_smooth / atr) * 100, 0)
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    
+    # ADX: smoothed DX
+    adx = np.zeros_like(dx)
+    adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
+    for i in range(2*period+1, len(dx)):
+        adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
+    
+    # Align to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        if np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: RSI > 50 (mean reversion complete) OR chop < 38.2 (trending regime)
-            if rsi[i] > 50 or chop[i] < 38.2:
+            # Exit: ADX < 20 (trend weakening) OR -DI > +DI (trend reversal) OR price below EMA200
+            if adx_aligned[i] < 20 or minus_di_aligned[i] > plus_di_aligned[i] or close[i] < ema_200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI < 50 OR chop < 38.2
-            if rsi[i] < 50 or chop[i] < 38.2:
+            # Exit: ADX < 20 (trend weakening) OR +DI > -DI (trend reversal) OR price above EMA200
+            if adx_aligned[i] < 20 or plus_di_aligned[i] > minus_di_aligned[i] or close[i] > ema_200_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Only trade in ranging regime: chop > 61.8
-            if chop[i] > 61.8:
-                # Long: RSI < 30 (oversold) AND price above KAMA (bullish bias)
-                if rsi[i] < 30 and kama_dir[i] == 1:
+            # Need volume confirmation and ADX > 25 (strong trend)
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            strong_trend = adx_aligned[i] > 25
+            
+            if volume_confirmed and strong_trend:
+                # Long: +DI > -DI and price above EMA200 (bullish alignment)
+                if plus_di_aligned[i] > minus_di_aligned[i] and close[i] > ema_200_1d_aligned[i]:
                     position = 1
                     signals[i] = 0.25
-                # Short: RSI > 70 (overbought) AND price below KAMA (bearish bias)
-                elif rsi[i] > 70 and kama_dir[i] == -1:
+                # Short: -DI > +DI and price below EMA200 (bearish alignment)
+                elif minus_di_aligned[i] > plus_di_aligned[i] and close[i] < ema_200_1d_aligned[i]:
                     position = -1
                     signals[i] = -0.25
     
