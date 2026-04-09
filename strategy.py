@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h volume confirmation and 1d chop regime filter
-# Camarilla pivots provide precise intraday support/resistance levels
-# 4h volume spike confirms breakout authenticity
-# 1d chop regime filter adapts to market conditions: trend follow in trending markets, mean revert in ranging
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Target: 60-150 total trades over 4 years (15-37/year) with discrete sizing 0.20
+# Hypothesis: 6h Williams %R + 1d Elder Ray (Bull/Bear Power) + 1w ADX regime filter
+# Williams %R(14) identifies overbought/oversold conditions for mean reversion
+# 1d Elder Ray confirms trend strength: Bull Power > 0 and Bear Power < 0 for strong trends
+# 1w ADX > 25 filters for trending markets to avoid whipsaws in ranging markets
+# Works in bull/bear: ADX regime ensures we only trade strong trends, Williams %R provides timely entries
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25-0.30
 
-name = "1h_4h_1d_camarilla_volume_chop_v1"
-timeframe = "1h"
+name = "6h_1d_1w_williams_elder_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,135 +22,131 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE for volume confirmation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate 4h average volume (20-period)
-    volume_4h = df_4h['volume'].values
-    volume_s_4h = pd.Series(volume_4h)
-    avg_volume_4h = volume_s_4h.rolling(window=20, min_periods=20).mean().values
-    avg_volume_4h_aligned = align_htf_to_ltf(prices, df_4h, avg_volume_4h)
-    
-    # Load 1d data ONCE for chop regime
+    # Load 1d data ONCE before loop for Elder Ray calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Choppiness Index (CHOP)
+    # Calculate 1d Elder Ray (Bull Power and Bear Power)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # 13-period EMA for Elder Ray
+    close_s_1d = pd.Series(close_1d)
+    ema_13_1d = close_s_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Wilder's smoothing for ATR
+    bull_power_1d = high_1d - ema_13_1d  # Bull Power = High - EMA13
+    bear_power_1d = low_1d - ema_13_1d   # Bear Power = Low - EMA13
+    
+    # Load 1w data ONCE before loop for ADX calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1w ADX (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed TR, DM+, DM- using Wilder's smoothing (alpha = 1/14)
     def wilders_smoothing(values, period):
         if len(values) < period:
             return np.full(len(values), np.nan)
         alpha = 1.0 / period
         result = np.full(len(values), np.nan)
+        # First value is simple average
         result[period-1] = np.nanmean(values[:period])
         for i in range(period, len(values)):
             result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
         return result
     
-    atr_1d = wilders_smoothing(tr, 14)
+    atr_1w = wilders_smoothing(tr_1w, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # Highest high and lowest low over 14 periods
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # DI+ and DI-
+    di_plus = np.where(atr_1w != 0, 100 * dm_plus_smooth / atr_1w, 0)
+    di_minus = np.where(atr_1w != 0, 100 * dm_minus_smooth / atr_1w, 0)
     
-    # Chop calculation
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    range_14 = hh_1d - ll_1d
-    chop_1d = np.where(range_14 != 0, 
-                       100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 
-                       50)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_1w = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Align 1d and 1w indicators to 6h timeframe
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Calculate 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                          -100 * (highest_high - close) / (highest_high - lowest_low), 
+                          -50)  # neutral when range is zero
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
-        # Skip if outside session or missing data
-        if not in_session[i]:
+    for i in range(100, n):  # Start after warmup
+        # Skip if any required data is invalid
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(williams_r[i]) or np.isnan(bull_power_1d_aligned[i]) or
+            np.isnan(bear_power_1d_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
-            
-        if (np.isnan(avg_volume_4h_aligned[i]) or np.isnan(chop_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
         
-        # Calculate Camarilla pivots for 1h timeframe using previous bar's OHLC
-        if i < 1:
-            signals[i] = 0.0
-            continue
-            
-        prev_close = close[i-1]
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_range = prev_high - prev_low
+        # Williams %R conditions: oversold < -80, overbought > -20
+        williams_oversold = williams_r[i] < -80
+        williams_overbought = williams_r[i] > -20
         
-        # Camarilla levels
-        h5 = prev_close + 1.1 * prev_range / 2  # Resistance 5
-        h4 = prev_close + 1.1 * prev_range / 4  # Resistance 4
-        h3 = prev_close + 1.1 * prev_range / 6  # Resistance 3
-        l3 = prev_close - 1.1 * prev_range / 6  # Support 3
-        l4 = prev_close - 1.1 * prev_range / 4  # Support 4
-        l5 = prev_close - 1.1 * prev_range / 2  # Support 5
+        # Elder Ray conditions: strong bull trend (BP > 0 and Bear Power < 0), strong bear trend (BP < 0 and Bull Power > 0)
+        strong_bull = bull_power_1d_aligned[i] > 0 and bear_power_1d_aligned[i] < 0
+        strong_bear = bull_power_1d_aligned[i] < 0 and bear_power_1d_aligned[i] > 0
         
-        # Volume confirmation: current 1h volume > 1.5x 4h average volume
-        volume_confirmed = volume[i] > 1.5 * avg_volume_4h_aligned[i]
-        
-        # Regime filters
-        trending_regime = chop_1d_aligned[i] < 38.2
-        ranging_regime = chop_1d_aligned[i] > 61.8
+        # ADX regime filter: trending market when ADX > 25
+        trending_market = adx_1w_aligned[i] > 25
         
         if position == 1:  # Long position
-            # Exit: price closes below H3 or regime shifts to ranging
-            if close[i] < h3 or ranging_regime:
+            # Exit: Williams %R becomes overbought OR trend weakens
+            if williams_overbought or not (strong_bull and trending_market):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above L3 or regime shifts to ranging
-            if close[i] > l3 or ranging_regime:
+            # Exit: Williams %R becomes oversold OR trend weakens
+            if williams_oversold or not (strong_bear and trending_market):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Entry logic
-            if trending_regime:
-                # Follow breakout in trending regime
-                if close[i] > h5 and volume_confirmed:
+            # Entry logic: only in trending markets
+            if trending_market:
+                # Long: Williams %R oversold + strong bull trend
+                if williams_oversold and strong_bull:
                     position = 1
-                    signals[i] = 0.20
-                elif close[i] < l5 and volume_confirmed:
+                    signals[i] = 0.25
+                # Short: Williams %R overbought + strong bear trend
+                elif williams_overbought and strong_bear:
                     position = -1
-                    signals[i] = -0.20
-            elif ranging_regime:
-                # Mean revert at H3/L3 in ranging regime
-                if close[i] < l3 and volume_confirmed:
-                    position = 1
-                    signals[i] = 0.20
-                elif close[i] > h3 and volume_confirmed:
-                    position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
