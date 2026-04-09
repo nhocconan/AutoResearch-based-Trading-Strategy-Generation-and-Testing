@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-# mtf_1h_rsi_divergence_4h1d_atr_v1
-# Hypothesis: 1h RSI divergence (bullish/bearish) confirmed by 4h trend (EMA50) and 1d regime (ADX<25 for mean reversion, ADX>25 for trend).
-# Uses ATR-based stops via signal=0. Works in bull/bear: 4h EMA filters trend, 1d ADX selects regime, RSI divergence captures exhaustion.
-# Target: 20-40 trades/year.
+# 6h_weekly_pivot_breakout_1d_atr_v2
+# Hypothesis: Weekly pivot points act as strong support/resistance on 6h timeframe.
+# Breakout above weekly R1 with volume confirmation and ATR filter = long.
+# Breakdown below weekly S1 with volume confirmation and ATR filter = short.
+# Uses 1d ATR for volatility regime filter (only trade when ATR > 20-period MA).
+# Works in bull/bear: pivots adapt to price levels, ATR filter avoids choppy markets.
+# Target: 12-30 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_rsi_divergence_4h1d_atr_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_breakout_1d_atr_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,118 +23,102 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h EMA(50) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly HTF data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # 1d ADX(14) for regime filter
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Weekly R1 = 2*P - L, S1 = 2*P - H
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align weekly pivots to 6h timeframe (wait for weekly bar close)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # 1d HTF data for ATR regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    # True Range calculation
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    tr = np.concatenate([[np.nan], tr])  # Align with same length
     
-    # Directional Movement
-    up = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                  np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    down = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                    np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    up = np.concatenate([[np.nan], up])
-    down = np.concatenate([[np.nan], down])
+    # ATR(14) on 1d
+    atr_1d = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Smoothed TR, +DM, -DM
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    up_smooth = pd.Series(up).ewm(alpha=1/14, adjust=False).mean().values
-    down_smooth = pd.Series(down).ewm(alpha=1/14, adjust=False).mean().values
+    # Align ATR regime to 6h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
-    # DI+ and DI-
-    di_plus = 100 * up_smooth / tr_smooth
-    di_minus = 100 * down_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # RSI divergence detection (lookback 3 bars)
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
-    for i in range(2, n):
-        if np.isnan(rsi[i]) or np.isnan(rsi[i-2]) or np.isnan(close[i]) or np.isnan(close[i-2]):
-            continue
-        # Bullish: price lower low, RSI higher low
-        if low[i] < low[i-2] and rsi[i] > rsi[i-2]:
-            bullish_div[i] = True
-        # Bearish: price higher high, RSI lower high
-        if high[i] > high[i-2] and rsi[i] < rsi[i-2]:
-            bearish_div[i] = True
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(bullish_div[i]) or np.isnan(bearish_div[i])):
+        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
+        # Volatility regime filter: only trade when ATR > 20-period MA
+        volatility_filter = atr_1d_aligned[i] > atr_ma_1d_aligned[i]
+        
         if position == 1:  # Long position
-            # Exit: trend turns bearish OR bearish RSI divergence
-            if close[i] < ema_4h_aligned[i] or bearish_div[i]:
+            # Exit: price breaks below weekly pivot OR volatility dies
+            if close[i] < weekly_pivot_aligned[i] or not volatility_filter:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: trend turns bullish OR bullish RSI divergence
-            if close[i] > ema_4h_aligned[i] or bullish_div[i]:
+            # Exit: price breaks above weekly pivot OR volatility dies
+            if close[i] > weekly_pivot_aligned[i] or not volatility_filter:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Regime filter: use ADX to decide mean reversion vs trend
-            if adx_aligned[i] < 25:  # Range market: mean reversion
-                # Bullish divergence + price below 4h EMA → long
-                if bullish_div[i] and close[i] < ema_4h_aligned[i]:
+            if not volatility_filter:
+                signals[i] = 0.0
+                continue
+                
+            # Volume confirmation
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            
+            if volume_confirmed:
+                # Breakout above weekly R1
+                if close[i] > weekly_r1_aligned[i]:
                     position = 1
-                    signals[i] = 0.20
-                # Bearish divergence + price above 4h EMA → short
-                elif bearish_div[i] and close[i] > ema_4h_aligned[i]:
+                    signals[i] = 0.25
+                # Breakdown below weekly S1
+                elif close[i] < weekly_s1_aligned[i]:
                     position = -1
-                    signals[i] = -0.20
-            else:  # Trending market: trend continuation
-                # Bullish divergence + price above 4h EMA → long (pullback in uptrend)
-                if bullish_div[i] and close[i] > ema_4h_aligned[i]:
-                    position = 1
-                    signals[i] = 0.20
-                # Bearish divergence + price below 4h EMA → short (pullback in downtrend)
-                elif bearish_div[i] and close[i] < ema_4h_aligned[i]:
-                    position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
+
+# Align weekly pivot points (need to compute after getting aligned arrays)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
