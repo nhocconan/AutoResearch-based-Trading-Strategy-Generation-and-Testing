@@ -3,58 +3,53 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1w Camarilla pivot levels with volume confirmation and ATR trailing stop
-# - Uses 1w HTF for Camarilla pivot levels (based on completed weekly candles)
-# - Long when price touches Camarilla L3 level with volume > 1.8x 20-period average and closes above open
-# - Short when price touches Camarilla H3 level with volume > 1.8x 20-period average and closes below open
-# - ATR(14) trailing stop: exit long at 2.5x ATR below highest high since entry, exit short at 2.5x ATR above lowest low since entry
+# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume confirmation and ATR trailing stop
+# - Uses 1d HTF for Camarilla pivot levels (based on completed daily candles)
+# - Long when price touches Camarilla L3 level with volume > 1.5x 20-period average
+# - Short when price touches Camarilla H3 level with volume > 1.5x 20-period average
+# - ATR(14) trailing stop: exit long at 2.0x ATR below highest high since entry, exit short at 2.0x ATR above lowest low since entry
 # - Fixed position size 0.25 to control drawdown
-# - Works in bull/bear: Camarilla levels adapt to volatility, volume and price action confirmation filters false signals
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in bull/bear: Camarilla levels adapt to volatility, volume confirmation filters false touches
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
 
-name = "12h_1w_camarilla_volume_priceaction_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w Camarilla levels (based on previous week)
-    # Camarilla formulas:
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.0 * (high - low)
-    # H2 = close + 0.75 * (high - low)
-    # H1 = close + 0.5 * (high - low)
-    # L3 = close - 1.0 * (high - low)
-    # L2 = close - 0.75 * (high - low)
-    # L1 = close - 0.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    hl_range = high_1w - low_1w
-    camarilla_h3 = close_1w + 1.0 * hl_range
-    camarilla_l3 = close_1w - 1.0 * hl_range
+    # Calculate 1d Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # L3 = Pivot - 1.1 * Range / 2
+    # H3 = Pivot + 1.1 * Range / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_l3 = pivot_1d - 1.1 * range_1d / 2.0
+    camarilla_h3 = pivot_1d + 1.1 * range_1d / 2.0
     
-    # Align Camarilla levels to 12h timeframe (wait for completed 1w bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     
-    # Pre-compute volume confirmation (20-period average for 12h)
+    # Pre-compute volume confirmation (20-period average for 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute ATR (14-period) for stoploss
@@ -70,25 +65,23 @@ def generate_signals(prices):
     highest_high_since_entry = 0.0
     lowest_low_since_entry = 0.0
     
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
             np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or
             vol_ma_20[i] <= 0 or atr[i] <= 0):
             signals[i] = 0.0
             continue
         
-        # Volume and price action confirmation
-        volume_confirmed = volume[i] > 1.8 * vol_ma_20[i]
-        bullish_candle = close[i] > open_price[i]  # Close above open
-        bearish_candle = close[i] < open_price[i]  # Close below open
+        # Volume confirmation: current 4h volume > 1.5x average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 1:  # Long position
             # Update highest high since entry
             highest_high_since_entry = max(highest_high_since_entry, high[i])
             
-            # ATR-based trailing stop: exit if price drops 2.5x ATR from highest high
-            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price drops 2.0x ATR from highest high
+            if close[i] < highest_high_since_entry - 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -100,8 +93,8 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_low_since_entry = min(lowest_low_since_entry, low[i])
             
-            # ATR-based trailing stop: exit if price rises 2.5x ATR from lowest low
-            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
+            # ATR-based trailing stop: exit if price rises 2.0x ATR from lowest low
+            if close[i] > lowest_low_since_entry + 2.0 * atr[i]:
                 position = 0
                 highest_high_since_entry = 0.0
                 lowest_low_since_entry = 0.0
@@ -109,16 +102,16 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Entry logic: Camarilla L3/H3 touch with volume and price action confirmation
+            # Entry logic: Camarilla touch with volume confirmation
             if volume_confirmed:
-                # Long entry: price touches or goes below L3 with bullish close
-                if low[i] <= camarilla_l3_aligned[i] and bullish_candle:
+                # Long entry: price touches or goes below Camarilla L3
+                if close[i] <= camarilla_l3_aligned[i]:
                     position = 1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
                     signals[i] = 0.25
-                # Short entry: price touches or goes above H3 with bearish close
-                elif high[i] >= camarilla_h3_aligned[i] and bearish_candle:
+                # Short entry: price touches or goes above Camarilla H3
+                elif close[i] >= camarilla_h3_aligned[i]:
                     position = -1
                     highest_high_since_entry = high[i]
                     lowest_low_since_entry = low[i]
