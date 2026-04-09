@@ -3,18 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# - Uses 1d Camarilla pivot levels (H3/L3) for breakout entries on 12h timeframe
-# - Volume confirmation: 12h volume > 1.5x 20-period average to ensure breakout strength
-# - Regime filter: 12h Choppiness Index > 61.8 for mean-reversion (fade extreme touches)
-# - ATR(14) trailing stop at 2.5x ATR from extreme for risk control
+# Hypothesis: 6h Elder Ray + Williams %R + 12h ADX regime filter
+# - Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures bull/bear strength
+# - Williams %R(14) identifies overbought/oversold conditions
+# - 12h ADX > 25 filters for trending markets (avoid whipsaws in ranging markets)
+# - Long when Bull Power > 0 AND Williams %R < -80 (bullish momentum from oversold)
+# - Short when Bear Power > 0 AND Williams %R > -20 (bearish momentum from overbought)
+# - ATR(20) trailing stop at 3x ATR from extreme for risk control
 # - Position size: 0.25 (25% of capital) - discrete level to minimize fee churn
-# - Target: ~12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Novelty: Combines Camarilla pivots with chop regime to avoid false breakouts in sideways markets
-# - Works in both bull/bear: Camarilla levels adapt to volatility, chop filter prevents whipsaws
+# - Target: 50-150 total trades over 4 years (12-37/year) per 6h strategy guidelines
+# - Works in both bull/bear: Elder Ray adapts to trend strength, Williams %R catches reversals
+# - Novelty: Combines Elder Ray's trend strength measurement with Williams %R reversal signals
+# - 12h ADX regime filter prevents entries during low-volatility chop
 
-name = "12h_1d_camarilla_volume_chop_v2"
-timeframe = "12h"
+name = "6h_12h_elderray_williams_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,53 +26,72 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 12h indicators
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Camarilla pivot levels (H3, L3)
-    # Camarilla: H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
-    camarilla_h3 = close_1d + (1.1 * (high_1d - low_1d) / 4)
-    camarilla_l3 = close_1d - (1.1 * (high_1d - low_1d) / 4)
+    # Calculate 12h ADX(14) for regime filter
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h[0] = tr_12h[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h),
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)),
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = dm_minus[0] = 0
     
-    # 12h price data
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    tr_smooth = pd.Series(tr_12h).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    di_plus = np.where(tr_smooth > 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth > 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx_12h = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 6h timeframe (completed 12h bar only)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # 6h price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 12h volume > 1.5x 20-period average (volume confirmation)
-    avg_volume_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * avg_volume_20)
+    # 6h EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 12h ATR(14) for trailing stop
+    # 6h Elder Ray
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = ema13 - low   # Bear Power = EMA13 - Low
+    
+    # 6h Williams %R(14)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high_14 - lowest_low_14) > 0,
+                          -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14), -50)
+    
+    # 6h ATR(20) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 12h Choppiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / (max(high,n) - min(low,n))) / log10(n)
-    # Simplified: CHOP > 61.8 = ranging (mean revert), CHOP < 38.2 = trending
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    # Avoid division by zero
-    chop = np.where(range_14 > 0, 100 * np.log10(atr_14 / range_14) / np.log10(14), 50)
-    chop = np.where(np.isnan(chop), 50, chop)
-    chop_regime = chop > 61.8  # True when ranging/markets suitable for mean reversion
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -78,11 +100,11 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_spike[i]) or
+        if (np.isnan(adx_12h_aligned[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(williams_r[i]) or
             np.isnan(atr[i]) or
-            np.isnan(chop_regime[i]) or
             atr[i] <= 0):
             signals[i] = 0.0
             continue
@@ -92,9 +114,9 @@ def generate_signals(prices):
             if high[i] > highest_since_entry:
                 highest_since_entry = high[i]
             
-            # Exit conditions: price retraces 2.5x ATR from high OR Camarilla L3 touch (mean reversion in chop)
-            if low[i] <= highest_since_entry - (2.5 * atr[i]) or \
-               (chop_regime[i] and low[i] <= camarilla_l3_aligned[i]):
+            # Exit conditions: price retraces 3x ATR from high OR Elder Ray turns bearish
+            if low[i] <= highest_since_entry - (3.0 * atr[i]) or \
+               (bull_power[i] < 0 and bear_power[i] > 0):
                 position = 0
                 signals[i] = 0.0
             else:
@@ -105,26 +127,27 @@ def generate_signals(prices):
             if low[i] < lowest_since_entry:
                 lowest_since_entry = low[i]
             
-            # Exit conditions: price retraces 2.5x ATR from low OR Camarilla H3 touch (mean reversion in chop)
-            if high[i] >= lowest_since_entry + (2.5 * atr[i]) or \
-               (chop_regime[i] and high[i] >= camarilla_h3_aligned[i]):
+            # Exit conditions: price retraces 3x ATR from low OR Elder Ray turns bullish
+            if high[i] >= lowest_since_entry + (3.0 * atr[i]) or \
+               (bull_power[i] > 0 and bear_power[i] < 0):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with volume confirmation
-            # Long: price breaks above Camarilla H3 AND volume spike
-            if high[i] >= camarilla_h3_aligned[i] and volume_spike[i]:
-                position = 1
-                highest_since_entry = high[i]
-                lowest_since_entry = high[i]
-                signals[i] = 0.25
-            # Short: price breaks below Camarilla L3 AND volume spike
-            elif low[i] <= camarilla_l3_aligned[i] and volume_spike[i]:
-                position = -1
-                highest_since_entry = low[i]
-                lowest_since_entry = low[i]
-                signals[i] = -0.25
+            # Look for entries with 12h ADX > 25 (trending regime)
+            if adx_12h_aligned[i] > 25:
+                # Long: Bull Power > 0 (bullish trend) AND Williams %R < -80 (oversold)
+                if bull_power[i] > 0 and williams_r[i] < -80:
+                    position = 1
+                    highest_since_entry = high[i]
+                    lowest_since_entry = high[i]
+                    signals[i] = 0.25
+                # Short: Bear Power > 0 (bearish trend) AND Williams %R > -20 (overbought)
+                elif bear_power[i] > 0 and williams_r[i] > -20:
+                    position = -1
+                    highest_since_entry = low[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = -0.25
     
     return signals
