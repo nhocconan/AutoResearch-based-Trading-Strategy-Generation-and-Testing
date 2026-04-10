@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and ATR regime filter
-# - Primary: 4h timeframe (proven to work with Camarilla breakouts)
-# - HTF: 1d for Camarilla pivot levels (H3/L3), volume confirmation, and ATR volatility regime
-# - Long: Price breaks above H3 + volume > 1.5x 20-period MA + 1d ATR > 50th percentile
-# - Short: Price breaks below L3 + volume > 1.5x 20-period MA + 1d ATR > 50th percentile
-# - Exit: Price retouches pivot point (PP) or ATR < 30th percentile (low vol regime)
-# - Position sizing: 0.25 (discrete level)
-# - Works in bull/bear: Camarilla levels act as support/resistance; ATR/volume filters avoid false signals in ranging markets
-# - Target: 75-200 trades over 4 years (19-50/year) to avoid fee drag
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR volatility filter
+# - Primary: 4h timeframe for clean structure and lower trade frequency
+# - HTF: 1d for volume MA and ATR percentile to filter low-quality breakouts
+# - Long: Price breaks above 20-period Donchian high + 1d volume > 1.3x 20-period MA + 1d ATR > 40th percentile
+# - Short: Price breaks below 20-period Donchian low + same volume/volatility filters
+# - Exit: Price retouches the midpoint of the Donchian channel or ATR < 20th percentile (low vol)
+# - Position sizing: 0.25 (discrete level to minimize fee churn)
+# - Works in bull/bear: Donchian breakouts capture trends; volume/volatility filters avoid false signals in chop
+# - Target: 80-180 trades over 4 years (20-45/year) to stay within fee drag limits
 
-name = "4h_1d_camarilla_volume_v2"
+name = "4h_1d_donchian_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -40,22 +40,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = High - Low
-    range_1d = high_1d - low_1d
-    # Standard Camarilla: H3 = Close + Range * 1.1/4, L3 = Close - Range * 1.1/4
-    h3_1d = close_1d + (range_1d * 1.1 / 4)
-    l3_1d = close_1d - (range_1d * 1.1 / 4)
-    
-    # Align to 4h timeframe (wait for completed 1d bar)
-    pp_4h = align_htf_to_ltf(prices, df_1d, pp_1d)
-    h3_4h = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_4h = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # Calculate 4h Donchian channel (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr1 = pd.Series(high_1d).diff(1)
     tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
     tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
     tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
@@ -76,40 +67,42 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(pp_4h[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime conditions
-        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 50
-        
-        # Volume confirmation: current 1d volume > 1.5x 20-period MA
-        # Get the current 1d volume value (aligned to 4h)
+        # Get current 1d volume (aligned to 4h)
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_spike = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        
+        # Regime conditions
+        # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 40
+        
+        # Volume confirmation: current 1d volume > 1.3x 20-period MA
+        volume_spike = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above H3 + vol regime + volume spike
-            if (close_4h[i] > h3_4h[i] and vol_regime and volume_spike):
+            # Long entry: Price breaks above Donchian high + vol regime + volume spike
+            if (close_4h[i] > donchian_high[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L3 + vol regime + volume spike
-            elif (close_4h[i] < l3_4h[i] and vol_regime and volume_spike):
+            # Short entry: Price breaks below Donchian low + vol regime + volume spike
+            elif (close_4h[i] < donchian_low[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price retouches pivot point (PP) - mean reversion
-            # 2. ATR falls below 30th percentile (low volatility regime)
+            # 1. Price retouches midpoint of Donchian channel - mean reversion
+            # 2. ATR falls below 20th percentile (low volatility regime)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_4h[i] <= pp_4h[i] or  # Price retraced to or below pivot
-                    atr_percentile_aligned[i] < 30  # Low volatility regime
+                    close_4h[i] <= donchian_mid[i] or  # Price retraced to or below midpoint
+                    atr_percentile_aligned[i] < 20  # Low volatility regime
                 )
                 if exit_condition:
                     position = 0
@@ -118,8 +111,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_4h[i] >= pp_4h[i] or  # Price retraced to or above pivot
-                    atr_percentile_aligned[i] < 30  # Low volatility regime
+                    close_4h[i] >= donchian_mid[i] or  # Price retraced to or above midpoint
+                    atr_percentile_aligned[i] < 20  # Low volatility regime
                 )
                 if exit_condition:
                     position = 0
