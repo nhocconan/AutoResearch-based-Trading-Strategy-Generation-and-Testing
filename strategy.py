@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1w ADX trend filter and volume confirmation
-# - Williams %R(14): momentum oscillator measuring overbought/oversold levels
-# - Long when %R crosses above -80 from below AND 1w ADX > 25 AND volume > 1.3x 20-period average
-# - Short when %R crosses below -20 from above AND 1w ADX > 25 AND volume > 1.3x 20-period average
-# - Exit when %R crosses -50 (mean reversion) or opposite signal occurs
-# - Williams %R identifies turning points in trending markets with less lag than RSI
-# - 1w ADX filter ensures we only trade when higher timeframe is strongly trending
+# Hypothesis: 4h Bollinger Band breakout with 1d ADX trend filter and volume confirmation
+# - Long when price breaks above upper BB(20,2) AND 1d ADX > 25 AND volume > 1.5x 20-period average
+# - Short when price breaks below lower BB(20,2) AND 1d ADX > 25 AND volume > 1.5x 20-period average
+# - Exit when price crosses middle BB (20-period SMA) or opposite signal occurs
+# - Bollinger Bands capture volatility expansion/contraction with clear breakout levels
+# - 1d ADX filter ensures we only trade when higher timeframe is strongly trending
 # - Volume confirmation prevents false signals in low participation
-# - Target: 12-37 trades/year on 12h (50-150 total over 4 years) to avoid fee drag
+# - Target: 20-50 trades/year on 4h (75-200 total over 4 years) to avoid fee drag
 
-name = "12h_1w_williamsr_volume_adx_v1"
-timeframe = "12h"
+name = "4h_1d_bb_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,44 +22,48 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute Williams %R(14) on 12h
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    # Pre-compute Bollinger Bands(20,2) on 4h
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    vol_4h = prices['volume'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.full_like(close_12h, np.nan, dtype=float)
-    lookback = 14
+    # Middle Band = SMA(20)
+    sma_20 = np.full_like(close_4h, np.nan, dtype=float)
+    for i in range(19, n):
+        sma_20[i] = np.mean(close_4h[i-19:i+1])
     
-    for i in range(lookback - 1, n):
-        highest_high = np.max(high_12h[i-lookback+1:i+1])
-        lowest_low = np.min(low_12h[i-lookback+1:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = ((highest_high - close_12h[i]) / (highest_high - lowest_low)) * -100
-        else:
-            williams_r[i] = -50  # neutral when no range
+    # Standard Deviation(20)
+    std_20 = np.full_like(close_4h, np.nan, dtype=float)
+    for i in range(19, n):
+        std_20[i] = np.std(close_4h[i-19:i+1])
     
-    # Pre-compute 1w ADX(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Upper Band = SMA + 2*Std
+    upper_band = sma_20 + 2 * std_20
+    # Lower Band = SMA - 2*Std
+    lower_band = sma_20 - 2 * std_20
+    
+    # Pre-compute 1d ADX(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align with index
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -106,22 +109,16 @@ def generate_signals(prices):
                 if not np.isnan(dx[i]) and not np.isnan(adx[i-1]):
                     adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align HTF indicators to 12h timeframe
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align HTF indicators to 4h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    prev_williams_r = np.full(n, np.nan)  # for crossover detection
     
     for i in range(100, n):  # Start after warmup
-        # Store previous value for crossover detection
-        if i > 0:
-            prev_williams_r[i] = williams_r[i-1]
-        else:
-            prev_williams_r[i] = np.nan
-        
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -130,40 +127,41 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (1.3x average)
-        vol_series = prices['volume'].values
-        vol_ma_12h = np.full_like(vol_series, np.nan, dtype=float)
+        # Volume spike condition (1.5x average)
+        vol_ma_20 = np.full_like(vol_4h, np.nan, dtype=float)
         for j in range(19, i+1):
-            vol_ma_12h[j] = np.mean(vol_series[j-19:j+1])
-        vol_spike = not np.isnan(vol_ma_12h[i]) and vol_series[i] > 1.3 * vol_ma_12h[i]
+            vol_ma_20[j] = np.mean(vol_4h[j-19:j+1])
+        vol_spike = not np.isnan(vol_ma_20[i]) and vol_4h[i] > 1.5 * vol_ma_20[i]
         
-        williams_now = williams_r[i]
-        williams_prev = prev_williams_r[i]
-        adx_now = adx_1w_aligned[i]
+        close_now = close_4h[i]
+        upper_now = upper_band[i]
+        lower_now = lower_band[i]
+        middle_now = sma_20[i]
+        adx_now = adx_1d_aligned[i]
         
-        # Williams %R signals
-        williams_cross_80_up = (williams_prev <= -80 and williams_now > -80)  # crosses above -80
-        williams_cross_20_down = (williams_prev >= -20 and williams_now < -20)  # crosses below -20
-        williams_cross_50_up = (williams_prev <= -50 and williams_now > -50)  # crosses above -50
-        williams_cross_50_down = (williams_prev >= -50 and williams_now < -50)  # crosses below -50
+        # Bollinger Band signals
+        bb_break_up = close_now > upper_now  # price breaks above upper band
+        bb_break_down = close_now < lower_now  # price breaks below lower band
+        bb_cross_middle_up = (close_4h[i-1] <= middle_now and close_now > middle_now)  # crosses above middle
+        bb_cross_middle_down = (close_4h[i-1] >= middle_now and close_now < middle_now)  # crosses below middle
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: %R crosses above -80 AND 1w trending (ADX > 25) AND volume spike
-            if (williams_cross_80_up and adx_now > 25 and vol_spike):
+            # Long conditions: price breaks above upper BB AND 1d trending (ADX > 25) AND volume spike
+            if (bb_break_up and adx_now > 25 and vol_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: %R crosses below -20 AND 1w trending (ADX > 25) AND volume spike
-            elif (williams_cross_20_down and adx_now > 25 and vol_spike):
+            # Short conditions: price breaks below lower BB AND 1d trending (ADX > 25) AND volume spike
+            elif (bb_break_down and adx_now > 25 and vol_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: %R crosses -50 (mean reversion) or opposite signal
+            # Exit conditions: price crosses middle BB (mean reversion) or opposite BB breakout
             exit_long = (position == 1 and 
-                        (williams_cross_50_down or williams_cross_20_down))
+                        (bb_cross_middle_down or bb_break_down))
             exit_short = (position == -1 and 
-                         (williams_cross_50_up or williams_cross_80_up))
+                         (bb_cross_middle_up or bb_break_up))
             
             if exit_long or exit_short:
                 position = 0
