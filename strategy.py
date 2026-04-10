@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h volume spike and 1d ADX trend filter
-# - Entry: Long when price breaks above Camarilla H3 level + 12h volume > 1.8x 20-period average + 1d ADX > 20
-#          Short when price breaks below Camarilla L3 level + 12h volume > 1.8x 20-period average + 1d ADX > 20
+# Hypothesis: 4h Camarilla H3/L3 breakout with 12h volume spike and 1d ADX trend filter
+# - Entry: Long when price breaks above Camarilla H3 + 12h volume > 2.0x 20-period average + 1d ADX > 25
+#          Short when price breaks below Camarilla L3 + 12h volume > 2.0x 20-period average + 1d ADX > 25
 # - Exit: Close-based reversal - exit long when price < Camarilla H3 level, exit short when price > Camarilla L3 level
 # - Position sizing: 0.25 (discrete levels to minimize fee churn)
 # - Uses Camarilla pivot levels from daily data for structure, volume for confirmation, 1d ADX for trend filter
-# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within HARD MAX: 400 total
-# - Designed for 4h timeframe with volume confirmation and trend filter to reduce false breakouts
-# - Works in both bull and bear markets by requiring ADX > 20 (trending condition) for entries
+# - Target: 15-35 trades/year (60-140 total over 4 years) to stay well within HARD MAX: 400 total
+# - Designed for 4h timeframe with strict volume confirmation (2.0x) and stronger trend filter (ADX>25) to reduce false breakouts
+# - Works in both bull and bear markets by requiring ADX > 25 (strong trending condition) for entries
 
-name = "4h_12h_1d_camarilla_breakout_volume_adx_v1"
+name = "4h_12h_1d_camarilla_breakout_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -104,19 +104,19 @@ def generate_signals(prices):
         
         # Get current 12h volume for confirmation (need to align raw volume)
         volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        volume_confirmation = volume_12h_aligned[i] > 1.8 * volume_ma_aligned[i]
+        volume_confirmation = volume_12h_aligned[i] > 2.0 * volume_ma_aligned[i]
         
-        # Trend filter: 1d ADX > 20 indicates trending market
-        trend_filter = adx_1d_aligned[i] > 20.0
+        # Trend filter: 1d ADX > 25 indicates strong trending market
+        trend_filter = adx_1d_aligned[i] > 25.0
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla H3 + volume confirmation + trending market
+            # Long entry: price breaks above Camarilla H3 + volume confirmation + strong trending market
             if (close_price > camarilla_h3_aligned[i] and 
                 volume_confirmation and 
                 trend_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Camarilla L3 + volume confirmation + trending market
+            # Short entry: price breaks below Camarilla L3 + volume confirmation + strong trending market
             elif (close_price < camarilla_l3_aligned[i] and 
                   volume_confirmation and 
                   trend_filter):
