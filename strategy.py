@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and chop regime filter
-# - Long when price breaks above Donchian(20) high AND 1d volume > 2.0x 20-day average AND chop > 61.8 (range)
-# - Short when price breaks below Donchian(20) low AND 1d volume > 2.0x 20-day average AND chop > 61.8 (range)
-# - Exit when price touches Donchian(20) midpoint or opposite band
-# - Uses discrete position sizing (0.30) to balance reward and risk
-# - Targets ~20-40 trades/year (80-160 total over 4 years) to avoid fee drag
-# - Donchian provides objective breakout levels, volume confirms institutional participation
-# - Chop > 61.8 ensures we trade breakouts from consolidation (high probability continuations)
-# - Works in bull markets (breakouts continuation) and bear markets (breakdown continuations)
+# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high AND 12h close > EMA50 AND volume > 2.0x avg
+# - Short when price breaks below Donchian(20) low AND 12h close < EMA50 AND volume > 2.0x avg
+# - Exit when price crosses Donchian(20) midpoint OR opposite breakout occurs
+# - Uses discrete position sizing (0.25) to control drawdown
+# - Targets ~20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Donchian channels provide clear structure with proven edge on SOLUSDT
+# - 12h EMA50 filter ensures alignment with higher timeframe trend
+# - High volume threshold (2.0x) reduces false breakouts
 
-name = "4h_1d_donchian_volume_chop_v1"
+name = "4h_12h_donchian_breakout_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,52 +23,30 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels (20-period)
+    # Pre-compute Donchian(20) channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate Donchian high and low
+    # Donchian high: rolling max of high over 20 periods
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian low: rolling min of low over 20 periods
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian midpoint: average of high and low channels
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Pre-compute 1d volume confirmation: > 2.0x 20-day average
-    volume_1d = df_1d['volume'].values
-    vol_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (2.0 * vol_20_avg_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Pre-compute 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Pre-compute 1d Chopiness Index (14-period)
-    # Chop = 100 * log10(sum(ATR(14)) / log10(highest high - lowest low over 14 periods))
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with close_1d index
-    
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = highest_high_14 - lowest_low_14
-    
-    # Avoid division by zero
-    chop_raw = np.where(range_14 > 0, 
-                        100 * np.log10(sum_atr14) / np.log10(range_14), 
-                        50.0)  # Neutral when range is zero
-    chop_1d = pd.Series(chop_raw).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Pre-compute volume confirmation: > 2.0x 20-period average
+    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -76,41 +54,43 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
+            np.isnan(donchian_mid[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(volume_20_avg[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: only trade in ranging markets (chop > 61.8)
-        in_range = chop_1d_aligned[i] > 61.8
-        
         if position == 0:  # Flat - look for new entries
-            # Long signal: break above Donchian high AND volume spike AND ranging market
+            # Long signal: price breaks above Donchian high AND 12h uptrend AND volume spike
             if (close[i] > donchian_high[i] and 
-                vol_spike_1d_aligned[i] and 
-                in_range):
+                close[i-1] <= donchian_high[i-1] and  # Ensure breakout just occurred
+                close[i] > ema50_12h_aligned[i] and 
+                vol_spike.iloc[i]):
                 position = 1
-                signals[i] = 0.30
-            # Short signal: break below Donchian low AND volume spike AND ranging market
+                signals[i] = 0.25
+            # Short signal: price breaks below Donchian low AND 12h downtrend AND volume spike
             elif (close[i] < donchian_low[i] and 
-                  vol_spike_1d_aligned[i] and 
-                  in_range):
+                  close[i-1] >= donchian_low[i-1] and  # Ensure breakdown just occurred
+                  close[i] < ema50_12h_aligned[i] and 
+                  vol_spike.iloc[i]):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price touches Donchian midpoint (mean reversion)
-            # 2. Price touches opposite Donchian band (failed breakout)
-            if position == 1:
-                if close[i] <= donchian_mid[i] or close[i] >= donchian_high[i]:
+            # 1. Price crosses Donchian midpoint (trend change)
+            # 2. Opposite breakout occurs (strong reversal signal)
+            if position == 1:  # Long position
+                if (close[i] < donchian_mid[i] or 
+                    (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1])):
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.30  # Hold long
-            elif position == -1:
-                if close[i] >= donchian_mid[i] or close[i] <= donchian_low[i]:
+                    signals[i] = 0.25  # Hold long
+            elif position == -1:  # Short position
+                if (close[i] > donchian_mid[i] or 
+                    (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1])):
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.30  # Hold short
+                    signals[i] = -0.25  # Hold short
     
     return signals
