@@ -3,17 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
-# - Primary timeframe: 1h for entry timing precision
-# - HTF: 4h for trend direction (EMA21) and 1d for Camarilla pivot levels
-# - Camarilla pivot: H4 = close + 1.1*(high-low)/2, L4 = close - 1.1*(high-low)/2
-# - Entry: Long when price breaks above H4 with 4h uptrend, Short when breaks below L4 with 4h downtrend
-# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# - Discrete sizing: 0.20 to minimize fee churn and control drawdown
-# - Target: 15-35 trades/year (60-140 total over 4 years) to stay within HARD MAX: 200 total
+# Hypothesis: 6h Volume-Weighted RSI with 1w trend filter and 1d volatility regime
+# - VW-RSI(14): RSI calculated using typical price * volume as input, gives more weight to high-volume moves
+# - 1w EMA(50) trend filter: only take longs when price > weekly EMA50, shorts when price < weekly EMA50
+# - 1d ATR percentile regime filter: only trade when ATR(14) is between 30th and 70th percentile (avoid extremes)
+# - Entry logic:
+#   * Long: VW-RSI < 30 AND price > weekly EMA50 AND ATR in mid-range
+#   * Short: VW-RSI > 70 AND price < weekly EMA50 AND ATR in mid-range
+# - Exit: opposite VW-RSI signal (Long exit at VW-RSI > 50, Short exit at VW-RSI < 50)
+# - Discrete position sizing (0.25) to minimize fee churn
+# - VW-RSI reduces false signals in low-volume moves and captures institutional participation
+# - ATR regime filter avoids choppy (low ATR) and volatile (high ATR) extremes
+# - Weekly trend filter ensures we trade with the higher timeframe momentum
+# - Target: 20-30 trades/year (80-120 total over 4 years) to stay within HARD MAX: 300 total
 
-name = "1h_4h_1d_camarilla_pivot_breakout_v1"
-timeframe = "1h"
+name = "6h_1w_vwrsi_trend_atr_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,82 +27,105 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 4h EMA21 for trend filter
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    
-    # Pre-compute 1d Camarilla pivot levels
+    # Pre-compute 1d ATR for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    camarilla_h4 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l4 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # Pre-compute 1d ATR percentile rank (30th and 70th) for regime filter
+    # We'll calculate rolling percentile using min_periods
+    atr_series = pd.Series(atr_1d)
+    atr_pct_30 = atr_series.rolling(window=50, min_periods=30).quantile(0.30).values
+    atr_pct_70 = atr_series.rolling(window=50, min_periods=30).quantile(0.70).values
+    atr_in_mid_range = (atr_1d >= atr_pct_30) & (atr_1d <= atr_pct_70)
+    
+    # Pre-compute weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align HTF indicators to 6h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    atr_in_mid_range_aligned = align_htf_to_ltf(prices, df_1d, atr_in_mid_range.astype(float))
+    
+    # Pre-compute 6h typical price and volume for VW-RSI
+    typical_price = (prices['high'].values + prices['low'].values + prices['close'].values) / 3.0
+    volume = prices['volume'].values
+    vp = typical_price * volume  # volume-weighted price
+    
+    # Calculate VW-RSI(14) on 6h timeframe
+    change = vp - np.roll(vp, 1)
+    change[0] = 0
+    gain = np.where(change > 0, change, 0)
+    loss = np.where(change < 0, -change, 0)
+    
+    gain_smooth = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    loss_smooth = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = gain_smooth / (loss_smooth + 1e-10)  # avoid division by zero
+    vwrsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup for EMA21
+    for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_21_4h_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i])):
-            signals[i] = 0.0
+        if (np.isnan(vwrsi[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(atr_in_mid_range_aligned[i])):
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
+        # Get current values
+        vwrsi_current = vwrsi[i]
+        ema_50_current = ema_50_aligned[i]
+        atr_regime_current = bool(atr_in_mid_range_aligned[i])  # Convert from float to bool
         close_price = prices['close'].iloc[i]
-        open_price = prices['open'].iloc[i]
         
         if position == 0:  # Flat - look for new entries
-            if in_session:
-                # 4h uptrend: price > EMA21
-                uptrend_4h = close_price > ema_21_4h_aligned[i]
-                # 4h downtrend: price < EMA21
-                downtrend_4h = close_price < ema_21_4h_aligned[i]
-                
-                # Long: price breaks above Camarilla H4 in uptrend
-                if uptrend_4h and close_price > camarilla_h4_aligned[i]:
-                    position = 1
-                    signals[i] = 0.20
-                # Short: price breaks below Camarilla L4 in downtrend
-                elif downtrend_4h and close_price < camarilla_l4_aligned[i]:
-                    position = -1
-                    signals[i] = -0.20
-                else:
-                    signals[i] = 0.0
+            # Long conditions: VW-RSI oversold (<30), price above weekly EMA, ATR in mid-range
+            if (vwrsi_current < 30 and 
+                close_price > ema_50_current and 
+                atr_regime_current):
+                position = 1
+                signals[i] = 0.25
+            # Short conditions: VW-RSI overbought (>70), price below weekly EMA, ATR in mid-range
+            elif (vwrsi_current > 70 and 
+                  close_price < ema_50_current and 
+                  atr_regime_current):
+                position = -1
+                signals[i] = -0.25
             else:
-                signals[i] = 0.0  # Outside session, stay flat
+                signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: reverse signal or time-based
+            # Exit conditions: VW-RSI crosses midline (50) in opposite direction
             if position == 1:  # Long position
-                # Exit: price breaks below Camarilla L4 or 4h trend turns down
-                if close_price < camarilla_l4_aligned[i] or (close_price < ema_21_4h_aligned[i]):
+                if vwrsi_current > 50:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1, Short position
-                # Exit: price breaks above Camarilla H4 or 4h trend turns up
-                if close_price > camarilla_h4_aligned[i] or (close_price > ema_21_4h_aligned[i]):
+                if vwrsi_current < 50:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
