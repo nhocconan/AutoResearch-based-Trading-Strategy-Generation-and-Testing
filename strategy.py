@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
 # - Long when price breaks above Camarilla H3 level with volume > 2.0x average AND 1d close > 1d EMA50
 # - Short when price breaks below Camarilla L3 level with volume > 2.0x average AND 1d close < 1d EMA50
 # - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.8x average
 # - Uses 1d trend filter to avoid counter-trend trades in bear markets (2025+)
-# - Higher volume threshold (2.0x) reduces false breakouts and targets 12-25 trades/year
-# - Designed for 12h timeframe to minimize fee drag while capturing multi-day trends
+# - Higher volume threshold (2.0x) reduces false breakouts and targets 20-40 trades/year (80-160 total over 4 years)
+# - Tight entry conditions to avoid fee drag while maintaining edge in both bull and bear regimes
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,7 +45,7 @@ def generate_signals(prices):
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Align them to 12h timeframe
+    # Align them to 4h timeframe
     h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
     l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
     c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     ema50_1d = pd.Series(c_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
         if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i]) or 
             np.isnan(h_1d_aligned[i]) or np.isnan(l_1d_aligned[i]) or np.isnan(c_1d_aligned[i])):
@@ -67,11 +67,11 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get previous completed 1d bar values (need to shift by 2 to avoid look-ahead)
-        # Since 12h timeframe, there are 2 bars per 1d bar
-        if i >= 4:  # Need at least 4 12h bars (2x 1d bars) to get previous 1d bar's data
+        # Get previous completed 1d bar values (need to shift by 6 to avoid look-ahead)
+        # Since 4h timeframe, there are 6 bars per 1d bar
+        if i >= 12:  # Need at least 12 4h bars (2x 1d bars) to get previous 1d bar's data
             # Get index of previous completed 1d bar
-            prev_1d_idx = i - 2  # Look back 2 bars (one 1d period)
+            prev_1d_idx = i - 6  # Look back 6 bars (one 1d period)
             
             if prev_1d_idx >= 0 and not (np.isnan(h_1d_aligned[prev_1d_idx]) or 
                                         np.isnan(l_1d_aligned[prev_1d_idx]) or 
