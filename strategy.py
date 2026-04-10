@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and chop regime filter
-# - Long when price breaks above Donchian(20) high in low-chop regime (CHOP < 40) with volume spike
-# - Short when price breaks below Donchian(20) low in low-chop regime (CHOP < 40) with volume spike
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above Donchian upper band (20-period high) on 4h in 1w uptrend (close > EMA50) with volume spike (>1.5x 20-period avg volume)
+# - Short when price breaks below Donchian lower band (20-period low) on 4h in 1w downtrend (close < EMA50) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
-# - Chop regime filter avoids whipsaws in ranging markets
-# - Volume confirmation ensures breakout validity
-# - Works in both bull and bear markets by filtering for trending conditions via chop
+# - Targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Weekly trend filter reduces false breakouts in ranging markets
+# - ATR-based stoploss (2.5x ATR) to limit drawdown
 
-name = "12h_1d_donchian_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_1w_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,46 +21,34 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d ATR for Donchian calculation
-    high_low = df_1d['high'] - df_1d['low']
-    high_close = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    low_close = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_ranges = np.nanmax(ranges.values, axis=1)
-    atr_14_1d = pd.Series(true_ranges).rolling(window=14, min_periods=14).mean().values
-    
-    # Pre-compute 1d Donchian channels (20-period)
-    donchian_high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    # Pre-compute 1w indicators
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Pre-compute 1d volume confirmation: > 1.5x 20-period average
     volume_1d = df_1d['volume'].values
     avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
-    
-    # Pre-compute 1d Chopiness Index (CHOP) for regime filter
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low) / log10(period))
-    # Simplified: CHOP = 100 * log10( sum(ATR14 over period) / (HH - LL) ) / log10(period)
-    chop_period = 14
-    sum_atr_14 = pd.Series(true_ranges).rolling(window=chop_period, min_periods=chop_period).sum().values
-    highest_high = pd.Series(df_1d['high'].values).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(df_1d['low'].values).rolling(window=chop_period, min_periods=chop_period).min().values
-    range_hl = highest_high - lowest_low
-    # Avoid division by zero
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop_raw = np.log10(sum_atr_14 / range_hl) / np.log10(chop_period) * 100
-    chop_values = np.where(np.isnan(chop_raw) | np.isinf(chop_raw), 50.0, chop_raw)  # Default to neutral
-    
-    # Align all HTF indicators to LTF
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
+    
+    # Pre-compute ATR for stoploss (using 4h data for consistency)
+    high_low = prices['high'] - prices['low']
+    high_close = np.abs(prices['high'] - prices['close'].shift(1))
+    low_close = np.abs(prices['low'] - prices['close'].shift(1))
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_ranges = np.nanmax(ranges.values, axis=1)
+    atr_14 = pd.Series(true_ranges).rolling(window=14, min_periods=14).mean().values
+    
+    # Pre-compute Donchian channels on 4h data
+    donchian_window = 20
+    donchian_upper = pd.Series(prices['high']).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_lower = pd.Series(prices['low']).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,15 +57,14 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # ATR-based stoploss
-            if prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14_1d_aligned[i]:
+            if prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14[i]:
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
@@ -87,23 +73,23 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # ATR-based stoploss
-            if prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14_1d_aligned[i]:
+            if prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14[i]:
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long signal: price breaks above Donchian high in low-chop regime with volume spike
-            if (prices['high'].iloc[i] > donchian_high_20_aligned[i] and 
-                chop_aligned[i] < 40.0 and 
+            # Long signal: price breaks above Donchian upper band in 1w uptrend with volume spike
+            if (prices['high'].iloc[i] > donchian_upper[i] and 
+                prices['close'].iloc[i] > ema_50_1w_aligned[i] and 
                 vol_spike_1d_aligned[i]):
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = 0.25
-            # Short signal: price breaks below Donchian low in low-chop regime with volume spike
-            elif (prices['low'].iloc[i] < donchian_low_20_aligned[i] and 
-                  chop_aligned[i] < 40.0 and 
+            # Short signal: price breaks below Donchian lower band in 1w downtrend with volume spike
+            elif (prices['low'].iloc[i] < donchian_lower[i] and 
+                  prices['close'].iloc[i] < ema_50_1w_aligned[i] and 
                   vol_spike_1d_aligned[i]):
                 position = -1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
