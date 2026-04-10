@@ -3,20 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h 4-bar EMA pullback strategy with 4h volume confirmation and 1d trend filter
-# - Entry: On 1h, wait for EMA(4) pullback during 4h-volume-confirmed breakouts
-# - Long: Price > EMA(4) after touching EMA(4) from above during bullish 4h candle with volume confirmation
-# - Short: Price < EMA(4) after touching EMA(4) from below during bearish 4h candle with volume confirmation
-# - Trend filter: 1d EMA(50) alignment - only long when price > 1d EMA(50), short when price < 1d EMA(50)
-# - Exit: Opposite EMA(4) touch or max 8-bar hold (8h) to prevent overstaying
-# - Session filter: 08-20 UTC to reduce noise
-# - Position size: 0.20 discrete
-# - Designed for low trade frequency (target: 15-30/year) with high win rate by trading only
-#   high-probability pullbacks in strong trends with volume confirmation
-# - Works in bull/bear: captures momentum continuations while avoiding counter-trend traps
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
+# - Weekly pivot levels: breakout above weekly R2 = long, below weekly S2 = short
+# - Volume confirmation: current 6h volume > 1.5x 20-period EMA (avoid low-volume fakeouts)
+# - Exit: opposite weekly pivot level (S2/R2 reversal) or max hold of 3 bars (18h)
+# - Position sizing: 0.25 discrete level
+# - Session filter: 08-20 UTC to avoid Asian session noise
+# - Targets ~20-40 trades/year on 6h timeframe. Uses weekly pivot for structure,
+#   volume confirmation reduces whipsaws, Donchian breakout captures momentum.
 
-name = "1h_4h_1d_ema_pullback_v1"
-timeframe = "1h"
+name = "6h_1w_donchian_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,9 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -37,110 +33,82 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     bars_in_trade = 0  # track time in trade for max hold
     
-    # Calculate 1h EMA(4) for entry signals
-    close_s = pd.Series(close)
-    ema_4 = close_s.ewm(span=4, min_periods=4, adjust=False).mean().values
+    # Calculate weekly pivot levels (using previous week's OHLC)
+    # Standard pivot: P = (H + L + C) / 3
+    # R2 = P + (H - L), S2 = P - (H - L)
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = high_1w[0]
+    prev_low[0] = low_1w[0]
+    prev_close[0] = close_1w[0]
     
-    # Calculate 4h volume EMA for confirmation
-    volume_ema_20_4h = pd.Series(volume_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ema_20_4h)
+    pivot_point = (prev_high + prev_low + prev_close) / 3
+    weekly_range = prev_high - prev_low
+    weekly_r2 = pivot_point + weekly_range
+    weekly_s2 = pivot_point - weekly_range
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Determine 4h candle direction for volume confirmation context
-    # Bullish 4h candle: close > open
-    # Bearish 4h candle: close < open
-    open_4h = df_4h['open'].values
-    fourh_bullish = close_4h > open_4h
-    fourh_bearish = close_4h < open_4h
-    fourh_bullish_aligned = align_htf_to_ltf(prices, df_4h, fourh_bullish)
-    fourh_bearish_aligned = align_htf_to_ltf(prices, df_4h, fourh_bearish)
+    # Calculate 6h volume EMA for confirmation
+    volume_ema_20_6h = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour  # prices.index is DatetimeIndex
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Track EMA touch state for pullback detection
-    ema_touch_long = np.zeros(n, dtype=bool)   # price touched EMA from above
-    ema_touch_short = np.zeros(n, dtype=bool)  # price touched EMA from below
-    
     for i in range(100, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(ema_4[i]) or np.isnan(volume_ema_20_4h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(weekly_r2[i]) or np.isnan(weekly_s2[i]) or 
+            np.isnan(volume_ema_20_6h[i]) or
             not in_session[i]):
             signals[i] = 0.0
             bars_in_trade = 0  # reset if forced flat
-            ema_touch_long[i] = False
-            ema_touch_short[i] = False
             continue
         
-        # Update EMA touch states (using previous bar to avoid look-ahead)
-        if i > 0:
-            # Long touch: price was at or above EMA, now below EMA (pullback to EMA from above)
-            ema_touch_long[i] = (close[i-1] >= ema_4[i-1]) and (close[i] < ema_4[i])
-            # Short touch: price was at or below EMA, now above EMA (pullback to EMA from below)
-            ema_touch_short[i] = (close[i-1] <= ema_4[i-1]) and (close[i] > ema_4[i])
-        else:
-            ema_touch_long[i] = False
-            ema_touch_short[i] = False
+        # HTF volume confirmation: 6h volume > 1.5x its 20-period EMA
+        vol_confirm_6h = volume[i] > 1.5 * volume_ema_20_6h[i]
         
-        # HTF volume confirmation: 4h volume > 1.3x its 20-period EMA
-        vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)
-        vol_confirm_4h = vol_4h_current[i] > 1.3 * volume_ema_20_4h_aligned[i]
-        
-        # Entry conditions require EMA touch + volume confirmation + trend alignment
-        long_entry = (ema_touch_long[i] and 
-                     vol_confirm_4h and 
-                     fourh_bullish_aligned[i] and  # 4h candle bullish
-                     close[i] > ema_50_1d_aligned[i])  # above 1d EMA(50)
-        short_entry = (ema_touch_short[i] and 
-                      vol_confirm_4h and 
-                      fourh_bearish_aligned[i] and  # 4h candle bearish
-                      close[i] < ema_50_1d_aligned[i])  # below 1d EMA(50)
+        # Entry conditions
+        long_entry = (close[i] > weekly_r2[i] and vol_confirm_6h)
+        short_entry = (close[i] < weekly_s2[i] and vol_confirm_6h)
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
                 bars_in_trade = 0
             elif short_entry:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
                 bars_in_trade = 0
             else:
                 signals[i] = 0.0
                 bars_in_trade = 0
         else:  # Have position - look for exit
             bars_in_trade += 1
-            # Exit conditions: opposite EMA touch or max hold (8 bars = 8h)
+            # Exit conditions: opposite weekly pivot level or max hold (3 bars = 18h)
             if position == 1:  # Long position
-                if (ema_touch_short[i] or  # opposite touch (price pulling back to EMA from below)
-                    bars_in_trade >= 8):   # max hold time
+                if (close[i] < weekly_s2[i] or  # opposite pivot level
+                    bars_in_trade >= 3):        # max hold time
                     position = 0
                     signals[i] = 0.0
                     bars_in_trade = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if (ema_touch_long[i] or   # opposite touch (price pulling back to EMA from above)
-                    bars_in_trade >= 8):   # max hold time
+                if (close[i] > weekly_r2[i] or  # opposite pivot level
+                    bars_in_trade >= 3):        # max hold time
                     position = 0
                     signals[i] = 0.0
                     bars_in_trade = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
