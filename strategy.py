@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and ADX trend filter
-# - Long when price breaks above 20-period Donchian high + 1d volume > 1.5x 20-period volume SMA + ADX > 25 (strong trend)
-# - Short when price breaks below 20-period Donchian low + 1d volume > 1.5x 20-period volume SMA + ADX > 25 (strong trend)
-# - Exit: price returns to opposite Donchian level or ADX < 20 (weak trend/ranging)
+# Hypothesis: 4h Donchian breakout with 1d volume spike and choppiness regime filter
+# - Long when price breaks above 20-period Donchian high + 1d volume > 2.0x 20-period volume SMA + CHOP > 61.8 (range market)
+# - Short when price breaks below 20-period Donchian low + 1d volume > 2.0x 20-period volume SMA + CHOP > 61.8 (range market)
+# - Exit: price returns to opposite Donchian level
 # - Position sizing: 0.25 discrete level
-# - Works in bull/bear: Donchian adapts to volatility, volume confirms institutional interest, ADX filter avoids whipsaws in ranging markets
-# - 12h timeframe balances signal frequency with cost efficiency (target: 12-37 trades/year)
+# - Works in bull/bear: Donchian adapts to volatility, volume spike confirms institutional interest, CHOP filter avoids trending markets where breakouts fail
+# - 4h timeframe targets 20-50 trades/year with strict entry conditions
 
-name = "12h_1d_donchian_volume_adx_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 20-period Donchian channels on 12h
+    # Calculate 20-period Donchian channels on 4h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -43,49 +43,46 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Calculate ADX(14) on 12h for trend filter
+    # Calculate Choppiness Index on 1d (14-period)
     # True Range
-    tr1 = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr1[0] = high[0] - low[0]  # first bar
-    # Plus Directional Movement
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
-    plus_dm[0] = 0
-    # Minus Directional Movement
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
-    minus_dm[0] = 0
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    atr = pd.Series(tr1).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr1 = np.maximum(df_1d['high'] - df_1d['low'], 
+                     np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)), 
+                                np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
+    tr1[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
+    # Sum of TR over 14 periods
+    tr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    ll = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    # Choppiness Index: 100 * log10(sum(tr1)/(hh-ll)) / log10(14)
+    chop_raw = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    chop = align_htf_to_ltf(prices, df_1d, chop_raw)
     
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx[i])):
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period SMA
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (spike)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend (good for breakouts)
-        strong_trend = adx[i] > 25
+        # Regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion breakouts)
+        ranging_market = chop[i] > 61.8
         
         # Breakout conditions
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Exit conditions: return to opposite Donchian level or ADX < 20 (weak trend)
-        long_exit = close[i] < donchian_low[i] or adx[i] < 20
-        short_exit = close[i] > donchian_high[i] or adx[i] < 20
+        # Exit conditions: return to opposite Donchian level
+        long_exit = close[i] < donchian_low[i]
+        short_exit = close[i] > donchian_high[i]
         
         # Entry conditions
-        long_entry = long_breakout and vol_confirm and strong_trend
-        short_entry = short_breakout and vol_confirm and strong_trend
+        long_entry = long_breakout and vol_confirm and ranging_market
+        short_entry = short_breakout and vol_confirm and ranging_market
         
         if position == 0:  # Flat - look for entry
             if long_entry:
