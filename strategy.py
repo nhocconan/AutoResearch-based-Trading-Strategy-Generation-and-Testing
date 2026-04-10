@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 (1d) AND 1d EMA(50) > EMA(200) (bullish trend) AND 12h volume > 1.5x 20-bar avg
-# - Short when price breaks below Camarilla L3 (1d) AND 1d EMA(50) < EMA(200) (bearish trend) AND 12h volume > 1.5x 20-bar avg
-# - Exit when price returns to Camarilla pivot point (mean reversion to equilibrium)
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) upper band AND 1d EMA(50) > EMA(200) AND 12h volume > 2.0x 20-bar avg
+# - Short when price breaks below Donchian(20) lower band AND 1d EMA(50) < EMA(200) AND 12h volume > 2.0x 20-bar avg
+# - Exit when price crosses Donchian(20) midpoint OR opposing signal occurs
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Camarilla levels act as natural support/resistance; 1d trend filter ensures alignment with higher timeframe
-# - Volume confirmation avoids low-liquidity false signals
+# - Donchian captures breakouts in trending markets; 1d EMA filter ensures alignment with daily trend
+# - Volume confirmation avoids low-liquidity false breakouts
 # - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: breakouts in trends, mean reversion in ranges
+# - Works in both bull and bear markets: breakouts work in trends, EMA filter prevents counter-trend trades
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
+name = "12h_1d_donchian_breakout_volume_trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -38,43 +38,33 @@ def generate_signals(prices):
     ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
     ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
     
-    # Pre-compute 1d Camarilla pivot levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute Donchian(20) channels on 12h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Camarilla levels: based on previous day's range
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # H2 = close + 0.7 * (high - low)
-    # H1 = close + 0.5 * (high - low)
-    # Pivot = (high + low + close) / 3
-    # L1 = close - 0.5 * (high - low)
-    # L2 = close - 0.7 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    range_1d = high_1d - low_1d
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    h3_1d = close_1d + 1.1 * range_1d
-    l3_1d = close_1d - 1.1 * range_1d
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    # Align 1d Camarilla levels to 12h timeframe (use previous day's levels)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Donchian breakout conditions
+    breakout_up = close > donchian_upper
+    breakout_down = close < donchian_lower
     
-    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
+    # Pre-compute 12h volume confirmation: > 2.0x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * volume_20_avg)
+    vol_spike = volume > (2.0 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or
+            np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
             np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
@@ -86,25 +76,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 1d bullish trend AND volume spike
-            if (prices['close'].iloc[i] > h3_1d_aligned[i] and 
+            # Long when price breaks above Donchian upper AND 1d bullish trend AND volume spike
+            if (breakout_up[i] and 
                 ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND 1d bearish trend AND volume spike
-            elif (prices['close'].iloc[i] < l3_1d_aligned[i] and 
+            # Short when price breaks below Donchian lower AND 1d bearish trend AND volume spike
+            elif (breakout_down[i] and 
                   ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot point (mean reversion)
-            # Exit when price returns to pivot point (within 0.5% tolerance)
-            exit_signal = np.abs(prices['close'].iloc[i] - pivot_1d_aligned[i]) / pivot_1d_aligned[i] < 0.005
+        else:  # Have position - look for exit
+            # Exit when price crosses Donchian middle OR opposing signal occurs
+            exit_middle = (position == 1 and close[i] < donchian_middle[i]) or \
+                         (position == -1 and close[i] > donchian_middle[i])
             
-            if exit_signal:
+            # Exit on opposing breakout with volume and trend alignment
+            exit_opposing = False
+            if position == 1:  # Long position
+                exit_opposing = (breakout_down[i] and 
+                                ema_bearish_aligned[i] and 
+                                vol_spike[i])
+            else:  # Short position
+                exit_opposing = (breakout_up[i] and 
+                                ema_bullish_aligned[i] and 
+                                vol_spike[i])
+            
+            if exit_middle or exit_opposing:
                 position = 0
                 signals[i] = 0.0
             else:
