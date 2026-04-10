@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# - Primary: 4h price breaks above/below Camarilla pivot levels (H3/L3) from prior 1d session
-# - HTF: 1d volume > 1.2x 20-period MA for confirmation (avoids low-volume breakouts)
-# - Regime filter: 4h Choppiness Index (14) < 38.2 to ensure trending market (avoids chop)
-# - Long: Close > H3 + volume confirmation + chop trending
-# - Short: Close < L3 + volume confirmation + chop trending
-# - Exit: Close crosses back inside H3/L3 band OR chop regime shifts to ranging (CHOP > 61.8)
-# - Position sizing: 0.25 (discrete level, balances return/drawdown, reduces fee churn)
-# - Works in bull/bear: Camarilla adapts to volatility, volume filters false breakouts, chop regime avoids whipsaws
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ADX trend filter
+# - Primary: 4h price breaks above/below 20-period Donchian channel
+# - HTF: 1d volume > 1.5x 20-period MA for institutional participation confirmation
+# - Trend filter: 4h ADX(14) > 25 to ensure trending market (avoids chop/whipsaws)
+# - Long: Close > Upper Donchian + volume confirmation + ADX > 25
+# - Short: Close < Lower Donchian + volume confirmation + ADX > 25
+# - Exit: Close crosses back inside Donchian channel OR ADX drops below 20 (trend weakening)
+# - Position sizing: 0.30 (discrete level, balances return/drawdown)
+# - Works in bull/bear: Donchian adapts to volatility, volume filters false breakouts, ADX avoids ranging markets
 # - Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
 
-name = "4h_1d_camarilla_volume_chop_v1"
+name = "4h_1d_donchian_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,21 +39,16 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels (H3, L3) - using prior day only
-    camarilla_h3 = np.full(len(close_1d), np.nan)
-    camarilla_l3 = np.full(len(close_1d), np.nan)
+    # Calculate 4h Donchian Channel (20-period)
+    upper_donchian = np.full(len(close_4h), np.nan)
+    lower_donchian = np.full(len(close_4h), np.nan)
     
-    for i in range(1, len(close_1d)):
-        if not (np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]) or np.isnan(close_1d[i-1])):
-            # Camarilla levels based on prior day's range
-            range_ = high_1d[i-1] - low_1d[i-1]
-            camarilla_h3[i] = close_1d[i-1] + range_ * 1.1 / 2
-            camarilla_l3[i] = close_1d[i-1] - range_ * 1.1 / 2
+    for i in range(19, len(close_4h)):
+        if not (np.isnan(high_4h[i-19:i+1]).any() or np.isnan(low_4h[i-19:i+1]).any()):
+            upper_donchian[i] = np.max(high_4h[i-19:i+1])
+            lower_donchian[i] = np.min(low_4h[i-19:i+1])
     
-    # Calculate 4h Choppiness Index (14)
-    chop = np.full(len(close_4h), np.nan)
-    atr_sum = np.full(len(close_4h), np.nan)
-    
+    # Calculate 4h ADX (14-period) for trend strength
     # True Range
     tr = np.full(len(close_4h), np.nan)
     for i in range(1, len(close_4h)):
@@ -64,18 +59,52 @@ def generate_signals(prices):
                 abs(low_4h[i] - close_4h[i-1])
             )
     
-    # ATR sum for Chop denominator
-    for i in range(13, len(tr)):
-        if not np.isnan(tr[i-13:i+1]).any():
-            atr_sum[i] = np.sum(tr[i-13:i+1])
+    # Directional Movement
+    dm_plus = np.full(len(close_4h), np.nan)
+    dm_minus = np.full(len(close_4h), np.nan)
+    for i in range(1, len(close_4h)):
+        if not (np.isnan(high_4h[i]) or np.isnan(high_4h[i-1]) or 
+                np.isnan(low_4h[i]) or np.isnan(low_4h[i-1])):
+            up_move = high_4h[i] - high_4h[i-1]
+            down_move = low_4h[i-1] - low_4h[i]
+            if up_move > down_move and up_move > 0:
+                dm_plus[i] = up_move
+            elif down_move > up_move and down_move > 0:
+                dm_minus[i] = down_move
     
-    # Choppiness Index
-    for i in range(13, len(close_4h)):
-        if not (np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or np.isnan(atr_sum[i])):
-            highest_high = np.max(high_4h[i-13:i+1])
-            lowest_low = np.min(low_4h[i-13:i+1])
-            if atr_sum[i] > 0 and (highest_high - lowest_low) > 0:
-                chop[i] = 100 * np.log10(atr_sum[i] / (highest_high - lowest_low)) / np.log10(14)
+    # Smoothed TR, DM+ and DM- (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(values[0:period]) / period
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(values)):
+            if not np.isnan(values[i]) and not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.full(len(close_4h), np.nan)
+    di_minus = np.full(len(close_4h), np.nan)
+    for i in range(len(close_4h)):
+        if not (np.isnan(atr[i]) or atr[i] == 0):
+            di_plus[i] = (dm_plus_smooth[i] / atr[i]) * 100
+            di_minus[i] = (dm_minus_smooth[i] / atr[i]) * 100
+    
+    # DX and ADX
+    dx = np.full(len(close_4h), np.nan)
+    for i in range(len(close_4h)):
+        if not (np.isnan(di_plus[i]) or np.isnan(di_minus[i]) or 
+                (di_plus[i] + di_minus[i]) == 0):
+            dx[i] = (abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])) * 100
+    
+    adx = wilders_smoothing(dx, 14)
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = np.full(len(volume_1d), np.nan)
@@ -84,9 +113,9 @@ def generate_signals(prices):
             volume_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     
     # Align all HTF/LTF indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    chop_aligned = align_htf_to_ltf(prices, prices, chop)
+    upper_donchian_aligned = align_htf_to_ltf(prices, prices, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, prices, lower_donchian)
+    adx_aligned = align_htf_to_ltf(prices, prices, adx)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
@@ -94,43 +123,43 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.2x 20-period MA
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.2 * volume_ma_20_1d_aligned[i]
+        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
-        # Chop regime filter: CHOP < 38.2 = trending, CHOP > 61.8 = ranging
-        chop_trending = chop_aligned[i] < 38.2
-        chop_ranging = chop_aligned[i] > 61.8
+        # Trend filter: ADX > 25 = strong trend, ADX < 20 = weak trend/ranging
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Close > H3 + volume confirmation + chop trending
-            if close_4h[i] > camarilla_h3_aligned[i] and volume_confirm and chop_trending:
+            # Long entry: Close > Upper Donchian + volume confirmation + strong trend
+            if close_4h[i] > upper_donchian_aligned[i] and volume_confirm and strong_trend:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Close < L3 + volume confirmation + chop trending
-            elif close_4h[i] < camarilla_l3_aligned[i] and volume_confirm and chop_trending:
+                signals[i] = 0.30
+            # Short entry: Close < Lower Donchian + volume confirmation + strong trend
+            elif close_4h[i] < lower_donchian_aligned[i] and volume_confirm and strong_trend:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Close crosses back inside H3/L3 band OR chop regime shifts to ranging
+            # Exit: Close crosses back inside Donchian channel OR trend weakens (ADX < 20)
             if position == 1:  # Long position
-                if close_4h[i] < camarilla_h3_aligned[i] or chop_ranging:
+                if close_4h[i] < lower_donchian_aligned[i] or weak_trend:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1 (Short position)
-                if close_4h[i] > camarilla_l3_aligned[i] or chop_ranging:
+                if close_4h[i] > upper_donchian_aligned[i] or weak_trend:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
