@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d volume spike filter and 12h chop regime
-# - Long when Williams %R(14) < -80 (oversold) AND 1d volume > 1.5x 20-period average AND 12h chop > 61.8 (ranging market)
-# - Short when Williams %R(14) > -20 (overbought) AND 1d volume > 1.5x 20-period average AND 12h chop > 61.8 (ranging market)
-# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 12h chop regime filter
+# - Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-day average AND 12h chop < 38.2 (trending market)
+# - Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-day average AND 12h chop < 38.2 (trending market)
+# - Exit when price crosses Donchian(10) midline OR ATR-based stoploss (2x ATR)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Williams %R identifies overextended moves in ranging markets; volume confirms institutional participation
-# - Chop filter ensures we only trade when market is ranging (avoid strong trends where mean reversion fails)
+# - Donchian captures structural breaks; volume confirms institutional participation; chop filter avoids whipsaws in ranging markets
 # - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "4h_1d_12h_williamsr_volume_chop_v1"
+name = "4h_1d_12h_donchian_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,7 +32,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Williams %R (14-period)
+    # Pre-compute 4h Donchian channels (20-period)
     def highest_high(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
@@ -46,14 +45,10 @@ def generate_signals(prices):
             result[i] = np.min(arr[i - window + 1:i + 1])
         return result
     
-    hh_4h = highest_high(high, 14)
-    ll_4h = lowest_low(low, 14)
-    williams_r = np.full_like(close, np.nan, dtype=float)
-    for i in range(13, len(close)):
-        if hh_4h[i] > ll_4h[i]:
-            williams_r[i] = (hh_4h[i] - close[i]) / (hh_4h[i] - ll_4h[i]) * -100
-        else:
-            williams_r[i] = -50.0
+    hh_20 = highest_high(high, 20)
+    ll_20 = lowest_low(low, 20)
+    hh_10 = highest_high(high, 10)
+    ll_10 = lowest_low(low, 10)
     
     # Pre-compute 4h ATR (14-period) for stoploss
     def true_range(h, l, c_prev):
@@ -111,7 +106,7 @@ def generate_signals(prices):
         else:
             chop_12h[i] = 50.0
     
-    chop_regime_12h = chop_12h > 61.8  # Ranging market (chop > 61.8)
+    chop_regime_12h = chop_12h < 38.2  # Trending market (chop < 38.2)
     
     # Align HTF indicators to 4h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
@@ -122,7 +117,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+        if (np.isnan(hh_20[i]) or np.isnan(ll_20[i]) or np.isnan(hh_10[i]) or 
+            np.isnan(ll_10[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
             np.isnan(chop_regime_12h_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -132,29 +128,23 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 1d volume (approximation using price*volume as proxy)
-        # Since we don't have current 1d volume aligned, we'll use volume spike detection
-        # based on 4h volume relative to its average as a proxy for 1d volume spike
-        vol_ma_4h = rolling_mean(volume, 20)
-        vol_spike = volume[i] > 1.5 * vol_ma_4h[i] if not np.isnan(vol_ma_4h[i]) else False
-        
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Williams %R oversold AND volume spike AND chop regime
-            if williams_r[i] < -80 and vol_spike and chop_regime_12h_aligned[i]:
+            # Long conditions: Donchian breakout up AND volume spike AND trending regime
+            if close[i] > hh_20[i-1] and volume[i] > 1.5 * vol_ma_1d_aligned[i] and chop_regime_12h_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Williams %R overbought AND volume spike AND chop regime
-            elif williams_r[i] > -20 and vol_spike and chop_regime_12h_aligned[i]:
+            # Short conditions: Donchian breakout down AND volume spike AND trending regime
+            elif close[i] < ll_20[i-1] and volume[i] > 1.5 * vol_ma_1d_aligned[i] and chop_regime_12h_aligned[i]:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
-            exit_long = (position == 1 and williams_r[i] > -50)
-            exit_short = (position == -1 and williams_r[i] < -50)
+            # Exit conditions: Donchian(10) midline cross OR ATR-based stoploss
+            exit_long = (position == 1 and close[i] < (hh_10[i-1] + ll_10[i-1]) / 2)
+            exit_short = (position == -1 and close[i] > (hh_10[i-1] + ll_10[i-1]) / 2)
             
-            # Optional: ATR-based stoploss
+            # ATR-based stoploss
             stop_long = (position == 1 and close[i] <= high[i] - 2.0 * atr[i])
             stop_short = (position == -1 and close[i] >= low[i] + 2.0 * atr[i])
             
