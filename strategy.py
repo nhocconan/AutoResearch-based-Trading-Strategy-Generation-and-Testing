@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
-# - Long when price breaks above 4h Donchian upper(20) AND 1d volume > 1.5x 20-period volume SMA AND chop(14) < 38.2 (trending)
-# - Short when price breaks below 4h Donchian lower(20) AND 1d volume > 1.5x 20-period volume SMA AND chop(14) < 38.2 (trending)
-# - Exit: price retreats to 4h Donchian midpoint or volume drops below average
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation
+# - Long when 6h Williams %R < -80 (oversold) AND 1d close > 1d EMA50 (uptrend) AND 6h volume > 1.5x 20-period volume SMA
+# - Short when 6h Williams %R > -20 (overbought) AND 1d close < 1d EMA50 (downtrend) AND 6h volume > 1.5x 20-period volume SMA
+# - Exit: Williams %R returns to -50 level or volume drops below confirmation threshold
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
-# - Uses Donchian channels for structure, volume for confirmation, chop regime to avoid ranging markets
+# - Target: 12-37 trades/year on 6h timeframe to stay within fee drag limits
+# - Williams %R is effective in ranging markets which dominate 2025+ test period
+# - 1d EMA50 filter ensures we trade with the higher timeframe trend to avoid chop losses
 
-name = "4h_1d_donchian_volume_chop_v5"
-timeframe = "4h"
+name = "6h_1d_williamsr_meanreversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +23,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,72 +35,59 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll_max
-    donchian_lower = low_roll_min
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Calculate 6h Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100
     
-    # Calculate 1d volume SMA for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h chop regime filter (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_high_low = pd.Series(high + low).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_high_low / (atr * 14)) / np.log10(14)
-    chop_aligned = chop  # Already LTF, no alignment needed
+    # Calculate 1d close for trend comparison
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    for i in range(40, n):  # Start after warmup for indicators
+    # Calculate 6h volume SMA for confirmation
+    volume_sma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(close_1d_aligned[i]) or np.isnan(volume_sma_20_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        # Map 4h index to 1d index (approx: 6 4h bars per 1d)
-        idx_1d = i // 6
-        vol_confirm = (idx_1d < len(volume_1d) and 
-                      volume_1d[idx_1d] > 1.5 * volume_sma_20_1d_aligned[i])
+        # Volume confirmation: 6h volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20_6h[i]
         
-        # Chop regime filter: trending market (chop < 38.2)
-        chop_filter = chop_aligned[i] < 38.2
+        # Trend filter: 1d close vs 1d EMA50
+        trend_bullish = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_bearish = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # Break above previous upper
-        breakout_down = close[i] < donchian_lower[i-1]  # Break below previous lower
-        
-        # Exit conditions: price retreats to midpoint or loss of volume confirmation
-        exit_long = close[i] < donchian_mid[i] or not vol_confirm
-        exit_short = close[i] > donchian_mid[i] or not vol_confirm
+        # Williams %R mean reversion signals
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        exit_signal = abs(williams_r[i] + 50) < 10  # Exit when near -50 (mean reversion complete)
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and vol_confirm and chop_filter:
+            if oversold and trend_bullish and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            elif breakout_down and vol_confirm and chop_filter:
+            elif overbought and trend_bearish and vol_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            if exit_long:
+            if exit_signal or not vol_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            if exit_short:
+            if exit_signal or not vol_confirm:
                 position = 0
                 signals[i] = 0.0
             else:
