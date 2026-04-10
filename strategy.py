@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level with volume > 1.5x 20-bar average AND 4h close > 4h EMA50
-# - Short when price breaks below Camarilla L3 level with volume > 1.5x 20-bar average AND 4h close < 4h EMA50
-# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.7x average
-# - Session filter: only trade 08-20 UTC to avoid low-liquidity hours
-# - Uses 4h trend filter to avoid counter-trend trades in bear markets (2025+)
-# - Moderate volume threshold (1.5x) balances signal quality and trade frequency (target: 15-35 trades/year)
-# - Focus on BTC/ETH; SOL-only strategies are low value and will be discarded
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1w trend filter and volume confirmation
+# - Elder Ray: Bull Power = High - EMA13(Close), Bear Power = Low - EMA13(Close)
+# - Long when Bull Power > 0 AND 1w close > 1w EMA34 AND volume > 1.5x 20-bar average
+# - Short when Bear Power < 0 AND 1w close < 1w EMA34 AND volume > 1.5x 20-bar average
+# - Exit when power reverses sign OR volume drops below 0.7x average
+# - Uses 1w trend filter to avoid counter-trend trades in all market regimes
+# - Moderate volume threshold balances signal quality and trade frequency (target: 12-30 trades/year)
+# - Works in bull (trend continuation) and bear (mean reversion from extremes) markets
 
-name = "1h_4h_camarilla_breakout_volume_trend_v1"
-timeframe = "1h"
+name = "6h_1w_elder_ray_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,8 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
     # Pre-compute volume confirmation: > 1.5x 20-period average
@@ -33,108 +33,76 @@ def generate_signals(prices):
     # Pre-compute volume filter: < 0.7x average volume for exit (loss of momentum)
     vol_weak = prices['volume'] < (0.7 * volume_20_avg)
     
-    # Pre-compute aligned 4h data properly
-    h_4h = df_4h['high'].values
-    l_4h = df_4h['low'].values
-    c_4h = df_4h['close'].values
-    
-    # Align them to 1h timeframe
-    h_4h_aligned = align_htf_to_ltf(prices, df_4h, h_4h)
-    l_4h_aligned = align_htf_to_ltf(prices, df_4h, l_4h)
-    c_4h_aligned = align_htf_to_ltf(prices, df_4h, c_4h)
-    
-    # Pre-compute 4h EMA(50) for trend filter
-    ema50_4h = pd.Series(c_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if outside trading session or any required data is invalid
-        if not in_session[i] or (np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_20_avg[i]) or 
-                                 np.isnan(h_4h_aligned[i]) or np.isnan(l_4h_aligned[i]) or np.isnan(c_4h_aligned[i])):
+    # Pre-compute aligned 1w data properly
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
+    
+    # Align them to 6h timeframe
+    h_1w_aligned = align_htf_to_ltf(prices, df_1w, h_1w)
+    l_1w_aligned = align_htf_to_ltf(prices, df_1w, l_1w)
+    c_1w_aligned = align_htf_to_ltf(prices, df_1w, c_1w)
+    
+    # Pre-compute 1w EMA(34) for trend filter
+    ema34_1w = pd.Series(c_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Pre-compute Elder Ray components on 6h timeframe
+    close_prices = prices['close'].values
+    high_prices = prices['high'].values
+    low_prices = prices['low'].values
+    
+    # Calculate EMA13 of close for Elder Ray
+    ema13_close = pd.Series(close_prices).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13(Close), Bear Power = Low - EMA13(Close)
+    bull_power = high_prices - ema13_close
+    bear_power = low_prices - ema13_close
+    
+    for i in range(13, n):
+        # Skip if any required data is invalid
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_20_avg[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        # Get previous completed 4h bar values
-        # Since 1h timeframe, there are 4 bars per 4h bar
-        if i >= 4:  # Need at least 4 1h bars to get previous 4h bar's data
-            # Get index of previous completed 4h bar (look back 4 bars)
-            prev_4h_idx = i - 4
-            
-            if prev_4h_idx >= 0:
-                ph = h_4h_aligned[prev_4h_idx]  # Previous 4h bar's high
-                pl = l_4h_aligned[prev_4h_idx]  # Previous 4h bar's low
-                pc = c_4h_aligned[prev_4h_idx]  # Previous 4h bar's close
-                
-                # Calculate Camarilla levels
-                range_val = ph - pl
-                if range_val > 0:
-                    camarilla_h3 = pc + (range_val * 1.1 / 4)
-                    camarilla_l3 = pc - (range_val * 1.1 / 4)
-                    camarilla_h4 = pc + (range_val * 1.1 / 2)
-                    camarilla_l4 = pc - (range_val * 1.1 / 2)
-                    
-                    if position == 0:  # Flat - look for new breakout entries
-                        # Long breakout: price > Camarilla H3 with volume spike AND 4h uptrend
-                        if (prices['close'].iloc[i] > camarilla_h3 and 
-                            vol_spike.iloc[i] and 
-                            prices['close'].iloc[i] > ema50_4h_aligned[i]):
-                            position = 1
-                            signals[i] = 0.20
-                        # Short breakdown: price < Camarilla L3 with volume spike AND 4h downtrend
-                        elif (prices['close'].iloc[i] < camarilla_l3 and 
-                              vol_spike.iloc[i] and 
-                              prices['close'].iloc[i] < ema50_4h_aligned[i]):
-                            position = -1
-                            signals[i] = -0.20
-                    else:  # Have position - look for exit
-                        # Exit conditions:
-                        # 1. Price retreats to Camarilla H4/L4 levels
-                        # 2. Volume drops below 0.7x average (loss of momentum)
-                        if position == 1:  # Long position
-                            if (prices['close'].iloc[i] < camarilla_h4 or 
-                                vol_weak.iloc[i]):
-                                position = 0
-                                signals[i] = 0.0
-                            else:
-                                signals[i] = 0.20  # Hold long
-                        elif position == -1:  # Short position
-                            if (prices['close'].iloc[i] > camarilla_l4 or 
-                                vol_weak.iloc[i]):
-                                position = 0
-                                signals[i] = 0.0
-                            else:
-                                signals[i] = -0.20  # Hold short
-                else:
-                    # Hold current position
-                    if position == 0:
-                        signals[i] = 0.0
-                    elif position == 1:
-                        signals[i] = 0.20
-                    else:
-                        signals[i] = -0.20
-            else:
-                # Hold current position
-                if position == 0:
+        if position == 0:  # Flat - look for new entries
+            # Long entry: Bull Power > 0 AND 1w uptrend AND volume spike
+            if (bull_power[i] > 0 and 
+                c_1w_aligned[i] > ema34_1w_aligned[i] and 
+                vol_spike[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: Bear Power < 0 AND 1w downtrend AND volume spike
+            elif (bear_power[i] < 0 and 
+                  c_1w_aligned[i] < ema34_1w_aligned[i] and 
+                  vol_spike[i]):
+                position = -1
+                signals[i] = -0.25
+        else:  # Have position - look for exit
+            # Exit conditions:
+            # 1. Power reverses sign (trend exhaustion)
+            # 2. Volume drops below 0.7x average (loss of momentum)
+            if position == 1:  # Long position
+                if (bull_power[i] <= 0 or vol_weak[i]):
+                    position = 0
                     signals[i] = 0.0
-                elif position == 1:
-                    signals[i] = 0.20
                 else:
-                    signals[i] = -0.20
-        else:
-            # Not enough data yet, hold flat
-            signals[i] = 0.0
+                    signals[i] = 0.25  # Hold long
+            elif position == -1:  # Short position
+                if (bear_power[i] >= 0 or vol_weak[i]):
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25  # Hold short
     
     return signals
