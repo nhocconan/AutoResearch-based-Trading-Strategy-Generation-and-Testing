@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation
-# - Williams Alligator: Jaw (13-period SMMA, 8-bar shift), Teeth (8-period SMMA, 5-bar shift), Lips (5-period SMMA, 3-bar shift)
-# - Long when Lips > Teeth > Jaw (bullish alignment) with 1w uptrend (close > EMA50) and volume spike
-# - Short when Lips < Teeth < Jaw (bearish alignment) with 1w downtrend (close < EMA50) and volume spike
-# - Uses 1d timeframe targeting 30-100 total trades over 4 years (7-25/year) to minimize fee drag
-# - 1w EMA50 filter ensures trading with higher timeframe trend direction
-# - 1d volume > 2.0x 20-period average confirms breakout strength
+# Hypothesis: 6h Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4
+# - Camarilla pivots calculated from 1d OHLC: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+# - R4 = C + (H-L)*1.1, S4 = C - (H-L)*1.1
+# - Long when price breaks above R4 with volume confirmation (volume > 1.5x 20-period avg)
+# - Short when price breaks below S4 with volume confirmation
+# - Exit when price returns to R3/S3 levels (mean reversion) or opposite breakout occurs
+# - Uses 6h timeframe targeting 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+# - Camarilla levels from 1d provide institutional support/resistance that works in both bull and bear markets
+# - Volume confirmation reduces false breakouts
 # - Discrete position sizing (0.25) to minimize fee churn
-# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(14) or Alligator lines cross
 
-name = "1d_1w_alligator_volume_trend_atr_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,105 +24,73 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w indicators
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # R4 = C + (H-L)*1.1, R3 = C + (H-L)*1.1/2
+    # S4 = C - (H-L)*1.1, S3 = C - (H-L)*1.1/2
+    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1
     
-    # 1w volume confirmation: > 2.0x 20-period average
-    avg_volume_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (2.0 * avg_volume_20_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
+    # Align Camarilla levels to 6h timeframe (completed 1d bar only)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # 1w ATR(14) for stoploss
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14_1w = np.zeros_like(tr)
-    atr_14_1w[14-1] = np.mean(tr[:14])
-    for i in range(14, len(tr)):
-        atr_14_1w[i] = (atr_14_1w[i-1] * (14-1) + tr[i]) / 14
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
-    
-    # 1d Williams Alligator
-    close_1d = prices['close'].values
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    
-    # Jaw: 13-period SMMA of median price, shifted by 8 bars
-    median_price = (high_1d + low_1d) / 2
-    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw_raw, 8)
-    jaw[:8] = np.nan  # First 8 values invalid due to shift
-    
-    # Teeth: 8-period SMMA of median price, shifted by 5 bars
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)
-    teeth[:5] = np.nan  # First 5 values invalid due to shift
-    
-    # Lips: 5-period SMMA of median price, shifted by 3 bars
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)
-    lips[:3] = np.nan  # First 3 values invalid due to shift
-    
-    # Alligator alignment signals
-    bullish_alignment = (lips > teeth) & (teeth > jaw)
-    bearish_alignment = (lips < teeth) & (teeth < jaw)
+    # 1d volume confirmation: > 1.5x 20-period average
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    entry_atr = 0.0
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_spike_1w_aligned[i]) or 
-            np.isnan(atr_14_1w_aligned[i]) or np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: ATR-based stoploss or Alligator bearish crossover
-            if (prices['close'].iloc[i] < entry_price - 2.0 * entry_atr or 
-                (lips[i] < teeth[i] and teeth[i] < jaw[i])):  # Bearish alignment
+            # Exit: price returns to R3 (mean reversion) or breaks below S4 (reverse)
+            if (prices['close'].iloc[i] <= camarilla_r3_aligned[i] or 
+                prices['close'].iloc[i] < camarilla_s4_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: ATR-based stoploss or Alligator bullish crossover
-            if (prices['close'].iloc[i] > entry_price + 2.0 * entry_atr or 
-                (lips[i] > teeth[i] and teeth[i] > jaw[i])):  # Bullish alignment
+            # Exit: price returns to S3 (mean reversion) or breaks above R4 (reverse)
+            if (prices['close'].iloc[i] >= camarilla_s3_aligned[i] or 
+                prices['close'].iloc[i] > camarilla_r4_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Alligator alignment with trend and volume filters
-            if vol_spike_1w_aligned[i]:
-                # Long signal: bullish Alligator alignment in 1w uptrend
-                if bullish_alignment[i] and prices['close'].iloc[i] > ema_50_1w_aligned[i]:
+            # Look for breakout with volume confirmation
+            if vol_spike_1d_aligned[i]:
+                # Long signal: price breaks above R4
+                if prices['close'].iloc[i] > camarilla_r4_aligned[i]:
                     position = 1
-                    entry_price = prices['close'].iloc[i]
-                    entry_atr = atr_14_1w_aligned[i]
                     signals[i] = 0.25
-                # Short signal: bearish Alligator alignment in 1w downtrend
-                elif bearish_alignment[i] and prices['close'].iloc[i] < ema_50_1w_aligned[i]:
+                # Short signal: price breaks below S4
+                elif prices['close'].iloc[i] < camarilla_s4_aligned[i]:
                     position = -1
-                    entry_price = prices['close'].iloc[i]
-                    entry_atr = atr_14_1w_aligned[i]
                     signals[i] = -0.25
     
     return signals
