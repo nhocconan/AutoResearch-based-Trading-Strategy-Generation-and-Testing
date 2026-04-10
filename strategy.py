@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and chop regime filter
-# - Long when price breaks above Donchian(20) upper band AND 1d volume > 1.5x 20-period 1d volume SMA AND chop > 61.8 (range)
-# - Short when price breaks below Donchian(20) lower band AND 1d volume > 1.5x 20-period 1d volume SMA AND chop > 61.8 (range)
-# - Exit: ATR trailing stop (2.0x ATR from extreme)
-# - Uses 1d for volume confirmation, 4h for Donchian channels and ATR, chop filter from 4h
+# Hypothesis: 4h Williams %R reversal with 1d volume spike filter
+# - Long when Williams %R(14) crosses above -80 (oversold) AND 1d volume > 1.3x 20-period 1d volume SMA
+# - Short when Williams %R(14) crosses below -20 (overbought) AND 1d volume > 1.3x 20-period 1d volume SMA
+# - Exit: opposing Williams %R signal or time-based exit (max 12 bars)
+# - Uses 1d for volume confirmation, 4h for Williams %R calculation
 # - Position sizing: 0.25 discrete level to minimize fee churn
-# - Target: 15-30 trades/year (60-120 total over 4 years) to avoid overtrading
-# - Donchian breakouts capture institutional volume in ranging markets; chop filter ensures we only trade in ranging conditions
-# - Volume spike confirms institutional interest in the breakout
+# - Target: 20-40 trades/year (80-160 total over 4 years) to avoid overtrading
+# - Williams %R identifies exhaustion points in ranging markets; volume confirmation ensures institutional participation
+# - Effective in both bull and bear markets as it captures mean reversion from extremes
 
-name = "4h_1d_donchian_volume_chop_v1"
+name = "4h_1d_williamsr_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,6 +31,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    bars_since_entry = 0
     
     # Load 1d data ONCE before loop (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
@@ -46,117 +47,69 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 4h ATR for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 4h Donchian channels (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 4h Choppiness Index (CHOP) for regime filter
-    atr_1 = tr  # True Range
-    sum_atr_14 = pd.Series(atr_1).rolling(window=14, min_periods=14).sum().values
+    # Calculate 4h Williams %R (14-period)
     highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    hl_range = highest_high_14 - lowest_low_14
-    hl_range = np.where(hl_range <= 0, 1e-10, hl_range)  # small positive value
-    chop = 100 * np.log10(sum_atr_14 / (np.log10(hl_range) * np.log10(14)))
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # avoid division by zero
     
-    # Track highest high since entry for trailing stop (long)
-    # Track lowest low since entry for trailing stop (short)
-    highest_since_entry = np.full(n, np.nan)
-    lowest_since_entry = np.full(n, np.nan)
-    
-    for i in range(20, n):  # Start from 20 to have sufficient lookback
+    for i in range(14, n):  # Start from 14 to have sufficient lookback
         # Skip if not in trading session
         if not in_session[i]:
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
             
         # Skip if any required data is invalid
-        if (np.isnan(atr[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
+            bars_since_entry = 0
             continue
         
         # Get current 1d volume (need to align properly)
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        # Volume confirmation: 1d volume > 1.5x 20-period 1d volume SMA
-        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 1d volume > 1.3x 20-period 1d volume SMA
+        vol_confirm = vol_1d_aligned[i] > 1.3 * volume_sma_20_1d_aligned[i]
         
-        # Chop regime filter: only trade in ranging markets (CHOP > 61.8)
-        chop_filter = chop[i] > 61.8
-        
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # Break above upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # Break below lower band
+        # Williams %R signals
+        wr_prev = williams_r[i-1] if i > 0 else -50
+        wr_cross_above_80 = wr_prev <= -80 and williams_r[i] > -80  # Oversold bounce
+        wr_cross_below_20 = wr_prev >= -20 and williams_r[i] < -20   # Overbought rejection
         
         if position == 0:  # Flat - look for entry
-            # Require both volume confirmation and chop filter
-            if vol_confirm and chop_filter:
-                # Long: price breaks above Donchian upper band
-                if breakout_up:
+            # Require volume confirmation
+            if vol_confirm:
+                # Long: Williams %R crosses above -80 from oversold
+                if wr_cross_above_80:
                     position = 1
                     signals[i] = 0.25
-                    highest_since_entry[i] = high[i]  # Initialize trailing stop
-                # Short: price breaks below Donchian lower band
-                elif breakout_down:
+                    bars_since_entry = 0
+                # Short: Williams %R crosses below -20 from overbought
+                elif wr_cross_below_20:
                     position = -1
                     signals[i] = -0.25
-                    lowest_since_entry[i] = low[i]  # Initialize trailing stop
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.0
-                    # Carry forward NaN values for tracking
-                    if i > 0:
-                        highest_since_entry[i] = highest_since_entry[i-1]
-                        lowest_since_entry[i] = lowest_since_entry[i-1]
             else:
                 signals[i] = 0.0
-                # Carry forward NaN values for tracking
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
-        elif position == 1:  # Long position - look for exit
-            # Update highest high since entry
-            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
+        else:  # In position - look for exit
+            bars_since_entry += 1
             
-            # ATR trailing stop: exit if price drops 2.0*ATR below highest high since entry
-            trailing_stop = highest_since_entry[i] - 2.0 * atr[i]
+            # Exit conditions: opposing Williams %R signal or max 12 bars
+            exit_signal = False
+            if position == 1 and wr_cross_below_20:  # Long exit on overbought
+                exit_signal = True
+            elif position == -1 and wr_cross_above_80:  # Short exit on oversold
+                exit_signal = True
+            elif bars_since_entry >= 12:  # Time-based exit
+                exit_signal = True
             
-            # Exit condition: trailing stop hit
-            if close[i] < trailing_stop:
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
-                # Reset tracking arrays
-                highest_since_entry[i] = np.nan
-                lowest_since_entry[i] = np.nan
+                bars_since_entry = 0
             else:
-                signals[i] = 0.25
-                # Propagate tracking values
-                highest_since_entry[i] = highest_since_entry[i]
-                lowest_since_entry[i] = lowest_since_entry[i-1]
-        else:  # position == -1 (Short position) - look for exit
-            # Update lowest low since entry
-            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            
-            # ATR trailing stop: exit if price rises 2.0*ATR above lowest low since entry
-            trailing_stop = lowest_since_entry[i] + 2.0 * atr[i]
-            
-            # Exit condition: trailing stop hit
-            if close[i] > trailing_stop:
-                position = 0
-                signals[i] = 0.0
-                # Reset tracking arrays
-                highest_since_entry[i] = np.nan
-                lowest_since_entry[i] = np.nan
-            else:
-                signals[i] = -0.25
-                # Propagate tracking values
-                highest_since_entry[i] = highest_since_entry[i-1]
-                lowest_since_entry[i] = lowest_since_entry[i]
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
