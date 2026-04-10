@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d + volume confirmation + choppiness regime filter
-# - Primary signal: Price touches Camarilla H3 (resistance) for short, L3 (support) for long
-# - Volume filter: 12h volume > 1.5x 20-period average (avoid low-volume false breakouts)
-# - Regime filter: Choppiness Index(14) on 1d < 38.2 (trending market) for breakout trades
-# - Position size: 0.25 discrete level
-# - Stoploss: 2.0x ATR(14) on 12h
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
-# - Works in bull/bear: Camarilla levels adapt to volatility; chop filter avoids ranging markets
+# Hypothesis: 4h Donchian(20) breakout + 12h HMA(21) trend filter + volume confirmation
+# - Primary signal: Price breaks above/below Donchian(20) channel on 4h
+# - Trend filter: 12h HMA(21) slope > 0 for longs, < 0 for shorts (institutional trend)
+# - Volume filter: 4h volume > 1.5x 20-period average volume (momentum confirmation)
+# - Position size: 0.25 discrete level to minimize fee churn
+# - Stoploss: 2.0x ATR(14) on 4h
+# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - Works in bull/bear: Donchian breakouts capture trends; HMA filter avoids counter-trend trades in bear markets
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_hma_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,80 +22,46 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla pivot levels (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 12h HMA(21) and its slope for trend filter
+    close_12h = df_12h['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    wma_half = pd.Series(close_12h).ewm(span=half_len, adjust=False).mean().values
+    wma_full = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
+    raw_hma = 2 * wma_half - wma_full
+    hma_21 = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
+    hma_slope = hma_21 - np.roll(hma_21, 1)
+    hma_slope[0] = 0
+    hma_slope_pos = hma_slope > 0  # Uptrend
+    hma_slope_neg = hma_slope < 0  # Downtrend
+    hma_slope_pos_aligned = align_htf_to_ltf(prices, df_12h, hma_slope_pos)
+    hma_slope_neg_aligned = align_htf_to_ltf(prices, df_12h, hma_slope_neg)
     
-    # Calculate pivot point and ranges
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Pre-compute 4h Donchian(20) channels
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Camarilla levels
-    h3 = pivot + (range_1d * 1.1 / 4.0)  # Resistance level 3
-    l3 = pivot - (range_1d * 1.1 / 4.0)  # Support level 3
-    h4 = pivot + (range_1d * 1.1 / 2.0)  # Resistance level 4
-    l4 = pivot - (range_1d * 1.1 / 2.0)  # Support level 4
+    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Pre-compute 4h volume spike filter
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (1.5 * avg_volume_20)
     
-    # Pre-compute 12h volume spike filter
-    volume_12h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > (1.5 * avg_volume_20)
-    
-    # Pre-compute 1d Choppiness Index for regime filter
-    # Chop = 100 * log10(sum(ATR(14)) / log10(n) * (HHV - LLV)) / log10(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Pre-compute 4h ATR(14) for stoploss
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest High and Lowest Low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i >= 13 and sum_atr_14[i] > 0 and hh_14[i] > ll_14[i]:
-            chop[i] = 100 * np.log10(sum_atr_14[i] / np.log10(14) * (hh_14[i] - ll_14[i])) / np.log10(14)
-        else:
-            chop[i] = 50.0  # Neutral value when insufficient data
-    
-    # Trending market: Chop < 38.2
-    chop_trending = chop < 38.2
-    chop_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_trending)
-    
-    # Pre-compute 12h ATR(14) for stoploss
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h[0] = tr1_12h[0]
-    atr_14_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -103,39 +69,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(chop_trending_aligned[i]) or
-            np.isnan(atr_14_12h[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(hma_slope_pos_aligned[i]) or np.isnan(hma_slope_neg_aligned[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Price crosses below L3 OR stoploss hit
-            if close_12h[i] < l3_aligned[i] or close_12h[i] < entry_price - 2.0 * atr_14_12h[i]:
+            # Exit: Price breaks below Donchian lower OR stoploss hit
+            if close_4h[i] < lowest_low[i] or close_4h[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Price crosses above H3 OR stoploss hit
-            if close_12h[i] > h3_aligned[i] or close_12h[i] > entry_price + 2.0 * atr_14_12h[i]:
+            # Exit: Price breaks above Donchian upper OR stoploss hit
+            if close_4h[i] > highest_high[i] or close_4h[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla level touch with volume and regime filters
-            if vol_spike[i] and chop_trending_aligned[i]:
-                # Long: Price touches L3 support from above
-                if close_12h[i] <= l3_aligned[i] * 1.001 and close_12h[i-1] > l3_aligned[i-1]:
+            # Look for Donchian breakout with trend and volume filters
+            if vol_spike[i]:
+                # Long: Price breaks above Donchian upper in uptrend
+                if close_4h[i] > highest_high[i] and hma_slope_pos_aligned[i]:
                     position = 1
-                    entry_price = close_12h[i]
+                    entry_price = close_4h[i]
                     signals[i] = 0.25
-                # Short: Price touches H3 resistance from below
-                elif close_12h[i] >= h3_aligned[i] * 0.999 and close_12h[i-1] < h3_aligned[i-1]:
+                # Short: Price breaks below Donchian lower in downtrend
+                elif close_4h[i] < lowest_low[i] and hma_slope_neg_aligned[i]:
                     position = -1
-                    entry_price = close_12h[i]
+                    entry_price = close_4h[i]
                     signals[i] = -0.25
     
     return signals
