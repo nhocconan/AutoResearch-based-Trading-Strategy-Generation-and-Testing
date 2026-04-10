@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot with 1d volume regime filter
-# - Long when price breaks above R3 and 1d volume is in expansion regime (vol > 1.5x 20-day avg)
-# - Short when price breaks below S3 and 1d volume is in expansion regime
-# - Exit when price returns to Camarilla pivot point (PP)
-# - Volume regime filter ensures we only trade breakouts with institutional participation
-# - Works in both bull (continuation breakouts) and bear (panic breakdowns) markets
-# - Target: 15-25 trades/year (60-100 total over 4 years) to avoid fee drag
+# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d chop regime filter
+# - Long when price breaks above 20-period 12h Donchian upper band with volume > 1.5x 20-bar avg AND 1d chop < 61.8 (trending)
+# - Short when price breaks below 20-period 12h Donchian lower band with volume > 1.5x 20-bar avg AND 1d chop < 61.8 (trending)
+# - Exit when price crosses 12h EMA(20) in opposite direction
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
+# - Donchian breakouts capture strong trends, chop filter avoids whipsaws in ranging markets
+# - Volume confirmation ensures breakout validity
 
-name = "6h_1d_camarilla_pivot_volume_regime_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,63 +22,93 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Pre-compute 1d volume regime: expansion when vol > 1.5x 20-day average
-    volume_20d_avg = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_expansion = df_1d['volume'] > (1.5 * volume_20d_avg)
-    vol_expansion_aligned = align_htf_to_ltf(prices, df_1d, vol_expansion)
-    
-    # Pre-compute 12h data for Camarilla calculation (using 12h as midpoint between 6h and 1d)
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior 12h bar
+    # Pre-compute 12h Donchian channels (20-period)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
-    pp_12h = typical_price_12h  # PP = (H+L+C)/3
-    range_12h = high_12h - low_12h
-    r3_12h = pp_12h + (range_12h * 1.1 / 2.0)
-    s3_12h = pp_12h - (range_12h * 1.1 / 2.0)
+    # Calculate Donchian upper and lower bands
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 6h timeframe (completed 12h bar only)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
+    # Align Donchian bands to 12h timeframe (completed 12h bar only)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    
+    # Pre-compute 12h EMA(20) for exit signal
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    
+    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
+    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    
+    # Pre-compute 1d Chopiness Index (14-period) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    # Calculate ATR(14)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate max/min high/low over 14 periods
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Calculate Chopiness Index: 100 * log10(sum(atr14) / (max_high - min_low)) / log10(14)
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    chop_denominator = max_high_14 - min_low_14
+    chop_raw = 100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14)
+    chop_1d = np.where(chop_denominator > 0, chop_raw, 50.0)  # Default to 50 when denominator <= 0
+    
+    # Align Chopiness Index to 12h timeframe
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Define trending regime: chop < 61.8
+    trending_regime = chop_1d_aligned < 61.8
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or 
-            np.isnan(pp_12h_aligned[i]) or np.isnan(vol_expansion_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_20_12h_aligned[i]) or np.isnan(volume_20_avg[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long signal: price closes above R3 with 1d volume expansion
-            if (prices['close'].iloc[i] > r3_12h_aligned[i] and 
-                vol_expansion_aligned.iloc[i]):
+            # Long signal: price breaks above Donchian upper with volume spike and trending regime
+            if (prices['close'].iloc[i] > donchian_upper_aligned[i] and 
+                vol_spike.iloc[i] and 
+                trending_regime[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short signal: price closes below S3 with 1d volume expansion
-            elif (prices['close'].iloc[i] < s3_12h_aligned[i] and 
-                  vol_expansion_aligned.iloc[i]):
+            # Short signal: price breaks below Donchian lower with volume spike and trending regime
+            elif (prices['close'].iloc[i] < donchian_lower_aligned[i] and 
+                  vol_spike.iloc[i] and 
+                  trending_regime[i]):
                 position = -1
                 signals[i] = -0.25
         else:  # Have position - look for exit
-            # Exit when price returns to Camarilla pivot point (PP)
-            if position == 1 and prices['close'].iloc[i] < pp_12h_aligned[i]:
+            # Exit when price crosses 12h EMA(20) in opposite direction
+            if position == 1 and prices['close'].iloc[i] < ema_20_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and prices['close'].iloc[i] > pp_12h_aligned[i]:
+            elif position == -1 and prices['close'].iloc[i] > ema_20_12h_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             # Hold position otherwise
