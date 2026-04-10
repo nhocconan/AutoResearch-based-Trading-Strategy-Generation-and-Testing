@@ -88,10 +88,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 2.0x 20-period 1d volume SMA
-        vol_confirm = volume_sma_20_1d_aligned[i] > 0 and (df_1d['volume'].iloc[-1] if i == n-1 else 0) > 2.0 * volume_sma_20_1d_aligned[i]
         # Get current 1d volume (need to align properly)
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+        # Volume confirmation: 1d volume > 2.0x 20-period 1d volume SMA
         vol_confirm = vol_1d_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
         # ATR regime filter: low volatility environment (ATR14 < ATR50)
