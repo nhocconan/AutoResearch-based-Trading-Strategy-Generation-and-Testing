@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and chop regime filter
-# - Long when Williams %R < -80 (oversold) + 1d volume > 1.5x 20-period volume SMA + Chop(14) > 61.8 (range regime)
-# - Short when Williams %R > -20 (overbought) + 1d volume > 1.5x 20-period volume SMA + Chop(14) > 61.8
-# - Exit: Williams %R crosses back above -50 (for long) or below -50 (for short)
+# Hypothesis: 4h Bollinger Band squeeze breakout with 1d volume confirmation and chop regime filter
+# - Long when price closes above upper BB(20,2) + Bollinger Band Width < 0.05 (squeeze) + 1d volume > 1.3x 20-period volume SMA + Chop(14) > 50
+# - Short when price closes below lower BB(20,2) + Bollinger Band Width < 0.05 (squeeze) + 1d volume > 1.3x 20-period volume SMA + Chop(14) > 50
+# - Exit: price crosses back through middle BB(20) line
 # - Position sizing: 0.25 discrete level
-# - Williams %R identifies overextended moves in ranging markets where mean reversion occurs
-# - Volume confirms participation, chop filter avoids strong trends
-# - 4h timeframe targets 19-50 trades/year with strict entry conditions to minimize fee drag
+# - Bollinger Band squeeze identifies low volatility periods primed for breakout
+# - Volume confirms breakout validity, chop filter avoids weak trends
+# - 4h timeframe targets 20-50 trades/year with strict entry conditions to minimize fee drag
 
-name = "4h_1d_williamsr_volume_chop_v1"
+name = "4h_1d_bb_squeeze_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,6 +35,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Calculate 4h Bollinger Bands (20,2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = sma + (bb_std * std)
+    lower_bb = sma - (bb_std * std)
+    middle_bb = sma
+    
+    # Calculate Bollinger Band Width for squeeze detection
+    bb_width = (upper_bb - lower_bb) / middle_bb
+    bb_width = np.where(np.isnan(bb_width), 0, bb_width)
+    
     # Calculate 4h Chopiness Index (14-period) for regime filter
     # True Range
     tr1 = np.maximum(high - low, 
@@ -53,14 +66,6 @@ def generate_signals(prices):
                     100 * np.log10(sum_tr / hl_range) / np.log10(14), 
                     50)  # default to neutral when invalid
     
-    # Calculate 4h Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          ((highest_high - close) / (highest_high - lowest_low)) * -100, 
-                          -50)  # default to neutral when range is zero
-    
     # Calculate 1d OHLC for volume confirmation
     volume_1d = df_1d['volume'].values
     
@@ -70,7 +75,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(chop[i]) or 
+        if (np.isnan(sma[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+            np.isnan(bb_width[i]) or np.isnan(chop[i]) or 
             np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -78,25 +84,20 @@ def generate_signals(prices):
         # Get current 1d volume for volume spike confirmation
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period SMA (volume spike)
-        vol_confirm = vol_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period SMA (volume spike)
+        vol_confirm = vol_1d_current[i] > 1.3 * volume_sma_20_1d_aligned[i]
         
-        # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion)
-        ranging_market = chop[i] > 61.8
+        # Squeeze condition: Bollinger Band Width < 0.05 indicates low volatility
+        squeeze_condition = bb_width[i] < 0.05
         
-        # Williams %R signals
-        oversold = williams_r[i] < -80      # Oversold condition
-        overbought = williams_r[i] > -20    # Overbought condition
-        exit_long = williams_r[i] > -50     # Exit long when crosses above -50
-        exit_short = williams_r[i] < -50    # Exit short when crosses below -50
+        # Regime filter: Chop > 50 indicates ranging/transition market (favorable for breakout)
+        favorable_regime = chop[i] > 50
         
-        # Entry conditions: Williams %R extreme with volume and regime confirmation
-        long_entry = oversold and vol_confirm and ranging_market
-        short_entry = overbought and vol_confirm and ranging_market
-        
-        # Exit conditions: Williams %R crosses back through -50
-        long_exit = exit_long
-        short_exit = exit_short
+        # Bollinger Band signals
+        long_entry = (close[i] > upper_bb[i]) and squeeze_condition and vol_confirm and favorable_regime
+        short_entry = (close[i] < lower_bb[i]) and squeeze_condition and vol_confirm and favorable_regime
+        exit_long = close[i] < middle_bb[i]  # Exit long when price crosses below middle BB
+        exit_short = close[i] > middle_bb[i]  # Exit short when price crosses above middle BB
         
         if position == 0:  # Flat - look for entry
             if long_entry:
@@ -108,13 +109,13 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            if long_exit:
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            if short_exit:
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
