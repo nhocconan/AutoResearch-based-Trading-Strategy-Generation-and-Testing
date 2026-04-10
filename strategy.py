@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout + 1d ADX trend filter + volume confirmation
-# - Long when price breaks above Camarilla H3 level AND 1d ADX(14) > 25 (trending market) AND volume > 1.5x 20-period average
-# - Short when price breaks below Camarilla L3 level AND 1d ADX(14) > 25 AND volume > 1.5x 20-period average
+# Hypothesis: 1d Camarilla pivot breakout + 1w EMA trend filter + volume confirmation
+# - Long when price breaks above Camarilla H3 level AND weekly EMA(21) is rising AND volume > 2.0x 20-period average
+# - Short when price breaks below Camarilla L3 level AND weekly EMA(21) is falling AND volume > 2.0x 20-period average
 # - Exit when price returns to Camarilla PIVOT level (mean reversion to equilibrium)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - ADX filter ensures we only trade in trending markets where breakouts have follow-through
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Camarilla levels provide institutional support/resistance that work in both trending and ranging markets
+# - Weekly EMA filter ensures we trade with the higher timeframe trend
 # - Volume confirmation reduces false breakouts
-# - Works in both bull and bear markets by capturing directional moves
 
-name = "4h_1d_camarilla_adx_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,75 +23,33 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC and volume
+    # Pre-compute daily OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Pre-compute daily volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Pre-compute 1d ADX(14) for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute weekly EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_rising = np.diff(ema_21, prepend=ema_21[0]) > 0  # True when EMA is rising
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align HTF indicators to daily timeframe
+    ema_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_rising)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+ and DM- using Wilder's smoothing (alpha=1/14)
-    tr_14 = np.zeros_like(tr)
-    dm_plus_14 = np.zeros_like(dm_plus)
-    dm_minus_14 = np.zeros_like(dm_minus)
-    
-    tr_14[13] = np.mean(tr[1:14])
-    dm_plus_14[13] = np.mean(dm_plus[1:14])
-    dm_minus_14[13] = np.mean(dm_minus[1:14])
-    
-    for i in range(14, len(tr)):
-        tr_14[i] = (tr_14[i-1] * 13 + tr[i]) / 14
-        dm_plus_14[i] = (dm_plus_14[i-1] * 13 + dm_plus[i]) / 14
-        dm_minus_14[i] = (dm_minus_14[i-1] * 13 + dm_minus[i]) / 14
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / np.where(tr_14 == 0, 1, tr_14)
-    di_minus = 100 * dm_minus_14 / np.where(tr_14 == 0, 1, tr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = np.zeros_like(dx)
-    adx[27] = np.mean(dx[14:28])  # First ADX value after 14+14 periods
-    for i in range(28, len(dx)):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Trend filter: ADX > 25 indicates trending market
-    trending_regime = adx > 25
-    
-    # Pre-compute 4h Camarilla levels from previous period's OHLC
+    # Pre-compute daily Camarilla levels from previous period's OHLC
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # First bar uses current values
+    prev_high[0] = high[0]
     prev_low[0] = low[0]
     prev_close[0] = close[0]
     
@@ -105,16 +63,13 @@ def generate_signals(prices):
     camarilla_h4 = pivot + (range_hl * 1.1 / 2)
     camarilla_l4 = pivot - (range_hl * 1.1 / 2)
     
-    # Align HTF indicators to 4h timeframe
-    trending_regime_aligned = align_htf_to_ltf(prices, df_1d, trending_regime)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(pivot[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(trending_regime_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(ema_rising_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -124,15 +79,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla H3 AND trending regime AND volume spike
+            # Long conditions: price breaks above Camarilla H3 AND weekly EMA rising AND volume spike
             if (close[i] > camarilla_h3[i] and 
-                trending_regime_aligned[i] and 
+                ema_rising_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla L3 AND trending regime AND volume spike
+            # Short conditions: price breaks below Camarilla L3 AND weekly EMA falling AND volume spike
             elif (close[i] < camarilla_l3[i] and 
-                  trending_regime_aligned[i] and 
+                  (~ema_rising_aligned[i]) and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
