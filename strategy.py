@@ -3,30 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume confirmation
-# - Primary: 6h Williams %R(14) < -80 for long, > -20 for short (extreme oversold/overbought)
-# - HTF trend: 1w EMA(21) slope determines market regime (rising = long bias, falling = short bias)
-# - HTF volume: 1w volume > 1.5x 20-period MA for institutional participation
-# - Session filter: 08-20 UTC to avoid low-liquidity hours
-# - Long: Williams %R < -80 + rising 1w EMA slope + volume spike + session
-# - Short: Williams %R > -20 + falling 1w EMA slope + volume spike + session
-# - Exit: Williams %R crosses -50 (mean reversion complete) or EMA slope reverses
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
-# - Works in bull/bear: Williams %R captures mean reversion in ranges, EMA slope filters trend strength, volume confirms participation
+# Hypothesis: 6h Ichimoku Cloud + 1d Weekly Pivot Confluence for 6h timeframe
+# - Primary: 6h Ichimoku TK Cross (Tenkan/Kijun) with price above/below cloud for trend confirmation
+# - HTF: 1d Weekly Pivot levels (PP, R1/S1, R2/S2) for institutional reference points
+# - Entry: Long when TK Cross bullish + price > Kumo cloud + price > Weekly PP + volume > 1.2x MA
+#          Short when TK Cross bearish + price < Kumo cloud + price < Weekly PP + volume > 1.2x MA
+# - Exit: Opposite TK Cross or price crosses Weekly Pivot levels
+# - Session: 08-20 UTC for liquidity
+# - Position: 0.25 discrete to minimize fee churn
+# - Target: 80-120 total trades over 4 years (20-30/year) for 6h timeframe
+# - Works in bull/bear: Ichimoku adapts to trends, Weekly Pivots provide mean reversion levels in ranges
 
-name = "6h_1w_williamsr_mean_reversion_v1"
+name = "6h_1d_ichimoku_weekly_pivot_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -36,31 +35,75 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Calculate 6h Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate 1w EMA(21) and its slope
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Calculate EMA slope (rate of change over 3 periods)
-    ema_slope = np.zeros_like(ema_1w_aligned)
-    for i in range(3, len(ema_1w_aligned)):
-        if not np.isnan(ema_1w_aligned[i]) and not np.isnan(ema_1w_aligned[i-3]):
-            ema_slope[i] = (ema_1w_aligned[i] - ema_1w_aligned[i-3]) / 3
-        else:
-            ema_slope[i] = np.nan
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # Calculate 1w volume MA(20)
-    volume_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Kumo cloud boundaries (shifted 26 periods ahead)
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    senkou_a_shifted[:26] = np.nan
+    senkou_b_shifted[:26] = np.nan
+    
+    # Calculate 1d Weekly Pivot Points (using prior week's OHLC)
+    # For daily data, weekly pivot uses prior week's high, low, close
+    # We'll approximate using rolling window on daily data
+    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values  # 5 trading days
+    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values  # approx
+    
+    # Weekly Pivot Point (PP) = (High + Low + Close) / 3
+    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3
+    
+    # Weekly Resistance 1 (R1) = (2 * PP) - Low
+    weekly_r1 = 2 * weekly_pp - weekly_low
+    
+    # Weekly Support 1 (S1) = (2 * PP) - High
+    weekly_s1 = 2 * weekly_pp - weekly_high
+    
+    # Weekly Resistance 2 (R2) = PP + (High - Low)
+    weekly_r2 = weekly_pp + (weekly_high - weekly_low)
+    
+    # Weekly Support 2 (S2) = PP - (High - Low)
+    weekly_s2 = weekly_pp - (weekly_high - weekly_low)
+    
+    # Align HTF Ichimoku and Weekly Pivot data to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    senkou_a_shifted_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_shifted)
+    senkou_b_shifted_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_shifted)
+    
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1d, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    
+    # Calculate 1d volume MA(20) for confirmation
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -69,38 +112,62 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    for i in range(50, n):
+    for i in range(60, n):  # Start after warmup period
         # Skip if any required data is invalid or outside session
-        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(ema_slope[i]) or
-            np.isnan(volume_ma_20_1w_aligned[i]) or not in_session[i]):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(senkou_a_shifted_aligned[i]) or np.isnan(senkou_b_shifted_aligned[i]) or
+            np.isnan(weekly_pp_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1w volume > 1.5x 20-period MA
-        volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
-        volume_confirm = volume_1w_aligned[i] > 1.5 * volume_ma_20_1w_aligned[i]
+        # Volume confirmation: current 1d volume > 1.2x 20-period MA
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_confirm = volume_1d_aligned[i] > 1.2 * volume_ma_20_1d_aligned[i]
+        
+        # Determine Ichimoku trend
+        # Bullish: Tenkan > Kijun AND price > Senkou Span A AND price > Senkou Span B
+        # Bearish: Tenkan < Kijun AND price < Senkou Span A AND price < Senkou Span B
+        price = close[i]
+        tenkan_val = tenkan_aligned[i]
+        kijun_val = kijun_aligned[i]
+        senkou_a_val = senkou_a_aligned[i]
+        senkou_b_val = senkou_b_aligned[i]
+        
+        ichimoku_bullish = (tenkan_val > kijun_val) and (price > senkou_a_val) and (price > senkou_b_val)
+        ichimoku_bearish = (tenkan_val < kijun_val) and (price < senkou_a_val) and (price < senkou_b_val)
+        
+        # Weekly Pivot levels
+        pp = weekly_pp_aligned[i]
+        r1 = weekly_r1_aligned[i]
+        s1 = weekly_s1_aligned[i]
+        r2 = weekly_r2_aligned[i]
+        s2 = weekly_s2_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 + rising 1w EMA slope + volume spike + session
-            if (williams_r[i] < -80 and ema_slope[i] > 0 and volume_confirm):
+            # Long entry: Ichimoku bullish + price > Weekly PP + volume confirmation
+            if ichimoku_bullish and price > pp and volume_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R > -20 + falling 1w EMA slope + volume spike + session
-            elif (williams_r[i] > -20 and ema_slope[i] < 0 and volume_confirm):
+            # Short entry: Ichimoku bearish + price < Weekly PP + volume confirmation
+            elif ichimoku_bearish and price < pp and volume_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Williams %R crosses -50 (mean reversion complete) or EMA slope reverses
+            # Exit: Opposite Ichimoku Cross or price crosses Weekly Pivot levels
             if position == 1:  # Long position
-                if williams_r[i] > -50 or ema_slope[i] < 0:
+                exit_condition = (not ichimoku_bullish) or (price < s1)  # Exit if bearish or breaks S1
+                if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if williams_r[i] < -50 or ema_slope[i] > 0:
+                exit_condition = (not ichimoku_bearish) or (price > r1)  # Exit if bullish or breaks R1
+                if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
