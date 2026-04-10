@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend direction + RSI(14) mean reversion + choppiness regime filter
-# - KAMA(10,2,30) from 1d: trend direction (KAMA rising = long bias, falling = short bias)
-# - RSI(14) from 1d: long when RSI < 30 (oversold), short when RSI > 70 (overbought)
-# - Choppiness Index(14) from 1w: only trade when CHOP > 61.8 (ranging market) for mean reversion
-# - Designed for 1d timeframe: targets 15-30 trades/year to avoid fee drag
-# - Works in ranging markets: chop filter ensures we mean revert in sideways action
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX(14) > 25 trend filter and volume confirmation
+# - 12h Donchian(20): breakout above upper band = long, below lower band = short
+# - 1d ADX(14) > 25 ensures trending market, avoids choppy conditions
+# - Volume confirmation: current 12h volume > 2.0x 20-period average
+# - ATR-based trailing stop: exit long when price < highest_high - 2.5*ATR, short when price > lowest_low + 2.5*ATR
+# - Designed for 12h timeframe: targets 12-37 trades/year to avoid fee drag
+# - Works in bull/bear markets: ADX filter ensures we trade with higher timeframe trend
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Volatility-adjusted exit: reverse signal when RSI crosses 50 (mean reversion complete)
 
-name = "1d_1w_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,100 +21,118 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly for chop filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d KAMA(10,2,30) for trend direction
-    close_1d = prices['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, 10))
-    volatility = np.sum(np.abs(np.diff(close_1d, 1)), axis=1)
-    er = np.zeros_like(close_1d)
-    er[10:] = change / (volatility + 1e-10)
-    # Smoothing Constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA
-    kama = np.zeros_like(close_1d)
-    kama[9] = close_1d[9]
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
+    # Pre-compute 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute 1d RSI(14)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
-    
-    # Pre-compute 1w Choppiness Index(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    # Sum of TR over 14 periods
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    # Choppiness Index
-    chop = 100 * np.log10(tr_sum_14 / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
-    chop = np.concatenate([np.full(13, np.nan), chop])
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=0)
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute 12h Donchian channels (20-period)
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    
+    # Donchian upper band: highest high over past 20 periods
+    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower band: lowest low over past 20 periods
+    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 12h volume confirmation
+    volume_12h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h > (2.0 * avg_volume_20)
+    
+    # Pre-compute 12h ATR(14) for trailing stop
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_14 = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    highest_high = 0.0  # for trailing stop
+    lowest_low = 0.0    # for trailing stop
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_rising[i]) or np.isnan(kama_falling[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in ranging markets (chop > 61.8)
-        if chop_aligned[i] <= 61.8:
-            # Exit position if chop becomes too low (trending market)
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 1:  # Long position
-            # Exit: RSI crosses above 50 (mean reversion complete)
-            if rsi[i] > 50:
+            # Update highest high for trailing stop
+            if close_12h[i] > highest_high:
+                highest_high = close_12h[i]
+            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
+            if close_12h[i] < highest_high - 2.5 * atr_14[i] or close_12h[i] < highest_20[i]:
                 position = 0
+                highest_high = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: RSI crosses below 50 (mean reversion complete)
-            if rsi[i] < 50:
+            # Update lowest low for trailing stop
+            if close_12h[i] < lowest_low:
+                lowest_low = close_12h[i]
+            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
+            if close_12h[i] > lowest_low + 2.5 * atr_14[i] or close_12h[i] > lowest_20[i]:
                 position = 0
+                lowest_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for mean reversion entries aligned with KAMA trend
-            if kama_rising[i] and rsi[i] < 30:
-                # Long bias + oversold = long
-                position = 1
-                signals[i] = 0.25
-            elif kama_falling[i] and rsi[i] > 70:
-                # Short bias + overbought = short
-                position = -1
-                signals[i] = -0.25
+            # Look for Donchian breakout with trend and volume filters
+            if vol_spike[i] and adx_aligned[i] > 25:
+                # Breakout long: price closes above upper Donchian band
+                if close_12h[i] > highest_20[i]:
+                    position = 1
+                    entry_price = close_12h[i]
+                    highest_high = close_12h[i]
+                    signals[i] = 0.25
+                # Breakout short: price closes below lower Donchian band
+                elif close_12h[i] < lowest_20[i]:
+                    position = -1
+                    entry_price = close_12h[i]
+                    lowest_low = close_12h[i]
+                    signals[i] = -0.25
     
     return signals
