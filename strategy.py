@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume spike
-# - Williams %R(14) on 6h: oversold < -80, overbought > -20
-# - 1d EMA50 trend filter: price > EMA50 = bullish bias, price < EMA50 = bearish bias
-# - 6h volume spike: current volume > 1.5x 20-period average for confirmation
-# - Long: Williams %R crosses above -80 (from below) AND 1d bullish trend AND volume spike
-# - Short: Williams %R crosses below -20 (from above) AND 1d bearish trend AND volume spike
+# Hypothesis: 12h Williams %R with 1w EMA200 trend filter and volume spike
+# - Williams %R(14) on 12h: oversold < -80, overbought > -20
+# - 1w EMA200 trend filter: price > EMA200 = bullish bias, price < EMA200 = bearish bias
+# - 12h volume spike: current volume > 1.5x 20-period average for confirmation
+# - Long: Williams %R crosses above -80 (from below) AND 1w bullish trend AND volume spike
+# - Short: Williams %R crosses below -20 (from above) AND 1w bearish trend AND volume spike
 # - Exit: Williams %R crosses opposite threshold (-20 for longs, -80 for shorts) OR volume drops below average
-# - Target: 12-30 trades/year on 6h (50-120 total over 4 years) to avoid fee drag
+# - Target: 12-37 trades/year on 12h (50-150 total over 4 years) to avoid fee drag
 
-name = "6h_1d_williamsr_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1w_williamsr_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,16 +22,16 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Pre-compute 1w EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Pre-compute 6h Williams %R(14)
+    # Pre-compute 12h Williams %R(14)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -43,14 +43,14 @@ def generate_signals(prices):
                           ((highest_high - close) / (highest_high - lowest_low)) * -100,
                           -50.0)  # neutral when range=0
     
-    # Pre-compute 6h volume average (20-period)
+    # Pre-compute 12h volume average (20-period)
     volume = prices['volume'].values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(200, n):  # Start after warmup for EMA200
         # Skip if any required data is invalid
         if (np.isnan(williams_r[i]) or np.isnan(trend_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
@@ -78,13 +78,13 @@ def generate_signals(prices):
         # Exit short: WR crosses below -80 (oversold)
         exit_short = (wr_prev > -80 and wr_now <= -80)
         
-        # 1d trend filter: price > EMA50 = bullish, price < EMA50 = bearish
-        close_1d_current = df_1d['close'].values
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_current)
-        bullish_trend = not np.isnan(close_1d_aligned[i]) and not np.isnan(trend_aligned[i]) and \
-                        close_1d_aligned[i] > trend_aligned[i]
-        bearish_trend = not np.isnan(close_1d_aligned[i]) and not np.isnan(trend_aligned[i]) and \
-                        close_1d_aligned[i] < trend_aligned[i]
+        # 1w trend filter: price > EMA200 = bullish, price < EMA200 = bearish
+        close_1w_current = df_1w['close'].values
+        close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w_current)
+        bullish_trend = not np.isnan(close_1w_aligned[i]) and not np.isnan(trend_aligned[i]) and \
+                        close_1w_aligned[i] > trend_aligned[i]
+        bearish_trend = not np.isnan(close_1w_aligned[i]) and not np.isnan(trend_aligned[i]) and \
+                        close_1w_aligned[i] < trend_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long conditions: WR crosses above -80 AND bullish trend AND volume spike
