@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1w volume spike + chop regime filter
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + chop regime filter
 # - Primary: 12h Donchian breakout (20-period) for trend continuation
-# - HTF: 1w volume > 2.0x 24-period MA for institutional participation confirmation
+# - HTF: 1d volume > 2.0x 24-period MA for institutional participation confirmation
 # - Regime filter: 12h Choppiness Index (14) < 38.2 = trending market (breakout continuation)
 # - Long: Price breaks above Donchian(20) upper + volume confirmation + chop trending
 # - Short: Price breaks below Donchian(20) lower + volume confirmation + chop trending
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Works in bull/bear: Donchian captures breakouts in trending markets, volume filters weak moves, chop filter avoids false breakouts in ranging markets
 # - Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "12h_1w_donchian_volume_chop_v1"
+name = "12h_1d_donchian_volume_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,8 +24,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,10 +35,10 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 12h Donchian channels (20-period)
     donchian_upper = np.full(len(close), np.nan)
@@ -78,14 +78,14 @@ def generate_signals(prices):
             if atr_sum[i] > 0 and (highest_high - lowest_low) > 0:
                 chop[i] = 100 * np.log10(atr_sum[i] / (highest_high - lowest_low)) / np.log10(14)
     
-    # Calculate 1w volume moving average (24-period)
-    volume_ma_24_1w = np.full(len(volume_1w), np.nan)
-    for i in range(23, len(volume_1w)):
-        if not np.isnan(volume_1w[i-23:i+1]).any():
-            volume_ma_24_1w[i] = np.mean(volume_1w[i-23:i+1])
+    # Calculate 1d volume moving average (24-period)
+    volume_ma_24_1d = np.full(len(volume_1d), np.nan)
+    for i in range(23, len(volume_1d)):
+        if not np.isnan(volume_1d[i-23:i+1]).any():
+            volume_ma_24_1d[i] = np.mean(volume_1d[i-23:i+1])
     
     # Align HTF indicators to 12h timeframe
-    volume_ma_24_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_24_1w)
+    volume_ma_24_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_24_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -94,13 +94,13 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(donchian_mid[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_ma_24_1w_aligned[i])):
+            np.isnan(volume_ma_24_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1w volume > 2.0x 24-period MA
-        volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
-        volume_confirm = volume_1w_aligned[i] > 2.0 * volume_ma_24_1w_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 24-period MA
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_confirm = volume_1d_aligned[i] > 2.0 * volume_ma_24_1d_aligned[i]
         
         # Chop regime filter: CHOP < 38.2 = trending market (breakout continuation)
         chop_trending = chop[i] < 38.2
