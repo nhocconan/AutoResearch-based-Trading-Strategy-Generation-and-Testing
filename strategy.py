@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian channel breakout with 1w volume confirmation and ATR filter
-# - Long when price breaks above 20-period Donchian high (1d) AND 1w volume > 1.3x 20-bar avg AND ATR(14) < 0.02 * close (low volatility)
-# - Short when price breaks below 20-period Donchian low (1d) AND 1w volume > 1.3x 20-bar avg AND ATR(14) < 0.02 * close
-# - Exit when price crosses 10-period EMA (1d) in opposite direction
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR-based stoploss
+# - Long when price breaks above Camarilla R4 (1d) AND 1d volume > 1.5x 20-bar avg
+# - Short when price breaks below Camarilla S4 (1d) AND 1d volume > 1.5x 20-bar avg
+# - Exit when price returns to Camarilla PP (pivot point) from 1d OR ATR stoploss triggered
+# - ATR stoploss: 2.5 * ATR(14) from entry price (tracked via position state)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Donchian breakouts capture strong momentum moves; volume confirms institutional participation
-# - ATR filter ensures trades occur in normal volatility conditions, avoiding chop
-# - EMA exit provides timely mean reversion to the trend
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Camarilla levels provide precise support/resistance; volume confirms institutional participation
+# - ATR stoploss controls downside in volatile markets, improving survival in bear markets
 
-name = "1d_donchian_breakout_volume_atr_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,42 +23,53 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute 1d Donchian channels (20-period)
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
+    # Pre-compute Camarilla pivot levels from 1d data (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2.0)
+    camarilla_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2.0)
     
-    # Pre-compute 1d 10-period EMA for exit
-    ema_10 = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Pre-compute 1d ATR(14) for volatility filter
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_14[0:13] = np.nan  # First 13 values invalid
+    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * volume_20_avg)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute 1w volume confirmation: > 1.3x 20-period average
-    volume_1w = df_1w['volume'].values
-    volume_20_avg = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (1.3 * volume_20_avg)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
+    # Pre-compute ATR(14) for stoploss on primary timeframe
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # True Range calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar: no previous close
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0  # Track entry price for ATR stoploss
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_10[i]) or np.isnan(atr_14[i]) or np.isnan(vol_spike_1w_aligned[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or
+            np.isnan(atr[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -68,36 +79,41 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volatility filter: only trade when ATR < 2% of price (low volatility environment)
-        vol_filter = atr_14[i] < (0.02 * close_1d[i])
-        
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian high AND 1w volume spike AND low volatility
-            if (prices['high'].iloc[i] > donchian_high[i] and 
-                vol_spike_1w_aligned[i] and 
-                vol_filter):
+            # Long when price breaks above Camarilla R4 AND 1d volume spike
+            if (prices['high'].iloc[i] > camarilla_r4_aligned[i] and 
+                vol_spike_1d_aligned[i]):
                 position = 1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = 0.25
-            # Short when price breaks below Donchian low AND 1w volume spike AND low volatility
-            elif (prices['low'].iloc[i] < donchian_low[i] and 
-                  vol_spike_1w_aligned[i] and 
-                  vol_filter):
+            # Short when price breaks below Camarilla S4 AND 1d volume spike
+            elif (prices['low'].iloc[i] < camarilla_s4_aligned[i] and 
+                  vol_spike_1d_aligned[i]):
                 position = -1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit when price crosses 10 EMA
-            # Exit when price crosses 10 EMA in opposite direction
+        else:  # Have position - look for exit conditions
             exit_signal = False
+            
+            # Exit when price returns to Camarilla pivot point (mean reversion)
             if position == 1:  # Long position
-                if prices['close'].iloc[i] < ema_10[i]:
+                if prices['low'].iloc[i] <= camarilla_pp_aligned[i]:
+                    exit_signal = True
+                # ATR stoploss: exit if price drops below entry - 2.5*ATR
+                elif prices['low'].iloc[i] < entry_price - 2.5 * atr[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if prices['close'].iloc[i] > ema_10[i]:
+                if prices['high'].iloc[i] >= camarilla_pp_aligned[i]:
+                    exit_signal = True
+                # ATR stoploss: exit if price rises above entry + 2.5*ATR
+                elif prices['high'].iloc[i] > entry_price + 2.5 * atr[i]:
                     exit_signal = True
             
             if exit_signal:
                 position = 0
+                entry_price = 0.0
                 signals[i] = 0.0
             else:
                 if position == 1:
