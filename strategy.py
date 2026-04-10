@@ -3,109 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX regime filter
-# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# - Long when Bull Power > 0 AND ADX(14) > 25 AND +DI > -DI (strong uptrend)
-# - Short when Bear Power < 0 AND ADX(14) > 25 AND -DI > +DI (strong downtrend)
-# - Exit when ADX < 20 (trend weakening) or Elder Power reverses
+# Hypothesis: 12h Williams Alligator + 1w EMA trend filter + volume confirmation
+# - Williams Alligator: Jaw (EMA13, shift8), Teeth (EMA8, shift5), Lips (EMA5, shift3)
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND 1w close > 1w EMA(34) AND 12h volume > 1.5x 20-period average
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND 1w close < 1w EMA(34) AND 12h volume > 1.5x 20-period average
+# - Exit when Alligator lines re-cross (Lips crosses Teeth)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets by trading with the strong trend (ADX > 25)
+# - Alligator identifies trend emergence; weekly EMA filter ensures higher timeframe trend alignment
+# - Volume confirmation reduces false breakouts
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "6h_1d_elder_ray_adx_v1"
-timeframe = "6h"
+name = "12h_1w_alligator_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_1w) < 50 or len(df_12h) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC
+    # Pre-compute 12h OHLC
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Pre-compute 6h EMA(13) for Elder Ray
-    def ema(arr, span):
+    # Pre-compute 12h Williams Alligator
+    # Jaw: EMA(13, shift=8)
+    jaw = np.full_like(close, np.nan, dtype=float)
+    if len(close) >= 13:
+        jaw[12] = np.mean(close[:13])  # SMA seed
+        for i in range(13, len(close)):
+            jaw[i] = (close[i] * 2 + jaw[i-1] * 12) / 14  # EMA(13)
+    jaw = np.roll(jaw, 8)  # shift 8 bars forward
+    
+    # Teeth: EMA(8, shift=5)
+    teeth = np.full_like(close, np.nan, dtype=float)
+    if len(close) >= 8:
+        teeth[7] = np.mean(close[:8])  # SMA seed
+        for i in range(8, len(close)):
+            teeth[i] = (close[i] * 2 + teeth[i-1] * 7) / 10  # EMA(8)
+    teeth = np.roll(teeth, 5)  # shift 5 bars forward
+    
+    # Lips: EMA(5, shift=3)
+    lips = np.full_like(close, np.nan, dtype=float)
+    if len(close) >= 5:
+        lips[4] = np.mean(close[:5])  # SMA seed
+        for i in range(5, len(close)):
+            lips[i] = (close[i] * 2 + lips[i-1] * 4) / 6  # EMA(5)
+    lips = np.roll(lips, 3)  # shift 3 bars forward
+    
+    # Pre-compute 12h ATR (14-period) for dynamic stop
+    def true_range(h, l, c_prev):
+        tr1 = h - l
+        tr2 = np.abs(h - c_prev)
+        tr3 = np.abs(l - c_prev)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    tr = np.zeros_like(high)
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(high)):
+        tr[i] = true_range(high[i], low[i], close[i-1])
+    
+    atr = np.zeros_like(tr)
+    atr[13] = np.mean(tr[1:15])  # First ATR value
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Pre-compute 12h volume average (20-period)
+    def rolling_mean(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < span:
-            return result
-        multiplier = 2 / (span + 1)
-        result[span-1] = np.mean(arr[:span])  # SMA seed
-        for i in range(span, len(arr)):
-            result[i] = (arr[i] * multiplier) + (result[i-1] * (1 - multiplier))
+        for i in range(window - 1, len(arr)):
+            result[i] = np.mean(arr[i - window + 1:i + 1])
         return result
     
-    ema_13 = ema(close, 13)
+    vol_ma_12h = rolling_mean(volume, 20)
     
-    # Pre-compute 6h Elder Ray
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Pre-compute 1w EMA(34)
+    close_1w = df_1w['close'].values
+    ema_34_1w = np.full_like(close_1w, np.nan, dtype=float)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[:34])  # SMA seed
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = (close_1w[i] * 2 + ema_34_1w[i-1] * 32) / 34  # EMA(34)
     
-    # Pre-compute 1d ADX components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr = np.zeros_like(high_1d)
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(high_1d)):
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - close_1d[i-1]), 
-                   abs(low_1d[i] - close_1d[i-1]))
-    
-    # +DM and -DM
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1  # positive values
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smooth(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Wilder's smoothing: today = (yesterday * (period-1) + today) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    atr_1d = wilders_smooth(tr, 14)
-    plus_dm_smooth = wilders_smooth(plus_dm, 14)
-    minus_dm_smooth = wilders_smooth(minus_dm, 14)
-    
-    # +DI and -DI
-    plus_di = np.where(atr_1d != 0, 100 * plus_dm_smooth / atr_1d, 0)
-    minus_di = np.where(atr_1d != 0, 100 * minus_dm_smooth / atr_1d, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * abs(plus_di - minus_di) / (plus_di + minus_di), 
-                  0)
-    adx = wilders_smooth(dx, 14)
-    
-    # Align HTF indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    # Align HTF indicators to 12h timeframe
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(ema_34_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -115,28 +113,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power positive AND strong uptrend (ADX>25 and +DI > -DI)
-            if (bull_power[i] > 0 and 
-                adx_aligned[i] > 25 and 
-                plus_di_aligned[i] > minus_di_aligned[i]):
+            # Volume spike condition
+            vol_spike = not np.isnan(vol_ma_12h_aligned[i]) and volume[i] > 1.5 * vol_ma_12h_aligned[i]
+            
+            # Long conditions: Alligator bullish alignment AND volume spike AND 1w uptrend
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and vol_spike and 
+                close[i] > ema_34_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power negative AND strong downtrend (ADX>25 and -DI > +DI)
-            elif (bear_power[i] < 0 and 
-                  adx_aligned[i] > 25 and 
-                  minus_di_aligned[i] > plus_di_aligned[i]):
+            # Short conditions: Alligator bearish alignment AND volume spike AND 1w downtrend
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and vol_spike and 
+                  close[i] < ema_34_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: trend weakening (ADX < 20) or Elder Power reverses
-            exit_long = (position == 1 and 
-                        (adx_aligned[i] < 20 or bull_power[i] <= 0))
-            exit_short = (position == -1 and 
-                         (adx_aligned[i] < 20 or bear_power[i] >= 0))
+            # Exit conditions: Alligator lines re-cross (Lips crosses Teeth)
+            exit_long = (position == 1 and lips[i] <= teeth[i])
+            exit_short = (position == -1 and lips[i] >= teeth[i])
             
-            if exit_long or exit_short:
+            # Optional: ATR-based stoploss
+            stop_long = (position == 1 and close[i] <= high[i] - 2.5 * atr[i])
+            stop_short = (position == -1 and close[i] >= low[i] + 2.5 * atr[i])
+            
+            if exit_long or exit_short or stop_long or stop_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -146,3 +147,18 @@ def generate_signals(prices):
                     signals[i] = -0.25
     
     return signals
+
+def rolling_mean(arr, window):
+    result = np.full_like(arr, np.nan, dtype=float)
+    for i in range(window - 1, len(arr)):
+        result[i] = np.mean(arr[i - window + 1:i + 1])
+    return result
+
+if __name__ == "__main__":
+    # Quick sanity check
+    print("Strategy: 12h Williams Alligator + 1w EMA + Volume")
+    print("Timeframe:", timeframe)
+    print("Leverage:", leverage)
+    print("Discrete position sizing: ±0.25")
+    print("Entry conditions: Alligator alignment + volume spike + weekly EMA filter")
+    print("Exit conditions: Alligator re-cross or ATR stop")
