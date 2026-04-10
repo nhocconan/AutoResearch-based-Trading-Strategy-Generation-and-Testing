@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and 1w ADX trend filter
-# - Camarilla levels from 1d: R4/S4 for breakout continuation (strong momentum)
-# - 1w ADX(14) > 25 to ensure strong weekly trend and avoid choppy markets
-# - Volume confirmation: current 4h volume > 1.8x 30-period average to confirm institutional interest
-# - Designed for 4h timeframe: targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
-# - Works in bull/bear markets: weekly ADX filter ensures we trade with higher timeframe trend
+# Hypothesis: 6h Williams Fractal breakout with 1d EMA200 trend filter and volume confirmation
+# - Williams Fractals from 1d: bearish fractal (sell signal) when price breaks below, bullish fractal (buy signal) when price breaks above
+# - 1d EMA200 as trend filter: only take longs when price > EMA200 (bullish regime), shorts when price < EMA200 (bearish regime)
+# - Volume confirmation: current 6h volume > 2.0x 20-period average to confirm institutional interest
+# - Designed for 6h timeframe: targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Works in bull/bear markets: 1d EMA200 filter ensures we trade with higher timeframe trend
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - ATR-based stoploss: exit when price moves against position by 2.5x ATR(20)
 
-name = "4h_1d_1w_camarilla_adx_volume_atr_v1"
-timeframe = "4h"
+name = "6h_1d_williams_fractal_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,79 +22,43 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Pre-compute 1w ADX(14) for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Pre-compute 1d Camarilla levels
+    # Williams Fractals calculation (5-bar pattern)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    
+    # Initialize fractal arrays
+    bearish_fractal = np.full(len(high_1d), np.nan)  # High fractal (sell signal)
+    bullish_fractal = np.full(len(high_1d), np.nan)  # Low fractal (buy signal)
+    
+    # Williams Fractal: need 2 bars on each side (5-bar pattern)
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: middle bar has highest high
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        # Bullish fractal: middle bar has lowest low
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Camarilla levels calculation
-    rango = high_1d - low_1d
-    camarilla_r3 = close_1d + (rango * 1.1 / 4)
-    camarilla_s3 = close_1d - (rango * 1.1 / 4)
-    camarilla_r4 = close_1d + (rango * 1.1 / 2)
-    camarilla_s4 = close_1d - (rango * 1.1 / 2)
+    # Align HTF indicators to 6s timeframe with proper delay
+    # Williams fractals need 2 extra bars for confirmation (pattern completion)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Pre-compute 4h ATR(20) for stoploss
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    
-    # True Range for 4h
-    tr1_4h = high_4h - low_4h
-    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    tr_4h[0] = tr1_4h[0]
-    
-    atr_20 = pd.Series(tr_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Pre-compute 4h volume confirmation
-    volume_4h = prices['volume'].values
-    avg_volume_30 = pd.Series(volume_4h).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume_4h > (1.8 * avg_volume_30)
+    # Pre-compute 6h volume confirmation
+    volume_6h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_6h > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -103,38 +66,42 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_spike[i]) or
-            np.isnan(atr_20[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_200_aligned[i]) or np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: ATR-based stoploss or price closes below S3 (mean reversion failure)
-            if prices['close'].iloc[i] < entry_price - 2.5 * atr_20[i] or prices['close'].iloc[i] < camarilla_s3_aligned[i]:
+            # Exit: price closes below bullish fractal (failed breakout) or EMA200
+            if (prices['close'].iloc[i] < bullish_fractal_aligned[i] or 
+                prices['close'].iloc[i] < ema_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: ATR-based stoploss or price closes above R3 (mean reversion failure)
-            if prices['close'].iloc[i] > entry_price + 2.5 * atr_20[i] or prices['close'].iloc[i] > camarilla_r3_aligned[i]:
+            # Exit: price closes above bearish fractal (failed breakout) or EMA200
+            if (prices['close'].iloc[i] > bearish_fractal_aligned[i] or 
+                prices['close'].iloc[i] > ema_200_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with trend and volume filters
-            if vol_spike[i] and adx_aligned[i] > 25:
-                # Breakout long: price closes above R4 (strong bullish breakout)
-                if prices['close'].iloc[i] > camarilla_r4_aligned[i]:
+            # Look for fractal breakout with trend and volume filters
+            if vol_spike[i]:
+                # Breakout long: price closes above bullish fractal AND above EMA200 (bullish regime)
+                if (not np.isnan(bullish_fractal_aligned[i]) and 
+                    prices['close'].iloc[i] > bullish_fractal_aligned[i] and
+                    prices['close'].iloc[i] > ema_200_aligned[i]):
                     position = 1
                     entry_price = prices['close'].iloc[i]
                     signals[i] = 0.25
-                # Breakout short: price closes below S4 (strong bearish breakout)
-                elif prices['close'].iloc[i] < camarilla_s4_aligned[i]:
+                # Breakout short: price closes below bearish fractal AND below EMA200 (bearish regime)
+                elif (not np.isnan(bearish_fractal_aligned[i]) and 
+                      prices['close'].iloc[i] < bearish_fractal_aligned[i] and
+                      prices['close'].iloc[i] < ema_200_aligned[i]):
                     position = -1
                     entry_price = prices['close'].iloc[i]
                     signals[i] = -0.25
