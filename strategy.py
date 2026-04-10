@@ -3,15 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) high with volume > 1.5x 20-bar avg AND 1w close > 1w EMA50
-# - Short when price breaks below Donchian(20) low with volume > 1.5x 20-bar avg AND 1w close < 1w EMA50
-# - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets ~15 trades/year (60 total over 4 years) to avoid fee drag
-# - 1w trend filter ensures we only trade with the higher timeframe trend
-# - Volume confirmation ensures institutional participation in breakouts
+# Hypothesis: 1d Weekly Camarilla Pivot Breakout with Volume Confirmation
+# - Uses weekly Camarilla pivot levels (H3/L3) as strong support/resistance
+# - Long when price breaks above weekly H3 with volume > 1.8x 20-day average AND price > weekly EMA50
+# - Short when price breaks below weekly L3 with volume > 1.8x 20-day average AND price < weekly EMA50
+# - Exit when price returns to weekly pivot point (mean reversion to equilibrium)
+# - Weekly trend filter ensures alignment with higher timeframe momentum
+# - Volume spike confirms institutional participation in breakouts
+# - Target: 8-12 trades/year (32-48 over 4 years) to minimize fee drag
+# - Weekly Camarilla levels are more significant than daily, reducing false breakouts
+# - Works in both bull (breakouts continue) and bear (mean reversion to pivot) markets
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
+name = "1d_weekly_camarilla_breakout_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -26,50 +29,64 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Pre-compute 1w indicators
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # 1w EMA(50) for trend filter
+    # Weekly Camarilla pivot levels (based on prior week)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # H3 = Pivot + Range * 1.1/2
+    # L3 = Pivot - Range * 1.1/2
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    h3_1w = pivot_1w + (range_1w * 1.1 / 2.0)
+    l3_1w = pivot_1w - (range_1w * 1.1 / 2.0)
+    
+    # Align weekly levels to daily timeframe (available after weekly close)
+    h3_1w_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
+    l3_1w_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    
+    # Weekly EMA(50) for trend filter
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pre-compute 1d Donchian channels
-    highest_high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
-    
-    # 1d volume confirmation: > 1.5x 20-period average
+    # Pre-compute 1d indicators
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(h3_1w_aligned[i]) or np.isnan(l3_1w_aligned[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_20_avg[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long signal: price breaks above Donchian high with volume spike and 1w uptrend
-            if (prices['close'].iloc[i] > highest_high_20[i] and 
+            # Long signal: price breaks above weekly H3 with volume spike and weekly uptrend
+            if (prices['close'].iloc[i] > h3_1w_aligned[i] and 
                 vol_spike.iloc[i] and 
                 prices['close'].iloc[i] > ema_50_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short signal: price breaks below Donchian low with volume spike and 1w downtrend
-            elif (prices['close'].iloc[i] < lowest_low_20[i] and 
+            # Short signal: price breaks below weekly L3 with volume spike and weekly downtrend
+            elif (prices['close'].iloc[i] < l3_1w_aligned[i] and 
                   vol_spike.iloc[i] and 
                   prices['close'].iloc[i] < ema_50_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
-        else:  # Have position - look for exit
-            # Exit long when price returns to Donchian midpoint
-            if position == 1 and prices['close'].iloc[i] < (highest_high_20[i] + lowest_low_20[i]) / 2:
+        else:  # Have position - look for exit to weekly pivot (mean reversion)
+            # Exit long when price returns to weekly pivot point
+            if position == 1 and prices['close'].iloc[i] < pivot_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
-            # Exit short when price returns to Donchian midpoint
-            elif position == -1 and prices['close'].iloc[i] > (highest_high_20[i] + lowest_low_20[i]) / 2:
+            # Exit short when price returns to weekly pivot point
+            elif position == -1 and prices['close'].iloc[i] > pivot_1w_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             # Hold position otherwise
