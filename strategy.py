@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility filter and volume confirmation
-# - Long: Price breaks above Donchian(20) high + 1d ATR(14) > 1.5x 50-period MA of ATR + 1d volume > 1.3x 20-period MA
-# - Short: Price breaks below Donchian(20) low + 1d ATR(14) > 1.5x 50-period MA of ATR + 1d volume > 1.3x 20-period MA
-# - Exit: Price returns to Donchian(20) midpoint
-# - Position sizing: 0.25 (discrete level)
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR volatility filter
+# - Long: Price breaks above Camarilla H3 level + 1d volume > 1.5x 20-period MA + 1d ATR(14) > 1.2x ATR MA(50)
+# - Short: Price breaks below Camarilla L3 level + same volume/volatility conditions
+# - Exit: Price returns to Camarilla pivot point (PP)
+# - Uses 1d HTF for volume and volatility to ensure breakouts occur with institutional participation
+# - Volatility filter avoids low-momentum environments; volume confirmation reduces false breakouts
+# - Works in bull/bear: breakouts with volume/volatility confirmation capture strong moves while avoiding chop
 # - Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
-# - Uses 1d HTF for volatility and volume to ensure breakouts occur with institutional participation
-# - Volatility filter ensures we only trade during periods of elevated market activity
-# - Works in bull/bear: breakouts in trends with volume/volatility confirmation reduce false signals
 
-name = "4h_1d_donchian_breakout_vol_volume_v1"
+name = "4h_1d_camarilla_breakout_vol_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,12 +26,11 @@ def generate_signals(prices):
     if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLCV
+    # Pre-compute 4h OHLC
     open_4h = prices['open'].values
     high_4h = prices['high'].values
     low_4h = prices['low'].values
     close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -40,10 +38,16 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian(20) for 4h
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate Camarilla levels from previous 1d bar
+    # H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
+    # L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
+    # PP = (high + low + close)/3
+    rng = high_1d - low_1d
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_h3 = close_1d + 1.1 * rng * 1.1 / 4.0
+    camarilla_l3 = close_1d - 1.1 * rng * 1.1 / 4.0
+    camarilla_h4 = close_1d + 1.1 * rng * 1.1 / 2.0
+    camarilla_l4 = close_1d - 1.1 * rng * 1.1 / 2.0
     
     # Calculate 1d ATR(14)
     tr1 = pd.Series(high_1d - low_1d)
@@ -66,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(60, n):  # Start after warmup period (need at least 60 for ATR14 and ATR MA50)
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(camarilla_pp[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
             np.isnan(atr_14_aligned[i]) or np.isnan(atr_ma_50_aligned[i]) or 
             np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
@@ -80,30 +84,33 @@ def generate_signals(prices):
         atr_ma_50_current = atr_ma_50_aligned[i]
         volume_ma_current = volume_ma_aligned[i]
         volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        camarilla_pp_current = camarilla_pp[i]
+        camarilla_h3_current = camarilla_h3[i]
+        camarilla_l3_current = camarilla_l3[i]
         
-        # Volatility condition: current 1d ATR > 1.5x 50-period MA of ATR
-        vol_condition = atr_14_current > 1.5 * atr_ma_50_current
+        # Volatility condition: current 1d ATR > 1.2x 50-period MA of ATR
+        vol_condition = atr_14_current > 1.2 * atr_ma_50_current
         
-        # Volume spike condition: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d_current > 1.3 * volume_ma_current
+        # Volume spike condition: current 1d volume > 1.5x 20-period MA
+        volume_spike = volume_1d_current > 1.5 * volume_ma_current
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above Donchian(20) high + volatility condition + volume spike
-            if (close_price > highest_high[i] and vol_condition and volume_spike):
+            # Long entry: Price breaks above Camarilla H3 + volatility condition + volume spike
+            if (close_price > camarilla_h3_current and vol_condition and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian(20) low + volatility condition + volume spike
-            elif (close_price < lowest_low[i] and vol_condition and volume_spike):
+            # Short entry: Price breaks below Camarilla L3 + volatility condition + volume spike
+            elif (close_price < camarilla_l3_current and vol_condition and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when price returns to Donchian(20) midpoint
-            if position == 1 and close_price <= donchian_mid[i]:
+            # Exit when price returns to Camarilla pivot point (PP)
+            if position == 1 and close_price <= camarilla_pp_current:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close_price >= donchian_mid[i]:
+            elif position == -1 and close_price >= camarilla_pp_current:
                 position = 0
                 signals[i] = 0.0
             else:
