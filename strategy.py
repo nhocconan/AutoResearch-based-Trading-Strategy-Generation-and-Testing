@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d Volume Spike + ATR Trailing Stop
-# - Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend direction and strength
-# - Trend is strong when all three lines are aligned (Jaw > Teeth > Lips for uptrend, reverse for downtrend)
+# Hypothesis: 4h Williams %R + 1d Volume Spike + ATR Trailing Stop
+# - Williams %R(14) identifies overbought/oversold levels: > -20 = overbought, < -80 = oversold
+# - Trend filter: price > EMA(50) for long, price < EMA(50) for short to avoid counter-trend entries
 # - 1d volume spike (>2.0x 20-day average) confirms institutional participation
 # - ATR(14) trailing stop (2.5x) manages risk and adapts to volatility
 # - Discrete position sizing (0.25) minimizes fee churn
-# - Target: 12-30 trades/year (50-120 total over 4 years) to avoid fee drag
-# - Works in bull/bear: Alligator filters choppy markets, volume avoids false signals, ATR stop controls drawdown
+# - Target: 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Works in bull/bear: %R catches reversals in ranging markets, EMA filter avoids whipsaws in trends,
+#   volume avoids false signals, ATR stop controls drawdown
 
-name = "12h_1d_alligator_volume_v1"
-timeframe = "12h"
+name = "4h_1d_williamsr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,46 +47,22 @@ def generate_signals(prices):
     atr_volume_ma_20_1d = pd.Series(atr_volume_1d).rolling(window=20, min_periods=20).mean().values
     atr_volume_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_volume_ma_20_1d)
     
-    # Pre-compute 12h Williams Alligator
-    # Jaw: 13-period SMMA (smoothed moving average) of median price, shifted 8 bars forward
-    # Teeth: 8-period SMMA of median price, shifted 5 bars forward
-    # Lips: 5-period SMMA of median price, shifted 3 bars forward
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    median_price = (high_12h + low_12h + close_12h) / 3.0
+    # Pre-compute 4h Williams %R (14-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Smoothed Moving Average (SMMA) = EMA with alpha = 1/period
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        alpha = 1.0 / period
-        # First value is SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (Prev SMMA * (period-1) + Current Price) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_4h) / (highest_high_14 - lowest_low_14)
     
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
+    # Pre-compute 4h EMA(50) for trend filter
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Shift as per Alligator specification: Jaw=8, Teeth=5, Lips=3
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Invalidate shifted values that rolled from end
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-    
-    # Pre-compute 12h ATR for trailing stop (14-period)
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    # Pre-compute 4h ATR for trailing stop (14-period)
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
@@ -100,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or 
-            np.isnan(atr_volume_ma_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50[i]) or np.isnan(atr[i]) or 
+            np.isnan(atr_volume_ma_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -117,25 +94,28 @@ def generate_signals(prices):
         # Volume confirmation: current 1d ATR volume > 2.0x 20-day average
         volume_confirm = atr_volume_1d_aligned[i] > 2.0 * atr_volume_ma_aligned[i]
         
-        # Alligator trend conditions
-        jaw_val = jaw_shifted[i]
-        teeth_val = teeth_shifted[i]
-        lips_val = lips_shifted[i]
+        # Williams %R conditions
+        wr_value = williams_r[i]
+        close_price = close_4h[i]
+        ema_value = ema_50[i]
         
-        # Strong uptrend: Jaw > Teeth > Lips (all aligned upward)
-        strong_uptrend = jaw_val > teeth_val and teeth_val > lips_val
-        # Strong downtrend: Jaw < Teeth < Lips (all aligned downward)
-        strong_downtrend = jaw_val < teeth_val and teeth_val < lips_val
+        # Oversold conditions for long: Williams %R < -80 AND price > EMA(50) (uptrend filter)
+        oversold = wr_value < -80
+        uptrend_filter = close_price > ema_value
+        
+        # Overbought conditions for short: Williams %R > -20 AND price < EMA(50) (downtrend filter)
+        overbought = wr_value > -20
+        downtrend_filter = close_price < ema_value
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Strong uptrend AND volume confirmation
-            if strong_uptrend and volume_confirm:
+            # Long conditions: Oversold AND volume confirmation AND uptrend filter
+            if oversold and volume_confirm and uptrend_filter:
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: Strong downtrend AND volume confirmation
-            elif strong_downtrend and volume_confirm:
+            # Short conditions: Overbought AND volume confirmation AND downtrend filter
+            elif overbought and volume_confirm and downtrend_filter:
                 position = -1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 lowest_since_entry = prices['low'].iloc[i]
