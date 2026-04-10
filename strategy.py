@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with weekly trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level AND weekly trend is up (price > weekly EMA20)
-# - Short when price breaks below Camarilla L3 level AND weekly trend is down (price < weekly EMA20)
-# - Volume confirmation: 1d volume > 1.5x 20-period 1d volume SMA
-# - Exit: Price returns to Camarilla pivot level (midpoint) or opposite breakout with volume
+# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla R4 level AND 1d close > 1d EMA50 (uptrend) AND volume > 1.5x 20-period volume SMA
+# - Short when price breaks below Camarilla S4 level AND 1d close < 1d EMA50 (downtrend) AND volume > 1.5x 20-period volume SMA
+# - Exit: price retreats to Camarilla R3/S3 levels or opposite breakout with volume
 # - Position sizing: 0.25 discrete level
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Weekly EMA20 provides structural bias, Camarilla levels for precise entries, volume for confirmation
-# - Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
+# - Camarilla levels from 1d provide intraday structure, 1d EMA50 filters trend direction, volume confirms breakout strength
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "1d_1w_camarilla_pivot_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +21,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -39,76 +37,81 @@ def generate_signals(prices):
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate weekly EMA20 for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Track entry price for exit logic
-    entry_price = np.full(n, np.nan)
+    # Calculate Camarilla pivot levels from previous 1d OHLC
+    # Camarilla levels: 
+    # R4 = Close + ((High - Low) * 1.1/2)
+    # R3 = Close + ((High - Low) * 1.1/4)
+    # S3 = Close - ((High - Low) * 1.1/4)
+    # S4 = Close - ((High - Low) * 1.1/2)
+    prev_1d_high = df_1d['high'].values
+    prev_1d_low = df_1d['low'].values
+    prev_1d_close = df_1d['close'].values
+    camarilla_r4 = prev_1d_close + ((prev_1d_high - prev_1d_low) * 1.1 / 2)
+    camarilla_r3 = prev_1d_close + ((prev_1d_high - prev_1d_low) * 1.1 / 4)
+    camarilla_s3 = prev_1d_close - ((prev_1d_high - prev_1d_low) * 1.1 / 4)
+    camarilla_s4 = prev_1d_close - ((prev_1d_high - prev_1d_low) * 1.1 / 2)
     
-    for i in range(20, n):
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Track entry level for exit logic
+    entry_level = np.full(n, np.nan)  # Stores which level was broken (R4 or S4)
+    
+    for i in range(20, n):  # Start after volume SMA warmup
         # Skip if any required data is invalid
-        if (np.isnan(volume_sma_20[i]) or np.isnan(weekly_ema20_aligned[i])):
+        if (np.isnan(volume_sma_20[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Need at least 1 day of prior data for Camarilla calculation
-        if i < 1:
-            signals[i] = 0.0
-            continue
-            
-        # Calculate Camarilla pivot levels from previous day's OHLC
-        # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-        # H3 = Close + 1.1*(High-Low)/2
-        # L3 = Close - 1.1*(High-Low)/2
-        # Pivot = (High + Low + Close)/3
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_close = close[i-1]
-        
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2.0
-        camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2.0
-        
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
+        # Volume confirmation: 6h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Weekly trend filter
-        weekly_trend_up = close[i] > weekly_ema20_aligned[i]
-        weekly_trend_down = close[i] < weekly_ema20_aligned[i]
+        # Trend filter from 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
+        
+        # Camarilla breakout signals
+        breakout_r4 = close[i] > camarilla_r4_aligned[i]  # Break above R4
+        breakdown_s4 = close[i] < camarilla_s4_aligned[i]  # Break below S4
         
         if position == 0:  # Flat - look for entry
-            # Long: break above H3 with weekly uptrend and volume confirmation
-            if close[i] > camarilla_h3 and weekly_trend_up and vol_confirm:
+            if breakout_r4 and uptrend and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-                entry_price[i] = close[i]
-            # Short: break below L3 with weekly downtrend and volume confirmation
-            elif close[i] < camarilla_l3 and weekly_trend_down and vol_confirm:
+                entry_level[i] = camarilla_r4_aligned[i]  # Remember we broke R4
+            elif breakdown_s4 and downtrend and vol_confirm:
                 position = -1
                 signals[i] = -0.25
-                entry_price[i] = close[i]
+                entry_level[i] = camarilla_s4_aligned[i]  # Remember we broke S4
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit when price returns to pivot level or breaks below L3 with volume
-            exit_condition = (close[i] <= pivot) or \
-                           (close[i] < camarilla_l3 and vol_confirm)
-            if exit_condition:
+            # Exit when price retreats to R3 (take profit) or breaks S4 with volume (stop/reverse)
+            exit_to_r3 = close[i] < camarilla_r3_aligned[i]
+            reverse_breakdown = breakdown_s4 and vol_confirm
+            
+            if exit_to_r3 or reverse_breakdown:
                 position = 0
                 signals[i] = 0.0
-                entry_price[i] = np.nan
+                entry_level[i] = np.nan
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            # Exit when price returns to pivot level or breaks above H3 with volume
-            exit_condition = (close[i] >= pivot) or \
-                           (close[i] > camarilla_h3 and vol_confirm)
-            if exit_condition:
+            # Exit when price retreats to S3 (take profit) or breaks R4 with volume (stop/reverse)
+            exit_to_s3 = close[i] > camarilla_s3_aligned[i]
+            reverse_breakout = breakout_r4 and vol_confirm
+            
+            if exit_to_s3 or reverse_breakout:
                 position = 0
                 signals[i] = 0.0
-                entry_price[i] = np.nan
+                entry_level[i] = np.nan
             else:
                 signals[i] = -0.25
     
