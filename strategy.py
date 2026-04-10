@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
 # - Long when price breaks above Camarilla H3 level with volume > 1.5x average AND daily close > daily EMA50
 # - Short when price breaks below Camarilla L3 level with volume > 1.5x average AND daily close < daily EMA50
 # - Exit when price retreats to Camarilla H4/L4 levels or volume drops below average
 # - Daily trend filter ensures alignment with major trend across market cycles
 # - Volume confirmation prevents false breakouts
-# - Targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
 # - Camarilla pivots work well in ranging markets; combined with daily trend/volume filters for breakouts
+# - 12h timeframe reduces trade frequency vs 4h while maintaining responsiveness
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,56 +27,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Pre-compute volume confirmation: > 1.5x 20-period average
-    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
-    
-    # Pre-compute volume filter: < average volume for exit
-    vol_normal = prices['volume'] < volume_20_avg
-    
-    signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
-    
-    for i in range(20, n):
-        # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-        
-        # Get previous completed 1d bar values (shifted by 1 to avoid look-ahead)
-        if i >= 1:
-            # Access aligned arrays directly - no manual indexing needed
-            ph = df_1d['high'].values[min(i//24, len(df_1d)-1)] if i//24 < len(df_1d) else df_1d['high'].values[-1]
-            pl = df_1d['low'].values[min(i//24, len(df_1d)-1)] if i//24 < len(df_1d) else df_1d['low'].values[-1]
-            pc = df_1d['close'].values[min(i//24, len(df_1d)-1)] if i//24 < len(df_1d) else df_1d['close'].values[-1]
-            
-            # Better approach: use aligned arrays from get_htf_data properly
-            # We'll compute Camarilla levels using the previous day's OHLC
-            
-            # Actually, let's use the proper aligned arrays method
-            # Since we need previous day's data, we'll use shift on the aligned arrays
-            pass  # We'll implement correctly below
-    
-    # Let's restart with proper implementation
-    signals = np.zeros(n)
-    position = 0
-    
-    # Pre-compute aligned 1d data properly
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
     # Get the 1d arrays
     h_1d = df_1d['high'].values
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Align them to 4h timeframe (this gives us the values for each 4h bar)
+    # Align them to 12h timeframe (this gives us the values for each 12h bar)
     h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
     l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
     c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
@@ -91,6 +48,9 @@ def generate_signals(prices):
     # Pre-compute volume filter: < average volume for exit
     vol_normal = prices['volume'] < volume_20_avg
     
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
     for i in range(20, n):
         # Skip if any required data is invalid
         if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i]) or 
@@ -105,14 +65,14 @@ def generate_signals(prices):
             continue
         
         # Get previous completed 1d bar values (we need to shift by 1 to avoid look-ahead)
-        # Since align_htf_to_ltf gives us values aligned to each 4h bar,
+        # Since align_htf_to_ltf gives us values aligned to each 12h bar,
         # we need to look at the previous 1d bar's values
-        # For 4h timeframe, there are 6 bars per 1d bar
-        # So we need to look back 6 positions in the aligned array to get previous day's values
+        # For 12h timeframe, there are 2 bars per 1d bar
+        # So we need to look back 2 positions in the aligned array to get previous day's values
         
-        if i >= 6:  # Need at least 6 4h bars to get previous day's data
+        if i >= 2:  # Need at least 2 12h bars to get previous day's data
             # Get index of previous completed 1d bar
-            prev_1d_idx = i - 6
+            prev_1d_idx = i - 2
             
             if prev_1d_idx >= 0 and not (np.isnan(h_1d_aligned[prev_1d_idx]) or 
                                         np.isnan(l_1d_aligned[prev_1d_idx]) or 
