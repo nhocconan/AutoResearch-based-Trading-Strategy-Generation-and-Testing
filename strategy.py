@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and 12h ADX trend filter
-# - Entry: Long when price breaks above 4h Donchian upper channel (20) + 1d volume > 1.5x 20-period average + 12h ADX(14) > 25
+# Hypothesis: 4h Donchian channel breakout with 12h ADX trend filter and 1d volume spike filter
+# - Entry: Long when price breaks above 4h Donchian upper channel (20) + 1d volume > 2.0x 20-period average + 12h ADX(14) > 25
 #          Short when price breaks below 4h Donchian lower channel (20) + same volume and trend filters
 # - Exit: Close-based reversal - exit long when price < 4h Donchian lower channel, exit short when price > 4h Donchian upper channel
-# - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
+# - Stoploss: ATR-based - exit when price moves against position by 2.5 * ATR(14) on 4h
 # - Position sizing: 0.25 (discrete level)
-# - Donchian channels provide clear breakout levels that work in both trending and ranging markets
-# - Volume confirmation on 1d avoids false breakouts, ADX filter on 12h ensures we trade in trending regimes
-# - Target: 75-200 total trades over 4 years (19-50/year) to stay within HARD MAX: 400 total
+# - Volume spike filter (2.0x average) is stricter than typical 1.5x to reduce false breakouts and trade frequency
+# - Higher ATR multiplier (2.5) reduces whipsaw exits in choppy markets
+# - Target: 75-150 total trades over 4 years (19-38/year) to stay well within HARD MAX: 400 total
 
-name = "4h_1d_12h_donchian_breakout_volume_adx_v1"
+name = "4h_1d_12h_donchian_breakout_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -117,7 +117,7 @@ def generate_signals(prices):
         
         # Get current 1d volume for confirmation
         volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        volume_confirmation = volume_1d_current > 1.5 * volume_ma_aligned[i]
+        volume_confirmation = volume_1d_current > 2.0 * volume_ma_aligned[i]
         
         # Trend filter: ADX > 25 indicates trending market (avoid choppy conditions)
         trend_filter = adx_12h[i] > 25
@@ -142,7 +142,7 @@ def generate_signals(prices):
         else:  # Have position - look for exit or stoploss
             # Calculate stoploss level
             if position == 1:  # Long position
-                stop_loss = entry_price - 2.0 * atr_14_4h[i]
+                stop_loss = entry_price - 2.5 * atr_14_4h[i]
                 # Exit conditions: price < Donchian lower channel OR stoploss hit
                 if close_price < donchian_low_4h[i] or close_price <= stop_loss:
                     position = 0
@@ -151,7 +151,7 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1, Short position
-                stop_loss = entry_price + 2.0 * atr_14_4h[i]
+                stop_loss = entry_price + 2.5 * atr_14_4h[i]
                 # Exit conditions: price > Donchian upper channel OR stoploss hit
                 if close_price > donchian_high_4h[i] or close_price >= stop_loss:
                     position = 0
