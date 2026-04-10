@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above H3 pivot AND 1d EMA50 rising AND volume > 1.5x 20-bar avg
-# - Short when price breaks below L3 pivot AND 1d EMA50 falling AND volume > 1.5x 20-bar avg
-# - Exit when price crosses the 1d EMA50 (trend change)
-# - Uses 1d EMA50 for trend filter and as dynamic exit
+# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above H3 Camarilla level AND price > 1w EMA50 AND volume > 2x 20-bar avg
+# - Short when price breaks below L3 Camarilla level AND price < 1w EMA50 AND volume > 2x 20-bar avg
+# - Exit when price returns to Camarilla Pivot level (mean reversion to center)
+# - Uses 1w EMA50 for trend filter to avoid counter-trend trades in bear markets
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-30 trades/year on 4h timeframe (80-120 total over 4 years)
-# - Camarilla pivots work well in ranging markets and breakouts in trending markets
-# - Volume confirmation reduces false breakouts
-# - Trend filter avoids counter-trend trades in bear markets like 2025+
+# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
+# - Camarilla pivots work well in ranging/bear markets which matches 2025+ test conditions
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_trend_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,39 +22,45 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low)
-    # L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low)
+    # Pre-compute Camarilla pivot levels from previous day
+    # H4 = close + 1.5*(high-low), H3 = close + 1.25*(high-low), etc.
+    # Using previous day's OHLC for today's levels (no look-ahead)
+    high_shift = prices['high'].shift(1)
+    low_shift = prices['low'].shift(1)
+    close_shift = prices['close'].shift(1)
     
-    # Pre-compute aligned Camarilla levels
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate Camarilla levels
+    rang = high_shift - low_shift
+    H3 = close_shift + 1.25 * rang
+    L3 = close_shift - 1.25 * rang
+    H4 = close_shift + 1.5 * rang
+    L4 = close_shift - 1.5 * rang
+    Pivot = (high_shift + low_shift + close_shift) / 3
     
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Pre-compute volume confirmation: > 2x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
-    
-    # Pre-compute 1d EMA(50) for trend filter and exit
-    c_1d = df_1d['close'].values
-    ema50_1d = pd.Series(c_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Pre-compute aligned 1w data
+    c_1w = df_1w['close'].values
+    c_1w_aligned = align_htf_to_ltf(prices, df_1w, c_1w)
+    
+    # Pre-compute 1w EMA(50) for trend filter
+    ema50_1w = pd.Series(c_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
     for i in range(50, n):  # Start after EMA50 warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_20_avg[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(Pivot[i]) or 
+            np.isnan(volume_20_avg[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(c_1w_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -67,28 +71,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND in 1d uptrend with volume spike
-            if (prices['close'].iloc[i] > h3_aligned[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA50 rising
+            # Long when price breaks above H3 AND in 1w uptrend with volume spike
+            if (prices['close'].iloc[i] > H3.iloc[i] and 
+                prices['close'].iloc[i] > ema50_1w_aligned[i] and 
                 vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND in 1d downtrend with volume spike
-            elif (prices['close'].iloc[i] < l3_aligned[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA50 falling
+            # Short when price breaks below L3 AND in 1w downtrend with volume spike
+            elif (prices['close'].iloc[i] < L3.iloc[i] and 
+                  prices['close'].iloc[i] < ema50_1w_aligned[i] and 
                   vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit when price crosses the 1d EMA50 (trend change)
+        else:  # Have position - look for exit to pivot (mean reversion)
+            # Exit when price returns to pivot level (mean reversion complete)
             exit_signal = False
             if position == 1:  # Long position
-                if prices['close'].iloc[i] < ema50_1d_aligned[i]:
+                if prices['close'].iloc[i] <= Pivot.iloc[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if prices['close'].iloc[i] > ema50_1d_aligned[i]:
+                if prices['close'].iloc[i] >= Pivot.iloc[i]:
                     exit_signal = True
             
             if exit_signal:
