@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d EMA trend filter + volume confirmation
-# - Primary signal: Williams %R(14) on 6h crosses above -50 (bullish) or below -50 (bearish)
-# - Trend filter: 1d EMA(50) slope > 0 for longs, < 0 for shorts (institutional trend)
-# - Volume filter: 6h volume > 1.3x 20-period average volume (momentum confirmation)
+# Hypothesis: 12h Williams %R + 1w EMA trend filter + volume confirmation
+# - Primary signal: Williams %R(14) on 12h crosses above -50 (bullish) or below -50 (bearish)
+# - Trend filter: 1w EMA(50) slope > 0 for longs, < 0 for shorts (institutional trend)
+# - Volume filter: 12h volume > 1.3x 20-period average volume (momentum confirmation)
 # - Position size: 0.25 discrete level to minimize fee churn
-# - Stoploss: 2.0x ATR(14) on 6h
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Stoploss: 2.0x ATR(14) on 12h
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
 # - Works in bull/bear: Williams %R captures momentum shifts; EMA filter avoids counter-trend trades
 
-name = "6h_1d_williamsr_ema_volume_v1"
-timeframe = "6h"
+name = "12h_1w_williamsr_ema_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,39 +22,39 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA(50) and its slope for trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Pre-compute 1w EMA(50) and its slope for trend filter
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_slope = ema_50 - np.roll(ema_50, 1)
     ema_slope[0] = 0
     ema_slope_pos = ema_slope > 0  # Uptrend
     ema_slope_neg = ema_slope < 0  # Downtrend
-    ema_slope_pos_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_pos)
-    ema_slope_neg_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_neg)
+    ema_slope_pos_aligned = align_htf_to_ltf(prices, df_1w, ema_slope_pos)
+    ema_slope_neg_aligned = align_htf_to_ltf(prices, df_1w, ema_slope_neg)
     
-    # Pre-compute 6h Williams %R(14)
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h Williams %R(14)
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_6h) / (highest_high - lowest_low)
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
     williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
     
-    # Pre-compute 6h volume spike filter
-    volume_6h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_6h > (1.3 * avg_volume_20)
+    # Pre-compute 12h volume spike filter
+    volume_12h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h > (1.3 * avg_volume_20)
     
-    # Pre-compute 6h ATR(14) for stoploss
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    # Pre-compute 12h ATR(14) for stoploss
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -73,7 +73,7 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: Williams %R crosses below -50 OR stoploss hit
-            if williams_r[i] < -50 or close_6h[i] < entry_price - 2.0 * atr_14[i]:
+            if williams_r[i] < -50 or close_12h[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -81,7 +81,7 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: Williams %R crosses above -50 OR stoploss hit
-            if williams_r[i] > -50 or close_6h[i] > entry_price + 2.0 * atr_14[i]:
+            if williams_r[i] > -50 or close_12h[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -92,12 +92,12 @@ def generate_signals(prices):
                 # Long: Williams %R crosses above -50 in uptrend
                 if williams_r[i] > -50 and williams_r[i-1] <= -50 and ema_slope_pos_aligned[i]:
                     position = 1
-                    entry_price = close_6h[i]
+                    entry_price = close_12h[i]
                     signals[i] = 0.25
                 # Short: Williams %R crosses below -50 in downtrend
                 elif williams_r[i] < -50 and williams_r[i-1] >= -50 and ema_slope_neg_aligned[i]:
                     position = -1
-                    entry_price = close_6h[i]
+                    entry_price = close_12h[i]
                     signals[i] = -0.25
     
     return signals
