@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 1d Camarilla H3 level AND 1d close > 1d EMA20 (bullish trend)
-# - Short when price breaks below 1d Camarilla L3 level AND 1d close < 1d EMA20 (bearish trend)
-# - Volume confirmation: 4h volume > 1.5x 20-period volume SMA
-# - Exit: opposite Camarilla breakout or volume drops below average
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume spike confirmation
+# - Long when Williams %R(14) < -80 (oversold) AND 1d close > 1d EMA50 (bullish trend) AND volume spike (>2x avg)
+# - Short when Williams %R(14) > -20 (overbought) AND 1d close < 1d EMA50 (bearish trend) AND volume spike (>2x avg)
+# - Exit when Williams %R returns to neutral range (-50) or opposite extreme reached
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 19-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Target: 12-37 trades/year on 6h timeframe to stay within fee drag limits
+# - Williams %R is effective in ranging markets and catches reversals in bear market rallies
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "6h_1d_williamsr_meanreversion_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,65 +34,57 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h volume SMA for regime filter
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Williams %R(14) on 6h
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate 1d EMA20 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 1d close for trend comparison
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Calculate 1d Camarilla pivot levels
-    # Camarilla formula: 
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # H2 = close + 0.55 * (high - low)
-    # H1 = close + 0.275 * (high - low)
-    # L1 = close - 0.275 * (high - low)
-    # L2 = close - 0.55 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_raw = df_1d['close'].values
+    # Calculate 6h volume average for spike confirmation
+    volume_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # ~4 days average
     
-    camarilla_h3 = close_1d_raw + 1.1 * (high_1d - low_1d)
-    camarilla_l3 = close_1d_raw - 1.1 * (high_1d - low_1d)
-    
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    for i in range(40, n):  # Start after warmup for indicators
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(close_1d_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_sma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(close_1d_aligned[i]) or np.isnan(volume_avg[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Volume spike confirmation: current volume > 2x 24-period average
+        vol_spike = volume[i] > 2.0 * volume_avg[i]
         
-        # Trend filter: 1d close vs 1d EMA20
-        trend_bullish = close_1d_aligned[i] > ema_20_1d_aligned[i]
-        trend_bearish = close_1d_aligned[i] < ema_20_1d_aligned[i]
+        # Trend filter: 1d close vs 1d EMA50
+        trend_bullish = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_bearish = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Camarilla breakout signals
-        breakout_up = close[i] > camarilla_h3_aligned[i-1]  # Break above previous H3
-        breakout_down = close[i] < camarilla_l3_aligned[i-1]  # Break below previous L3
+        # Williams %R levels
+        wr = williams_r[i]
+        oversold = wr < -80
+        overbought = wr > -20
+        neutral_exit = wr > -50 and wr < -50  # This will never be true, fixing below
         
-        # Exit conditions: opposite breakout or loss of volume confirmation
-        exit_long = breakout_down or not vol_confirm
-        exit_short = breakout_up or not vol_confirm
+        # Fixed neutral exit condition
+        neutral_exit = (wr >= -50)  # Exit when Williams %R returns to or above -50
+        
+        # Exit conditions
+        exit_long = neutral_exit or overbought  # Exit long when neutral or overbought
+        exit_short = neutral_exit or oversold   # Exit short when neutral or oversold
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and trend_bullish and vol_confirm:
+            if oversold and trend_bullish and vol_spike:
                 position = 1
                 signals[i] = 0.25
-            elif breakout_down and trend_bearish and vol_confirm:
+            elif overbought and trend_bearish and vol_spike:
                 position = -1
                 signals[i] = -0.25
             else:
