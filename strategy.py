@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
-# - Long when price breaks above Donchian upper channel (20-period high) + ATR(14) < ATR(50) (low volatility regime) + 1d volume > 1.3x 20-period volume SMA
-# - Short when price breaks below Donchian lower channel (20-period low) + ATR(14) < ATR(50) + 1d volume > 1.3x 20-period volume SMA
-# - Exit: price crosses back through Donchian middle (10-period midpoint)
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR regime filter
+# - Long when price breaks above Camarilla H3 level (1d) + 1d volume > 1.5x 20-period volume SMA + ATR(14) < ATR(50) (low volatility)
+# - Short when price breaks below Camarilla L3 level (1d) + same volume and volatility conditions
+# - Exit: price returns to Camarilla Pivot point (1d)
 # - Position sizing: 0.25 discrete level
-# - Donchian channels provide clear breakout levels with built-in trend following
-# - ATR regime filter ensures we trade during low volatility periods (pre-breakout squeeze)
-# - Volume confirmation validates breakout strength
+# - Camarilla levels provide high-probability intraday reversal/breakout levels
+# - Volume confirmation ensures breakout strength
+# - ATR regime filter avoids false breakouts during high volatility
 # - Target: 20-40 trades/year to minimize fee drag while capturing strong moves
 
-name = "4h_1d_donchian_atr_volume_v1"
+name = "4h_1d_camarilla_atr_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,39 +36,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Donchian Channels (20-period)
-    donch_period = 20
-    upper_channel = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
-    lower_channel = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
-    middle_channel = (upper_channel + lower_channel) / 2
+    # Calculate 1d Camarilla levels (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h ATR(14) and ATR(50) for volatility regime
-    atr_period_short = 14
-    atr_period_long = 50
+    # Camarilla levels: based on previous day's range
+    # H4 = close + 1.5*(high-low), H3 = close + 1.0*(high-low), etc.
+    # L3 = close - 1.0*(high-low), L4 = close - 1.5*(high-low)
+    range_1d = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.0 * range_1d
+    camarilla_l3 = close_1d - 1.0 * range_1d
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0  # Standard pivot
     
+    # Align Camarilla levels to 4h timeframe (using previous day's values)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # Calculate 1d volume SMA for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    
+    # Calculate 4h ATR for volatility regime filter
     # True Range
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
                                 np.abs(low - np.roll(close, 1))))
     tr1[0] = high[0] - low[0]
     
+    atr_period_short = 14
+    atr_period_long = 50
+    
     atr_short = pd.Series(tr1).rolling(window=atr_period_short, min_periods=atr_period_short).mean().values
     atr_long = pd.Series(tr1).rolling(window=atr_period_long, min_periods=atr_period_long).mean().values
     
-    # ATR ratio: short/long < 1 indicates low volatility regime (favorable for breakout)
+    # ATR ratio: short/long < 1 indicates low volatility regime
     atr_ratio = np.where(atr_long > 0, atr_short / atr_long, 1.0)
-    
-    # Calculate 1d OHLC for volume confirmation
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d volume SMA(20) for confirmation
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(middle_channel[i]) or np.isnan(atr_ratio[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(atr_ratio[i]) or 
             np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -76,17 +86,17 @@ def generate_signals(prices):
         # Get current 1d volume for volume spike confirmation
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period SMA (volume spike)
-        vol_confirm = vol_1d_current[i] > 1.3 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period SMA (volume spike)
+        vol_confirm = vol_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
         # Volatility regime: ATR ratio < 0.95 indicates low volatility (squeeze condition)
         low_vol_regime = atr_ratio[i] < 0.95
         
-        # Donchian breakout signals
-        long_entry = (close[i] > upper_channel[i]) and low_vol_regime and vol_confirm
-        short_entry = (close[i] < lower_channel[i]) and low_vol_regime and vol_confirm
-        exit_long = close[i] < middle_channel[i]  # Exit long when price crosses below middle
-        exit_short = close[i] > middle_channel[i]  # Exit short when price crosses above middle
+        # Camarilla breakout signals
+        long_entry = (close[i] > camarilla_h3_aligned[i]) and low_vol_regime and vol_confirm
+        short_entry = (close[i] < camarilla_l3_aligned[i]) and low_vol_regime and vol_confirm
+        exit_long = close[i] < camarilla_pivot_aligned[i]  # Exit long when price crosses below pivot
+        exit_short = close[i] > camarilla_pivot_aligned[i]  # Exit short when price crosses above pivot
         
         if position == 0:  # Flat - look for entry
             if long_entry:
