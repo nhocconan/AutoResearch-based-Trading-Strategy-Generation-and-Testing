@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla breakout with volume confirmation and 1d trend filter + ATR stoploss
-# - Long when price breaks above Camarilla H3 level with volume > 1.5x 20-bar average AND 1d close > 1d EMA50
-# - Short when price breaks below Camarilla L3 level with volume > 1.5x 20-bar average AND 1d close < 1d EMA50
-# - Exit when price retreats to Camarilla H4/L4 levels OR ATR-based stoploss hit OR volume weakens
+# Hypothesis: 4h Camarilla breakout with volume confirmation and 1d trend filter + ATR stoploss
+# - Long when price breaks above Camarilla H3 level with volume > 1.8x 20-bar average AND 1d close > 1d EMA50
+# - Short when price breaks below Camarilla L3 level with volume > 1.8x 20-bar average AND 1d close < 1d EMA50
+# - Exit when price retreats to Camarilla H4/L4 levels OR ATR-based stoploss hit
 # - Uses 1d trend filter to avoid counter-trend trades and ATR stoploss for risk control
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-25 trades/year on 12h timeframe (50-100 total over 4 years)
-# - Works in both bull/bear via 1d trend filter + volume confirmation to avoid false breakouts
+# - Target: 20-40 trades/year on 4h timeframe (80-160 total over 4 years)
+# - Focus on BTC/ETH; SOL-only strategies are low value
 
-name = "12h_1d_camarilla_breakout_volume_trend_atrstop_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_atrstop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,9 +26,9 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Pre-compute volume confirmation: > 1.8x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
     
     # Pre-compute volume filter for exit: < 0.8x average volume (loss of momentum)
     vol_weak = prices['volume'] < (0.8 * volume_20_avg)
@@ -72,11 +72,11 @@ def generate_signals(prices):
             continue
         
         # Get previous completed 1d bar values for Camarilla calculation
-        # Since 12h timeframe, 1d data updates every 2 bars (24h/12h = 2)
-        # Look back to the previous multiple of 2 to get completed 1d bar
-        lookback_idx = (i // 2) * 2  # Start of current 12h bar pair
-        if lookback_idx >= 2:  # Need at least one previous completed 1d bar
-            prev_1d_idx = lookback_idx - 2  # Previous completed 1d bar
+        # Since 4h timeframe, 1d data updates every 6 bars (24h/4h = 6)
+        # Look back to the previous multiple of 6 to get completed 1d bar
+        lookback_idx = (i // 6) * 6  # Start of current 1d bar
+        if lookback_idx >= 6:  # Need at least one previous completed 1d bar
+            prev_1d_idx = lookback_idx - 6  # Previous completed 1d bar
             
             if prev_1d_idx >= 0:
                 ph = h_1d_aligned[prev_1d_idx]  # Previous 1d high
