@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and chop regime filter
-# - Long: price breaks above Donchian(20) high + 1d volume > 2.0x 20-period average + chop > 61.8 (range)
-# - Short: price breaks below Donchian(20) low + 1d volume > 2.0x 20-period average + chop > 61.8 (range)
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR expansion filter and chop regime
+# - Long: price breaks above Donchian(20) high + 1d ATR(14) > 1.5x 20-period average + chop > 61.8 (range)
+# - Short: price breaks below Donchian(20) low + 1d ATR(14) > 1.5x 20-period average + chop > 61.8 (range)
 # - Exit: close-based reversal - exit long when price < Donchian(10) high, exit short when price > Donchian(10) low
 # - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
 # - Position sizing: 0.25 (discrete level)
-# - Uses Donchian breakouts for structure, volume spike for confirmation, chop filter to avoid trending markets
+# - Uses Donchian breakouts for structure, ATR expansion for volatility confirmation, chop filter to avoid trending markets
 # - Target: 100-180 total trades over 4 years (25-45/year) to stay within HARD MAX: 400 total
-# - Works in both bull and bear: chop filter identifies ranging markets where breakouts fade, volume confirms participation
+# - Works in both bull and bear: chop filter identifies ranging markets where breakouts fade, ATR confirms genuine volatility expansion
 
-name = "4h_1d_donchian_breakout_volume_chop_v1"
+name = "4h_1d_donchian_breakout_atr_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,10 +33,9 @@ def generate_signals(prices):
     close_4h = prices['close'].values
     
     # Pre-compute 1d data
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
     # Calculate Donchian channels (20-period) for 4h
     highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
@@ -65,26 +64,28 @@ def generate_signals(prices):
     
     atr_14_4h = wilders_smoothing(tr, 14)
     
-    # Calculate 1d volume moving average (20-period)
-    volume_1d_series = pd.Series(volume_1d)
-    volume_ma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    
-    # Calculate 1d close for chop calculation
-    close_1d_series = pd.Series(close_1d)
-    
-    # Calculate True Range for chop
+    # Calculate 1d ATR(14) for volatility filter
     tr1_1d = high_1d - low_1d
     tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
     tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
     tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     tr_1d[0] = 0  # First TR is 0 (no previous close)
-    
-    # Calculate ATR(14) for chop denominator
     atr_14_1d = wilders_smoothing(tr_1d, 14)
     
+    # Calculate 1d ATR moving average (20-period)
+    atr_1d_series = pd.Series(atr_14_1d)
+    atr_ma_20_1d = atr_1d_series.rolling(window=20, min_periods=20).mean().values
+    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+    
+    # Calculate True Range for chop
+    tr1_1d_chop = high_1d - low_1d
+    tr2_1d_chop = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d_chop = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d_chop = np.maximum(tr1_1d_chop, np.maximum(tr2_1d_chop, tr3_1d_chop))
+    tr_1d_chop[0] = 0  # First TR is 0 (no previous close)
+    
     # Calculate Sum of True Range over 14 periods for chop numerator
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    sum_tr_14 = pd.Series(tr_1d_chop).rolling(window=14, min_periods=14).sum().values
     
     # Calculate Max High - Min Low over 14 periods for chop denominator
     max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
@@ -107,7 +108,7 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
             np.isnan(highest_high_10[i]) or np.isnan(lowest_low_10[i]) or
-            np.isnan(atr_14_4h[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(atr_14_4h[i]) or np.isnan(atr_ma_aligned[i]) or 
             np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
@@ -115,21 +116,21 @@ def generate_signals(prices):
         # Get current 4h close
         close_price = close_4h[i]
         
-        # Get current 1d volume for confirmation
-        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        volume_confirmation = volume_1d_current > 2.0 * volume_ma_aligned[i]
+        # Get current 1d ATR for volatility confirmation
+        atr_1d_current = align_htf_to_ltf(prices, df_1d, atr_14_1d)[i]
+        atr_expansion = atr_1d_current > 1.5 * atr_ma_aligned[i]
         
         # Chop regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
         chop_filter = chop_aligned[i] > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian(20) high + volume confirmation + chop filter
-            if (close_price > highest_high_20[i] and volume_confirmation and chop_filter):
+            # Long entry: price breaks above Donchian(20) high + ATR expansion + chop filter
+            if (close_price > highest_high_20[i] and atr_expansion and chop_filter):
                 position = 1
                 entry_price = close_price
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian(20) low + volume confirmation + chop filter
-            elif (close_price < lowest_low_20[i] and volume_confirmation and chop_filter):
+            # Short entry: price breaks below Donchian(20) low + ATR expansion + chop filter
+            elif (close_price < lowest_low_20[i] and atr_expansion and chop_filter):
                 position = -1
                 entry_price = close_price
                 signals[i] = -0.25
