@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and 12h volume confirmation
-# - Primary: 4h price breaks above Donchian(20) high (long) or below Donchian(20) low (short)
-# - Volume filter: 12h volume > 1.5x 20-period volume MA to confirm institutional participation
-# - Trend filter: 1d ADX(14) > 25 to ensure we're in a trending market (avoid chop/ranges)
-# - Entry: Long when breakout above upper band + volume spike + ADX > 25
-#          Short when breakout below lower band + volume spike + ADX > 25
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and ATR volume spike confirmation
+# - Primary: 1d price breaks above Donchian(20) high (long) or below Donchian(20) low (short)
+# - Trend filter: 1w EMA(34) direction (price above/below EMA for long/short bias)
+# - Volume filter: 1w ATR(10) > 1.5x 20-period ATR MA to confirm institutional participation
 # - Exit: Close crosses back inside Donchian channel (mean reversion exit)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# - Works in bull/bear: Donchian breakouts capture trends, volume spike avoids fakeouts, ADX filter avoids false signals in ranging markets
+# - Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe
+# - Works in bull/bear: Donchian breakouts capture trends, EMA filter avoids counter-trend trades, ATR volume spike avoids fakeouts
 
-name = "4h_12h_1d_donchian_adx_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_ema_atr_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -36,81 +33,50 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian channels (20-period) on 4h
+    # Calculate Donchian channels (20-period) on 1d
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h volume MA(20) for volume spike filter
-    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    # Calculate 1w EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d ADX(14)
-    # ADX = 100 * smoothed DX, where DX = |+DI - -DI| / (+DI + -DI)
-    # +DI = 100 * smoothed +DM / ATR, -DI = 100 * smoothed -DM / ATR
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    high_close_1d[0] = high_low_1d[0]
-    low_close_1d[0] = high_low_1d[0]
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    
-    # +DM and -DM
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    atr_14_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False).mean().values
-    plus_dm_14_1d = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_14_1d = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # +DI and -DI
-    plus_di_14_1d = 100 * plus_dm_14_1d / atr_14_1d
-    minus_di_14_1d = 100 * minus_dm_14_1d / atr_14_1d
-    
-    # DX and ADX
-    dx_14_1d = 100 * np.abs(plus_di_14_1d - minus_di_14_1d) / (plus_di_14_1d + minus_di_14_1d)
-    dx_14_1d = np.where((plus_di_14_1d + minus_di_14_1d) == 0, 0, dx_14_1d)
-    adx_14_1d = pd.Series(dx_14_1d).ewm(alpha=1/14, adjust=False).mean().values
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Calculate 1w ATR(10) for volume spike filter
+    high_low_1w = high_1w - low_1w
+    high_close_1w = np.abs(high_1w - np.roll(close_1w, 1))
+    low_close_1w = np.abs(low_1w - np.roll(close_1w, 1))
+    high_close_1w[0] = high_low_1w[0]
+    low_close_1w[0] = high_low_1w[0]
+    tr_1w = np.maximum(high_low_1w, np.maximum(high_close_1w, low_close_1w))
+    atr_10_1w = pd.Series(tr_1w).rolling(window=10, min_periods=10).mean().values
+    atr_ma_20_1w = pd.Series(atr_10_1w).rolling(window=20, min_periods=20).mean().values
+    atr_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     for i in range(30, n):
-        # Skip if any required data is invalid or outside session
+        # Skip if any required data is invalid
         if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(adx_14_1d_aligned[i]) or
-            not in_session[i]):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_ma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike filter: current 12h volume > 1.5x 20-period volume MA
-        volume_spike = volume_12h[i // 12] > 1.5 * vol_ma_20_12h_aligned[i] if i // 12 < len(volume_12h) else False
-        
-        # Trend filter: ADX > 25 indicates trending market
-        trend_filter = adx_14_1d_aligned[i] > 25
+        # Volume spike filter: current 1w ATR(10) > 1.5x 20-period ATR MA
+        atr_10_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_10_1w)
+        volume_spike = atr_10_1w_aligned[i] > 1.5 * atr_ma_20_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: breakout above upper Donchian band + volume spike + ADX > 25
-            if (close[i] > highest_20[i] and volume_spike and trend_filter):
+            # Long entry: breakout above upper Donchian band + price above 1w EMA(34) + volume spike
+            if (close[i] > highest_20[i] and close[i] > ema_34_1w_aligned[i] and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: breakout below lower Donchian band + volume spike + ADX > 25
-            elif (close[i] < lowest_20[i] and volume_spike and trend_filter):
+            # Short entry: breakout below lower Donchian band + price below 1w EMA(34) + volume spike
+            elif (close[i] < lowest_20[i] and close[i] < ema_34_1w_aligned[i] and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
