@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# - Long: price breaks above 4h Camarilla H3 level + 1d volume > 1.3x 20-period MA + chop > 61.8 (range)
-# - Short: price breaks below 4h Camarilla L3 level + 1d volume > 1.3x 20-period MA + chop > 61.8 (range)
-# - Exit: close-based reversal - exit long when price < Camarilla L3 level, exit short when price > Camarilla H3 level
-# - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation
+# - Long: Williams %R(14) < -80 (oversold) + price > 1d EMA50 (uptrend) + 1d volume > 1.2x 20-period MA
+# - Short: Williams %R(14) > -20 (overbought) + price < 1d EMA50 (downtrend) + 1d volume > 1.2x 20-period MA
+# - Exit: Williams %R crosses above -50 for longs, below -50 for shorts
 # - Position sizing: 0.25 (discrete level)
-# - Uses Camarilla pivot levels from 1d for structure, 1d volume for confirmation, chop filter to avoid strong trends
-# - Target: 75-150 total trades over 4 years (19-38/year) to stay within HARD MAX: 400 total
-# - Works in both bull and bear: chop filter identifies ranging markets where Camarilla levels hold, volume confirms genuine breakouts
+# - Target: 75-150 total trades over 4 years (19-38/year) to avoid fee drag
+# - Williams %R captures short-term reversals in ranging markets, EMA50 filters for trend alignment,
+#   volume confirms conviction. Works in both bull/bear: mean reversion in ranges, trend filter avoids counter-trend trades.
 
-name = "4h_1d_camarilla_breakout_vol_chop_v2"
-timeframe = "4h"
+name = "6h_1d_williamsr_meanreversion_vol_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,10 +26,10 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
+    # Pre-compute 6h OHLC
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -38,141 +37,64 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate ATR (14-period) for 4h stoploss
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # First TR is 0 (no previous close)
+    # Calculate Williams %R (14-period) for 6h
+    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # Avoid division by zero
     
-    # Wilder's ATR smoothing
-    def wilders_smoothing(data, period):
-        alpha = 1.0 / period
-        result = np.zeros_like(data)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])  # First value is simple average
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-    
-    atr_14_4h = wilders_smoothing(tr, 14)
-    
-    # Calculate 1d Camarilla pivot levels
-    # Camarilla levels based on previous day's OHLC
-    camarilla_h4 = np.zeros(len(close_1d))
-    camarilla_h3 = np.zeros(len(close_1d))
-    camarilla_h2 = np.zeros(len(close_1d))
-    camarilla_h1 = np.zeros(len(close_1d))
-    camarilla_l1 = np.zeros(len(close_1d))
-    camarilla_l2 = np.zeros(len(close_1d))
-    camarilla_l3 = np.zeros(len(close_1d))
-    camarilla_l4 = np.zeros(len(close_1d))
-    
-    # Calculate levels for each day (starting from index 1 as we need previous day)
-    for i in range(1, len(close_1d)):
-        high = high_1d[i-1]
-        low = low_1d[i-1]
-        close = close_1d[i-1]
-        range_val = high - low
-        
-        camarilla_h4[i] = close + range_val * 1.1 / 2
-        camarilla_h3[i] = close + range_val * 1.1 / 4
-        camarilla_h2[i] = close + range_val * 1.1 / 6
-        camarilla_h1[i] = close + range_val * 1.1 / 12
-        camarilla_l1[i] = close - range_val * 1.1 / 12
-        camarilla_l2[i] = close - range_val * 1.1 / 6
-        camarilla_l3[i] = close - range_val * 1.1 / 4
-        camarilla_l4[i] = close - range_val * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate 1d EMA50
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 1d volume moving average (20-period)
     volume_1d_series = pd.Series(volume_1d)
     volume_ma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # Calculate True Range for chop
-    tr1_1d_chop = high_1d - low_1d
-    tr2_1d_chop = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d_chop = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d_chop = np.maximum(tr1_1d_chop, np.maximum(tr2_1d_chop, tr3_1d_chop))
-    tr_1d_chop[0] = 0  # First TR is 0 (no previous close)
-    
-    # Calculate Sum of True Range over 14 periods for chop numerator
-    sum_tr_14 = pd.Series(tr_1d_chop).rolling(window=14, min_periods=14).sum().values
-    
-    # Calculate Max High - Min Low over 14 periods for chop denominator
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    
-    # Calculate Choppiness Index (CHOP)
-    chop = np.where(
-        (range_14 != 0) & (sum_tr_14 != 0) & ~np.isnan(range_14) & ~np.isnan(sum_tr_14),
-        100 * np.log10(sum_tr_14 / range_14) / np.log10(14),
-        50  # Default to middle when undefined
-    )
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
-    for i in range(20, n):  # Start after warmup period (need at least 20 for calculations)
+    for i in range(50, n):  # Start after warmup period (need at least 50 for EMA50)
         # Skip if any required data is invalid
-        if (np.isnan(volume_ma_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 4h close
-        close_price = close_4h[i]
+        # Get current 6h close
+        close_price = close_6h[i]
         
-        # Get aligned 1d data for current 4h bar (completed 1d bar)
-        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        # Get aligned 1d data for current 6h bar (completed 1d bar)
+        ema_50_current = ema_50_aligned[i]
         volume_ma_current = volume_ma_aligned[i]
-        chop_current = chop_aligned[i]
+        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Volume spike condition: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d_current > 1.3 * volume_ma_current
-        
-        # Chop regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
-        chop_filter = chop_current > 61.8
+        # Volume spike condition: current 1d volume > 1.2x 20-period MA
+        volume_spike = volume_1d_current > 1.2 * volume_ma_current
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla H3 level + volume spike + chop filter
-            if (close_price > h3_4h[i] and volume_spike and chop_filter):
+            # Long entry: Williams %R oversold (< -80) + price > 1d EMA50 + volume spike
+            if (williams_r[i] < -80 and close_price > ema_50_current and volume_spike):
                 position = 1
-                entry_price = close_price
                 signals[i] = 0.25
-            # Short entry: price breaks below Camarilla L3 level + volume spike + chop filter
-            elif (close_price < l3_4h[i] and volume_spike and chop_filter):
+            # Short entry: Williams %R overbought (> -20) + price < 1d EMA50 + volume spike
+            elif (williams_r[i] > -20 and close_price < ema_50_current and volume_spike):
                 position = -1
-                entry_price = close_price
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit or stoploss
-            # Calculate stoploss level
-            if position == 1:  # Long position
-                stop_loss = entry_price - 2.0 * atr_14_4h[i]
-                # Exit conditions: price < Camarilla L3 level OR stoploss hit
-                if close_price < l3_4h[i] or close_price <= stop_loss:
-                    position = 0
-                    entry_price = 0.0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1, Short position
-                stop_loss = entry_price + 2.0 * atr_14_4h[i]
-                # Exit conditions: price > Camarilla H3 level OR stoploss hit
-                if close_price > h3_4h[i] or close_price >= stop_loss:
-                    position = 0
-                    entry_price = 0.0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+        else:  # Have position - look for exit
+            # Exit long when Williams %R crosses above -50
+            if position == 1 and williams_r[i] > -50:
+                position = 0
+                signals[i] = 0.0
+            # Exit short when Williams %R crosses below -50
+            elif position == -1 and williams_r[i] < -50:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
