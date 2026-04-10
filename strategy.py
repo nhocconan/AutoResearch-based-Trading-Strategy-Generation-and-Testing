@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h Supertrend + volume confirmation
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low (13-period EMA on 6h)
-# - Supertrend on 12h: trend filter (ATR=10, mult=3.0) - only take longs in uptrend, shorts in downtrend
-# - Volume confirmation: 6h volume > 1.5x 20-period average volume to avoid low-participation signals
-# - Works in bull/bear: Supertrend regime filter adapts to market direction, Elder Ray measures momentum strength
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX regime filter
+# - Primary signal: Price breaks above/below 20-period Donchian channel on 4h
+# - Volume confirmation: 1d volume > 1.8x 20-period average volume (strict filter to reduce trades)
+# - Regime filter: 1w ADX(14) > 25 (trending market) enables breakout continuation
+# - Works in bull/bear: In strong trends (ADX > 25), trade breakouts; in weak trends (ADX < 20), avoid false breakouts
 # - Position size: 0.25 discrete level to minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Target: 20-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(20)
 
-name = "6h_12h_elderray_supertrend_volume_v1"
-timeframe = "6h"
+name = "4h_1d_1w_donchian_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,104 +22,116 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h Supertrend (ATR=10, mult=3.0)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1d volume spike filter (strict: 1.8x average)
+    volume_1d = df_1d['volume'].values
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.8 * avg_volume_20)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    
+    # Pre-compute 1w ADX(14) for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_12h[0] = tr_12h1[0] if 'tr_12h1' in locals() else tr_12h[0]  # handle first element
-    tr_12h1 = high_12h - low_12h  # recompute for clarity
-    tr_12h2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr_12h3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
-    tr_12h[0] = tr_12h1[0]
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    atr_12h = pd.Series(tr_12h).rolling(window=10, min_periods=10).mean().values
+    # Directional Movement
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Supertrend calculation
-    hl2_12h = (high_12h + low_12h) / 2
-    upper_band_12h = hl2_12h + (3.0 * atr_12h)
-    lower_band_12h = hl2_12h - (3.0 * atr_12h)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    supertrend_12h = np.zeros_like(close_12h)
-    direction_12h = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.mean(data[:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    for i in range(1, len(close_12h)):
-        if close_12h[i] > upper_band_12h[i-1]:
-            direction_12h[i] = 1
-        elif close_12h[i] < lower_band_12h[i-1]:
-            direction_12h[i] = -1
-        else:
-            direction_12h[i] = direction_12h[i-1]
-            if direction_12h[i] == 1 and lower_band_12h[i] < lower_band_12h[i-1]:
-                lower_band_12h[i] = lower_band_12h[i-1]
-            if direction_12h[i] == -1 and upper_band_12h[i] > upper_band_12h[i-1]:
-                upper_band_12h[i] = upper_band_12h[i-1]
+    atr_1w = wilder_smooth(tr, 14)
+    plus_di_1w = 100 * wilder_smooth(plus_dm, 14) / atr_1w
+    minus_di_1w = 100 * wilder_smooth(minus_dm, 14) / atr_1w
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = wilder_smooth(dx_1w, 14)
     
-        supertrend_12h[i] = lower_band_12h[i] if direction_12h[i] == 1 else upper_band_12h[i]
+    # ADX > 25 indicates strong trend (regime filter)
+    strong_trend = adx_1w > 25
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend)
     
-    supertrend_dir_12h = direction_12h  # 1=uptrend, -1=downtrend
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, supertrend_dir_12h)
+    # Pre-compute 4h Donchian Channel (20)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Pre-compute 6h Elder Ray (Bull/Bear Power) with 13-period EMA
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_6h - ema_13  # Bull Power = High - EMA13
-    bear_power = ema_13 - low_6h   # Bear Power = EMA13 - Low
-    
-    # Pre-compute 6h volume spike filter
-    volume_6h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_6h > (1.5 * avg_volume_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, prices, volume_spike)  # same timeframe
+    # Pre-compute 4h ATR(20) for stoploss
+    tr_4h1 = high_4h - low_4h
+    tr_4h2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr_4h3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
+    tr_4h[0] = tr_4h1[0]
+    atr_20 = pd.Series(tr_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(supertrend_dir_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(strong_trend_aligned[i]) or
+            np.isnan(atr_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Bear Power becomes stronger than Bull Power OR Supertrend turns down
-            if bear_power[i] > bull_power[i] or supertrend_dir_aligned[i] == -1:
+            # Exit: Donchian mean reversion OR stoploss hit
+            if close_4h[i] < donchian_mid[i] or close_4h[i] < entry_price - 2.0 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bull Power becomes stronger than Bear Power OR Supertrend turns up
-            if bull_power[i] > bear_power[i] or supertrend_dir_aligned[i] == 1:
+            # Exit: Donchian mean reversion OR stoploss hit
+            if close_4h[i] > donchian_mid[i] or close_4h[i] > entry_price + 2.0 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Elder Ray signals with volume spike and Supertrend alignment
-            if volume_spike_aligned[i]:
-                # Long: Bull Power > Bear Power (bullish momentum) AND Supertrend uptrend
-                if bull_power[i] > bear_power[i] and supertrend_dir_aligned[i] == 1:
+            # Look for Donchian breakouts with volume spike and strong trend filter
+            # Only trade breakouts in strong trending markets (ADX > 25)
+            if volume_spike_aligned[i] and strong_trend_aligned[i]:
+                # Long: price breaks above upper Donchian band
+                if close_4h[i] > donchian_high[i]:
                     position = 1
+                    entry_price = close_4h[i]
                     signals[i] = 0.25
-                # Short: Bear Power > Bull Power (bearish momentum) AND Supertrend downtrend
-                elif bear_power[i] > bull_power[i] and supertrend_dir_aligned[i] == -1:
+                # Short: price breaks below lower Donchian band
+                elif close_4h[i] < donchian_low[i]:
                     position = -1
+                    entry_price = close_4h[i]
                     signals[i] = -0.25
     
     return signals
