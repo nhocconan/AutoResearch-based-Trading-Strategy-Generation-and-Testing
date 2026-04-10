@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d trend filter and volume confirmation
-# - Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# - Long when Bull Power > 0 AND Bear Power < 0 (strong bullish momentum) AND 1d EMA(50) > EMA(200) (bullish trend) AND 6h volume > 1.5x 20-bar avg
-# - Short when Bear Power > 0 AND Bull Power < 0 (strong bearish momentum) AND 1d EMA(50) < EMA(200) (bearish trend) AND 6h volume > 1.5x 20-bar avg
-# - Exit when Elder Ray shows weakening momentum (|Bull Power| < 0.1 * ATR AND |Bear Power| < 0.1 * ATR)
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and chop regime filter
+# - Long when price breaks above Donchian(20) high AND 1d volume > 1.8x 20-period avg AND chop(14) > 61.8 (range)
+# - Short when price breaks below Donchian(20) low AND 1d volume > 1.8x 20-period avg AND chop(14) > 61.8 (range)
+# - Exit when price returns to Donchian(20) midpoint
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Elder Ray measures bull/bear power relative to EMA; 1d EMA filter ensures alignment with higher timeframe trend
-# - Volume confirmation avoids low-liquidity false signals
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: trend filter prevents counter-trend trades, volume confirms conviction
+# - Donchian breakouts capture momentum; chop filter ensures mean reversion in ranging markets
+# - Volume confirmation avoids low-liquidity false breakouts
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets: breakouts in trends, mean reversion in ranges via chop filter
 
-name = "6h_1d_elder_ray_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,59 +27,49 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA trend filter: EMA(50) vs EMA(200)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_bullish_1d = ema_50_1d > ema_200_1d
-    ema_bearish_1d = ema_50_1d < ema_200_1d
+    # Pre-compute 1d volume confirmation: > 1.8x 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.8 * volume_20_avg)
     
-    # Align 1d EMA trend to 6h timeframe
-    ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish_1d)
-    ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish_1d)
+    # Align 1d volume spike to 12h timeframe
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute Elder Ray Index on 6h data
+    # Pre-compute Donchian(20) on 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = highest_high
+    donchian_low = lowest_low
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Bull Power = High - EMA(13)
-    bull_power = high - ema_13
-    # Bear Power = EMA(13) - Low
-    bear_power = ema_13 - low
+    # Pre-compute Choppiness Index(14) on 12h data
+    atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / np.log(14) / (highest_high_14 - lowest_low_14))
+    chop = np.where((highest_high_14 - lowest_low_14) == 0, 50, chop)  # Avoid division by zero
+    chop_range = chop > 61.8  # Chop > 61.8 indicates ranging market
     
-    # ATR(14) for exit condition
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr2[0] = tr1[0]  # first bar
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Entry conditions
+    long_entry = (close > donchian_high) & vol_spike_1d_aligned & chop_range
+    short_entry = (close < donchian_low) & vol_spike_1d_aligned & chop_range
     
-    # Elder Ray conditions: strong bull/bear power
-    strong_bull = bull_power > 0
-    strong_bear = bear_power > 0
-    
-    # Exit when momentum weakens (both powers near zero)
-    weak_momentum = (np.abs(bull_power) < 0.1 * atr) & (np.abs(bear_power) < 0.1 * atr)
-    
-    # Pre-compute 6h volume confirmation: > 1.5x 20-period average
-    volume = prices['volume'].values
-    volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * volume_20_avg)
+    # Exit condition: return to midpoint
+    long_exit = np.abs(close - donchian_mid) < 0.1 * (donchian_high - donchian_low)
+    short_exit = np.abs(close - donchian_mid) < 0.1 * (donchian_high - donchian_low)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(strong_bull[i]) or np.isnan(strong_bear[i]) or
-            np.isnan(weak_momentum[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(long_entry[i]) or np.isnan(short_entry[i]) or 
+            np.isnan(long_exit[i]) or np.isnan(short_exit[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -90,24 +79,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long when strong bull power AND 1d bullish trend AND volume spike
-            if (strong_bull[i] and 
-                ema_bullish_aligned[i] and 
-                vol_spike[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            if long_entry[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short when strong bear power AND 1d bearish trend AND volume spike
-            elif (strong_bear[i] and 
-                  ema_bearish_aligned[i] and 
-                  vol_spike[i]):
+            elif short_entry[i]:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit on weakening momentum
-            # Exit when Elder Ray shows weakening momentum
-            exit_signal = weak_momentum[i]
+        else:  # Have position - look for exit to midpoint
+            # Exit when price returns to Donchian midpoint
+            exit_signal = long_exit[i] if position == 1 else short_exit[i]
             
             if exit_signal:
                 position = 0
