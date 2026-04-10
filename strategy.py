@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d volume regime filter
-# - Long when price breaks above Camarilla R4 (1d) AND 1d volume > 1.5x 20-period average
-# - Short when price breaks below Camarilla S4 (1d) AND 1d volume > 1.5x 20-period average
+# Hypothesis: 6h Camarilla pivot fade with 1d volume exhaustion filter
+# - Fade at Camarilla R3/S3 levels from 1d when 1d volume < 0.8x 20-period average (low volume = exhaustion)
+# - Long when price < S3 AND volume exhaustion (expect bounce from support)
+# - Short when price > R3 AND volume exhaustion (expect rejection at resistance)
 # - Exit when price retouches Camarilla PP (pivot point) from 1d
-# - Camarilla levels from higher timeframe provide structure that works in ranging markets
-# - Volume regime filter ensures breakouts occur with participation, reducing false signals
+# - Volume exhaustion filter ensures fade occurs at low participation, increasing reversal probability
 # - Target: 12-37 trades/year on 6h (50-150 total over 4 years) to avoid fee drag
 
-name = "6h_1d_camarilla_breakout_volume_v1"
+name = "6h_1d_camarilla_fade_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -32,8 +32,8 @@ def generate_signals(prices):
     
     # Camarilla levels: based on previous day's range
     camarilla_pp = np.full_like(close_1d, np.nan, dtype=float)
-    camarilla_r4 = np.full_like(close_1d, np.nan, dtype=float)
-    camarilla_s4 = np.full_like(close_1d, np.nan, dtype=float)
+    camarilla_r3 = np.full_like(close_1d, np.nan, dtype=float)
+    camarilla_s3 = np.full_like(close_1d, np.nan, dtype=float)
     
     for i in range(1, len(df_1d)):
         # Use previous day's OHLC
@@ -41,13 +41,13 @@ def generate_signals(prices):
         prev_low = low_1d[i-1]
         prev_close = close_1d[i-1]
         camarilla_pp[i] = (prev_high + prev_low + prev_close) / 3
-        camarilla_r4[i] = camarilla_pp[i] + (prev_high - prev_low) * 1.1 / 2
-        camarilla_s4[i] = camarilla_pp[i] - (prev_high - prev_low) * 1.1 / 2
+        camarilla_r3[i] = camarilla_pp[i] + (prev_high - prev_low) * 1.1 / 4
+        camarilla_s3[i] = camarilla_pp[i] - (prev_high - prev_low) * 1.1 / 4
     
     # Align HTF Camarilla levels to 6h timeframe
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Pre-compute 1d volume average (20-period)
     vol_1d = df_1d['volume'].values
@@ -63,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -73,30 +73,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume regime condition: current 1d volume > 1.5x 20-period average
-        # Need to get current 1d volume - we'll use the aligned 1d volume series
+        # Volume exhaustion condition: current 1d volume < 0.8x 20-period average
         vol_1d_current = df_1d['volume'].values
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
-        vol_regime = not np.isnan(vol_1d_aligned[i]) and not np.isnan(vol_ma_20_aligned[i]) and \
-                     vol_1d_aligned[i] > 1.5 * vol_ma_20_aligned[i]
+        vol_exhaustion = not np.isnan(vol_1d_aligned[i]) and not np.isnan(vol_ma_20_aligned[i]) and \
+                         vol_1d_aligned[i] < 0.8 * vol_ma_20_aligned[i]
         
         close_now = prices['close'].values[i]
         pp_now = camarilla_pp_aligned[i]
-        r4_now = camarilla_r4_aligned[i]
-        s4_now = camarilla_s4_aligned[i]
+        r3_now = camarilla_r3_aligned[i]
+        s3_now = camarilla_s3_aligned[i]
         
-        # Camarilla breakout signals
-        breakout_up = close_now > r4_now   # price breaks above Camarilla R4
-        breakout_down = close_now < s4_now  # price breaks below Camarilla S4
+        # Camarilla fade signals
+        fade_long = close_now < s3_now   # price below Camarilla S3 (support)
+        fade_short = close_now > r3_now  # price above Camarilla R3 (resistance)
         retouch_pp = abs(close_now - pp_now) < 0.001 * pp_now  # price retouches PP (within 0.1%)
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla R4 AND volume regime
-            if breakout_up and vol_regime:
+            # Long conditions: price below Camarilla S3 AND volume exhaustion
+            if fade_long and vol_exhaustion:
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla S4 AND volume regime
-            elif breakout_down and vol_regime:
+            # Short conditions: price above Camarilla R3 AND volume exhaustion
+            elif fade_short and vol_exhaustion:
                 position = -1
                 signals[i] = -0.25
             else:
