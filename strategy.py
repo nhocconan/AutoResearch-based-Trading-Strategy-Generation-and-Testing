@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX trend filter
-# - Long when price breaks above 20-period Donchian high (12h) AND 1d ADX > 25 AND 12h volume > 1.5x 20-period average
-# - Short when price breaks below 20-period Donchian low (12h) AND 1d ADX > 25 AND 12h volume > 1.5x 20-period average
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d ADX trend filter
+# - Long when price breaks above 20-period Donchian high (4h) AND 1d ADX > 25 AND 12h volume > 1.5x 20-period average
+# - Short when price breaks below 20-period Donchian low (4h) AND 1d ADX > 25 AND 12h volume > 1.5x 20-period average
 # - Exit when price crosses 20-period Donchian midpoint or opposite breakout occurs
-# - Donchian channels provide clear trend-following structure with built-in volatility adaptation
-# - 1d ADX filter ensures we only trade when higher timeframe is strongly trending
-# - Volume confirmation prevents false signals in low participation
-# - Target: 12-37 trades/year on 12h (50-150 total over 4 years) to avoid fee drag
+# - Uses 4h primary timeframe for optimal trade frequency (target: 30-60 trades/year)
+# - Combines price channel breakout with volume and trend confirmation to avoid false signals
+# - Discrete position sizing (0.25) to minimize fee churn
 
-name = "12h_1d_donchian_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_12h_1d_donchian_breakout_volume_adx_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +22,8 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_1d) < 30 or len(df_12h) < 30:
         return np.zeros(n)
     
     # Pre-compute 1d ADX(14)
@@ -80,22 +80,33 @@ def generate_signals(prices):
                 if not np.isnan(dx[i]) and not np.isnan(adx[i-1]):
                     adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 12h Donchian channels (20-period)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    # Pre-compute 12h volume MA(20) for volume spike condition
+    vol_12h = df_12h['volume'].values
+    vol_ma_20_12h = np.full_like(vol_12h, np.nan, dtype=float)
+    
+    for i in range(19, len(vol_12h)):
+        vol_ma_20_12h[i] = np.mean(vol_12h[i-19:i+1])
+    
+    # Align 12h volume indicators to 4h timeframe
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
+    vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h)
+    
+    # Pre-compute 4h Donchian channels (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
     # Donchian high and low
-    donchian_high = np.full_like(close_12h, np.nan, dtype=float)
-    donchian_low = np.full_like(close_12h, np.nan, dtype=float)
-    donchian_mid = np.full_like(close_12h, np.nan, dtype=float)
+    donchian_high = np.full_like(close_4h, np.nan, dtype=float)
+    donchian_low = np.full_like(close_4h, np.nan, dtype=float)
+    donchian_mid = np.full_like(close_4h, np.nan, dtype=float)
     
     for i in range(19, n):
-        donchian_high[i] = np.max(high_12h[i-19:i+1])
-        donchian_low[i] = np.min(low_12h[i-19:i+1])
+        donchian_high[i] = np.max(high_4h[i-19:i+1])
+        donchian_low[i] = np.min(low_4h[i-19:i+1])
         donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
     signals = np.zeros(n)
@@ -104,7 +115,8 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(adx_1d_aligned[i])):
+            np.isnan(donchian_mid[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(vol_ma_20_12h_aligned[i]) or np.isnan(vol_12h_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -113,14 +125,10 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (1.5x average)
-        vol_12h = prices['volume'].values
-        vol_ma_20 = np.full_like(vol_12h, np.nan, dtype=float)
-        for j in range(19, i+1):
-            vol_ma_20[j] = np.mean(vol_12h[j-19:j+1])
-        vol_spike = not np.isnan(vol_ma_20[i]) and vol_12h[i] > 1.5 * vol_ma_20[i]
+        # Volume spike condition (1.5x average from 12h data)
+        vol_spike = vol_12h_aligned[i] > 1.5 * vol_ma_20_12h_aligned[i]
         
-        close_now = close_12h[i]
+        close_now = close_4h[i]
         donchian_high_now = donchian_high[i]
         donchian_low_now = donchian_low[i]
         donchian_mid_now = donchian_mid[i]
@@ -129,8 +137,8 @@ def generate_signals(prices):
         # Donchian breakout signals
         breakout_up = close_now > donchian_high_now  # price breaks above Donchian high
         breakout_down = close_now < donchian_low_now  # price breaks below Donchian low
-        mid_cross_up = (close_12h[i-1] <= donchian_mid_now and close_now > donchian_mid_now)  # crosses above midpoint
-        mid_cross_down = (close_12h[i-1] >= donchian_mid_now and close_now < donchian_mid_now)  # crosses below midpoint
+        mid_cross_up = (close_4h[i-1] <= donchian_mid_now and close_now > donchian_mid_now)  # crosses above midpoint
+        mid_cross_down = (close_4h[i-1] >= donchian_mid_now and close_now < donchian_mid_now)  # crosses below midpoint
         
         if position == 0:  # Flat - look for new entries
             # Long conditions: price breaks above Donchian high AND 1d trending (ADX > 25) AND volume spike
