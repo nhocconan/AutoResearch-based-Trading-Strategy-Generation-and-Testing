@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
 # - Long when price breaks above Camarilla H3 level with volume > 1.8x average AND daily close > daily EMA50
 # - Short when price breaks below Camarilla L3 level with volume > 1.8x average AND daily close < daily EMA50
-# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below average
-# - Uses 6h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years)
-# - Higher volume threshold (1.8x) and 6h timeframe reduce false breakouts and fee drag
+# - Exit when price retreats to Camarilla H4/L4 levels or volume drops below average
 # - Daily trend filter ensures alignment with major trend across market cycles
 # - Volume confirmation prevents false breakouts
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Camarilla pivots work well in ranging markets; combined with daily trend/volume filters for breakouts
 
-name = "6h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Align them to 6h timeframe (this gives us the values for each 6h bar)
+    # Align them to 12h timeframe (this gives us the values for each 12h bar)
     h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
     l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
     c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
@@ -40,7 +40,7 @@ def generate_signals(prices):
     ema50_1d = pd.Series(c_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Pre-compute volume confirmation: > 1.8x 20-period average (higher threshold to reduce trades)
+    # Pre-compute volume confirmation: > 1.8x 20-period average (stricter to reduce trades)
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
     vol_spike = prices['volume'] > (1.8 * volume_20_avg)
     
@@ -64,12 +64,14 @@ def generate_signals(prices):
             continue
         
         # Get previous completed 1d bar values (we need to shift by 1 to avoid look-ahead)
-        # For 6h timeframe, there are 4 bars per 1d bar
-        # So we need to look back 4 positions in the aligned array to get previous day's values
+        # Since align_htf_to_ltf gives us values aligned to each 12h bar,
+        # we need to look at the previous 1d bar's values
+        # For 12h timeframe, there are 2 bars per 1d bar
+        # So we need to look back 2 positions in the aligned array to get previous day's values
         
-        if i >= 4:  # Need at least 4 6h bars to get previous day's data
+        if i >= 2:  # Need at least 2 12h bars to get previous day's data
             # Get index of previous completed 1d bar
-            prev_1d_idx = i - 4
+            prev_1d_idx = i - 2
             
             if prev_1d_idx >= 0 and not (np.isnan(h_1d_aligned[prev_1d_idx]) or 
                                         np.isnan(l_1d_aligned[prev_1d_idx]) or 
