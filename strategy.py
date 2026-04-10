@@ -3,62 +3,98 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
-# - Long when price breaks above 20-day high AND weekly EMA50 rising AND volume > 2.0x 20-bar avg
-# - Short when price breaks below 20-day low AND weekly EMA50 falling AND volume > 2.0x 20-bar avg
-# - Exit with ATR-based trailing stop: signal→0 when price < highest_high - 2.5*ATR (long) or price > lowest_low + 2.5*ATR (short)
-# - Uses weekly EMA50 for trend filter to avoid counter-trend trades and reduce whipsaw in bear markets
-# - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
+# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d regime filter
+# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
+# - Bull regime: 1d ADX > 25 AND 1d +DI > -DI (strong uptrend)
+# - Bear regime: 1d ADX > 25 AND 1d +DI < -DI (strong downtrend)
+# - Range regime: 1d ADX < 20 (choppy market)
+# - Long in bull regime when Bull Power > 0 AND rising for 2 consecutive bars
+# - Short in bear regime when Bear Power > 0 AND rising for 2 consecutive bars
+# - Flat in range regime or when power fails
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Target: 12-25 trades/year on 6h timeframe (50-100 total over 4 years)
+# - Elder Ray measures buying/selling pressure relative to trend; regime filter avoids whipsaws
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute ATR(14) for trailing stop
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Pre-compute 1d ADX and DI for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute Donchian channels from daily data (20-period)
-    highest_20 = pd.Series(close).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(close).rolling(window=20, min_periods=20).min().values
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Pre-compute 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Pre-compute volume confirmation: > 2.0x 20-period average
-    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(values, period):
+        result = np.zeros_like(values)
+        result[period-1] = np.nansum(values[:period])
+        for i in range(period, len(values)):
+            result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
+    
+    period = 14
+    tr_period = wilders_smoothing(tr, period)
+    plus_dm_period = wilders_smoothing(plus_dm, period)
+    minus_dm_period = wilders_smoothing(minus_dm, period)
+    
+    # DI and ADX
+    plus_di = 100 * plus_dm_period / tr_period
+    minus_di = 100 * minus_dm_period / tr_period
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period)
+    
+    # Align HTF regime indicators to LTF
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    
+    # Pre-compute 6h EMA13 for Elder Ray
+    close_6h = prices['close'].values
+    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray Power
+    bull_power = prices['high'].values - ema13_6h
+    bear_power = ema13_6h - prices['low'].values
+    
+    # Rising power detection (2-bar consecutive rise)
+    bull_power_rising = (bull_power > np.roll(bull_power, 1)) & (np.roll(bull_power, 1) > np.roll(bull_power, 2))
+    bear_power_rising = (bear_power > np.roll(bear_power, 1)) & (np.roll(bear_power, 1) > np.roll(bear_power, 2))
+    
+    # Align power indicators (already LTF, no alignment needed)
+    # But we need to handle NaN from rolling
+    bull_power_rising = np.where(np.isnan(bull_power_rising), False, bull_power_rising)
+    bear_power_rising = np.where(np.isnan(bear_power_rising), False, bear_power_rising)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(volume_20_avg[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or 
+            np.isnan(minus_di_aligned[i]) or np.isnan(ema13_6h[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -68,45 +104,42 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above 20-day high AND weekly uptrend with volume spike
-            if (prices['close'].iloc[i] > highest_20[i] and 
-                prices['close'].iloc[i] > ema50_1w_aligned[i] and  # price above weekly EMA50
-                vol_spike.iloc[i]):
+        # Determine regime
+        is_bull_regime = (adx_aligned[i] > 25) and (plus_di_aligned[i] > minus_di_aligned[i])
+        is_bear_regime = (adx_aligned[i] > 25) and (plus_di_aligned[i] < minus_di_aligned[i])
+        is_range_regime = adx_aligned[i] < 20
+        
+        if position == 0:  # Flat - look for new entries
+            # Long in bull regime when Bull Power > 0 AND rising
+            if is_bull_regime and (bull_power[i] > 0) and bull_power_rising[i]:
                 position = 1
-                entry_price = prices['close'].iloc[i]
-                highest_since_entry = entry_price
-                lowest_since_entry = entry_price
                 signals[i] = 0.25
-            # Short when price breaks below 20-day low AND weekly downtrend with volume spike
-            elif (prices['close'].iloc[i] < lowest_20[i] and 
-                  prices['close'].iloc[i] < ema50_1w_aligned[i] and  # price below weekly EMA50
-                  vol_spike.iloc[i]):
+            # Short in bear regime when Bear Power > 0 AND rising
+            elif is_bear_regime and (bear_power[i] > 0) and bear_power_rising[i]:
                 position = -1
-                entry_price = prices['close'].iloc[i]
-                highest_since_entry = entry_price
-                lowest_since_entry = entry_price
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - update extremes and check trailing stop
-            # Update highest/lowest since entry
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # Check long trailing stop: exit if price drops 2.5*ATR from highest since entry
-                if prices['close'].iloc[i] < highest_since_entry - 2.5 * atr[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
+        else:  # Have position - look for exit
+            # Exit conditions:
+            # 1. Power fails (becomes negative)
+            # 2. Regime changes to range
+            # 3. Opposite regime appears
+            exit_signal = False
+            
+            if position == 1:  # Long position
+                if (bull_power[i] <= 0) or is_range_regime or is_bear_regime:
+                    exit_signal = True
+            elif position == -1:  # Short position
+                if (bear_power[i] <= 0) or is_range_regime or is_bull_regime:
+                    exit_signal = True
+            
+            if exit_signal:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
                     signals[i] = 0.25
-            else:  # position == -1
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # Check short trailing stop: exit if price rises 2.5*ATR from lowest since entry
-                if prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr[i]:
-                    position = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = -0.25
     
