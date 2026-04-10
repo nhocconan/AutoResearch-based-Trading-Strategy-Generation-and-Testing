@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h volume confirmation and 1d ATR filter
-# - Primary signal: Price breaks above/below Camarilla H3/L3 levels on 1h
-# - Volume filter: 4h volume > 1.3x 20-period average volume (institutional participation)
-# - Volatility filter: 1d ATR(14) < 0.05 * price (avoid extreme volatility)
-# - Session filter: 08-20 UTC (active London/NY overlap)
-# - Position size: 0.20 discrete level to minimize fee churn
-# - Stoploss: 1.5x ATR(14) on 1h
-# - Target: 15-37 trades/year (60-150 total over 4 years) per 1h strategy guidelines
-# - Works in bull/bear: Breakouts capture strong moves; filters avoid chop/false signals
+# Hypothesis: 6h Donchian(20) breakout with 1w pivot direction and 1d volume confirmation
+# - Primary signal: Price breaks above/below Donchian(20) channel on 6h
+# - HTF filter: Trade only in direction of weekly Camarilla pivot bias (above/below weekly pivot)
+# - Volume filter: 1d volume > 1.3x 20-period average volume (institutional participation)
+# - Position size: 0.25 discrete level to minimize fee churn
+# - Stoploss: 2.0x ATR(20) on 6h
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Weekly pivot provides structural bias that works in both bull/bear markets
+# - Volume confirmation ensures breakouts have conviction
+# - Discrete sizing and filters reduce overtrading and fee drag
 
-name = "1h_4h_1d_camarilla_volume_atr_v1"
-timeframe = "1h"
+name = "6h_1w_1d_donchian_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,108 +24,91 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1w) < 20 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h volume spike filter
-    volume_4h = df_4h['volume'].values
-    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_4h > (1.3 * avg_volume_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_4h, vol_spike)
+    # Pre-compute weekly Camarilla pivot for directional bias
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pre-compute 1d ATR(14) for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly pivot point (Camarilla)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly resistance/support levels (Camarilla)
+    range_1w = high_1w - low_1w
+    r3_1w = pivot_1w + range_1w * 1.1 / 2  # R3 level
+    s3_1w = pivot_1w - range_1w * 1.1 / 2  # S3 level
     
-    tr_1d1 = high_1d - low_1d
-    tr_1d2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr_1d3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr_1d1, np.maximum(tr_1d2, tr_1d3))
-    tr_1d[0] = tr_1d1[0]
-    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_filter = (atr_14 / close_1d) < 0.05  # ATR < 5% of price
-    atr_filter_aligned = align_htf_to_ltf(prices, df_1d, atr_filter)
+    # Determine weekly bias: 1 = bullish (above pivot), -1 = bearish (below pivot), 0 = neutral
+    weekly_bias = np.zeros(len(close_1w))
+    weekly_bias[close_1w > pivot_1w] = 1
+    weekly_bias[close_1w < pivot_1w] = -1
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
     
-    # Pre-compute 1h Camarilla levels (based on previous day's OHLC)
-    # We need daily OHLC for Camarilla calculation
-    # Since we have 1h data, we'll approximate using rolling window of 24 periods (1 day)
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
-    open_1h = prices['open'].values
+    # Pre-compute 1d volume spike filter
+    volume_1d = df_1d['volume'].values
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (1.3 * avg_volume_20)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Approximate daily OHLC using 24-period rolling (for 1h timeframe)
-    # This is an approximation but avoids look-ahead by using completed periods
-    def rolling_ohlc(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).apply(
-            lambda x: x[-1] if len(x) == window else np.nan, raw=True
-        ).values
+    # Pre-compute 6h Donchian channels (20-period)
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
     
-    # Get previous day's close (24 periods ago) for Camarilla calculation
-    prev_close = np.roll(close_1h, 24)
-    prev_high = np.roll(high_1h, 24)
-    prev_low = np.roll(low_1h, 24)
+    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: H3/L3 = close +- (high-low)*1.1/4
-    camarilla_high = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_low = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Pre-compute 1h ATR(14) for stoploss
-    tr_1h1 = high_1h - low_1h
-    tr_1h2 = np.abs(high_1h - np.roll(close_1h, 1))
-    tr_1h3 = np.abs(low_1h - np.roll(close_1h, 1))
-    tr_1h = np.maximum(tr_1h1, np.maximum(tr_1h2, tr_1h3))
-    tr_1h[0] = tr_1h1[0]
-    atr_14_1h = pd.Series(tr_1h).rolling(window=14, min_periods=14).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Pre-compute 6h ATR(20) for stoploss
+    tr_6h1 = high_6h - low_6h
+    tr_6h2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr_6h3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr_6h = np.maximum(tr_6h1, np.maximum(tr_6h2, tr_6h3))
+    tr_6h[0] = tr_6h1[0]
+    atr_20 = pd.Series(tr_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
     for i in range(100, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(camarilla_high[i]) or np.isnan(camarilla_low[i]) or
-            np.isnan(vol_spike_aligned[i]) or np.isnan(atr_filter_aligned[i]) or
-            np.isnan(atr_14_1h[i]) or not session_filter[i]):
+        # Skip if any required data is invalid
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(weekly_bias_aligned[i]) or
+            np.isnan(atr_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price re-enters Camarilla range OR stoploss hit
-            if (close_1h[i] < camarilla_high[i] and close_1h[i] > camarilla_low[i]) or \
-               close_1h[i] < entry_price - 1.5 * atr_14_1h[i]:
+            # Exit: Donchian mean reversion OR stoploss hit
+            if close_6h[i] < donchian_low[i] or close_6h[i] < entry_price - 2.0 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price re-enters Camarilla range OR stoploss hit
-            if (close_1h[i] < camarilla_high[i] and close_1h[i] > camarilla_low[i]) or \
-               close_1h[i] > entry_price + 1.5 * atr_14_1h[i]:
+            # Exit: Donchian mean reversion OR stoploss hit
+            if close_6h[i] > donchian_high[i] or close_6h[i] > entry_price + 2.0 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakouts with volume and volatility filters
-            if vol_spike_aligned[i] and atr_filter_aligned[i]:
-                # Long: price breaks above Camarilla H3
-                if close_1h[i] > camarilla_high[i]:
+            # Look for Donchian breakouts with weekly bias and volume confirmation
+            if vol_spike_aligned[i]:
+                bias = weekly_bias_aligned[i]
+                # Long: price breaks above Donchian high with bullish weekly bias
+                if close_6h[i] > donchian_high[i] and bias == 1:
                     position = 1
-                    entry_price = close_1h[i]
-                    signals[i] = 0.20
-                # Short: price breaks below Camarilla L3
-                elif close_1h[i] < camarilla_low[i]:
+                    entry_price = close_6h[i]
+                    signals[i] = 0.25
+                # Short: price breaks below Donchian low with bearish weekly bias
+                elif close_6h[i] < donchian_low[i] and bias == -1:
                     position = -1
-                    entry_price = close_1h[i]
-                    signals[i] = -0.20
+                    entry_price = close_6h[i]
+                    signals[i] = -0.25
     
     return signals
