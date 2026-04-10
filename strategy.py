@@ -3,26 +3,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume spike confirmation
-# - Long when 6h Williams %R < -80 (oversold) AND 12h EMA50 > EMA200 (bullish trend) AND 6h volume > 1.5x 20-period volume SMA
-# - Short when 6h Williams %R > -20 (overbought) AND 12h EMA50 < EMA200 (bearish trend) AND 6h volume > 1.5x 20-period volume SMA
-# - Exit: Williams %R returns to -50 level or volume drops below average
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1h chop regime filter
+# - Long when price breaks above 4h Donchian upper band (20-period high) AND 1d volume > 1.5x 20-period volume SMA AND 1h chop > 61.8 (range regime)
+# - Short when price breaks below 4h Donchian lower band (20-period low) AND 1d volume > 1.5x 20-period volume SMA AND 1h chop > 61.8 (range regime)
+# - Exit: price retreats to midpoint of Donchian channel OR volume drops below average
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 12-37 trades/year on 6h timeframe to stay within fee drag limits
-# - Williams %R identifies extreme reversals, 12h EMA crossover filters trend direction, volume confirms momentum
+# - Target: 15-40 trades/year on 4h timeframe to stay within fee drag limits
+# - Uses Donchian structure from 4h, volume confirmation from 1d, regime filter from 1h for mean reversion in choppy markets
 
-name = "6h_12h_williamsr_meanreversion_volume_v1"
-timeframe = "6h"
+name = "4h_1d_1h_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1d) < 30 or len(df_1h) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,65 +35,92 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 6h Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # Avoid division by zero
+    # Calculate 4h Donchian channel (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max_20 + low_min_20) / 2.0
     
-    # Calculate 12h EMA50 and EMA200 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d volume SMA for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Align 12h EMAs to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
+    # Calculate 1h chop index regime filter (Ehler's Chop: 100 * log10(sum(atr(14)) / log10(highest_high - lowest_low)) / log10(14))
+    # Simplified: chop > 61.8 = ranging market (good for mean reversion), chop < 38.2 = trending
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # Calculate 12h close for trend comparison
-    close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+    # Calculate True Range for 1h
+    tr1 = high_1h - low_1h
+    tr2 = np.abs(high_1h - np.roll(close_1h, 1))
+    tr3 = np.abs(low_1h - np.roll(close_1h, 1))
+    tr1[0] = high_1h[0] - low_1h[0]  # first bar
+    tr2[0] = np.abs(high_1h[0] - close_1h[0])  # approximate
+    tr3[0] = np.abs(low_1h[0] - close_1h[0])   # approximate
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 6h volume SMA for confirmation
-    volume_sma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate highest high and lowest low over 14 periods for chop denominator
+    hh_14 = pd.Series(high_1h).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1h).rolling(window=14, min_periods=14).min().values
     
-    for i in range(100, n):  # Start after warmup for indicators
+    # Chop calculation: 100 * log10(sum(atr(14)) / (hh_14 - ll_14)) / log10(14)
+    # Avoid division by zero
+    range_14 = hh_14 - ll_14
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    chop_denominator = np.where(range_14 > 0, range_14, 1e-10)
+    chop_ratio = sum_atr_14 / chop_denominator
+    chop_ratio = np.where(chop_ratio > 0, chop_ratio, 1e-10)
+    chop = 100 * np.log10(chop_ratio) / np.log10(14)
+    
+    # Align HTF data to 4h timeframe
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1h, chop)
+    
+    for i in range(40, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(ema_200_12h_aligned[i]) or np.isnan(close_12h_aligned[i]) or
-            np.isnan(volume_sma_20_6h[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 6h volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20_6h[i]
+        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
+        # Need to get 1d volume at the aligned index
+        vol_idx = i // 6  # Approximate: 4h bars per 1d (6 * 4h = 24h)
+        if vol_idx < len(volume_1d):
+            vol_confirm = volume_1d[vol_idx] > 1.5 * volume_sma_20_1d[vol_idx]
+        else:
+            vol_confirm = False
         
-        # Trend filter: 12h EMA50 vs EMA200
-        trend_bullish = ema_50_12h_aligned[i] > ema_200_12h_aligned[i]
-        trend_bearish = ema_50_12h_aligned[i] < ema_200_12h_aligned[i]
+        # Chop regime filter: chop > 61.8 = ranging market (favorable for mean reversion breakouts)
+        chop_filter = chop_aligned[i] > 61.8
         
-        # Williams %R mean reversion signals
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        exit_level = abs(williams_r[i] + 50) < 10  # Near -50 level
+        # Donchian breakout signals
+        breakout_up = close[i] > high_max_20[i-1]  # Break above previous period's high
+        breakout_down = close[i] < low_min_20[i-1]  # Break below previous period's low
+        
+        # Exit conditions: price retreats to midpoint OR loss of volume/chop confirmation
+        exit_long = close[i] < donchian_mid[i] or not (vol_confirm and chop_filter)
+        exit_short = close[i] > donchian_mid[i] or not (vol_confirm and chop_filter)
         
         if position == 0:  # Flat - look for entry
-            if oversold and trend_bullish and vol_confirm:
+            if breakout_up and vol_confirm and chop_filter:
                 position = 1
                 signals[i] = 0.25
-            elif overbought and trend_bearish and vol_confirm:
+            elif breakout_down and vol_confirm and chop_filter:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            if exit_level or not vol_confirm:
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            if exit_level or not vol_confirm:
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
