@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian upper channel AND 12h HMA(21) rising AND volume > 1.5x 20-period average volume
-# - Short when price breaks below 20-period Donchian lower channel AND 12h HMA(21) falling AND volume > 1.5x 20-period average volume
-# - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
-# - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# - Donchian channels identify clear breakouts with defined risk levels
-# - HMA trend filter ensures we trade in the direction of the higher timeframe trend
-# - Volume confirmation reduces false breakouts
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
+# - Long when price breaks above H3 pivot level AND 4h close > 4h open (bullish 4h candle) AND hour in [8,20) UTC
+# - Short when price breaks below L3 pivot level AND 4h close < 4h open (bearish 4h candle) AND hour in [8,20) UTC
+# - Exit when price returns to the 4h mid-point (pivot) level
+# - Uses discrete position sizing 0.20 to limit fee churn
+# - Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
+# - Camarilla pivots provide precise intraday support/resistance levels
+# - 4h trend filter ensures we trade with the higher timeframe momentum
+# - Session filter (08-20 UTC) avoids low-volume Asian session noise
+# - Works in both bull and bear markets by following 4h trend direction
 
-name = "4h_12h_donchian_hma_volume_v1"
-timeframe = "4h"
+name = "1h_4h_camarilla_pivot_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,113 +24,103 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC and volume
+    # Pre-compute 1h OHLC
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Pre-compute 4h Donchian channels (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    # Pre-compute 1h Camarilla pivot levels (based on previous bar)
+    # H4 = close + 1.5*(high-low), H3 = close + 1.25*(high-low), etc.
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # First bar uses current values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
+    # Calculate pivot range
+    pivot_range = prev_high - prev_low
     
-    upper_channel = rolling_max(high, 20)
-    lower_channel = rolling_min(low, 20)
+    # Camarilla levels
+    h5 = prev_close + 1.625 * pivot_range
+    h4 = prev_close + 1.500 * pivot_range
+    h3 = prev_close + 1.250 * pivot_range
+    l3 = prev_close - 1.250 * pivot_range
+    l4 = prev_close - 1.500 * pivot_range
+    l5 = prev_close - 1.625 * pivot_range
     
-    # Pre-compute 4h volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Pivot point (mid-point)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
     
-    # Pre-compute 12h HMA(21) for trend filter
-    def wma(data, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(data, weights / weights.sum(), mode='valid')
+    # Pre-compute 4h trend (bullish/bearish candle)
+    # We need 4h open, high, low, close - but we only have aligned close
+    # So we'll use: bullish if 4h close > 4h open
+    # To get 4h open, we need to load the full 4h data
+    open_4h = df_4h['open'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    def hma(data, window):
-        half_window = window // 2
-        sqrt_window = int(np.sqrt(window))
-        wma_half = wma(data, half_window)
-        wma_full = wma(data, window)
-        wma_half_2x = 2 * wma_half
-        diff = wma_half_2x - wma_full
-        return wma(diff, sqrt_window)
+    # 4h bullish candle: close > open
+    bullish_4h = close_4h > open_4h
+    bearish_4h = close_4h < open_4h
     
-    close_12h = df_12h['close'].values
-    hma_12h = np.full_like(close_12h, np.nan, dtype=float)
-    if len(close_12h) >= 21:
-        hma_values = hma(close_12h, 21)
-        start_idx = 21 - 1  # HMA(21) needs 21 periods
-        hma_12h[start_idx:start_idx + len(hma_values)] = hma_values
+    # Align 4h indicators to 1h timeframe
+    bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_4h)
+    bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, bearish_4h)
+    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot)
     
-    # HMA trend: rising when current > previous, falling when current < previous
-    hma_rising = np.full_like(hma_12h, False, dtype=bool)
-    hma_falling = np.full_like(hma_12h, False, dtype=bool)
-    for i in range(1, len(hma_12h)):
-        if not np.isnan(hma_12h[i]) and not np.isnan(hma_12h[i-1]):
-            if hma_12h[i] > hma_12h[i-1]:
-                hma_rising[i] = True
-            elif hma_12h[i] < hma_12h[i-1]:
-                hma_falling[i] = True
-    
-    # Align HTF indicators to 4h timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_12h, hma_rising)
-    hma_falling_aligned = align_htf_to_ltf(prices, df_12h, hma_falling)
+    # Pre-compute session filter (08-20 UTC)
+    # prices.index is already DatetimeIndex
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours < 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i])):
+        if (np.isnan(h3[i]) or np.isnan(l3[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(bullish_4h_aligned[i]) or np.isnan(bearish_4h_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above upper channel AND HMA rising AND volume spike
-            if (close[i] > upper_channel[i] and 
-                hma_rising_aligned[i] and 
-                volume_spike[i]):
+            # Long conditions: price breaks above H3 AND 4h bullish AND in session
+            if (close[i] > h3[i] and 
+                bullish_4h_aligned[i] and 
+                in_session[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short conditions: price breaks below lower channel AND HMA falling AND volume spike
-            elif (close[i] < lower_channel[i] and 
-                  hma_falling_aligned[i] and 
-                  volume_spike[i]):
+                signals[i] = 0.20
+            # Short conditions: price breaks below L3 AND 4h bearish AND in session
+            elif (close[i] < l3[i] and 
+                  bearish_4h_aligned[i] and 
+                  in_session[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses back inside the Donchian channel
-            exit_long = (position == 1 and close[i] < upper_channel[i])
-            exit_short = (position == -1 and close[i] > lower_channel[i])
+            # Exit conditions: price returns to pivot level
+            exit_long = (position == 1 and close[i] < pivot_aligned[i])
+            exit_short = (position == -1 and close[i] > pivot_aligned[i])
             
             if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 if position == 1:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
