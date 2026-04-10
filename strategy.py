@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX filter
-# - Donchian(20) breakout from 4h: price > highest(high,20) for long, < lowest(low,20) for short
-# - Volume confirmation: 4h volume > 2.0 x 20-period average (strong participation)
-# - 1w ADX(14) > 25 to ensure trending market (avoid chop)
-# - Stoploss: ATR-based trailing stop (exit when price moves against position by 2.5 * ATR)
-# - Position size: 0.25 (25% of capital) to manage drawdown in bear markets
-# - Works in bull/bear: ADX filter ensures we only trade when higher timeframe is trending
-# - Target trades: ~150 over 4 years (37/year) to minimize fee drag
+# Hypothesis: 1d Williams Alligator + 1w trend filter + volume confirmation
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price
+# - Trend: Alligator lines aligned (Jaw > Teeth > Lips for uptrend, reverse for downtrend)
+# - 1w ADX(14) > 25 to ensure strong trending environment, avoid chop
+# - Volume confirmation: current volume > 2.0x 50-period average to filter low-quality breaks
+# - Long: Alligator uptrend + ADX filter + volume spike + price > Lips
+# - Short: Alligator downtrend + ADX filter + volume spike + price < Lips
+# - Designed for 1d timeframe: targets 20-50 trades/year to avoid fee drag
+# - Works in bull/bear markets: ADX filter ensures we trade only when 1w trend is strong
 
-name = "4h_1w_donchian_volume_adx_v1"
-timeframe = "4h"
+name = "1d_1w_alligator_adx_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +27,7 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1w ADX(14) for trend filter
+    # Pre-compute 1w ADX(25) for trend filter (higher threshold for stronger trends)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -47,88 +48,94 @@ def generate_signals(prices):
     dm_minus[0] = 0
     
     # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_25 = pd.Series(tr).ewm(span=25, adjust=False, min_periods=25).mean().values
+    dm_plus_25 = pd.Series(dm_plus).ewm(span=25, adjust=False, min_periods=25).mean().values
+    dm_minus_25 = pd.Series(dm_minus).ewm(span=25, adjust=False, min_periods=25).mean().values
     
     # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    di_plus = 100 * dm_plus_25 / tr_25
+    di_minus = 100 * dm_minus_25 / tr_25
     
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx = pd.Series(dx).ewm(span=25, adjust=False, min_periods=25).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Pre-compute 4h indicators
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # Williams Alligator on 1d data
+    high_1d = prices['high'].values
+    low_1d = prices['low'].values
+    close_1d = prices['close'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Median price = (high + low) / 2
+    median_price = (high_1d + low_1d) / 2.0
     
-    # Volume confirmation: volume > 2.0 x 20-period average
-    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_4h > (2.0 * avg_volume_20)
+    # Alligator lines: SMAs of median price
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = pd.Series(jaw).shift(8)  # 8-bar forward shift
     
-    # ATR(14) for stoploss
-    tr1_4h = high_4h - low_4h
-    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    tr_4h[0] = tr1_4h[0]
-    atr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(teeth).shift(5)  # 5-bar forward shift
+    
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(lips).shift(3)  # 3-bar forward shift
+    
+    # Alligator trend conditions
+    jaw_gt_teeth = jaw > teeth
+    teeth_gt_lips = teeth > lips
+    jaw_lt_teeth = jaw < teeth
+    teeth_lt_lips = teeth < lips
+    
+    # Pre-compute 1d volume confirmation
+    volume_1d = prices['volume'].values
+    avg_volume_50 = pd.Series(volume_1d).rolling(window=50, min_periods=50).mean().values
+    vol_spike = volume_1d > (2.0 * avg_volume_50)
+    
+    # Pre-compute 1d ATR(14) for stoploss
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]
+    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
-    highest_since_entry = 0.0  # for trailing stop long
-    lowest_since_entry = 0.0   # for trailing stop short
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup period for Alligator
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Update highest since entry
-            highest_since_entry = max(highest_since_entry, high_4h[i])
-            # Exit: price < lowest_low(20) OR trailing stop hit
-            if close_4h[i] < lowest_low[i] or close_4h[i] < highest_since_entry - 2.5 * atr_14[i]:
+            # Exit: Alligator trend reverses OR stoploss hit
+            if not (jaw_gt_teeth[i] and teeth_gt_lips[i]) or close_1d[i] < entry_price - 2.5 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
-                highest_since_entry = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest since entry
-            lowest_since_entry = min(lowest_since_entry, low_4h[i])
-            # Exit: price > highest_high(20) OR trailing stop hit
-            if close_4h[i] > highest_high[i] or close_4h[i] > lowest_since_entry + 2.5 * atr_14[i]:
+            # Exit: Alligator trend reverses OR stoploss hit
+            if not (jaw_lt_teeth[i] and teeth_lt_lips[i]) or close_1d[i] > entry_price + 2.5 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
-                lowest_since_entry = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with trend and volume filters
-            if vol_spike[i] and adx_aligned[i] > 25:
-                # Breakout: price > highest_high(20) for long, < lowest_low(20) for short
-                if close_4h[i] > highest_high[i]:
+            # Look for Alligator signals with trend and volume filters
+            if adx_aligned[i] > 25 and vol_spike[i]:
+                # Uptrend: Jaw > Teeth > Lips
+                if jaw_gt_teeth[i] and teeth_gt_lips[i] and close_1d[i] > lips[i]:
                     position = 1
-                    entry_price = close_4h[i]
-                    highest_since_entry = high_4h[i]
+                    entry_price = close_1d[i]
                     signals[i] = 0.25
-                elif close_4h[i] < lowest_low[i]:
+                # Downtrend: Jaw < Teeth < Lips
+                elif jaw_lt_teeth[i] and teeth_lt_lips[i] and close_1d[i] < lips[i]:
                     position = -1
-                    entry_price = close_4h[i]
-                    lowest_since_entry = low_4h[i]
+                    entry_price = close_1d[i]
                     signals[i] = -0.25
     
     return signals
