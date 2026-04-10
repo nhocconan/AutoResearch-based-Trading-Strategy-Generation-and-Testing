@@ -3,107 +3,97 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation
-# - Williams Alligator consists of three SMAs (jaw, teeth, lips) representing balance lines
-# - Long when: lips > teeth > jaw (bullish alignment) AND price > 1d EMA50 (uptrend) AND volume > 1.3x average
-# - Short when: lips < teeth < jaw (bearish alignment) AND price < 1d EMA50 (downtrend) AND volume > 1.3x average
-# - Exit when: Alligator lines converge (|lips - jaw| < 0.5 * ATR) OR volume drops below average
-# - Williams Alligator identifies trend absence (convergence) and presence (divergence)
-# - 1d EMA50 filter ensures alignment with higher timeframe trend
-# - Volume confirmation prevents false signals during low participation
-# - Targets 12-25 trades/year (48-100 total over 4 years) to avoid fee drag
-# - Works in both bull and bear markets by capturing genuine trend phases with filters
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above H3 level with volume > 1.5x average AND daily close > daily EMA20
+# - Short when price breaks below L3 level with volume > 1.5x average AND daily close < daily EMA20
+# - Exit when price retests H4/L4 levels or volume drops below average
+# - Daily trend filter ensures alignment with intermediate trend
+# - Volume confirmation prevents false breakouts
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Camarilla pivots work well in both trending and ranging markets when combined with trend and volume filters
 
-name = "6h_1d_alligator_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Williams Alligator: 3 SMAs with different periods and offsets
-    # Jaw: SMA(13, 8) - blue line
-    # Teeth: SMA(8, 5) - red line  
-    # Lips: SMA(5, 3) - green line
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Pre-compute Camarilla pivot levels from previous 1d bar (standard calculation)
+    # H4 = Close + 1.5*(High-Low), H3 = Close + 1.0*(High-Low), etc.
+    # L4 = Close - 1.5*(High-Low), L3 = Close - 1.0*(High-Low), etc.
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Jaw (13-period SMA, offset 8 bars forward)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period SMA, offset 5 bars forward)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period SMA, offset 3 bars forward)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate pivot levels for each 1d bar
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_h3 = close_1d + 1.0 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.0 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # 1d EMA(50) for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align HTF pivot levels to 12h timeframe (wait for completed 1d bar)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # ATR(14) for exit condition (convergence measurement)
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Pre-compute 1d EMA(20) for trend filter
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Volume confirmation: > 1.3x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average on 12h timeframe
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.3 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
-    # Volume filter: < average volume for exit
+    # Pre-compute volume filter: < average volume for exit
     vol_normal = prices['volume'] < volume_20_avg
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or
-            np.isnan(volume_20_avg[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Bullish Alligator alignment: lips > teeth > jaw
-            bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-            # Bearish Alligator alignment: lips < teeth < jaw
-            bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-            
-            # Long entry: bullish alignment + price > 1d EMA50 + volume spike
-            if (bullish_alignment and 
-                prices['close'].iloc[i] > ema50_1d_aligned[i] and
-                vol_spike.iloc[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long breakout: price > H3 level with volume spike AND daily uptrend
+            if (prices['high'].iloc[i] > h3_1d_aligned[i] and 
+                vol_spike.iloc[i] and 
+                prices['close'].iloc[i] > ema20_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish alignment + price < 1d EMA50 + volume spike
-            elif (bearish_alignment and
-                  prices['close'].iloc[i] < ema50_1d_aligned[i] and
-                  vol_spike.iloc[i]):
+            # Short breakdown: price < L3 level with volume spike AND daily downtrend
+            elif (prices['low'].iloc[i] < l3_1d_aligned[i] and 
+                  vol_spike.iloc[i] and 
+                  prices['close'].iloc[i] < ema20_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Alligator convergence: |lips - jaw| < 0.5 * ATR (trend weakening)
+            # 1. Price retests H4/L4 levels (strong reversal signal)
             # 2. Volume drops below average (loss of momentum)
-            alligator_convergence = np.abs(lips[i] - jaw[i]) < (0.5 * atr[i])
-            
             if position == 1:  # Long position
-                if (alligator_convergence or vol_normal.iloc[i]):
+                if (prices['low'].iloc[i] < h4_1d_aligned[i] or 
+                    vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25  # Hold long
             elif position == -1:  # Short position
-                if (alligator_convergence or vol_normal.iloc[i]):
+                if (prices['high'].iloc[i] > l4_1d_aligned[i] or 
+                    vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
