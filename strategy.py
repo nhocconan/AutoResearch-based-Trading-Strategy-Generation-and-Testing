@@ -3,86 +3,109 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
-# - Long when Williams %R(14) crosses above -80 (oversold) AND 1d close > 1d EMA(200) AND 4h volume > 1.2x 20-period average
-# - Short when Williams %R(14) crosses below -20 (overbought) AND 1d close < 1d EMA(200) AND 4h volume > 1.2x 20-period average
-# - Exit when Williams %R crosses -50 (mean reversion midpoint)
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX regime filter
+# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# - Long when Bull Power > 0 AND ADX(14) > 25 AND +DI > -DI (strong uptrend)
+# - Short when Bear Power < 0 AND ADX(14) > 25 AND -DI > +DI (strong downtrend)
+# - Exit when ADX < 20 (trend weakening) or Elder Power reverses
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Williams %R identifies extreme momentum exhaustion points
-# - Daily EMA(200) filter ensures we trade with the long-term trend
-# - Volume confirmation reduces false signals
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets by trading with the strong trend (ADX > 25)
 
-name = "4h_1d_williamsr_volume_trend_v1"
-timeframe = "4h"
+name = "6h_1d_elder_ray_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLCV
+    # Pre-compute 6h OHLC
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Pre-compute 4h Williams %R (14-period)
-    def rolling_max(arr, window):
+    # Pre-compute 6h EMA(13) for Elder Ray
+    def ema(arr, span):
         result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
+        if len(arr) < span:
+            return result
+        multiplier = 2 / (span + 1)
+        result[span-1] = np.mean(arr[:span])  # SMA seed
+        for i in range(span, len(arr)):
+            result[i] = (arr[i] * multiplier) + (result[i-1] * (1 - multiplier))
         return result
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
+    ema_13 = ema(close, 13)
     
-    highest_high = rolling_max(high, 14)
-    lowest_low = rolling_min(low, 14)
-    williams_r = np.full_like(close, np.nan, dtype=float)
-    for i in range(13, len(close)):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            williams_r[i] = -50  # Avoid division by zero
+    # Pre-compute 6h Elder Ray
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Pre-compute 4h volume moving average (20-period)
-    def rolling_mean(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.mean(arr[i - window + 1:i + 1])
-        return result
-    
-    vol_ma_4h = rolling_mean(volume, 20)
-    
-    # Pre-compute 1d EMA(200)
+    # Pre-compute 1d ADX components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200_1d = np.full_like(close_1d, np.nan, dtype=float)
-    if len(close_1d) >= 200:
-        # Seed with SMA
-        ema_200_1d[199] = np.mean(close_1d[:200])
-        # EMA calculation
-        for i in range(200, len(close_1d)):
-            ema_200_1d[i] = (close_1d[i] * 2 + ema_200_1d[i-1] * 198) / 200
     
-    # Align HTF indicators to 4h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # True Range
+    tr = np.zeros_like(high_1d)
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]), 
+                   abs(low_1d[i] - close_1d[i-1]))
+    
+    # +DM and -DM
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1  # positive values
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smooth(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Wilder's smoothing: today = (yesterday * (period-1) + today) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    atr_1d = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
+    
+    # +DI and -DI
+    plus_di = np.where(atr_1d != 0, 100 * plus_dm_smooth / atr_1d, 0)
+    minus_di = np.where(atr_1d != 0, 100 * minus_dm_smooth / atr_1d, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * abs(plus_di - minus_di) / (plus_di + minus_di), 
+                  0)
+    adx = wilders_smooth(dx, 14)
+    
+    # Align HTF indicators to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(vol_ma_4h[i]) or np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -91,26 +114,27 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition
-        vol_spike = volume[i] > 1.2 * vol_ma_4h[i]
-        
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Williams %R crosses above -80 AND volume spike AND 1d uptrend
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and vol_spike and 
-                close > ema_200_1d_aligned[i]):
+            # Long conditions: Bull Power positive AND strong uptrend (ADX>25 and +DI > -DI)
+            if (bull_power[i] > 0 and 
+                adx_aligned[i] > 25 and 
+                plus_di_aligned[i] > minus_di_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Williams %R crosses below -20 AND volume spike AND 1d downtrend
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and vol_spike and 
-                  close < ema_200_1d_aligned[i]):
+            # Short conditions: Bear Power negative AND strong downtrend (ADX>25 and -DI > +DI)
+            elif (bear_power[i] < 0 and 
+                  adx_aligned[i] > 25 and 
+                  minus_di_aligned[i] > plus_di_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Williams %R crosses -50 (mean reversion midpoint)
-            exit_long = (position == 1 and williams_r[i] < -50 and williams_r[i-1] >= -50)
-            exit_short = (position == -1 and williams_r[i] > -50 and williams_r[i-1] <= -50)
+            # Exit conditions: trend weakening (ADX < 20) or Elder Power reverses
+            exit_long = (position == 1 and 
+                        (adx_aligned[i] < 20 or bull_power[i] <= 0))
+            exit_short = (position == -1 and 
+                         (adx_aligned[i] < 20 or bear_power[i] >= 0))
             
             if exit_long or exit_short:
                 position = 0
@@ -122,21 +146,3 @@ def generate_signals(prices):
                     signals[i] = -0.25
     
     return signals
-
-def rolling_mean(arr, window):
-    result = np.full_like(arr, np.nan, dtype=float)
-    for i in range(window - 1, len(arr)):
-        result[i] = np.mean(arr[i - window + 1:i + 1])
-    return result
-
-def rolling_max(arr, window):
-    result = np.full_like(arr, np.nan, dtype=float)
-    for i in range(window - 1, len(arr)):
-        result[i] = np.max(arr[i - window + 1:i + 1])
-    return result
-
-def rolling_min(arr, window):
-    result = np.full_like(arr, np.nan, dtype=float)
-    for i in range(window - 1, len(arr)):
-        result[i] = np.min(arr[i - window + 1:i + 1])
-    return result
