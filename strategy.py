@@ -3,106 +3,134 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + ATR regime filter
-# - Primary: 4h for balance of trade frequency and signal quality
-# - HTF: 1d for volume spike detection (>2x 20-period MA) and ATR percentile (>50th) to avoid low-vol chop
-# - Long: Price breaks above 4h Donchian(20) high + 1d volume > 2x 20-period MA + 1d ATR > 50th percentile
-# - Short: Price breaks below 4h Donchian(20) low + same volume/vol regime filters
-# - Exit: Price reverts to 4h Donchian midpoint (mean reversion) or ATR-based trailing stop
-# - Position sizing: 0.25 discrete level to minimize fee churn
-# - Target: 80-160 total trades over 4 years (20-40/year) - within 4h sweet spot
-# - Works in bull/bear: Donchian breakouts capture trends, volume/vol filters avoid false signals in ranging markets
+# Hypothesis: 6h Ichimoku Cloud with 1d Weekly Pivot Filter
+# - Primary: 6h Ichimoku (Tenkan/Kijun cross + price vs cloud) for trend entry
+# - HTF: 1d for weekly Camarilla pivots (H4/L4) as institutional support/resistance
+# - Long: Tenkan > Kijun AND price > cloud (Senkou Span A/B) AND close > 1d H4 pivot
+# - Short: Tenkan < Kijun AND price < cloud AND close < 1d L4 pivot
+# - Exit: Tenkan/Kijun cross reverses OR price re-enters cloud
+# - Position sizing: 0.25 (discrete level)
+# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
+# - Works in bull/bear: Ichimoku captures trends, weekly pivots filter false breaks in ranging markets (2025)
 
-name = "4h_1d_donchian_volume_v1"
-timeframe = "4h"
+name = "6h_1d_ichimoku_weekly_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need enough data for calculations
+    if n < 100:  # Need enough data for Ichimoku calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLCV
-    open_4h = prices['open'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # Pre-compute 6h OHLCV
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Donchian Channel (20-period)
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2.0
+    # Calculate Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Calculate 1d ATR percentile rank (using 30-day lookback)
-    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for entry)
+    
+    # Calculate weekly Camarilla pivots from 1d data (using prior week's OHLC)
+    # Approximate weekly by taking 5-day OHLC (1 trading week)
+    def calculate_weekly_ohlc(daily_series, window=5):
+        # For each point, get OHLC of prior 5 days
+        high_week = pd.Series(daily_series).rolling(window=window, min_periods=window).max().values
+        low_week = pd.Series(daily_series).rolling(window=window, min_periods=window).min().values
+        # For weekly close, use the close of the most recent day in the window
+        close_week = pd.Series(daily_series).shift(1).rolling(window=window, min_periods=window).apply(
+            lambda x: x[-1] if len(x) == window else np.nan, raw=False
+        ).values
+        # For weekly open, use the open of the first day in the window (approximate with prior day's close)
+        open_week = pd.Series(daily_series).shift(window).rolling(window=window, min_periods=window).apply(
+            lambda x: x[0] if len(x) == window else np.nan, raw=False
+        ).values
+        return high_week, low_week, close_week, open_week
+    
+    # Since we don't have 1d open in df_1d, we'll approximate weekly OHLC using close
+    # Weekly high = max of prior 5 daily highs
+    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    # Weekly low = min of prior 5 daily lows
+    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    # Weekly close = close of prior day (most recent completed day)
+    weekly_close = pd.Series(close_1d).shift(1).values
+    # Weekly open = close 5 days ago (approximation)
+    weekly_open = pd.Series(close_1d).shift(5).values
+    
+    # Calculate Camarilla levels for weekly
+    weekly_rng = weekly_high - weekly_low
+    h4_weekly = weekly_close + 1.5 * weekly_rng  # Weekly H4
+    l4_weekly = weekly_close - 1.5 * weekly_rng  # Weekly L4
+    
+    # Align weekly Camarilla levels to 6h
+    h4_weekly_aligned = align_htf_to_ltf(prices, df_1d, h4_weekly)
+    l4_weekly_aligned = align_htf_to_ltf(prices, df_1d, l4_weekly)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(52, n):  # Start after Ichimoku warmup (52 periods for Senkou B)
         # Skip if any required data is invalid
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(h4_weekly_aligned[i]) or np.isnan(l4_weekly_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime conditions
-        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 50
+        # Ichimoku conditions
+        price_above_cloud = (close_6h[i] > senkou_a[i]) and (close_6h[i] > senkou_b[i])
+        price_below_cloud = (close_6h[i] < senkou_a[i]) and (close_6h[i] < senkou_b[i])
+        tenkan_above_kijun = tenkan[i] > kijun[i]
+        tenkan_below_kijun = tenkan[i] < kijun[i]
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period MA
-        volume_spike = volume_1d[i] > 2.0 * volume_ma_20_1d_aligned[i]
+        # Weekly pivot conditions
+        above_weekly_h4 = close_6h[i] > h4_weekly_aligned[i]
+        below_weekly_l4 = close_6h[i] < l4_weekly_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above Donchian high + vol regime + volume spike
-            if (close_4h[i] > highest_20[i] and vol_regime and volume_spike):
+            # Long entry: Bullish Ichimoku + above weekly H4
+            if (tenkan_above_kijun and price_above_cloud and above_weekly_h4):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low + vol regime + volume spike
-            elif (close_4h[i] < lowest_20[i] and vol_regime and volume_spike):
+            # Short entry: Bearish Ichimoku + below weekly L4
+            elif (tenkan_below_kijun and price_below_cloud and below_weekly_l4):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions:
-            # 1. Price reverts to Donchian midpoint (mean reversion)
-            # 2. ATR-based trailing stop (2.5 * ATR from extreme)
-            
+            # Exit: Ichimoku cross reverses OR price re-enters cloud
             if position == 1:  # Long position
-                # Calculate trailing stop: 2.5 * ATR below highest high since entry
-                # Simplified: exit if price < Donchian midpoint or 2.5*ATR below entry
-                atr_4h = pd.Series(high_4h - low_4h).rolling(window=14, min_periods=14).mean().iloc[i]
                 exit_condition = (
-                    close_4h[i] < donchian_mid[i] or  # Reverted to midpoint
-                    close_4h[i] < (highest_20[i] - 2.5 * atr_4h)  # ATR trailing stop
+                    tenkan_below_kijun or  # Tenkan/Kijun cross reverses
+                    not price_above_cloud   # Price re-enters or falls below cloud
                 )
                 if exit_condition:
                     position = 0
@@ -110,11 +138,9 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                # Calculate trailing stop: 2.5 * ATR above lowest low since entry
-                atr_4h = pd.Series(high_4h - low_4h).rolling(window=14, min_periods=14).mean().iloc[i]
                 exit_condition = (
-                    close_4h[i] > donchian_mid[i] or  # Reverted to midpoint
-                    close_4h[i] > (lowest_20[i] + 2.5 * atr_4h)  # ATR trailing stop
+                    tenkan_above_kijun or  # Tenkan/Kijun cross reverses
+                    not price_below_cloud   # Price re-enters or rises above cloud
                 )
                 if exit_condition:
                     position = 0
