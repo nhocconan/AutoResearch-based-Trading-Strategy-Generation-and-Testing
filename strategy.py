@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h volume confirmation and 1d trend filter
-# - Camarilla pivot levels on 1h: breakout above H3 = long, below L3 = short
-# - Volume confirmation: current 4h volume > 1.3x 20-period EMA (avoid low-volume fakeouts)
-# - Trend filter: price > 1d EMA(50) for longs, price < 1d EMA(50) for shorts
-# - Exit: opposite Camarilla breakout (H3/L3 reversal) or time-based exit (12h max hold)
-# - Position sizing: 0.20 discrete level
-# - Session filter: 08-20 UTC to avoid Asian session noise
-# - Targets ~15-35 trades/year on 1h timeframe. Uses Camarilla for precise entry/exit,
-#   volume confirmation reduces whipsaws, 1d EMA ensures alignment with higher timeframe trend.
-#   Works in bull/bear: breakouts capture momentum, volume/trend filters improve win rate.
+# Hypothesis: 1h 4-bar EMA pullback strategy with 4h volume confirmation and 1d trend filter
+# - Entry: On 1h, wait for EMA(4) pullback during 4h-volume-confirmed breakouts
+# - Long: Price > EMA(4) after touching EMA(4) from above during bullish 4h candle with volume confirmation
+# - Short: Price < EMA(4) after touching EMA(4) from below during bearish 4h candle with volume confirmation
+# - Trend filter: 1d EMA(50) alignment - only long when price > 1d EMA(50), short when price < 1d EMA(50)
+# - Exit: Opposite EMA(4) touch or max 8-bar hold (8h) to prevent overstaying
+# - Session filter: 08-20 UTC to reduce noise
+# - Position size: 0.20 discrete
+# - Designed for low trade frequency (target: 15-30/year) with high win rate by trading only
+#   high-probability pullbacks in strong trends with volume confirmation
+# - Works in bull/bear: captures momentum continuations while avoiding counter-trend traps
 
-name = "1h_4h_1d_camarilla_volume_trend_v1"
+name = "1h_4h_1d_ema_pullback_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -46,20 +47,9 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     bars_in_trade = 0  # track time in trade for max hold
     
-    # Calculate Camarilla pivot levels on 1h (using previous bar's OHLC)
-    # Camarilla: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
-    #            L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
-    # Using previous bar to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    range_hl = prev_high - prev_low
-    camarilla_h3 = prev_close + 1.1 * range_hl * 1.1 / 4
-    camarilla_l3 = prev_close - 1.1 * range_hl * 1.1 / 4
+    # Calculate 1h EMA(4) for entry signals
+    close_s = pd.Series(close)
+    ema_4 = close_s.ewm(span=4, min_periods=4, adjust=False).mean().values
     
     # Calculate 4h volume EMA for confirmation
     volume_ema_20_4h = pd.Series(volume_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -69,30 +59,57 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # Determine 4h candle direction for volume confirmation context
+    # Bullish 4h candle: close > open
+    # Bearish 4h candle: close < open
+    open_4h = df_4h['open'].values
+    fourh_bullish = close_4h > open_4h
+    fourh_bearish = close_4h < open_4h
+    fourh_bullish_aligned = align_htf_to_ltf(prices, df_4h, fourh_bullish)
+    fourh_bearish_aligned = align_htf_to_ltf(prices, df_4h, fourh_bearish)
+    
     # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour  # prices.index is DatetimeIndex
     in_session = (hours >= 8) & (hours <= 20)
     
+    # Track EMA touch state for pullback detection
+    ema_touch_long = np.zeros(n, dtype=bool)   # price touched EMA from above
+    ema_touch_short = np.zeros(n, dtype=bool)  # price touched EMA from below
+    
     for i in range(100, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(volume_ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(ema_4[i]) or np.isnan(volume_ema_20_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
             not in_session[i]):
             signals[i] = 0.0
             bars_in_trade = 0  # reset if forced flat
+            ema_touch_long[i] = False
+            ema_touch_short[i] = False
             continue
+        
+        # Update EMA touch states (using previous bar to avoid look-ahead)
+        if i > 0:
+            # Long touch: price was at or above EMA, now below EMA (pullback to EMA from above)
+            ema_touch_long[i] = (close[i-1] >= ema_4[i-1]) and (close[i] < ema_4[i])
+            # Short touch: price was at or below EMA, now above EMA (pullback to EMA from below)
+            ema_touch_short[i] = (close[i-1] <= ema_4[i-1]) and (close[i] > ema_4[i])
+        else:
+            ema_touch_long[i] = False
+            ema_touch_short[i] = False
         
         # HTF volume confirmation: 4h volume > 1.3x its 20-period EMA
         vol_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)
         vol_confirm_4h = vol_4h_current[i] > 1.3 * volume_ema_20_4h_aligned[i]
         
-        # Entry conditions
-        long_entry = (close[i] > camarilla_h3[i] and 
+        # Entry conditions require EMA touch + volume confirmation + trend alignment
+        long_entry = (ema_touch_long[i] and 
                      vol_confirm_4h and 
-                     close[i] > ema_50_1d_aligned[i])
-        short_entry = (close[i] < camarilla_l3[i] and 
+                     fourh_bullish_aligned[i] and  # 4h candle bullish
+                     close[i] > ema_50_1d_aligned[i])  # above 1d EMA(50)
+        short_entry = (ema_touch_short[i] and 
                       vol_confirm_4h and 
-                      close[i] < ema_50_1d_aligned[i])
+                      fourh_bearish_aligned[i] and  # 4h candle bearish
+                      close[i] < ema_50_1d_aligned[i])  # below 1d EMA(50)
         
         if position == 0:  # Flat - look for entry
             if long_entry:
@@ -108,18 +125,18 @@ def generate_signals(prices):
                 bars_in_trade = 0
         else:  # Have position - look for exit
             bars_in_trade += 1
-            # Exit conditions: opposite Camarilla breakout or max hold (12 bars = 12h)
+            # Exit conditions: opposite EMA touch or max hold (8 bars = 8h)
             if position == 1:  # Long position
-                if (close[i] < camarilla_l3[i] or  # opposite breakout
-                    bars_in_trade >= 12):          # max hold time
+                if (ema_touch_short[i] or  # opposite touch (price pulling back to EMA from below)
+                    bars_in_trade >= 8):   # max hold time
                     position = 0
                     signals[i] = 0.0
                     bars_in_trade = 0
                 else:
                     signals[i] = 0.20
             else:  # position == -1 (Short position)
-                if (close[i] > camarilla_h3[i] or  # opposite breakout
-                    bars_in_trade >= 12):          # max hold time
+                if (ema_touch_long[i] or   # opposite touch (price pulling back to EMA from above)
+                    bars_in_trade >= 8):   # max hold time
                     position = 0
                     signals[i] = 0.0
                     bars_in_trade = 0
