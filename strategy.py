@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d ATR filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
 # - Long when price breaks above 20-period Donchian upper channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
 # - Short when price breaks below 20-period Donchian lower channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
 # - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 # - Donchian channels identify clear breakouts with defined risk levels
 # - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
 # - Volume confirmation reduces false breakouts
 
-name = "12h_1d_donchian_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,13 +27,13 @@ def generate_signals(prices):
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC and volume
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 12h Donchian channels (20-period)
+    # Pre-compute 4h Donchian channels (20-period)
     def rolling_max(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
@@ -49,7 +49,7 @@ def generate_signals(prices):
     upper_channel = rolling_max(high, 20)
     lower_channel = rolling_min(low, 20)
     
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -77,7 +77,7 @@ def generate_signals(prices):
     atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
     low_vol_regime = atr_1d < atr_median_20
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
