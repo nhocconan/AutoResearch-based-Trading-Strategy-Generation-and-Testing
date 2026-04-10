@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend + RSI(14) mean reversion + choppiness regime filter
-# - KAMA adapts to market efficiency, trending in strong moves, flat in chop
-# - RSI(14) < 30 for long, > 70 for short in ranging markets (CHOP > 61.8)
-# - Choppiness index > 61.8 = ranging market (mean reversion regime)
-# - Choppiness index < 38.2 = trending market (follow KAMA direction)
-# - ATR(14) trailing stop (2.5x) for risk management
+# Hypothesis: 6h Camarilla pivot breakout with 12h volume confirmation and 1d trend filter
+# - Camarilla levels (R3/S3, R4/S4) provide institutional breakout/fade zones
+# - Breakout at R4/S4 with volume confirmation captures strong momentum moves
+# - Fade at R3/S3 with trend filter avoids counter-trend traps in ranging markets
+# - 1d EMA(50) trend filter ensures alignment with higher timeframe direction
 # - Position size: 0.25 discrete to minimize fee churn
 # - Target: 15-25 trades/year (60-100 total over 4 years) to avoid fee drag
-# - Works in bull/bear: regime filter adapts logic, KAMA avoids whipsaw, RSI captures reversals
+# - Works in bull/bear: Camarilla adapts to volatility, volume filter avoids false breakouts, trend filter avoids counter-trend trades
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_12h_1d_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,158 +22,109 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_12h) < 30 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w EMA for trend filter (21-period)
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Pre-compute 12h Camarilla levels from previous 12h bar
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Pre-calculate indicators for primary timeframe (1d)
+    # Calculate Camarilla levels for each 12h bar (based on previous bar)
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    range_12h = high_12h - low_12h
+    camarilla_r4 = close_12h + 1.5 * range_12h
+    camarilla_r3 = close_12h + 1.1 * range_12h
+    camarilla_s3 = close_12h - 1.1 * range_12h
+    camarilla_s4 = close_12h - 1.5 * range_12h
+    
+    # Align Camarilla levels to 6h timeframe (using previous completed 12h bar)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    
+    # Pre-compute 12h volume confirmation (volume > 1.5x 20-period average)
+    volume_12h = df_12h['volume'].values
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_12h = volume_12h > (1.5 * vol_ma_20_12h)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_12h, volume_confirm_12h.astype(float))
+    
+    # Pre-compute 1d EMA for trend filter (50-period)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Primary price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # KAMA (adaptive moving average)
-    # Efficiency ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.subtract(close[10:], close[:-10]))  # |close - close[10]|
-    volatility = np.sum(np.abs(np.subtract(close[1:], close[:-1])), axis=0)  # sum |close - close[1]|
-    # Pad arrays for alignment
-    change_padded = np.concatenate([np.full(10, np.nan), change])
-    volatility_padded = np.concatenate([np.full(1, np.nan), volatility, np.full(9, np.nan)])
-    # Calculate ER with proper alignment
-    er = np.full_like(close, np.nan)
-    valid_idx = ~(np.isnan(change_padded) | np.isnan(volatility_padded))
-    er[valid_idx] = change_padded[valid_idx] / volatility_padded[valid_idx]
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    # Sum of True Range over 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Choppiness Index
-    chop = np.where(
-        (atr_sum > 0) & (hh - ll > 0),
-        100 * np.log10(atr_sum / (hh - ll)) / np.log10(14),
-        50  # neutral when undefined
-    )
-    
-    # ATR(14) for trailing stop
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0  # for trailing stop
-    lowest_since_entry = 0.0   # for trailing stop
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(atr[i])):
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.25
-            else:
-                signals[i] = -0.25
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(volume_confirm_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0
             continue
         
-        # Regime filters
-        chop_high = chop[i] > 61.8  # ranging market (mean reversion)
-        chop_low = chop[i] < 38.2   # trending market
+        # Current price
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        
+        # Get current levels
+        r4 = camarilla_r4_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        s4 = camarilla_s4_aligned[i]
+        
+        # Volume confirmation (aligned)
+        vol_confirm = volume_confirm_aligned[i] > 0.5  # Boolean as float
+        
+        # Trend filter
+        trend_long = curr_close > ema_50_1d_aligned[i]
+        trend_short = curr_close < ema_50_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions
-            long_condition = False
-            if chop_high:  # ranging market - mean reversion
-                long_condition = rsi[i] < 30 and close[i] > kama[i]
-            elif chop_low:  # trending market - follow trend
-                long_condition = close[i] > kama[i] and close[i] > ema_21_1w_aligned[i]
-            
-            # Short conditions
-            short_condition = False
-            if chop_high:  # ranging market - mean reversion
-                short_condition = rsi[i] > 70 and close[i] < kama[i]
-            elif chop_low:  # trending market - follow trend
-                short_condition = close[i] < kama[i] and close[i] < ema_21_1w_aligned[i]
-            
-            if long_condition:
+            # Long breakout: price > R4 with volume confirmation and uptrend
+            if curr_close > r4 and vol_confirm and trend_long:
                 position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            elif short_condition:
+            # Short breakout: price < S4 with volume confirmation and downtrend
+            elif curr_close < s4 and vol_confirm and trend_short:
                 position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                lowest_since_entry = prices['low'].iloc[i]
+                signals[i] = -0.25
+            # Long fade: price < S3 with uptrend (mean reversion in uptrend)
+            elif curr_close < s3 and trend_long:
+                position = 1
+                signals[i] = 0.25
+            # Short fade: price > R3 with downtrend (mean reversion in downtrend)
+            elif curr_close > r3 and trend_short:
+                position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit or trailing stop
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # Exit conditions: reverse signal OR ATR trailing stop
-                exit_long = (
-                    (chop_high and rsi[i] > 50) or  # RSI mean reversion exit in range
-                    (chop_low and close[i] < kama[i]) or  # trend break
-                    (close[i] < ema_21_1w_aligned[i])  # weekly trend break
-                )
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr[i]
-                exit_condition = exit_long or trailing_stop
-            else:  # position == -1
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # Exit conditions: reverse signal OR ATR trailing stop
-                exit_short = (
-                    (chop_high and rsi[i] < 50) or  # RSI mean reversion exit in range
-                    (chop_low and close[i] > kama[i]) or  # trend break
-                    (close[i] > ema_21_1w_aligned[i])  # weekly trend break
-                )
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr[i]
-                exit_condition = exit_short or trailing_stop
-            
-            if exit_condition:
-                position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
-                signals[i] = 0.0
-            else:
-                if position == 1:
+        else:  # Have position - look for exit
+            # Exit conditions: reverse signal or opposite Camarilla level touch
+            if position == 1:  # Long position
+                # Exit if price touches S3 (fade level) or gets bearish signal
+                if curr_low <= s3 or (curr_close < r3 and not trend_long):
+                    position = 0
+                    signals[i] = 0.0
+                else:
                     signals[i] = 0.25
+            else:  # position == -1, short position
+                # Exit if price touches R3 (fade level) or gets bullish signal
+                if curr_high >= r3 or (curr_close > s3 and not trend_short):
+                    position = 0
+                    signals[i] = 0.0
                 else:
                     signals[i] = -0.25
     
