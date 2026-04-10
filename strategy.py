@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h volume spike and chop regime filter
-# - Long when price breaks above Camarilla H3 level + 12h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8 (range regime)
-# - Short when price breaks below Camarilla L3 level + 12h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8
+# Hypothesis: 1h Camarilla pivot breakout with 4h volume spike and chop regime filter
+# - Long when price breaks above Camarilla H3 level + 4h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8 (range regime)
+# - Short when price breaks below Camarilla L3 level + 4h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8
 # - Exit: price returns to Camarilla pivot point (mean reversion within range)
-# - Position sizing: 0.25 discrete level
-# - Camarilla levels derived from prior 12h bar provide structure in ranging markets
+# - Position sizing: 0.20 discrete level
+# - Camarilla levels derived from prior 4h bar provide structure in ranging markets
 # - Volume confirms institutional participation, chop filter ensures we trade in ranging markets
 # - Works in bull/bear: mean reversion at pivot levels works in all regimes, chop filter avoids strong trends
-# - 4h timeframe targets 20-50 trades/year with strict entry conditions to minimize fee drag
+# - 1h timeframe targets 15-37 trades/year with strict entry conditions to minimize fee drag
+# - Session filter (08-20 UTC) to reduce noise trades
 
-name = "4h_12h_camarilla_vol_chop_v1"
-timeframe = "4h"
+name = "1h_4h_camarilla_vol_chop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +24,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -36,19 +37,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h Camarilla pivot levels (based on prior 12h bar)
+    # Calculate 4h Camarilla pivot levels (based on prior 4h bar)
     # Camarilla formula: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
     # L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
     # Pivot = (high + low + close) / 3
-    hl_range_12h = df_12h['high'].values - df_12h['low'].values
-    camarilla_pivot = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
-    camarilla_h3 = camarilla_pivot + 1.1 * hl_range_12h * 1.1 / 4
-    camarilla_l3 = camarilla_pivot - 1.1 * hl_range_12h * 1.1 / 4
+    hl_range_4h = df_4h['high'].values - df_4h['low'].values
+    camarilla_pivot = (df_4h['high'].values + df_4h['low'].values + df_4h['close'].values) / 3
+    camarilla_h3 = camarilla_pivot + 1.1 * hl_range_4h * 1.1 / 4
+    camarilla_l3 = camarilla_pivot - 1.1 * hl_range_4h * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (using completed 12h bar)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    # Align Camarilla levels to 1h timeframe (using completed 4h bar)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pivot)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
     
     # Calculate 4h Chopiness Index (14-period) for regime filter
     # True Range
@@ -68,24 +69,33 @@ def generate_signals(prices):
                     100 * np.log10(sum_tr / hl_range) / np.log10(14), 
                     50)  # default to neutral when invalid
     
-    # Calculate 12h volume SMA(20) for confirmation
-    volume_12h = df_12h['volume'].values
-    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    # Calculate 4h volume SMA(20) for confirmation
+    volume_4h = df_4h['volume'].values
+    volume_sma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_sma_20_4h)
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    in_session = (hours >= 8) & (hours <= 20)
     
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_pivot_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_sma_20_12h_aligned[i])):
+            np.isnan(volume_sma_20_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 12h volume for volume spike confirmation
-        vol_12h_current = align_htf_to_ltf(prices, df_12h, df_12h['volume'].values)
+        # Session filter: only trade during 08-20 UTC
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
         
-        # Volume confirmation: current 12h volume > 2.0x 20-period SMA (volume spike)
-        vol_confirm = vol_12h_current[i] > 2.0 * volume_sma_20_12h_aligned[i]
+        # Get current 4h volume for volume spike confirmation
+        vol_4h_current = align_htf_to_ltf(prices, df_4h, df_4h['volume'].values)
+        
+        # Volume confirmation: current 4h volume > 2.0x 20-period SMA (volume spike)
+        vol_confirm = vol_4h_current[i] > 2.0 * volume_sma_20_4h_aligned[i]
         
         # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion at pivot levels)
         ranging_market = chop[i] > 61.8
@@ -106,10 +116,10 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif short_entry:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -117,12 +127,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         else:  # position == -1 (Short position) - look for exit
             if short_exit:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
