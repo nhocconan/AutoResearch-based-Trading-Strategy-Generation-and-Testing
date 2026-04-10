@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and trend filter
-# - Long when price breaks above Camarilla H3 level with volume > 1.3x average AND daily close > daily EMA50
-# - Short when price breaks below Camarilla L3 level with volume > 1.3x average AND daily close < daily EMA50
+# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level with volume > 1.5x average AND daily close > daily EMA50
+# - Short when price breaks below Camarilla L3 level with volume > 1.5x average AND daily close < daily EMA50
 # - Exit when price retreats to Camarilla H4/L4 levels or volume drops below average
 # - Daily trend filter ensures alignment with major trend across market cycles
 # - Volume confirmation prevents false breakouts
-# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag on 12h timeframe
+# - Targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
 # - Camarilla pivots work well in ranging markets; combined with daily trend/volume filters for breakouts
-# - Uses proper MTF data loading to avoid look-ahead and excessive I/O
 
-name = "12h_1d_camarilla_breakout_volume_trend_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +31,7 @@ def generate_signals(prices):
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Align them to 12h timeframe (this gives us the values for each 12h bar)
+    # Align them to 4h timeframe (this gives us the values for each 4h bar)
     h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
     l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
     c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
@@ -41,9 +40,9 @@ def generate_signals(prices):
     ema50_1d = pd.Series(c_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Pre-compute volume confirmation: > 1.3x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.3 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     # Pre-compute volume filter: < average volume for exit
     vol_normal = prices['volume'] < volume_20_avg
@@ -65,12 +64,14 @@ def generate_signals(prices):
             continue
         
         # Get previous completed 1d bar values (we need to shift by 1 to avoid look-ahead)
-        # For 12h timeframe, there are 2 bars per 1d bar
-        # So we need to look back 2 positions in the aligned array to get previous day's values
+        # Since align_htf_to_ltf gives us values aligned to each 4h bar,
+        # we need to look at the previous 1d bar's values
+        # For 4h timeframe, there are 6 bars per 1d bar
+        # So we need to look back 6 positions in the aligned array to get previous day's values
         
-        if i >= 2:  # Need at least 2 12h bars to get previous day's data
+        if i >= 6:  # Need at least 6 4h bars to get previous day's data
             # Get index of previous completed 1d bar
-            prev_1d_idx = i - 2
+            prev_1d_idx = i - 6
             
             if prev_1d_idx >= 0 and not (np.isnan(h_1d_aligned[prev_1d_idx]) or 
                                         np.isnan(l_1d_aligned[prev_1d_idx]) or 
