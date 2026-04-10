@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume and ATR regime filter
-# - Primary: 12h timeframe for lower trade frequency (target: 50-150 trades over 4 years)
-# - HTF: 1d for Camarilla pivot levels (H3/L3) and volume confirmation
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and ATR regime filter
+# - Primary: 4h timeframe (proven to work with Camarilla breakouts)
+# - HTF: 1d for Camarilla pivot levels (H3/L3), volume confirmation, and ATR volatility regime
 # - Long: Price breaks above H3 + volume > 1.5x 20-period MA + 1d ATR > 50th percentile
 # - Short: Price breaks below L3 + volume > 1.5x 20-period MA + 1d ATR > 50th percentile
 # - Exit: Price retouches pivot point (PP) or ATR < 30th percentile (low vol regime)
 # - Position sizing: 0.25 (discrete level)
 # - Works in bull/bear: Camarilla levels act as support/resistance; ATR/volume filters avoid false signals in ranging markets
+# - Target: 75-200 trades over 4 years (19-50/year) to avoid fee drag
 
-name = "12h_1d_camarilla_volume_v3"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,12 +27,12 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLCV
-    open_12h = prices['open'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    volume_12h = prices['volume'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -48,10 +49,10 @@ def generate_signals(prices):
     h3_1d = close_1d + (range_1d * 1.1 / 4)
     l3_1d = close_1d - (range_1d * 1.1 / 4)
     
-    # Align to 12h timeframe (wait for completed 1d bar)
-    pp_12h = align_htf_to_ltf(prices, df_1d, pp_1d)
-    h3_12h = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_12h = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # Align to 4h timeframe (wait for completed 1d bar)
+    pp_4h = align_htf_to_ltf(prices, df_1d, pp_1d)
+    h3_4h = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_4h = align_htf_to_ltf(prices, df_1d, l3_1d)
     
     # Calculate 1d ATR(14) for volatility regime filter
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
@@ -75,7 +76,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(pp_12h[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
+        if (np.isnan(pp_4h[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
             np.isnan(atr_percentile_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -85,17 +86,17 @@ def generate_signals(prices):
         vol_regime = atr_percentile_aligned[i] > 50
         
         # Volume confirmation: current 1d volume > 1.5x 20-period MA
-        # Get the current 1d volume value (aligned to 12h)
+        # Get the current 1d volume value (aligned to 4h)
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         volume_spike = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long entry: Price breaks above H3 + vol regime + volume spike
-            if (close_12h[i] > h3_12h[i] and vol_regime and volume_spike):
+            if (close_4h[i] > h3_4h[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
             # Short entry: Price breaks below L3 + vol regime + volume spike
-            elif (close_12h[i] < l3_12h[i] and vol_regime and volume_spike):
+            elif (close_4h[i] < l3_4h[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
@@ -107,7 +108,7 @@ def generate_signals(prices):
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_12h[i] <= pp_12h[i] or  # Price retraced to or below pivot
+                    close_4h[i] <= pp_4h[i] or  # Price retraced to or below pivot
                     atr_percentile_aligned[i] < 30  # Low volatility regime
                 )
                 if exit_condition:
@@ -117,7 +118,7 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_12h[i] >= pp_12h[i] or  # Price retraced to or above pivot
+                    close_4h[i] >= pp_4h[i] or  # Price retraced to or above pivot
                     atr_percentile_aligned[i] < 30  # Low volatility regime
                 )
                 if exit_condition:
