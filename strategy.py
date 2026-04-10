@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX regime filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX trend filter
 # - Primary: 4h price breaks Donchian(20) channel for directional entries
-# - Volume filter: 1d volume > 1.5x 20-period volume MA to confirm institutional participation
-# - Regime filter: 1d ADX(14) > 25 to avoid choppy markets and ensure trending conditions
-# - Exit: Price crosses back below Donchian(20) midpoint (long) or above midpoint (short)
+# - Volume filter: 1d volume > 2.0x 20-period volume MA to confirm institutional participation
+# - Regime filter: 1d ADX(14) > 20 to ensure trending markets (avoid chop)
+# - Exit: Price crosses Donchian midpoint
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
 # - Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe
-# - Works in bull/bear: Donchian captures breakouts in any trend, volume confirms strength, ADX avoids whipsaws in ranging markets
+# - Works in bull/bear: Donchian captures breakouts, volume confirms strength, ADX avoids whipsaws
 
-name = "4h_1d_donchian_volume_adx_v1"
+name = "4h_1d_donchian_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -44,21 +44,16 @@ def generate_signals(prices):
     donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Calculate 1d ADX(14) for regime filter
-    high_diff = high_1d - np.roll(high_1d, 1)
-    low_diff = np.roll(low_1d, 1) - low_1d
-    high_diff[0] = 0
-    low_diff[0] = 0
+    high_diff = np.diff(high_1d, prepend=high_1d[0])
+    low_diff = np.diff(low_1d, prepend=low_1d[0]) * -1  # reverse for correct direction
     
     plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
     minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
     
     # True Range
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr2 = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    tr3 = np.abs(np.diff(low_1d, prepend=low_1d[0]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Smoothed values
@@ -78,6 +73,7 @@ def generate_signals(prices):
     # Calculate 1d volume MA(20) for volume filter
     volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_ma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -85,16 +81,16 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_aligned[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_aligned[i]) or
+            np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-period volume MA
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * volume_ma_20_aligned[i]
+        # Volume filter: current 1d volume > 2.0x 20-period volume MA
+        volume_confirmed = volume_1d_aligned[i] > 2.0 * volume_ma_20_aligned[i]
         
-        # Regime filter: ADX > 25 to avoid choppy markets
-        trending = adx_aligned[i] > 25
+        # Regime filter: ADX > 20 to avoid choppy markets
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
             # Long entry: price breaks above Donchian(20) upper band + volume confirmation + trending
