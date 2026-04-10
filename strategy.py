@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike filter and 1w EMA50 trend filter
-# - Long when price breaks above 4h Donchian upper band (20-period high) AND
-#   1d volume > 1.5x 20-period volume SMA AND 1w close > 1w EMA50
-# - Short when price breaks below 4h Donchian lower band (20-period low) AND
-#   1d volume > 1.5x 20-period volume SMA AND 1w close < 1w EMA50
-# - Exit: price retreats to midpoint of Donchian channel or volume drops below average
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above 12h Camarilla R3 level AND 1d volume > 1.1x 20-period volume SMA AND 1w close > 1w EMA50
+# - Short when price breaks below 12h Camarilla S3 level AND 1d volume > 1.1x 20-period volume SMA AND 1w close < 1w EMA50
+# - Exit: price retreats to Camarilla pivot point (PP) or volume drops below average
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
-# - Uses proven Donchian breakout structure with volume confirmation and trend filter
+# - Target: 12-37 trades/year on 12h timeframe to stay within fee drag limits (50-150 total over 4 years)
+# - Uses Camarilla levels from 1d timeframe for structure, 12h for execution timing
+# - Focus on BTC/ETH as primary targets with SOL as secondary validation
 
-name = "4h_1d_1w_donchian_volume_trend_v4"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -37,15 +36,23 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Donchian channel (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2.0
+    # Calculate 1d Camarilla pivot levels
+    # Camarilla formula: PP = (H + L + C) / 3
+    # R3 = PP + (H - L) * 1.1/4
+    # S3 = PP - (H - L) * 1.1/4
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume SMA for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = camarilla_pp + camarilla_range * 1.1 / 4.0
+    camarilla_s3 = camarilla_pp - camarilla_range * 1.1 / 4.0
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate 1w EMA50 for trend filter
     close_1w = df_1w['close'].values
@@ -55,33 +62,38 @@ def generate_signals(prices):
     # Calculate 1w close for trend comparison
     close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    for i in range(60, n):  # Start after warmup for indicators
+    # Calculate 1d volume SMA for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    
+    # Calculate 12h volume SMA for confirmation
+    volume_sma_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_sma_20_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        # Get 1d volume for current 4h bar (each 1d = 6x 4h bars)
-        idx_1d = i // 6
-        if idx_1d >= len(volume_1d):
-            vol_confirm = False
-        else:
-            vol_confirm = volume_1d[idx_1d] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 12h volume > 1.1x 20-period volume SMA AND 1d volume > 1.1x 20-period volume SMA
+        vol_confirm_12h = volume[i] > 1.1 * volume_sma_20_12h[i]
+        vol_confirm_1d = volume_1d[i // 2] > 1.1 * volume_sma_20_1d_aligned[i] if i // 2 < len(volume_1d) else False
+        vol_confirm = vol_confirm_12h and vol_confirm_1d
         
         # Trend filter: 1w close vs 1w EMA50
         trend_bullish = close_1w_aligned[i] > ema_50_1w_aligned[i]
         trend_bearish = close_1w_aligned[i] < ema_50_1w_aligned[i]
         
-        # Donchian breakout signals (using previous bar's channel to avoid look-ahead)
-        breakout_up = close[i] > highest_20[i-1]
-        breakout_down = close[i] < lowest_20[i-1]
+        # Camarilla breakout signals
+        breakout_up = close[i] > camarilla_r3_aligned[i-1]  # Break above previous R3
+        breakout_down = close[i] < camarilla_s3_aligned[i-1]  # Break below previous S3
         
-        # Exit conditions: price retreats to midpoint or loss of volume confirmation
-        exit_long = close[i] < donchian_mid[i] or not vol_confirm
-        exit_short = close[i] > donchian_mid[i] or not vol_confirm
+        # Exit conditions: price retreats to pivot point or loss of volume confirmation
+        exit_long = close[i] < camarilla_pp_aligned[i] or not vol_confirm
+        exit_short = close[i] > camarilla_pp_aligned[i] or not vol_confirm
         
         if position == 0:  # Flat - look for entry
             if breakout_up and trend_bullish and vol_confirm:
