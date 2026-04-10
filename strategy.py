@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout + 1d volume confirmation + choppiness regime filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.8x 20-period average AND 12h chop < 61.8 (trending)
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.8x 20-period average AND 12h chop < 61.8 (trending)
-# - Exit when price crosses Camarilla PIVOT level (midpoint) OR opposite breakout occurs
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend filter + volume confirmation
+# - Long when price breaks above Donchian(20) high AND 1d HMA(21) is rising AND volume > 1.5x 20-period average
+# - Short when price breaks below Donchian(20) low AND 1d HMA(21) is falling AND volume > 1.5x 20-period average
+# - Exit when price crosses Donchian(20) midline OR opposite breakout occurs
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Camarilla pivots provide precise intraday support/resistance levels
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian breakouts capture strong momentum moves
+# - 1d HMA filter ensures we trade with the higher timeframe trend
 # - Volume confirmation reduces false breakouts
-# - Choppiness filter ensures we trade only in trending markets (avoid chop)
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,91 +24,77 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Pre-compute 12h price data
+    # Pre-compute 4h Donchian channels (20)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume_12h = prices['volume'].values
+    volume = prices['volume'].values
     
-    # Pre-compute 12h Camarilla pivot levels (based on previous day's OHLC)
-    # Camarilla levels calculated from daily OHLC
+    # Donchian high/low (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Pre-compute 4h volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Pre-compute 1d HMA(21) for trend filter
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    def wma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, n + 1)
+        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
     
-    # Pivot point = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    # Calculate WMA for n/2 and n
+    n_hma = 21
+    half_n = n_hma // 2
+    sqrt_n = int(np.sqrt(n_hma))
     
-    # Camarilla levels
-    # H4 = P + 1.1 * (H - L) / 2
-    # H3 = P + 1.1 * (H - L) / 4
-    # L3 = P - 1.1 * (H - L) / 4
-    # L4 = P - 1.1 * (H - L) / 2
-    range_1d = high_1d - low_1d
-    camarilla_h3 = pivot_1d + (1.1 * range_1d / 4)
-    camarilla_l3 = pivot_1d - (1.1 * range_1d / 4)
-    camarilla_pivot = pivot_1d  # Midpoint for exit
+    wma_half = wma(close_1d, half_n)
+    wma_full = wma(close_1d, n_hma)
     
-    # Pre-compute 12h volume confirmation (using 1d volume aligned to 12h)
-    vol_ma_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values  # Using close as proxy for volume calculation
-    # Actually use volume from 1d data - but we don't have volume in df_1d from get_htf_data
-    # So we'll use price-based volatility as volume proxy: ATR
-    # Alternative: since we can't get volume from HTF easily, use price range as proxy
-    vol_proxy_1d = (high_1d - low_1d)  # Daily range as volume proxy
-    vol_ma_proxy = pd.Series(vol_proxy_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = vol_proxy_1d > (1.8 * vol_ma_proxy)
+    # Handle array lengths
+    wma_half_padded = np.full_like(close_1d, np.nan)
+    wma_full_padded = np.full_like(close_1d, np.nan)
     
-    # Pre-compute 12h Choppiness Index (CHOP)
-    # CHOP = 100 * log10(sum(ATR(14)) / log10((HHH - LLL) / ATR(14)))
-    # Simplified: CHOP = 100 * log10(sum of TR over period) / log10((max high - min low) / ATR)
-    # We'll use a simpler version: CHOP = 100 * (sum of true range over 14 periods) / (max high - min low over 14 periods) * log10(14)
-    # Actually standard formula: CHOP = 100 * log10(sum(TR14) / (log10((HHH-LLL)/ATR14)))
-    # For simplicity, we'll use: CHOP < 61.8 = trending, > 61.8 = ranging
+    if len(wma_half) > 0:
+        wma_half_padded[half_n-1:half_n-1+len(wma_half)] = wma_half
+    if len(wma_full) > 0:
+        wma_full_padded[n_hma-1:n_hma-1+len(wma_full)] = wma_full
     
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    # 2*WMA(n/2) - WMA(n)
+    diff = 2 * wma_half_padded - wma_full_padded
+    # WMA(sqrt(n)) of the diff
+    wma_diff = wma(diff, sqrt_n)
+    wma_diff_padded = np.full_like(close_1d, np.nan)
+    if len(wma_diff) > 0:
+        wma_diff_padded[sqrt_n-1:sqrt_n-1+len(wma_diff)] = wma_diff
     
-    tr = np.zeros_like(high)
-    tr[0] = high[0] - low[0]  # First bar
-    for i in range(1, len(high)):
-        tr[i] = true_range(high[i], low[i], close[i-1])
+    hma_1d = wma_diff_padded
     
-    # Sum of TR over 14 periods
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # HMA slope (rising/falling)
+    hma_slope = np.diff(hma_1d, prepend=np.nan)
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
     
-    # Max high and min low over 14 periods
-    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    denominator = hh_14 - ll_14
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    
-    # Choppiness Index
-    chop = 100 * np.log10(tr_sum_14 / np.log10(denominator / tr_sum_14 + 1e-10))
-    chop = np.where(np.isnan(chop) | np.isinf(chop), 50, chop)  # Default to neutral
-    
-    # Trending market: CHOP < 61.8
-    trending_market = chop < 61.8
-    
-    # Align HTF indicators to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
-    trending_market_aligned = align_htf_to_ltf(prices, df_1d, trending_market)
+    # Align HTF indicators to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising)
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(volume_spike_1d_aligned[i]) or 
-            np.isnan(trending_market_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(hma_rising_aligned[i]) or 
+            np.isnan(hma_falling_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -118,26 +104,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla H3 AND volume spike AND trending market
-            if (close[i] > camarilla_h3_aligned[i] and 
-                volume_spike_1d_aligned[i] and 
-                trending_market_aligned[i]):
+            # Long conditions: price breaks above Donchian high AND 1d HMA rising AND volume spike
+            if (close[i] > donch_high[i] and 
+                hma_rising_aligned[i] and 
+                volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla L3 AND volume spike AND trending market
-            elif (close[i] < camarilla_l3_aligned[i] and 
-                  volume_spike_1d_aligned[i] and 
-                  trending_market_aligned[i]):
+            # Short conditions: price breaks below Donchian low AND 1d HMA falling AND volume spike
+            elif (close[i] < donch_low[i] and 
+                  hma_falling_aligned[i] and 
+                  volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Camarilla PIVOT level OR opposite breakout occurs
+            # Exit conditions: price crosses Donchian midline OR opposite breakout occurs
             exit_long = (position == 1 and 
-                        (close[i] < camarilla_pivot_aligned[i] or close[i] < camarilla_l3_aligned[i]))
+                        (close[i] < donch_mid[i] or close[i] < donch_low[i]))
             exit_short = (position == -1 and 
-                         (close[i] > camarilla_pivot_aligned[i] or close[i] > camarilla_h3_aligned[i]))
+                         (close[i] > donch_mid[i] or close[i] > donch_high[i]))
             
             if exit_long or exit_short:
                 position = 0
