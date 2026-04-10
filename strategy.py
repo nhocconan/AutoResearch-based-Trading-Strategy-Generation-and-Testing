@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d volume spike and ADX filter
-# - Long when Williams %R(14) < -80 (oversold) + ADX(14) > 25 + 1d volume > 2.0x 20-period volume SMA
-# - Short when Williams %R(14) > -20 (overbought) + same ADX and volume conditions
-# - Exit: Williams %R returns to -50 (mean reversion midpoint)
-# - Position sizing: 0.30 discrete level
-# - Williams %R identifies overextended moves ready for mean reversion
-# - ADX filter ensures we only trade in trending markets, avoiding chop
-# - Volume confirmation ensures breakout/mean reversion strength
-# - Target: 12-37 trades/year on 12h timeframe to minimize fee drag
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX(14) trend filter
+# - Long when price breaks above Donchian(20) high + ADX(14) > 25 + 1d volume > 1.5x 20-period volume SMA
+# - Short when price breaks below Donchian(20) low + same ADX and volume conditions
+# - Exit: opposite Donchian breakout (long exits on lower band break, short exits on upper band break)
+# - Position sizing: 0.25 discrete level to balance risk and reward
+# - Donchian channels provide clear breakout levels in both trending and ranging markets
+# - ADX filter ensures we only trade when there's sufficient trend strength
+# - Volume confirmation adds conviction to breakouts
+# - Target: 20-50 trades/year on 4h timeframe to minimize fee drag
 
-name = "12h_williamsr_volume_adx_v2"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -36,15 +36,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h Williams %R (14-period)
-    williams_period = 14
-    highest_high = pd.Series(high).rolling(window=williams_period, min_periods=williams_period).max().values
-    lowest_low = pd.Series(low).rolling(window=williams_period, min_periods=williams_period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 4h Donchian channels (20-period)
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Calculate 12h ADX for trend filter
+    # Calculate 4h ADX for trend filter
     # True Range
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
@@ -80,39 +77,37 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Align Williams %R and ADX to 12h timeframe (already in 12h, but keep for consistency)
-    williams_r_aligned = williams_r
-    adx_aligned = adx
-    
-    for i in range(100, n):
+    for i in range(donchian_period, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume for volume spike confirmation
-        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (strong volume spike)
-        vol_confirm = volume_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period SMA (volume spike)
+        vol_confirm = volume_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
         # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
+        trending = adx[i] > 25
         
-        # Williams %R mean reversion signals
-        long_entry = (williams_r_aligned[i] < -80) and trending and vol_confirm
-        short_entry = (williams_r_aligned[i] > -20) and trending and vol_confirm
-        exit_long = williams_r_aligned[i] > -50  # Exit long when Williams %R crosses above -50
-        exit_short = williams_r_aligned[i] < -50  # Exit short when Williams %R crosses below -50
+        # Donchian breakout signals
+        long_breakout = close[i] > highest_high[i]
+        short_breakout = close[i] < lowest_low[i]
+        
+        # Exit conditions: opposite band break
+        exit_long = close[i] < lowest_low[i]
+        exit_short = close[i] > highest_high[i]
         
         if position == 0:  # Flat - look for entry
-            if long_entry:
+            if long_breakout and trending and vol_confirm:
                 position = 1
-                signals[i] = 0.30
-            elif short_entry:
+                signals[i] = 0.25
+            elif short_breakout and trending and vol_confirm:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -120,12 +115,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
             if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
