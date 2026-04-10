@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR-based stoploss
-# - Long when price breaks above 20-period Donchian high AND 1d volume > 1.5x 20-period volume SMA
-# - Short when price breaks below 20-period Donchian low AND 1d volume > 1.5x 20-period volume SMA
-# - Exit: ATR-based trailing stop (3x ATR from extreme) or Donchian midpoint reversion
-# - Position sizing: 0.30 discrete level to balance return and drawdown
-# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
-# - Uses Donchian channels for structure, volume for confirmation, ATR for risk management
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike confirmation and ATR-based stoploss
+# - Long when price breaks above 20-period Donchian high AND 1d volume > 2.0x 20-period volume SMA (strong volume confirmation)
+# - Short when price breaks below 20-period Donchian low AND 1d volume > 2.0x 20-period volume SMA
+# - Exit: ATR-based trailing stop (2.5x ATR from extreme) or Donchian midpoint reversion
+# - Position sizing: 0.25 discrete level to reduce fee impact and manage drawdown
+# - Target: 15-35 trades/year on 4h timeframe (~60-140 total over 4 years) to stay within fee drag limits
+# - Uses Donchian channels for structure, volume spike for confirmation of institutional interest, ATR for risk management
 
-name = "4h_donchian_volume_atr_v1"
+name = "4h_donchian_volume_spike_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,11 +64,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
+        # Volume confirmation: 1d volume > 2.0x 20-period volume SMA (strong confirmation)
         # Get 1d volume for current 4h bar (each 1d bar = 6 4h bars)
         idx_1d = i // 6
         if idx_1d < len(volume_1d):
-            vol_confirm = volume_1d[idx_1d] > 1.5 * volume_sma_20_1d_aligned[i]
+            vol_confirm = volume_1d[idx_1d] > 2.0 * volume_sma_20_1d_aligned[i]
         else:
             vol_confirm = False
         
@@ -96,9 +96,9 @@ def generate_signals(prices):
         stop_short = False
         
         if position == 1 and not np.isnan(long_extreme[i]):
-            stop_long = close[i] < long_extreme[i] - 3.0 * atr[i]
+            stop_long = close[i] < long_extreme[i] - 2.5 * atr[i]
         elif position == -1 and not np.isnan(short_extreme[i]):
-            stop_short = close[i] > short_extreme[i] + 3.0 * atr[i]
+            stop_short = close[i] > short_extreme[i] + 2.5 * atr[i]
         
         # Donchian midpoint reversion exit
         exit_long = close[i] < donchian_mid[i]
@@ -107,10 +107,10 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for entry
             if breakout_up and vol_confirm:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif breakout_down and vol_confirm:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -119,13 +119,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 long_extreme[i] = np.nan  # Reset extreme
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
             if stop_short or exit_short:
                 position = 0
                 signals[i] = 0.0
                 short_extreme[i] = np.nan  # Reset extreme
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
