@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX regime filter
-# - Primary: 4h price breaking above/below 20-period Donchian channels
-# - HTF: 1d volume confirmation (current volume > 1.3x 20-period MA) + ADX > 20 for trend strength
-# - Long: Breakout above upper Donchian + volume confirmation + ADX > 20
-# - Short: Breakout below lower Donchian + volume confirmation + ADX > 20
-# - Exit: Price returns to opposite Donchian level (long exits at lower, short exits at upper)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike confirmation and ADX regime filter
+# - Primary: 4h price breaking above/below 20-period Donchian channels (structure)
+# - HTF: 1d volume > 2.0x 20-period MA (spike confirmation) + ADX > 25 (strong trend)
+# - Long: Breakout above upper Donchian + volume spike + ADX > 25
+# - Short: Breakout below lower Donchian + volume spike + ADX > 25
+# - Exit: Price returns to opposite Donchian level (mean reversion within channel)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Donchian captures breakouts, volume confirms conviction, ADX filters ranging markets
-# - Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits
+# - Volume spike (2.0x) is stricter than prior 1.3x to reduce trades and increase edge
+# - ADX > 25 ensures only strong trends are traded, avoiding choppy markets
+# - Target: 75-150 total trades over 4 years (19-38/year) to stay within fee drag limits
+# - Works in bull/bear: Donchian captures breakouts, volume spike confirms conviction, ADX filters ranging markets
 
-name = "4h_1d_donchian_volume_adx_v1"
+name = "4h_1d_donchian_volume_spike_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,7 +41,6 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # Calculate 4h Donchian channels (20-period)
-    # Using rolling window with min_periods
     upper_donchian = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     lower_donchian = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
@@ -74,6 +75,7 @@ def generate_signals(prices):
     # Align all HTF indicators to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -81,18 +83,16 @@ def generate_signals(prices):
     for i in range(20, n):  # Start after Donchian warmup period
         # Skip if any required data is invalid
         if (np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
+            np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume (aligned to 4h)
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        # Volume confirmation: current 1d volume > 2.0x 20-period MA (spike)
+        volume_confirm = volume_1d_aligned[i] > 2.0 * volume_ma_20_1d_aligned[i]
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
-        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
-        
-        # ADX trend filter: ADX > 20 indicates sufficient trend strength
-        trend_confirm = adx_aligned[i] > 20.0
+        # ADX trend filter: ADX > 25 indicates strong trend strength
+        trend_confirm = adx_aligned[i] > 25.0
         
         # Donchian breakout conditions
         breakout_long = close_4h[i] > upper_donchian[i]
@@ -103,11 +103,11 @@ def generate_signals(prices):
         exit_short = close_4h[i] > upper_donchian[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Breakout above upper Donchian + volume confirmation + trend confirmation
+            # Long entry: Breakout above upper Donchian + volume spike + trend confirmation
             if breakout_long and volume_confirm and trend_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Breakout below lower Donchian + volume confirmation + trend confirmation
+            # Short entry: Breakout below lower Donchian + volume spike + trend confirmation
             elif breakout_short and volume_confirm and trend_confirm:
                 position = -1
                 signals[i] = -0.25
