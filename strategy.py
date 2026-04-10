@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR volatility filter
-# - Primary: 4h price breaks above 20-period Donchian high or below Donchian low from prior 1d
-# - Volume filter: 1d volume > 1.5x 20-period volume MA to ensure institutional participation
-# - Volatility filter: ATR(14) < 0.06 * close to avoid extreme volatility periods
-# - Exit: Price returns to 20-period Donchian midpoint (mean reversion to equilibrium)
+# Hypothesis: 4h Williams %R mean reversion with 1d volume confirmation and volatility filter
+# - Primary: 4h Williams %R(14) < -80 for long, > -20 for short (oversold/overbought)
+# - Volume filter: 1d volume > 1.3x 20-period volume MA to ensure participation
+# - Volatility filter: ATR(14) < 0.05 * close to avoid extreme volatility
+# - Exit: Williams %R returns to -50 (mean reversion to equilibrium)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Donchian channels act as dynamic support/resistance, volume confirms breakout strength
+# - Works in bull/bear: Williams %R identifies exhaustion points, volume confirms reversal strength
 # - Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
 
-name = "4h_1d_donchian_volume_volatility_v1"
+name = "4h_1d_williamsr_volume_volatility_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -38,31 +38,12 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate prior 1d Donchian levels (using prior day's OHLC)
-    # Donchian(20): upper = max(high of last 20 days), lower = min(low of last 20 days)
-    # We use prior day's data to avoid look-ahead
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Shift by 1 to use prior day's levels (avoid look-ahead)
-    donchian_high = np.roll(high_20, 1)
-    donchian_low = np.roll(low_20, 1)
-    
-    # Handle first element (use same day's data as fallback)
-    donchian_high[0] = high_1d[0]
-    donchian_low[0] = low_1d[0]
-    
-    # Calculate midpoint for exit
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Align Donchian levels to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
-    
-    # Calculate 1d volume confirmation: volume > 1.5x 20-period volume MA
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Calculate 14-period Williams %R for 4h
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Calculate 14-period ATR for volatility filter
     high_low = high - low
@@ -76,45 +57,49 @@ def generate_signals(prices):
     
     tr = np.maximum(high_low, np.maximum(high_close, low_close))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    volatility_filter = atr < 0.06 * close  # ATR less than 6% of price
+    volatility_filter = atr < 0.05 * close  # ATR less than 5% of price
+    
+    # Calculate 1d volume confirmation: volume > 1.3x 20-period volume MA
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or 
+            np.isnan(volume_1d_current[i]) or np.isnan(volatility_filter[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-period volume MA
-        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = volume_1d_current[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        # Volume filter: current 1d volume > 1.3x 20-period volume MA
+        vol_confirm = volume_1d_current[i] > 1.3 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian high + vol confirmation + volatility filter
-            if (close[i] > donchian_high_aligned[i] and 
+            # Long entry: Williams %R < -80 (oversold) + vol confirmation + volatility filter
+            if (williams_r[i] < -80 and 
                 vol_confirm and volatility_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian low + vol confirmation + volatility filter
-            elif (close[i] < donchian_low_aligned[i] and 
+            # Short entry: Williams %R > -20 (overbought) + vol confirmation + volatility filter
+            elif (williams_r[i] > -20 and 
                   vol_confirm and volatility_filter[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit to mean reversion
-            # Exit: price returns to Donchian midpoint
+            # Exit: Williams %R returns to -50 (mean reversion)
             if position == 1:  # Long position
-                if close[i] <= donchian_mid_aligned[i]:
+                if williams_r[i] >= -50:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] >= donchian_mid_aligned[i]:
+                if williams_r[i] <= -50:
                     position = 0
                     signals[i] = 0.0
                 else:
