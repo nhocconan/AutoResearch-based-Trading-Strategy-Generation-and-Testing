@@ -3,43 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla Pivot Breakout with 4h/1d volume and ATR regime filter
-# - Primary: 1h timeframe for entry timing precision
-# - HTF: 4h for trend direction (EMA21), 1d for volatility (ATR percentile) and volume confirmation
-# - Long: Price breaks above H3 Camarilla pivot + 4h EMA21 uptrend + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Short: Price breaks below L3 Camarilla pivot + 4h EMA21 downtrend + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4
-# - Session filter: 08-20 UTC to reduce noise trades
-# - Position sizing: 0.20 (discrete level)
-# - Target: 60-150 total trades over 4 years (15-37/year) - within 1h sweet spot
-# - Works in bull/bear: 4h EMA filter avoids counter-trend trades in strong trends, Camarilla pivots capture mean reversion in ranging markets
+# Hypothesis: 6h Elder Ray + Volume Regime Filter
+# - Primary: 6h timeframe for balanced frequency and reduced fee drag (target: 50-150 total trades over 4 years)
+# - HTF: 1w for trend direction (EMA34 slope) and 1d for volatility regime (ATR percentile)
+# - Long: Elder Bull Power > 0 + Bear Power < 0 + weekly EMA34 sloping up + 1d ATR > 50th percentile
+# - Short: Elder Bull Power < 0 + Bear Power > 0 + weekly EMA34 sloping down + 1d ATR > 50th percentile
+# - Exit: Elder Bull Power crosses below 0 (long) or above 0 (short) OR ATR drops below 30th percentile (volatility collapse)
+# - Position sizing: 0.25 (discrete level)
+# - Works in bull/bear: Elder Ray measures bull/bear power relative to EMA13; weekly EMA34 filter ensures we trade with higher timeframe trend; ATR regime avoids low-vol chop
 
-name = "1h_4h_1d_camarilla_pivot_v1"
-timeframe = "1h"
+name = "6h_1w_1d_elderray_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 100:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1w) < 40 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1h OHLCV
-    open_1h = prices['open'].values
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
-    volume_1h = prices['volume'].values
+    # Pre-compute 6h OHLCV
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Pre-compute 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Pre-compute 1w data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -47,24 +45,25 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1h Camarilla Pivot Points (based on previous 4h)
-    # Align 4h OHLC to 1h bars (using previous 4h bar's OHLC)
-    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4h)
-    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4h)
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+    # Calculate 6h EMA13 for Elder Ray
+    close_6h_series = pd.Series(close_6h)
+    ema13_6h = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Camarilla levels for each 1h bar (using previous 4h OHLC)
-    rng = high_4h_aligned - low_4h_aligned
-    h3 = close_4h_aligned + 1.1 * rng  # Long entry: break above H3 (tighter for 1h)
-    l3 = close_4h_aligned - 1.1 * rng  # Short entry: break below L3 (tighter for 1h)
-    h4 = close_4h_aligned + 1.3 * rng   # Long exit: break above H4 (take profit)
-    l4 = close_4h_aligned - 1.3 * rng   # Short exit: break below L4 (take profit)
-    pivot = (high_4h_aligned + low_4h_aligned + close_4h_aligned) / 3.0  # Mean reversion exit
+    # Calculate Elder Bull Power and Bear Power for 6h
+    bull_power = high_6h - ema13_6h  # High - EMA13
+    bear_power = low_6h - ema13_6h   # Low - EMA13
     
-    # Calculate 4h EMA21 for trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema_4h = close_4h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1w EMA34 for trend direction
+    close_1w_series = pd.Series(close_1w)
+    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate 1w EMA34 slope (trend direction) - using 3-bar lookback for stability
+    ema34_slope = np.zeros_like(ema34_1w)
+    ema34_slope[3:] = (ema34_1w[3:] - ema34_1w[:-3]) / 3  # 3-bar slope
+    
+    # Align 1w EMA34 and slope to 6h
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema34_slope_aligned = align_htf_to_ltf(prices, df_1w, ema34_slope)
     
     # Calculate 1d ATR(14) for volatility regime filter
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
@@ -73,83 +72,70 @@ def generate_signals(prices):
     tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d ATR percentile rank (using 30-day lookback)
-    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
+    # Calculate 1d ATR percentile rank (using 50-day lookback for stability)
+    atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=20).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_slope_aligned[i]) or 
+            np.isnan(atr_percentile_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime conditions
-        # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 40
+        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d[i] > 1.3 * volume_ma_20_1d_aligned[i]
-        
-        # 4h trend filter: EMA21 direction
-        uptrend = close_4h_aligned[i] > ema_4h_aligned[i]
-        downtrend = close_4h_aligned[i] < ema_4h_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = ema34_slope_aligned[i] > 0
+        weekly_downtrend = ema34_slope_aligned[i] < 0
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above H3 resistance + 4h uptrend + vol regime + volume spike
-            if (close_1h[i] > h3[i] and uptrend and vol_regime and volume_spike):
+            # Long entry: Bull Power > 0 (bulls in control) AND Bear Power < 0 (bears weak) 
+            #            AND weekly uptrend AND volatility regime
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                weekly_uptrend and vol_regime):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: Price breaks below L3 support + 4h downtrend + vol regime + volume spike
-            elif (close_1h[i] < l3[i] and downtrend and vol_regime and volume_spike):
+                signals[i] = 0.25
+            # Short entry: Bull Power < 0 (bulls weak) AND Bear Power > 0 (bears in control)
+            #            AND weekly downtrend AND volatility regime
+            elif (bull_power[i] < 0 and bear_power[i] > 0 and 
+                  weekly_downtrend and vol_regime):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price reverts to Pivot Point (mean reversion)
-            # 2. Price breaks opposite H4/L4 level (take profit)
+            # 1. Elder Ray power crossover (change in bull/bear balance)
+            # 2. Volatility collapse (ATR drops below 30th percentile)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_1h[i] < pivot[i] or  # Reverted to pivot
-                    close_1h[i] > h4[i]        # Break above H4 (take profit)
+                    bull_power[i] <= 0 or  # Bulls lose control
+                    atr_percentile_aligned[i] < 30  # Volatility collapse
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_1h[i] > pivot[i] or  # Reverted to pivot
-                    close_1h[i] < l4[i]        # Break below L4 (take profit)
+                    bear_power[i] >= 0 or  # Bears lose control
+                    atr_percentile_aligned[i] < 30  # Volatility collapse
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
