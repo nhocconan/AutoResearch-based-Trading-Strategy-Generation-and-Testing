@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R with 1d trend filter and volume confirmation
-# - Primary: Williams %R(14) < -80 for long, > -20 for short (oversold/overbought)
-# - Trend filter: 1d close > EMA50 for long bias, < EMA50 for short bias
-# - Volume confirmation: 4h volume > 1.5x 20-period volume MA
-# - Exit: Williams %R crosses back above -50 (long) or below -50 (short)
+# Hypothesis: 1d Williams Alligator with 1w volume confirmation and chop regime filter
+# - Primary: 1d Williams Alligator (JAWS=EMA13, TEETH=EMA8, LIPS=EMA5) - long when LIPS > TEETH > JAWS, short when LIPS < TEETH < JAWS
+# - Volume filter: 1w volume > 1.5x 20-period volume MA to confirm institutional interest
+# - Regime filter: Choppiness Index(14) < 38.2 (trending market) for trend following to work
+# - Exit: Alligator lines cross (trend exhaustion)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Williams %R captures mean reversion in ranging markets,
-#   1d EMA50 filter ensures we trade with higher timeframe trend
-# - Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
+# - Works in bull/bear: Alligator shows trend direction, chop filter ensures trending environment
+# - Target: 30-100 total trades over 4 years = 7-25/year for 1d timeframe
 
-name = "4h_1d_williams_r_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_alligator_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,61 +33,77 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    close_1d = df_1d['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate EMA50 for 1d trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Williams Alligator: JAWS=EMA13, TEETH=EMA8, LIPS=EMA5 (all on Median Price)
+    median_price = (high + low) / 2
+    jaws = pd.Series(median_price).ewm(span=13, min_periods=13, adjust=False).mean().values  # Blue line
+    teeth = pd.Series(median_price).ewm(span=8, min_periods=8, adjust=False).mean().values    # Red line
+    lips = pd.Series(median_price).ewm(span=5, min_periods=5, adjust=False).mean().values    # Green line
     
-    # Calculate Williams %R(14) for 4h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate 1w volume confirmation: volume > 1.5x 20-period volume MA
+    volume_ma_20_1w = pd.Series(volume_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
+    
+    # Calculate 14-period Choppiness Index for regime filter (using 1d data)
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    
+    # Handle first element
+    high_low[0] = high[0] - low[0]
+    high_close[0] = np.abs(high[0] - close[0])
+    low_close[0] = np.abs(low[0] - close[0])
+    
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
     # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    range_hl = max_high - min_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
     
-    williams_r = -100 * ((highest_high - close) / hl_range)
-    
-    # Calculate 4h volume confirmation: volume > 1.5x 20-period volume MA
-    volume_ma_20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
+    chop_filter = chop < 38.2  # Chop < 38.2 indicates trending market (good for trend following)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_ma_20[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaws[i]) or 
+            np.isnan(volume_ma_20_1w_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * volume_ma_20[i]
+        # Align 1w volume data for current bar
+        volume_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)
+        vol_confirm = volume_1w_current[i] > 1.5 * volume_ma_20_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold) + above 1d EMA50 + vol confirmation
-            if (williams_r[i] < -80 and 
-                close[i] > ema50_1d_aligned[i] and vol_confirm):
+            # Long entry: Alligator bullish (Lips > Teeth > Jaws) + vol confirmation + chop filter
+            if (lips[i] > teeth[i] and teeth[i] > jaws[i] and 
+                vol_confirm and chop_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R > -20 (overbought) + below 1d EMA50 + vol confirmation
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema50_1d_aligned[i] and vol_confirm):
+            # Short entry: Alligator bearish (Lips < Teeth < Jaws) + vol confirmation + chop filter
+            elif (lips[i] < teeth[i] and teeth[i] < jaws[i] and 
+                  vol_confirm and chop_filter[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit when Williams %R crosses -50
-            # Exit: Williams %R crosses back above -50 (long) or below -50 (short)
+        else:  # Have position - look for exit when Alligator lines cross (trend exhaustion)
+            # Exit: Alligator lines cross (Lips crosses Teeth or Teeth crosses Jaws)
             if position == 1:  # Long position
-                if williams_r[i] >= -50:
+                if lips[i] <= teeth[i] or teeth[i] <= jaws[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if williams_r[i] <= -50:
+                if lips[i] >= teeth[i] or teeth[i] >= jaws[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
