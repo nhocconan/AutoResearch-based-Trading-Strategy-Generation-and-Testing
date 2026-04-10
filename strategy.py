@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d ATR-based volatility filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level (1d) + 1d ATR ratio > 0.8 (normal volatility) + 1d volume > 1.2x 20-period volume SMA
-# - Short when price breaks below Camarilla L3 level (1d) + same volatility and volume conditions
-# - Exit: close below/above Camarilla L4/H4 levels
+# Hypothesis: 4h Williams %R mean reversion with 1d volume regime filter
+# - Williams %R(14) on 4h for overbought/oversold conditions
+# - Long when %R crosses above -80 from below AND 1d volume > 1.5x 20-period volume SMA (high conviction)
+# - Short when %R crosses below -20 from above AND same volume condition
+# - Exit: %R crosses back through -50 level (mean reversion completion)
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Volatility filter ensures we avoid extremely low volatility periods where breakouts fail
-# - Volume confirmation adds conviction to breakouts
-# - Target: 30-60 trades/year on 4h timeframe to minimize fee drag while capturing meaningful moves
+# - Volume regime filter ensures we trade only during high participation periods
+# - Target: 40-80 trades/year on 4h timeframe to balance opportunity and cost
 
-name = "4h_1d_camarilla_vol_volume_v1"
+name = "4h_1d_williamsr_volume_regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,84 +35,56 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # handle division by zero
     
-    # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels
-    range_1d = high_1d - low_1d
-    h3 = pivot + (range_1d * 1.1 / 2.0)  # H3 = pivot + 1.1*(HL)/2
-    l3 = pivot - (range_1d * 1.1 / 2.0)  # L3 = pivot - 1.1*(HL)/2
-    h4 = pivot + (range_1d * 1.1)        # H4 = pivot + 1.1*(HL)
-    l4 = pivot - (range_1d * 1.1)        # L4 = pivot - 1.1*(HL)
-    
-    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Calculate 1d ATR for volatility filter
-    tr1 = np.maximum(high_1d - low_1d, 
-                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
-                                np.abs(low_1d - np.roll(close_1d, 1))))
-    tr1[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ATR ratio (current ATR / 20-period ATR average) to filter low volatility
-    atr_ma_20_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio_1d = np.where(atr_ma_20_1d > 0, atr_1d / atr_ma_20_1d, 1.0)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # Calculate 1d volume SMA for confirmation
+    # Calculate 1d volume SMA for regime filter
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
     for i in range(30, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume for volume spike confirmation
+        # Volume regime filter: 1d volume > 1.5x 20-period SMA (high participation)
         volume_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+        vol_regime = volume_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Volatility filter: ATR ratio > 0.8 (avoid extremely low volatility)
-        vol_filter = atr_ratio_1d_aligned[i] > 0.8
+        # Williams %R signals (mean reversion from extremes)
+        wr_current = williams_r[i]
+        wr_prev = williams_r[i-1] if i > 0 else -50
         
-        # Volume confirmation: current 1d volume > 1.2x 20-period SMA (moderate volume spike)
-        vol_confirm = volume_1d_current[i] > 1.2 * volume_sma_20_1d_aligned[i]
-        
-        # Camarilla breakout signals
-        long_breakout = close[i] > h3_aligned[i]
-        short_breakout = close[i] < l3_aligned[i]
-        
-        # Exit conditions: close beyond extreme Camarilla levels
-        exit_long = close[i] < l4_aligned[i]
-        exit_short = close[i] > h4_aligned[i]
+        # Long: %R crosses above -80 from below (oversold bounce)
+        long_signal = (wr_prev <= -80) and (wr_current > -80) and vol_regime
+        # Short: %R crosses below -20 from above (overbought rejection)
+        short_signal = (wr_prev >= -20) and (wr_current < -20) and vol_regime
+        # Exit: %R crosses back through -50 (mean reversion completion)
+        exit_signal = ((wr_prev <= -50) and (wr_current > -50)) or \
+                      ((wr_prev >= -50) and (wr_current < -50))
         
         if position == 0:  # Flat - look for entry
-            if long_breakout and vol_filter and vol_confirm:
+            if long_signal:
                 position = 1
                 signals[i] = 0.25
-            elif short_breakout and vol_filter and vol_confirm:
+            elif short_signal:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            if exit_long:
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            if exit_short:
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
