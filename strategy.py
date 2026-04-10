@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX > 20
-# - Long when price breaks above 4h Donchian upper band AND 1d volume > 2.0x 20-period volume SMA AND 1w ADX > 20
-# - Short when price breaks below 4h Donchian lower band AND 1d volume > 2.0x 20-period volume SMA AND 1w ADX > 20
-# - Exit: ATR trailing stop (2.0*ATR) from highest/lowest since entry
-# - Uses 4h for price action (Donchian channels), 1d for volume confirmation, 1w for ADX trend filter
-# - Donchian breakouts capture strong momentum; volume spike confirms validity; ADX filters weak/choppy markets
-# - Tight entries target 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
-# - Works in bull (breakouts up) and bear (breakouts down) with volume and trend filters
+# Hypothesis: 4h Williams %R reversal with 1d volume spike and 1w ADX > 25
+# - Long when Williams %R(14) crosses above -80 (oversold) AND 1d volume > 1.8x 20-period volume SMA AND 1w ADX > 25
+# - Short when Williams %R(14) crosses below -20 (overbought) AND 1d volume > 1.8x 20-period volume SMA AND 1w ADX > 25
+# - Exit: ATR trailing stop (2.5*ATR) from extreme since entry
+# - Uses 4h for Williams %R reversal signals, 1d for volume confirmation, 1w for ADX trend filter
+# - Williams %R captures mean reversals in overextended markets; volume confirms validity; ADX filters weak/choppy markets
+# - Tight entries target 15-35 trades/year (60-140 total over 4 years) to minimize fee drag
+# - Works in bull (reversals up from oversold) and bear (reversals down from overbought) with volume and trend filters
 
-name = "4h_1d_1w_donchian_volume_adx_v1"
+name = "4h_1d_1w_williamsr_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -81,14 +81,13 @@ def generate_signals(prices):
     adx_1w = wilders_smoothing(dx_1w, 14)
     adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Pre-compute Donchian channels on 4h (primary timeframe)
-    lookback = 20
+    # Pre-compute Williams %R(14) on 4h (primary timeframe)
+    lookback = 14
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    upper_band = highest_high
-    lower_band = lowest_low
-    mid_band = (upper_band + lower_band) / 2.0
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
     # ATR for dynamic stoploss (using 4h data)
     tr_4h1 = np.abs(high[1:] - low[:-1])
@@ -100,43 +99,42 @@ def generate_signals(prices):
     
     for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]) or
-            np.isnan(atr_4h[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i]) or np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 2.0x 20-period volume SMA
+        # Volume confirmation: 1d volume > 1.8x 20-period volume SMA
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        vol_confirm = vol_1d_aligned[i] > 1.8 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: 1w ADX > 20 indicates sufficient trend strength
-        trend_filter = adx_1w_aligned[i] > 20.0
+        # Trend filter: 1w ADX > 25 indicates sufficient trend strength
+        trend_filter = adx_1w_aligned[i] > 25.0
         
         # Only trade when both volume confirmation and trend filter are present
         if vol_confirm and trend_filter:
-            # Long breakout: price breaks above Donchian upper band
-            if close[i] > upper_band[i]:
+            # Long entry: Williams %R crosses above -80 (oversold reversal)
+            if williams_r[i] > -80 and williams_r[i-1] <= -80:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25  # Maintain position
-            # Short breakout: price breaks below Donchian lower band
-            elif close[i] < lower_band[i]:
+            # Short entry: Williams %R crosses below -20 (overbought reversal)
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
                 else:
                     signals[i] = -0.25  # Maintain position
-            # Alternative exit: ATR-based trailing stop
-            elif position == 1 and close[i] < (highest_high_since_entry - 2.0 * atr_4h[i]):
+            # ATR-based trailing stop
+            elif position == 1 and close[i] < (highest_high_since_entry - 2.5 * atr_4h[i]):
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
-            elif position == -1 and close[i] > (lowest_low_since_entry + 2.0 * atr_4h[i]):
+            elif position == -1 and close[i] > (lowest_low_since_entry + 2.5 * atr_4h[i]):
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
