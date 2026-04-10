@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 #   volume spike confirms institutional participation, chop filter avoids whipsaws in ranging markets.
 #   Works in bull/bear: breakouts capture strong moves, chop filter adapts to regime.
 
-name = "4h_1d_camarilla_breakout_v3"
+name = "4h_1d_camarilla_breakout_v4"
 timeframe = "4h"
 leverage = 1.0
 
