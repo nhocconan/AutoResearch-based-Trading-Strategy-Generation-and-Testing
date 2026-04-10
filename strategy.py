@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike filter and chop regime filter
-# - Donchian breakout: price closes above 20-period high (long) or below 20-period low (short) on 4h
-# - Volume confirmation: current 4h volume > 2.0x 20-period average to avoid false breakouts
-# - Chop regime filter: only trade when Choppiness Index(14) < 38.2 (trending market) on 4h
-# - ATR(14) trailing stop (2.5x) on 4h timeframe
+# Hypothesis: 1d Donchian(20) breakout with weekly trend filter and volume confirmation
+# - Primary signal: price breaks above/below 20-day Donchian channel on 1d timeframe
+# - Weekly trend filter: only take longs when price > weekly EMA50, shorts when price < weekly EMA50
+# - Volume confirmation: current 1d volume > 1.3x 20-day average volume
+# - ATR(14) trailing stop (2.5x) on 1d timeframe
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within HARD MAX: 400 total
-# - Works in bull markets via breakouts, works in bear via short breakouts + regime filter prevents whipsaws
+# - Donchian breakouts capture strong momentum moves
+# - Weekly trend filter prevents counter-trend trades in bear markets
+# - Volume confirmation ensures breakouts have conviction
+# - Target: 20-40 trades/year (80-160 total over 4 years) within HARD MAX: 150 total
 
-name = "4h_donchian_volume_chop_regime_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,62 +23,52 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (not used in this strategy but keeping for potential extension)
-    # df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
-    highest_since_entry = 0.0  # for trailing stop
-    lowest_since_entry = 0.0   # for trailing stop
+    # Pre-compute 1d Donchian channel (20-period)
+    high_1d = prices['high'].values
+    low_1d = prices['low'].values
+    close_1d = prices['close'].values
     
-    # Pre-calculate indicators before loop
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Donchian upper = 20-period high, lower = 20-period low
+    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: 20-period average
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly EMA to 1d timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Choppiness Index (14-period) - measures trend vs range
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Pre-compute 1d volume and its 20-period moving average
+    volume_1d = prices['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute 1d ATR for trailing stop
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum.reduce([tr1, tr2, tr3])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Sum of TR over 14 periods
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    highest_since_entry = 0.0  # for trailing stop
+    lowest_since_entry = 0.0   # for trailing stop
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sumTR14 / (hh14 - ll14)) / log10(14)
-    # Avoid division by zero and log of zero
-    hl_range = hh_14 - ll_14
-    chop_raw = np.where((hl_range > 0) & (tr_sum_14 > 0), 
-                        100 * np.log10(tr_sum_14 / hl_range) / np.log10(14), 
-                        50.0)  # default to neutral when invalid
-    chop = chop_raw
-    
-    # ATR (14-period) for trailing stop
-    tr_atr = tr  # reuse True Range from above
-    atr_14 = pd.Series(tr_atr).rolling(window=14, min_periods=14).mean().values
-    
-    # Main loop
-    for i in range(20, n):  # Start after warmup for Donchian
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(volume_ma_20[i]) or np.isnan(chop[i]) or 
-            np.isnan(atr_14[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma_20_1d[i]) or 
+            np.isnan(atr_1d[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -85,46 +77,42 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        close_price = close[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        volume_spike = volume_1d[i] > 1.3 * volume_ma_20_1d[i]
+        
+        close_price = close_1d[i]
         
         if position == 0:  # Flat - look for new entries
-            # Only trade in trending markets (Chop < 38.2)
-            if chop[i] < 38.2:
-                # Volume confirmation: current volume > 2.0x 20-period average
-                volume_spike = volume[i] > 2.0 * volume_ma_20[i]
-                
-                if volume_spike:
-                    # Long breakout: close above 20-period high
-                    if close_price > highest_20[i]:
-                        position = 1
-                        highest_since_entry = high[i]
-                        signals[i] = 0.25
-                    # Short breakout: close below 20-period low
-                    elif close_price < lowest_20[i]:
-                        position = -1
-                        lowest_since_entry = low[i]
-                        signals[i] = -0.25
-                    else:
-                        signals[i] = 0.0
-                else:
-                    signals[i] = 0.0
+            # Long: price breaks above Donchian upper AND weekly uptrend AND volume spike
+            if close_price > donchian_upper[i] and close_price > ema_50_aligned[i] and volume_spike:
+                position = 1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                highest_since_entry = prices['high'].iloc[i]
+                signals[i] = 0.25
+            # Short: price breaks below Donchian lower AND weekly downtrend AND volume spike
+            elif close_price < donchian_lower[i] and close_price < ema_50_aligned[i] and volume_spike:
+                position = -1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                lowest_since_entry = prices['low'].iloc[i]
+                signals[i] = -0.25
             else:
-                signals[i] = 0.0  # ranging market - no breakout trades
+                signals[i] = 0.0
         else:  # Have position - look for exit or trailing stop
             # Update highest/lowest since entry for trailing stop
             if position == 1:
-                highest_since_entry = max(highest_since_entry, high[i])
+                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
                 # ATR trailing stop: exit when price drops 2.5*ATR from highest point
-                trailing_stop = close_price < highest_since_entry - 2.5 * atr_14[i]
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr_1d[i]
                 exit_condition = trailing_stop
             else:  # position == -1
-                lowest_since_entry = min(lowest_since_entry, low[i])
+                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
                 # ATR trailing stop: exit when price rises 2.5*ATR from lowest point
-                trailing_stop = close_price > lowest_since_entry + 2.5 * atr_14[i]
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr_1d[i]
                 exit_condition = trailing_stop
             
             if exit_condition:
                 position = 0
+                entry_price = 0.0
                 highest_since_entry = 0.0
                 lowest_since_entry = 0.0
                 signals[i] = 0.0
