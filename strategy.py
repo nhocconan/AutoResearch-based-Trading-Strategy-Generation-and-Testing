@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
-# - Long when price breaks above 12h Camarilla R3 level AND 1d volume > 1.1x 20-period volume SMA AND 1w close > 1w EMA50
-# - Short when price breaks below 12h Camarilla S3 level AND 1d volume > 1.1x 20-period volume SMA AND 1w close < 1w EMA50
-# - Exit: price retreats to Camarilla pivot point (PP) or volume drops below average
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d chop regime filter
+# - Long when price breaks above 4h Donchian(20) high AND 12h volume > 1.3x 20-period volume SMA AND 1d chop > 61.8 (ranging market)
+# - Short when price breaks below 4h Donchian(20) low AND 12h volume > 1.3x 20-period volume SMA AND 1d chop > 61.8 (ranging market)
+# - Exit: price retreats to midpoint of Donchian channel or volume drops below average
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 12-37 trades/year on 12h timeframe to stay within fee drag limits (50-150 total over 4 years)
-# - Uses Camarilla levels from 1d timeframe for structure, 12h for execution timing
-# - Focus on BTC/ETH as primary targets with SOL as secondary validation
+# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Uses 12h for volume confirmation (more reliable than 4h volume spikes) and 1d chop for regime detection (mean reversion in choppy markets)
 
-name = "12h_1d_1w_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_1d_donchian_chop_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,9 +21,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -36,70 +35,71 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 1d Camarilla pivot levels
-    # Camarilla formula: PP = (H + L + C) / 3
-    # R3 = PP + (H - L) * 1.1/4
-    # S3 = PP - (H - L) * 1.1/4
+    # Calculate 4h Donchian(20) channels
+    donchian_period = 20
+    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
+    # Calculate 12h volume SMA for confirmation
+    volume_12h = df_12h['volume'].values
+    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    
+    # Calculate 1d chop regime filter (Choppiness Index)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_range = high_1d - low_1d
-    camarilla_r3 = camarilla_pp + camarilla_range * 1.1 / 4.0
-    camarilla_s3 = camarilla_pp - camarilla_range * 1.1 / 4.0
+    # True Range calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with 1d index
     
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # ATR(14) for chop denominator
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Sum of True Range over 14 periods
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate 1w close for trend comparison
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Choppiness Index: CHOP = 100 * log10(tr_sum_14 / (atr_14 * 14)) / log10(14)
+    chop_denominator = atr_14 * 14
+    chop_raw = np.where((tr_sum_14 > 0) & (chop_denominator > 0), 
+                        tr_sum_14 / chop_denominator, np.nan)
+    chop = 100 * np.log10(chop_raw) / np.log10(14)
     
-    # Calculate 1d volume SMA for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Align HTF indicators to 4h timeframe
+    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate 12h volume SMA for confirmation
-    volume_sma_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    for i in range(50, n):  # Start after warmup for indicators
+    for i in range(40, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_sma_20_12h[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_sma_20_12h_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.1x 20-period volume SMA AND 1d volume > 1.1x 20-period volume SMA
-        vol_confirm_12h = volume[i] > 1.1 * volume_sma_20_12h[i]
-        vol_confirm_1d = volume_1d[i // 2] > 1.1 * volume_sma_20_1d_aligned[i] if i // 2 < len(volume_1d) else False
-        vol_confirm = vol_confirm_12h and vol_confirm_1d
+        # Volume confirmation: 12h volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > 1.3 * volume_sma_20_12h_aligned[i]
         
-        # Trend filter: 1w close vs 1w EMA50
-        trend_bullish = close_1w_aligned[i] > ema_50_1w_aligned[i]
-        trend_bearish = close_1w_aligned[i] < ema_50_1w_aligned[i]
+        # Chop regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
+        chop_filter = chop_aligned[i] > 61.8
         
-        # Camarilla breakout signals
-        breakout_up = close[i] > camarilla_r3_aligned[i-1]  # Break above previous R3
-        breakout_down = close[i] < camarilla_s3_aligned[i-1]  # Break below previous S3
+        # Donchian breakout signals (using previous bar's levels to avoid look-ahead)
+        breakout_up = close[i] > highest_high[i-1]
+        breakout_down = close[i] < lowest_low[i-1]
         
-        # Exit conditions: price retreats to pivot point or loss of volume confirmation
-        exit_long = close[i] < camarilla_pp_aligned[i] or not vol_confirm
-        exit_short = close[i] > camarilla_pp_aligned[i] or not vol_confirm
+        # Exit conditions: price retreats to midpoint or loss of confirmation
+        exit_long = close[i] < donchian_mid[i] or not vol_confirm or not chop_filter
+        exit_short = close[i] > donchian_mid[i] or not vol_confirm or not chop_filter
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and trend_bullish and vol_confirm:
+            if breakout_up and vol_confirm and chop_filter:
                 position = 1
                 signals[i] = 0.25
-            elif breakout_down and trend_bearish and vol_confirm:
+            elif breakout_down and vol_confirm and chop_filter:
                 position = -1
                 signals[i] = -0.25
             else:
