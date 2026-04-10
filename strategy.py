@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot levels with weekly trend filter and volume confirmation
-# - Long when price touches Camarilla L3 support AND weekly HMA(21) is rising AND volume > 1.5x 20-day average volume
-# - Short when price touches Camarilla H3 resistance AND weekly HMA(21) is falling AND volume > 1.5x 20-day average volume
-# - Exit when price crosses the Camarilla pivot point (midpoint between H3 and L3)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
+# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.3x 20-period average AND chop > 61.8 (ranging market)
+# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.3x 20-period average AND chop > 61.8
+# - Exit when price returns to Camarilla Pivot level (mean reversion to center)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Camarilla levels provide precise support/resistance with high probability reactions
-# - Weekly HMA filter ensures we trade with the higher timeframe trend
-# - Volume confirmation reduces false signals
+# - Camarilla levels work well in ranging markets which are common in 2025 bear/bias
+# - Volume confirmation reduces false breakouts
+# - Chop filter ensures we trade in ranging conditions where mean reversion works
 
-name = "1d_1w_camarilla_hma_volume_v2"
-timeframe = "1d"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,68 +22,86 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLC and volume
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 1d Camarilla levels (based on previous day's range)
-    # Camarilla levels: H4, H3, H2, H1, Pivot, L1, L2, L3, L4
-    # H3 = Close + 1.1 * (High - Low) / 2
-    # L3 = Close - 1.1 * (High - Low) / 2
-    # Pivot = (High + Low + Close) / 3
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # First bar uses current values
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
-    
-    # Pre-compute 1d volume confirmation (20-day average)
+    # Pre-compute 12h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.3 * vol_ma)
     
-    # Pre-compute weekly HMA(21) for trend filter
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Pre-compute 12h Chopiness Index (14-period) for regime filter
+    def true_range(h, l, c_prev):
+        tr1 = h - l
+        tr2 = np.abs(h - c_prev)
+        tr3 = np.abs(l - c_prev)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
     
-    def wma(arr, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(arr, weights / weights.sum(), mode='same')
+    # Calculate True Range
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]  # First bar uses current close
+    tr = true_range(high, low, prev_close)
     
-    close_1w = df_1w['close'].values
-    wma_half = wma(close_1w, half_len)
-    wma_full = wma(close_1w, 21)
-    hma_21 = wma(2 * wma_half - wma_full, sqrt_len)
+    # Calculate ATR (smoothed TR)
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
     
-    # HMA trend: rising when current HMA > previous HMA
-    hma_rising = np.zeros_like(hma_21, dtype=bool)
-    hma_rising[1:] = hma_21[1:] > hma_21[:-1]
-    hma_falling = np.zeros_like(hma_21, dtype=bool)
-    hma_falling[1:] = hma_21[1:] < hma_21[:-1]
+    # Calculate Chopiness Index: 100 * log10(sum(ATR)/ (max(high)-min(low))) / log10(period)
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     
-    # Align HTF indicators to 1d timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising)
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling)
+    # Avoid division by zero
+    range_hl = max_high - min_low
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    
+    chop = 100 * (np.log10(sum_atr) - np.log10(range_hl)) / np.log10(14)
+    chop_regime = chop > 61.8  # Chop > 61.8 indicates ranging market
+    
+    # Pre-compute 1d Camarilla levels from previous day
+    # Camarilla: based on previous day's OHLC
+    prev_close_1d = np.roll(df_1d['close'].values, 1)
+    prev_high_1d = np.roll(df_1d['high'].values, 1)
+    prev_low_1d = np.roll(df_1d['low'].values, 1)
+    
+    # First day has no previous data
+    prev_close_1d[0] = df_1d['close'].values[0]
+    prev_high_1d[0] = df_1d['high'].values[0]
+    prev_low_1d[0] = df_1d['low'].values[0]
+    
+    # Calculate Camarilla levels
+    range_1d = prev_high_1d - prev_low_1d
+    camarilla_pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_h3 = camarilla_pivot + (range_1d * 1.1 / 4)
+    camarilla_l3 = camarilla_pivot - (range_1d * 1.1 / 4)
+    camarilla_h4 = camarilla_pivot + (range_1d * 1.1 / 2)
+    camarilla_l4 = camarilla_pivot - (range_1d * 1.1 / 2)
+    
+    # Align HTF indicators to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(camarilla_pivot[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(chop_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -94,24 +111,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price touches L3 support AND weekly HMA rising AND volume spike
-            if (low[i] <= camarilla_l3[i] and 
-                hma_rising_aligned[i] and 
-                volume_spike[i]):
+            # Long conditions: price breaks above H3 AND volume spike AND chop regime (ranging)
+            if (close[i] > camarilla_h3_aligned[i] and 
+                volume_spike_aligned[i] and 
+                chop_regime_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price touches H3 resistance AND weekly HMA falling AND volume spike
-            elif (high[i] >= camarilla_h3[i] and 
-                  hma_falling_aligned[i] and 
-                  volume_spike[i]):
+            # Short conditions: price breaks below L3 AND volume spike AND chop regime (ranging)
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  volume_spike_aligned[i] and 
+                  chop_regime_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses the Camarilla pivot point
-            exit_long = (position == 1 and close[i] < camarilla_pivot[i])
-            exit_short = (position == -1 and close[i] > camarilla_pivot[i])
+            # Exit conditions: price returns to pivot level (mean reversion)
+            exit_long = (position == 1 and close[i] < camarilla_pivot_aligned[i])
+            exit_short = (position == -1 and close[i] > camarilla_pivot_aligned[i])
+            
+            # Also exit if price breaks through H4/L4 (strong breakout against position)
+            exit_long |= (position == 1 and close[i] > camarilla_h4_aligned[i])
+            exit_short |= (position == -1 and close[i] < camarilla_l4_aligned[i])
             
             if exit_long or exit_short:
                 position = 0
