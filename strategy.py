@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
-# - Short when price breaks below 20-period Donchian low AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
-# - Exit when price crosses 1d EMA50 (trend reversal signal)
-# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+# - Long when price breaks above 20-period high AND 12h EMA50 rising AND volume > 2.0x 20-bar avg
+# - Short when price breaks below 20-period low AND 12h EMA50 falling AND volume > 2.0x 20-bar avg
+# - Exit when price crosses below 12h EMA50 (for long) or above 12h EMA50 (for short)
+# - Uses 12h EMA50 for trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Donchian breakouts capture strong moves; trend filter ensures directional alignment
-# - Volume confirmation reduces false breakouts
+# - Target: 20-30 trades/year on 4h timeframe (80-120 total over 4 years)
+# - Donchian breakouts capture strong momentum; trend filter improves win rate in bear markets
 
-name = "12h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,31 +22,18 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Pre-compute Donchian channels from 12h data
-    # Using 12h data for breakout calculation (primary timeframe)
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Pre-compute Donchian channels (20-period high/low)
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
     
-    # Donchian(20) channels: 20-period high/low
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align HTF Donchian levels to LTF
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Pre-compute 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Pre-compute volume confirmation: > 2.0x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -58,8 +44,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -70,28 +56,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian high AND 1d uptrend with volume spike
-            if (prices['close'].iloc[i] > donch_high_aligned[i] and 
-                close_1d[i] > ema50_1d[i] and  # current 1d close above EMA50 (uptrend)
+            # Long when price breaks above 20-period high AND 12h uptrend with volume spike
+            if (prices['close'].iloc[i] > high_20[i] and 
+                close_12h[-1] > ema50_12h[-1] and  # 12h close above EMA50 (uptrend)
                 vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below Donchian low AND 1d downtrend with volume spike
-            elif (prices['close'].iloc[i] < donch_low_aligned[i] and 
-                  close_1d[i] < ema50_1d[i] and  # current 1d close below EMA50 (downtrend)
+            # Short when price breaks below 20-period low AND 12h downtrend with volume spike
+            elif (prices['close'].iloc[i] < low_20[i] and 
+                  close_12h[-1] < ema50_12h[-1] and  # 12h close below EMA50 (downtrend)
                   vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit on trend reversal
-            # Exit when price crosses 1d EMA50 (trend reversal signal)
+        else:  # Have position - look for exit when price crosses 12h EMA50
+            # Exit when price crosses below 12h EMA50 (for long) or above 12h EMA50 (for short)
             exit_signal = False
             if position == 1:  # Long position
-                if close_1d[i] <= ema50_1d[i]:  # price crosses below EMA50
+                if prices['close'].iloc[i] < ema50_12h_aligned[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if close_1d[i] >= ema50_1d[i]:  # price crosses above EMA50
+                if prices['close'].iloc[i] > ema50_12h_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
