@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level with volume > 1.5x average AND weekly close > weekly EMA50
-# - Short when price breaks below Camarilla L3 level with volume > 1.5x average AND weekly close < weekly EMA50
-# - Exit when price retreats to Camarilla H4/L4 levels or volume drops below average
-# - Weekly trend filter ensures alignment with major trend across market cycles
-# - Volume confirmation prevents false breakouts
-# - Targets 7-25 trades/year (30-100 total over 4 years) to avoid fee drag
-# - Daily timeframe avoids excessive trading while capturing multi-day moves
-# - Combines Camarilla structure with weekly trend/volume filters for high-probability breakouts
+# Hypothesis: 6h Elder Ray + VWAP + volume confirmation
+# - Elder Ray: Bull Power = Close - EMA13(High), Bear Power = EMA13(Low) - Close
+# - Long when Bull Power > 0 AND price > VWAP AND volume > 1.5x 20-period average
+# - Short when Bear Power > 0 AND price < VWAP AND volume > 1.5x 20-period average
+# - Exit when Elder Ray power reverses sign OR price crosses VWAP in opposite direction
+# - VWAP acts as dynamic support/resistance, Elder Ray measures trend strength
+# - Volume confirmation ensures breakouts have conviction
+# - Targets 12-25 trades/year (50-100 total over 4 years) to avoid fee drag
+# - Works in both bull and bear markets by measuring institutional buying/selling pressure
 
-name = "1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_elder_ray_vwap_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,83 +22,64 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Pre-compute 13-period EMA of high and low for Elder Ray
+    ema13_high = pd.Series(prices['high']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_low = pd.Series(prices['low']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Pre-compute 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Elder Ray components
+    bull_power = prices['close'].values - ema13_high  # Buy power
+    bear_power = ema13_low - prices['close'].values   # Sell power
     
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Pre-compute VWAP (typical price * volume) cumulative
+    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
+    vwap_numerator = (typical_price * prices['volume']).cumsum()
+    vwap_denominator = prices['volume'].cumsum()
+    vwap = (vwap_numerator / vwap_denominator).values
+    
+    # Volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
     vol_spike = prices['volume'] > (1.5 * volume_20_avg)
-    
-    # Pre-compute volume filter: < average volume for exit
-    vol_normal = prices['volume'] < volume_20_avg
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vwap[i]) or np.isnan(volume_20_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Get previous completed 1d bar values (shifted by 1 to avoid look-ahead)
-        if i >= 1:
-            ph = prices['high'].iloc[i-1]  # Previous day's high
-            pl = prices['low'].iloc[i-1]   # Previous day's low
-            pc = prices['close'].iloc[i-1] # Previous day's close
-            
-            if not (np.isnan(ph) or np.isnan(pl) or np.isnan(pc)):
-                # Calculate Camarilla levels
-                range_val = ph - pl
-                if range_val > 0:
-                    camarilla_h3 = pc + (range_val * 1.1 / 4)
-                    camarilla_l3 = pc - (range_val * 1.1 / 4)
-                    camarilla_h4 = pc + (range_val * 1.1 / 2)
-                    camarilla_l4 = pc - (range_val * 1.1 / 2)
-                    
-                    if position == 0:  # Flat - look for new breakout entries
-                        # Long breakout: price > Camarilla H3 with volume spike AND weekly uptrend
-                        if (prices['close'].iloc[i] > camarilla_h3 and 
-                            vol_spike.iloc[i] and 
-                            prices['close'].iloc[i] > ema50_1w_aligned[i]):
-                            position = 1
-                            signals[i] = 0.25
-                        # Short breakdown: price < Camarilla L3 with volume spike AND weekly downtrend
-                        elif (prices['close'].iloc[i] < camarilla_l3 and 
-                              vol_spike.iloc[i] and 
-                              prices['close'].iloc[i] < ema50_1w_aligned[i]):
-                            position = -1
-                            signals[i] = -0.25
-                    else:  # Have position - look for exit
-                        # Exit conditions:
-                        # 1. Price retreats to Camarilla H4/L4 levels
-                        # 2. Volume drops below average (loss of momentum)
-                        if position == 1:  # Long position
-                            if (prices['close'].iloc[i] < camarilla_h4 or 
-                                vol_normal.iloc[i]):
-                                position = 0
-                                signals[i] = 0.0
-                            else:
-                                signals[i] = 0.25  # Hold long
-                        elif position == -1:  # Short position
-                            if (prices['close'].iloc[i] > camarilla_l4 or 
-                                vol_normal.iloc[i]):
-                                position = 0
-                                signals[i] = 0.0
-                            else:
-                                signals[i] = -0.25  # Hold short
+        if position == 0:  # Flat - look for new entries
+            # Long entry: Bull Power positive AND price above VWAP AND volume spike
+            if (bull_power[i] > 0 and 
+                prices['close'].iloc[i] > vwap[i] and 
+                vol_spike.iloc[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: Bear Power positive AND price below VWAP AND volume spike
+            elif (bear_power[i] > 0 and 
+                  prices['close'].iloc[i] < vwap[i] and 
+                  vol_spike.iloc[i]):
+                position = -1
+                signals[i] = -0.25
+        else:  # Have position - look for exit
+            # Exit conditions:
+            # 1. Elder Ray power reverses (loss of momentum)
+            # 2. Price crosses VWAP in opposite direction (trend change)
+            if position == 1:  # Long position
+                if (bull_power[i] <= 0 or 
+                    prices['close'].iloc[i] < vwap[i]):
+                    position = 0
+                    signals[i] = 0.0
                 else:
-                    signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            else:
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-        else:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+                    signals[i] = 0.25  # Hold long
+            elif position == -1:  # Short position
+                if (bear_power[i] <= 0 or 
+                    prices['close'].iloc[i] > vwap[i]):
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25  # Hold short
     
     return signals
