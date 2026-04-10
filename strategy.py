@@ -3,29 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d volume confirmation and 1d ADX > 20
-# - Long when price breaks above Donchian upper band AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX > 20
-# - Short when price breaks below Donchian lower band AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX > 20
-# - Exit: price returns to Donchian midpoint (mid-band) or ATR-based trailing stop (2*ATR)
-# - Uses 6h for price action (Donchian channels), 1d for volume and ADX confirmation
-# - Donchian breakouts capture strong momentum moves; volume confirms breakout validity; ADX filters weak/choppy markets
-# - Tight entry conditions target 12-37 trades/year to minimize fee drag while maintaining edge
-# - Works in bull (breakouts up) and bear (breakouts down) with volume and trend filters
+# Hypothesis: 6h Williams %R reversal with 1d Elder Ray filter
+# - Long when 6h Williams %R crosses above -80 (oversold bounce) AND 1d Bear Power < 0 (bearish momentum weakening) AND 6h close > 6h EMA(50)
+# - Short when 6h Williams %R crosses below -20 (overbought rejection) AND 1d Bull Power > 0 (bullish momentum weakening) AND 6h close < 6h EMA(50)
+# - Exit: Williams %R crosses -50 (mean reversion midpoint) or ATR trailing stop (2.5*ATR)
+# - Uses 6h for entry timing (Williams %R), 1d for Elder Ray (Bull/Bear Power) to filter counter-trend moves
+# - Williams %R captures short-term reversals; Elder Ray confirms underlying momentum shift on higher timeframe
+# - EMA(50) filter ensures trades align with intermediate trend to avoid chop
+# - Tight entry conditions target 12-30 trades/year to minimize fee drag while maintaining edge
+# - Works in bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend)
 
-name = "6h_1d_donchian_volume_adx_v1"
+name = "6h_1d_williams_elderray_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -35,135 +35,120 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return signals
     
-    # Calculate 1d volume SMA for confirmation
-    vol_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    
-    # Calculate 1d ADX(14) for trend strength filter
+    # Calculate 1d Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # Align with indices
+    # EMA(13) for Elder Ray
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Align Elder Ray to 6h
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Wilder's smoothing function
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(values[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(values)):
-                result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # Pre-compute 6h Williams %R(14)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    atr_1d = wilders_smoothing(tr, 14)
-    plus_di_1d = 100 * wilders_smoothing(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilders_smoothing(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilders_smoothing(dx_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Pre-compute 6h EMA(50) for trend filter
+    ema50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Pre-compute Donchian channels on 6h (primary timeframe)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    upper_band = highest_high
-    lower_band = lowest_low
-    mid_band = (upper_band + lower_band) / 2.0
-    
-    # ATR for dynamic stoploss (using 6h data)
-    tr_6h1 = np.abs(high[1:] - low[:-1])
-    tr_6h2 = np.abs(high[1:] - close[:-1])
-    tr_6h3 = np.abs(low[1:] - close[:-1])
-    tr_6h = np.maximum(np.maximum(tr_6h1, tr_6h2), tr_6h3)
+    # Pre-compute ATR for dynamic stoploss (6h)
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr_6h = np.maximum(np.maximum(tr1, tr2), tr3)
     tr_6h = np.concatenate([[np.nan], tr_6h])
     atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(lookback, n):
+    for i in range(14, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_6h[i]) or 
+            np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or
             np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Williams %R signals: cross above -80 (long), cross below -20 (short)
+        wr_long_signal = (williams_r[i-1] <= -80) and (williams_r[i] > -80)
+        wr_short_signal = (williams_r[i-1] >= -20) and (williams_r[i] < -20)
+        wr_exit_signal = (williams_r[i-1] < -50 and williams_r[i] >= -50) or \
+                         (williams_r[i-1] > -50 and williams_r[i] <= -50)
         
-        # Trend filter: 1d ADX > 20 indicates strong trend
-        trend_filter = adx_1d_aligned[i] > 20.0
+        # Elder Ray filters: Bear Power < 0 for long, Bull Power > 0 for short
+        # (indicates weakening bearish/bullish momentum on 1d)
+        elder_long_filter = bear_power_1d_aligned[i] < 0
+        elder_short_filter = bull_power_1d_aligned[i] > 0
         
-        # Only trade when both volume confirmation and trend filter are present
-        if vol_confirm and trend_filter:
-            # Long breakout: price breaks above Donchian upper band
-            if close[i] > upper_band[i]:
+        # EMA(50) trend filter
+        uptrend = close[i] > ema50_6h[i]
+        downtrend = close[i] < ema50_6h[i]
+        
+        # Only trade when Elder Ray and EMA filters align
+        if elder_long_filter and uptrend:
+            if wr_long_signal:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25  # Maintain position
-            # Short breakout: price breaks below Donchian lower band
-            elif close[i] < lower_band[i]:
+            elif wr_exit_signal and position == 1:
+                if position != 0:  # Only signal on exit
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.0  # Maintain flat
+            elif position == 1:
+                # ATR trailing stop: exit if price drops 2.5*ATR from highest high since entry
+                if 'highest_high_since_entry' not in locals():
+                    highest_high_since_entry = high[i]
+                else:
+                    highest_high_since_entry = max(highest_high_since_entry, high[i])
+                if close[i] < (highest_high_since_entry - 2.5 * atr_6h[i]):
+                    if position != 0:  # Only signal on exit
+                        position = 0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = 0.0  # Maintain flat
+                else:
+                    signals[i] = 0.25  # Maintain position
+            else:
+                signals[i] = 0.0
+        elif elder_short_filter and downtrend:
+            if wr_short_signal:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
                 else:
                     signals[i] = -0.25  # Maintain position
-            # Exit: price returns to mid-band (within 0.1% of band width)
-            elif abs(close[i] - mid_band[i]) < (upper_band[i] - lower_band[i]) * 0.001:
+            elif wr_exit_signal and position == -1:
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
-            # Alternative exit: ATR-based trailing stop
-            elif position == 1 and close[i] < (highest_high_since_entry - 2.0 * atr_6h[i]):
-                if position != 0:  # Only signal on exit
-                    position = 0
-                    signals[i] = 0.0
+            elif position == -1:
+                # ATR trailing stop: exit if price rises 2.5*ATR from lowest low since entry
+                if 'lowest_low_since_entry' not in locals():
+                    lowest_low_since_entry = low[i]
                 else:
-                    signals[i] = 0.0  # Maintain flat
-            elif position == -1 and close[i] > (lowest_low_since_entry + 2.0 * atr_6h[i]):
-                if position != 0:  # Only signal on exit
-                    position = 0
-                    signals[i] = 0.0
+                    lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+                if close[i] > (lowest_low_since_entry + 2.5 * atr_6h[i]):
+                    if position != 0:  # Only signal on exit
+                        position = 0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = 0.0  # Maintain flat
                 else:
-                    signals[i] = 0.0  # Maintain flat
+                    signals[i] = -0.25  # Maintain position
             else:
-                # Maintain current position and update tracking levels
-                if position == 1:
-                    # Track highest high since entry for trailing stop
-                    if 'highest_high_since_entry' not in locals():
-                        highest_high_since_entry = high[i]
-                    else:
-                        highest_high_since_entry = max(highest_high_since_entry, high[i])
-                    signals[i] = 0.25
-                elif position == -1:
-                    # Track lowest low since entry for trailing stop
-                    if 'lowest_low_since_entry' not in locals():
-                        lowest_low_since_entry = low[i]
-                    else:
-                        lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         else:
             # No trade: exit any position if conditions not met
             if position != 0:
