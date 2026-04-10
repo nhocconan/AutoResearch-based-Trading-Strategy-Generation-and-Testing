@@ -3,106 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ATR-based volatility breakout with 1d trend filter and volume confirmation
-# - Long: 6h close > 6h open + 1.5 * ATR(14) + price > 1d EMA200 (uptrend) + 1d volume > 1.3x 20-period MA
-# - Short: 6h open > 6h close + 1.5 * ATR(14) + price < 1d EMA200 (downtrend) + 1d volume > 1.3x 20-period MA
-# - Exit: Close back inside the ATR band (mean reversion) or opposite signal
+# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation
+# - Long: 12h close > Donchian upper(20) + price > 1w EMA50 (uptrend) + 12h volume > 1.5x 20-period MA
+# - Short: 12h low < Donchian lower(20) + price < 1w EMA50 (downtrend) + 12h volume > 1.5x 20-period MA
+# - Exit: Close back inside Donchian channel (mean reversion) or opposite signal
 # - Position sizing: 0.25 (discrete level)
-# - Target: 60-120 total trades over 4 years (15-30/year) to avoid fee drag
-# - Volatility breakouts capture momentum after consolidation, EMA200 filters for higher-timeframe trend,
+# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
+# - Donchian breakouts capture volatility expansion, EMA50 filters for higher-timeframe trend,
 #   volume confirms institutional participation. Works in bull/bear: breakouts with trend in bull,
 #   mean reversion exits in bear ranges.
 
-name = "6h_1d_atr_breakout_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_breakout_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 100:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h OHLCV
+    open_12h = prices['open'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    volume_12h = prices['volume'].values
     
-    # Pre-compute 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Pre-compute 1w data
+    close_1w = df_1w['close'].values
     
-    # Calculate ATR (14-period) for 6h
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Donchian Channel (20-period) for 12h
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d EMA200
-    close_1d_series = pd.Series(close_1d)
-    ema_200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 1w EMA50
+    close_1w_series = pd.Series(close_1w)
+    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d volume moving average (20-period)
-    volume_1d_series = pd.Series(volume_1d)
-    volume_ma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Calculate 12h volume moving average (20-period)
+    volume_12h_series = pd.Series(volume_12h)
+    volume_ma_20_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, prices, volume_ma_20_12h)  # same timeframe
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period (need at least 50 for ATR14)
+    for i in range(50, n):  # Start after warmup period (need at least 50 for Donchian20)
         # Skip if any required data is invalid
-        if (np.isnan(atr_14[i]) or np.isnan(ema_200_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 6h OHLC
-        open_price = open_6h[i]
-        close_price = close_6h[i]
+        # Get current 12h OHLCV
+        open_price = open_12h[i]
+        high_price = high_12h[i]
+        low_price = low_12h[i]
+        close_price = close_12h[i]
+        volume_price = volume_12h[i]
         
-        # Get aligned 1d data for current 6h bar (completed 1d bar)
-        ema_200_current = ema_200_aligned[i]
+        # Get aligned 1w data for current 12h bar (completed 1w bar)
+        ema_50_current = ema_50_aligned[i]
         volume_ma_current = volume_ma_aligned[i]
-        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         
-        # Volume spike condition: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d_current > 1.3 * volume_ma_current
+        # Volume spike condition: current 12h volume > 1.5x 20-period MA
+        volume_spike = volume_price > 1.5 * volume_ma_current
         
-        # ATR breakout conditions
-        body_size = np.abs(close_price - open_price)
-        atr_threshold = 1.5 * atr_14[i]
-        
-        bullish_breakout = close_price > open_price and body_size > atr_threshold
-        bearish_breakout = open_price > close_price and body_size > atr_threshold
+        # Donchian breakout conditions
+        bullish_breakout = close_price > donchian_upper[i]
+        bearish_breakout = low_price < donchian_lower[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: bullish ATR breakout + price > 1d EMA200 + volume spike
-            if (bullish_breakout and close_price > ema_200_current and volume_spike):
+            # Long entry: bullish Donchian breakout + price > 1w EMA50 + volume spike
+            if (bullish_breakout and close_price > ema_50_current and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish ATR breakout + price < 1d EMA200 + volume spike
-            elif (bearish_breakout and close_price < ema_200_current and volume_spike):
+            # Short entry: bearish Donchian breakout + price < 1w EMA50 + volume spike
+            elif (bearish_breakout and close_price < ema_50_current and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when price closes back inside the ATR band (mean reversion)
-            if position == 1 and close_price < open_price + atr_threshold:
+            # Exit when price closes back inside the Donchian channel (mean reversion)
+            if position == 1 and close_price < donchian_upper[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close_price > open_price - atr_threshold:
+            elif position == -1 and close_price > donchian_lower[i]:
                 position = 0
                 signals[i] = 0.0
             else:
