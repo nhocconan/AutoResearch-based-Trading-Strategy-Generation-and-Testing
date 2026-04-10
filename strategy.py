@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w HMA(21) trend filter + volume confirmation
-# - Long when price breaks above Donchian(20) high AND 1w HMA(21) is rising AND volume > 1.5x 20-period average
-# - Short when price breaks below Donchian(20) low AND 1w HMA(21) is falling AND volume > 1.5x 20-period average
-# - Exit when price crosses Donchian(20) midline
+# Hypothesis: 6h Williams %R mean reversion + 1d ADX trend filter + volume confirmation
+# - Williams %R(14) < -80 indicates oversold (long signal) when 1d ADX > 25 (trending market) and volume > 1.5x 20-period average
+# - Williams %R(14) > -20 indicates overbought (short signal) when 1d ADX > 25 and volume > 1.5x 20-period average
+# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Donchian breakouts capture strong momentum moves in both bull and bear markets
-# - 1w HMA filter ensures we trade with the higher timeframe trend, reducing whipsaw
-# - Volume confirmation reduces false breakouts
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Williams %R captures short-term extremes in trending markets
+# - 1d ADX filter ensures we only trade when higher timeframe is trending (avoids ranging markets)
+# - Volume confirmation reduces false signals
 
-name = "1d_1w_donchian_hma_volume_v1"
-timeframe = "1d"
+name = "6h_1d_williamsr_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +23,78 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
     
-    # Pre-compute 1d Donchian channels (20)
+    # Pre-compute 6h Williams %R (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian high/low (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
     
-    # Pre-compute 1d volume confirmation
+    # Pre-compute 6h volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 1w HMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(arr, n):
-        if len(arr) < n:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, n + 1)
-        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
+    # Pre-compute 1d ADX (14-period)
+    # ADX calculation requires +DI, -DI, and DX
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate WMA for n/2 and n
-    n = 21
-    half_n = n // 2
-    sqrt_n = int(np.sqrt(n))
+    # True Range (TR)
+    tr1 = pd.Series(high_1d).diff().abs()
+    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift()).abs()
+    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
     
-    wma_half = wma(close_1w, half_n)
-    wma_full = wma(close_1w, n)
+    # +DM and -DM
+    up_move = pd.Series(high_1d).diff()
+    down_move = -pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Handle array lengths
-    wma_half_padded = np.full_like(close_1w, np.nan)
-    wma_full_padded = np.full_like(close_1w, np.nan)
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        if len(data) < period:
+            return np.full_like(data, np.nan)
+        result = np.full_like(data, np.nan)
+        # First value is simple average
+        result[period-1] = np.nansum(data[:period]) / period
+        # Subsequent values: previous * (period-1)/period + current / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    if len(wma_half) > 0:
-        wma_half_padded[half_n-1:half_n-1+len(wma_half)] = wma_half
-    if len(wma_full) > 0:
-        wma_full_padded[n-1:n-1+len(wma_full)] = wma_full
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
     
-    # 2*WMA(n/2) - WMA(n)
-    diff = 2 * wma_half_padded - wma_full_padded
-    # WMA(sqrt(n)) of the diff
-    wma_diff = wma(diff, sqrt_n)
-    wma_diff_padded = np.full_like(close_1w, np.nan)
-    if len(wma_diff) > 0:
-        wma_diff_padded[sqrt_n-1:sqrt_n-1+len(wma_diff)] = wma_diff
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
     
-    hma_1w = wma_diff_padded
+    # ADX > 25 indicates trending market
+    adx_trending = adx > 25
     
-    # HMA slope (rising/falling)
-    hma_slope = np.diff(hma_1w, prepend=np.nan)
-    hma_rising = hma_slope > 0
-    hma_falling = hma_slope < 0
-    
-    # Align HTF indicators to 1d timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising)
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling)
+    # Align HTF indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(hma_rising_aligned[i]) or 
-            np.isnan(hma_falling_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or 
+            np.isnan(adx_trending_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -104,24 +104,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Donchian high AND 1w HMA rising AND volume spike
-            if (close[i] > donch_high[i] and 
-                hma_rising_aligned[i] and 
+            # Long conditions: Williams %R < -80 (oversold) AND 1d ADX trending AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                adx_trending_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND 1w HMA falling AND volume spike
-            elif (close[i] < donch_low[i] and 
-                  hma_falling_aligned[i] and 
+            # Short conditions: Williams %R > -20 (overbought) AND 1d ADX trending AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  adx_trending_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Donchian midline
-            exit_long = (position == 1 and close[i] < donch_mid[i])
-            exit_short = (position == -1 and close[i] > donch_mid[i])
+            # Exit conditions: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+            exit_long = (position == 1 and williams_r_aligned[i] > -50)
+            exit_short = (position == -1 and williams_r_aligned[i] < -50)
             
             if exit_long or exit_short:
                 position = 0
