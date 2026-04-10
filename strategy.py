@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend direction + RSI(2) mean reversion + 1w volume confirmation
-# - KAMA(10,2,30) determines primary trend direction on daily timeframe
-# - RSI(2) < 10 for long entry, RSI(2) > 90 for short entry (extreme mean reversion)
-# - 1w volume > 1.5x 20-period average confirms institutional participation
-# - Only trade in direction of KAMA trend to avoid fighting the trend
+# Hypothesis: 12h Donchian(10) breakout + 1d volume spike + 1d chop regime filter
+# - Long when price breaks above Donchian(10) high AND 1d volume > 2.0x 20-period average AND 1d chop > 61.8 (range)
+# - Short when price breaks below Donchian(10) low AND 1d volume > 2.0x 20-period average AND 1d chop > 61.8 (range)
+# - Exit when price returns to Donchian(10) middle
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Works in bull markets via trend continuation, in bear markets via mean reversion within trend
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in range markets via mean reversion at Donchian extremes with volume confirmation
+# - Chop filter ensures we only trade in ranging conditions where breakouts are more likely to fail
+# - 12h timeframe reduces trade frequency vs lower TFs, minimizing fee drag
+# - Volume spike requirement ensures participation, reducing false breakouts
 
-name = "1d_1w_kama_rsi2_volume_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,62 +24,65 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Primary data
-    close = prices['close'].values
+    # Pre-compute 12h Donchian channels (10) - shorter period for more sensitivity
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # === 1d KAMA (Trend Direction) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # 10-period volatility
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
+    donchian_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    donchian_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donchian_middle = (donchian_high + donchian_low) / 2
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Pre-compute 1d volume confirmation
+    df_1d_vol = df_1d['volume'].values
+    vol_ma_1d = pd.Series(df_1d_vol).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = df_1d_vol > (2.0 * vol_ma_1d)  # Higher threshold for 1d
     
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # Start after first 10 periods
-    for i in range(10, n):
-        if not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Pre-compute 1d chop regime (choppiness index)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA trend: 1 = above KAMA (uptrend), -1 = below KAMA (downtrend)
-    kama_trend = np.where(close > kama, 1, -1)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - np.roll(close_1d, 1)[1:])
+    tr3 = np.abs(low_1d[1:] - np.roll(close_1d, 1)[1:])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # first element is NaN
     
-    # === 1d RSI(2) (Mean Reversion) ===
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # ATR(14)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Sum of TR over 14 periods
+    tr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     
-    # === 1w Volume Confirmation ===
-    vol_ma = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_spike = df_1w['volume'].values > (1.5 * vol_ma)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1w, vol_spike)
+    # Max(high) - Min(low) over 14 periods
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_max_min = max_high - min_low
+    
+    # Chop = 100 * log10(tr_sum / range_max_min) / log10(14)
+    chop = 100 * np.log10(tr_sum / range_max_min) / np.log10(14)
+    chop = np.concatenate([np.full(13, np.nan), chop[13:]])  # align indices
+    
+    # Chop regime: > 61.8 = ranging (good for mean reversion at extremes)
+    chop_range = chop > 61.8
+    
+    # Align HTF indicators to 12h timeframe
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_trend[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(chop_range_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -87,26 +92,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: RSI(2) < 10 (oversold) AND KAMA uptrend AND 1w volume spike
-            if (rsi[i] < 10 and 
-                kama_trend[i] == 1 and 
-                vol_spike_aligned[i]):
+            # Long conditions: price breaks above Donchian high AND 1d volume spike AND chop range
+            if (close[i] > donchian_high[i-1] and  # breakout above previous period's high
+                volume_spike_1d_aligned[i] and 
+                chop_range_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: RSI(2) > 90 (overbought) AND KAMA downtrend AND 1w volume spike
-            elif (rsi[i] > 90 and 
-                  kama_trend[i] == -1 and 
-                  vol_spike_aligned[i]):
+            # Short conditions: price breaks below Donchian low AND 1d volume spike AND chop range
+            elif (close[i] < donchian_low[i-1] and  # breakout below previous period's low
+                  volume_spike_1d_aligned[i] and 
+                  chop_range_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when RSI returns to neutral (50) or opposite extreme
-            exit_long = (position == 1 and 
-                        (rsi[i] >= 50 or rsi[i] > 80))
-            exit_short = (position == -1 and 
-                         (rsi[i] <= 50 or rsi[i] < 20))
+            # Exit when price returns to Donchian middle
+            exit_long = (position == 1 and close[i] <= donchian_middle[i])
+            exit_short = (position == -1 and close[i] >= donchian_middle[i])
             
             if exit_long or exit_short:
                 position = 0
