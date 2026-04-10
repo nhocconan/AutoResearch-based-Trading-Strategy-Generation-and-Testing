@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ADX regime filter
-# - Primary: 12h price breaks Donchian(20) channel for directional entries
-# - Volume filter: 1d volume > 1.5x 20-period volume MA to confirm institutional participation
-# - Regime filter: 1d ADX(14) > 25 to avoid choppy markets and ensure trending conditions
-# - Exit: Price crosses back below Donchian(20) midpoint (long) or above midpoint (short)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX regime filter
+# - Primary: 4h price breaks Donchian(20) channel for directional entries
+# - Volume filter: 1d volume > 1.3x 20-period volume MA to confirm institutional participation
+# - Regime filter: 1d ADX(14) > 20 to avoid choppy markets and ensure trending conditions
+# - Exit: Price crosses Donchian midpoint (re-entry allowed on same signal)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 # - Works in bull/bear: Donchian captures breakouts in any trend, volume confirms strength, ADX avoids whipsaws in ranging markets
 
-name = "12h_1d_donchian_volume_adx_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_adx_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,7 +38,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian Channel(20) on 12h
+    # Calculate Donchian Channel(20) on 4h
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (highest_high + lowest_low) / 2.0
@@ -89,12 +89,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-period volume MA
+        # Volume filter: current 1d volume > 1.3x 20-period volume MA
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirmed = volume_1d_aligned[i] > 1.5 * volume_ma_20_aligned[i]
+        volume_confirmed = volume_1d_aligned[i] > 1.3 * volume_ma_20_aligned[i]
         
-        # Regime filter: ADX > 25 to avoid choppy markets
-        trending = adx_aligned[i] > 25
+        # Regime filter: ADX > 20 to avoid choppy markets
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
             # Long entry: price breaks above Donchian(20) upper band + volume confirmation + trending
@@ -107,18 +107,22 @@ def generate_signals(prices):
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit: price crosses back below Donchian midpoint (long) or above midpoint (short)
+        else:  # Have position - look for exit/re-entry
+            # Exit: price crosses Donchian midpoint
             if position == 1:  # Long position
                 if close[i] < donchian_mid[i]:  # Exit when price crosses below midpoint
                     position = 0
                     signals[i] = 0.0
+                elif close[i] > highest_high[i]:  # Re-entry on new high
+                    signals[i] = 0.25
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 if close[i] > donchian_mid[i]:  # Exit when price crosses above midpoint
                     position = 0
                     signals[i] = 0.0
+                elif close[i] < lowest_low[i]:  # Re-entry on new low
+                    signals[i] = -0.25
                 else:
                     signals[i] = -0.25
     
