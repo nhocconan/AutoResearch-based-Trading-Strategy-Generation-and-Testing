@@ -4,15 +4,15 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 4h 20-period high with volume > 1.8x 20-period average AND 1d close > 1d EMA50
-# - Short when price breaks below 4h 20-period low with volume > 1.8x 20-period average AND 1d close < 1d EMA50
-# - Exit when price crosses 10-period midpoint OR volume drops below 1.2x average
-# - 1d trend filter ensures alignment with major trend (avoids counter-trend breakouts)
-# - Higher volume threshold (1.8x) reduces false breakouts and trade frequency
-# - Targets 20-40 trades/year (80-160 total over 4 years) to avoid fee drag
-# - Donchian breakouts work in both trending and ranging markets when combined with trend and volume filters
+# - Long when price breaks above 20-period high with volume > 1.5x average AND daily close > daily EMA50
+# - Short when price breaks below 20-period low with volume > 1.5x average AND daily close < daily EMA50
+# - Exit when price retests 10-period midpoint or volume drops below average
+# - Daily trend filter ensures alignment with intermediate trend
+# - Volume confirmation prevents false breakouts
+# - Targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Donchian breakouts work well in both trending and ranging markets when combined with trend and volume filters
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
+name = "4h_1d_donchian_breakout_volume_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,12 +39,12 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Pre-compute volume confirmation: > 1.8x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
-    # Pre-compute volume filter: < 1.2x average volume for exit (softer exit)
-    vol_normal = prices['volume'] < (1.2 * volume_20_avg)
+    # Pre-compute volume filter: < average volume for exit
+    vol_normal = prices['volume'] < volume_20_avg
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -72,8 +72,8 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price crosses 10-period midpoint (mean reversion signal)
-            # 2. Volume drops below 1.2x average (loss of momentum)
+            # 1. Price retests 10-day midpoint (mean reversion signal)
+            # 2. Volume drops below average (loss of momentum)
             if position == 1:  # Long position
                 if (prices['close'].iloc[i] < midpoint_10[i] or 
                     vol_normal.iloc[i]):
