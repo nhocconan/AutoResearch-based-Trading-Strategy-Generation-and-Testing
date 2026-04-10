@@ -3,35 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ADX trend filter
-# - Primary: 4h price breaks above/below 20-period Donchian channel
-# - HTF: 1d volume > 1.5x 20-period MA for institutional participation confirmation
-# - Trend filter: 4h ADX(14) > 25 to ensure trending market (avoids chop/whipsaws)
-# - Long: Close > Upper Donchian + volume confirmation + ADX > 25
-# - Short: Close < Lower Donchian + volume confirmation + ADX > 25
-# - Exit: Close crosses back inside Donchian channel OR ADX drops below 20 (trend weakening)
-# - Position sizing: 0.30 (discrete level, balances return/drawdown)
-# - Works in bull/bear: Donchian adapts to volatility, volume filters false breakouts, ADX avoids ranging markets
-# - Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume spike and 1w trend filter
+# - Primary: 6h price breaks above/below Camarilla pivot levels (H4/L4) from prior 1d session
+# - HTF 1d: Volume spike > 2.0x 20-period MA for confirmation (avoids low-volume breakouts)
+# - HTF 1w: Close > weekly SMA50 for long bias, < weekly SMA50 for short bias (trend filter)
+# - Long: Close > H4 + volume spike + weekly uptrend
+# - Short: Close < L4 + volume spike + weekly downtrend
+# - Exit: Close crosses back inside H4/L4 band
+# - Position sizing: 0.25 (discrete level, balances return/drawdown, reduces fee churn)
+# - Works in bull/bear: Camarilla adapts to volatility, volume filters false breakouts, weekly trend avoids counter-trend trades
+# - Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
 
-name = "4h_1d_donchian_volume_adx_v1"
-timeframe = "4h"
+name = "6h_1d_1w_camarilla_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:  # Need enough data for calculations
+    if n < 100:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:  # Need enough data for calculations
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 25 or len(df_1w) < 55:  # Need enough data for calculations
         return np.zeros(n)
     
-    # Pre-compute 4h data
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
+    # Pre-compute 6h data
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -39,72 +40,19 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Donchian Channel (20-period)
-    upper_donchian = np.full(len(close_4h), np.nan)
-    lower_donchian = np.full(len(close_4h), np.nan)
+    # Pre-compute 1w data
+    close_1w = df_1w['close'].values
     
-    for i in range(19, len(close_4h)):
-        if not (np.isnan(high_4h[i-19:i+1]).any() or np.isnan(low_4h[i-19:i+1]).any()):
-            upper_donchian[i] = np.max(high_4h[i-19:i+1])
-            lower_donchian[i] = np.min(low_4h[i-19:i+1])
+    # Calculate 1d Camarilla pivot levels (H4, L4) - using prior day only
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
     
-    # Calculate 4h ADX (14-period) for trend strength
-    # True Range
-    tr = np.full(len(close_4h), np.nan)
-    for i in range(1, len(close_4h)):
-        if not (np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or np.isnan(close_4h[i-1])):
-            tr[i] = max(
-                high_4h[i] - low_4h[i],
-                abs(high_4h[i] - close_4h[i-1]),
-                abs(low_4h[i] - close_4h[i-1])
-            )
-    
-    # Directional Movement
-    dm_plus = np.full(len(close_4h), np.nan)
-    dm_minus = np.full(len(close_4h), np.nan)
-    for i in range(1, len(close_4h)):
-        if not (np.isnan(high_4h[i]) or np.isnan(high_4h[i-1]) or 
-                np.isnan(low_4h[i]) or np.isnan(low_4h[i-1])):
-            up_move = high_4h[i] - high_4h[i-1]
-            down_move = low_4h[i-1] - low_4h[i]
-            if up_move > down_move and up_move > 0:
-                dm_plus[i] = up_move
-            elif down_move > up_move and down_move > 0:
-                dm_minus[i] = down_move
-    
-    # Smoothed TR, DM+ and DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(values[0:period]) / period
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(values)):
-            if not np.isnan(values[i]) and not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.full(len(close_4h), np.nan)
-    di_minus = np.full(len(close_4h), np.nan)
-    for i in range(len(close_4h)):
-        if not (np.isnan(atr[i]) or atr[i] == 0):
-            di_plus[i] = (dm_plus_smooth[i] / atr[i]) * 100
-            di_minus[i] = (dm_minus_smooth[i] / atr[i]) * 100
-    
-    # DX and ADX
-    dx = np.full(len(close_4h), np.nan)
-    for i in range(len(close_4h)):
-        if not (np.isnan(di_plus[i]) or np.isnan(di_minus[i]) or 
-                (di_plus[i] + di_minus[i]) == 0):
-            dx[i] = (abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])) * 100
-    
-    adx = wilders_smoothing(dx, 14)
+    for i in range(1, len(close_1d)):
+        if not (np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]) or np.isnan(close_1d[i-1])):
+            # Camarilla levels based on prior day's range
+            range_ = high_1d[i-1] - low_1d[i-1]
+            camarilla_h4[i] = close_1d[i-1] + range_ * 1.1 / 2
+            camarilla_l4[i] = close_1d[i-1] - range_ * 1.1 / 2
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = np.full(len(volume_1d), np.nan)
@@ -112,54 +60,61 @@ def generate_signals(prices):
         if not np.isnan(volume_1d[i-19:i+1]).any():
             volume_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Align all HTF/LTF indicators to 4h timeframe
-    upper_donchian_aligned = align_htf_to_ltf(prices, prices, upper_donchian)
-    lower_donchian_aligned = align_htf_to_ltf(prices, prices, lower_donchian)
-    adx_aligned = align_htf_to_ltf(prices, prices, adx)
+    # Calculate 1w SMA50
+    sma_50_1w = np.full(len(close_1w), np.nan)
+    for i in range(49, len(close_1w)):
+        if not np.isnan(close_1w[i-49:i+1]).any():
+            sma_50_1w[i] = np.mean(close_1w[i-49:i+1])
+    
+    # Align all HTF indicators to 6h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i]) or 
+            np.isnan(sma_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period MA
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-period MA
+        volume_spike = volume_1d_aligned[i] > 2.0 * volume_ma_20_1d_aligned[i]
         
-        # Trend filter: ADX > 25 = strong trend, ADX < 20 = weak trend/ranging
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20
+        # Weekly trend filter: close > weekly SMA50 for uptrend, < for downtrend
+        weekly_uptrend = close_1w_aligned[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close_1w_aligned[i] < sma_50_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Close > Upper Donchian + volume confirmation + strong trend
-            if close_4h[i] > upper_donchian_aligned[i] and volume_confirm and strong_trend:
+            # Long entry: Close > H4 + volume spike + weekly uptrend
+            if close_6h[i] > camarilla_h4_aligned[i] and volume_spike and weekly_uptrend:
                 position = 1
-                signals[i] = 0.30
-            # Short entry: Close < Lower Donchian + volume confirmation + strong trend
-            elif close_4h[i] < lower_donchian_aligned[i] and volume_confirm and strong_trend:
+                signals[i] = 0.25
+            # Short entry: Close < L4 + volume spike + weekly downtrend
+            elif close_6h[i] < camarilla_l4_aligned[i] and volume_spike and weekly_downtrend:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Close crosses back inside Donchian channel OR trend weakens (ADX < 20)
+            # Exit: Close crosses back inside H4/L4 band
             if position == 1:  # Long position
-                if close_4h[i] < lower_donchian_aligned[i] or weak_trend:
+                if close_6h[i] < camarilla_h4_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close_4h[i] > upper_donchian_aligned[i] or weak_trend:
+                if close_6h[i] > camarilla_l4_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
