@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX(14) trend filter
-# - Long when price breaks above Donchian(20) high + ADX(14) > 25 + 1d volume > 1.5x 20-period volume SMA
-# - Short when price breaks below Donchian(20) low + same ADX and volume conditions
-# - Exit: opposite Donchian breakout (long exits on lower band break, short exits on upper band break)
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ADX(14) trend filter
+# - Long when price breaks above Camarilla H3 level (1d) + ADX(14) > 25 + 1d volume > 1.3x 20-period volume SMA
+# - Short when price breaks below Camarilla L3 level (1d) + same ADX and volume conditions
+# - Exit: opposite Camarilla level (H3 for shorts, L3 for longs) or close below/above L4/H4
 # - Position sizing: 0.25 discrete level to balance risk and reward
-# - Donchian channels provide clear breakout levels in both trending and ranging markets
+# - Camarilla pivots from higher timeframe (1d) provide institutional support/resistance levels
 # - ADX filter ensures we only trade when there's sufficient trend strength
 # - Volume confirmation adds conviction to breakouts
 # - Target: 20-50 trades/year on 4h timeframe to minimize fee drag
 
-name = "4h_1d_donchian_volume_adx_v1"
+name = "4h_1d_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,10 +36,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_period = 20
-    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    range_1d = high_1d - low_1d
+    h3 = pivot + (range_1d * 1.1 / 2.0)  # H3 = pivot + 1.1*(HL)/2
+    l3 = pivot - (range_1d * 1.1 / 2.0)  # L3 = pivot - 1.1*(HL)/2
+    h4 = pivot + (range_1d * 1.1)        # H4 = pivot + 1.1*(HL)
+    l4 = pivot - (range_1d * 1.1)        # L4 = pivot - 1.1*(HL)
+    
+    # Align 1d Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     # Calculate 4h ADX for trend filter
     # True Range
@@ -77,9 +92,9 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    for i in range(donchian_period, n):
+    for i in range(30, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(adx[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -87,19 +102,19 @@ def generate_signals(prices):
         # Get current 1d volume for volume spike confirmation
         volume_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period SMA (volume spike)
-        vol_confirm = volume_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period SMA (volume spike)
+        vol_confirm = volume_1d_current[i] > 1.3 * volume_sma_20_1d_aligned[i]
         
         # Trend filter: ADX > 25 indicates trending market
         trending = adx[i] > 25
         
-        # Donchian breakout signals
-        long_breakout = close[i] > highest_high[i]
-        short_breakout = close[i] < lowest_low[i]
+        # Camarilla breakout signals
+        long_breakout = close[i] > h3_aligned[i]
+        short_breakout = close[i] < l3_aligned[i]
         
-        # Exit conditions: opposite band break
-        exit_long = close[i] < lowest_low[i]
-        exit_short = close[i] > highest_high[i]
+        # Exit conditions: opposite Camarilla level or extreme levels
+        exit_long = close[i] < l3_aligned[i] or close[i] < l4_aligned[i]
+        exit_short = close[i] > h3_aligned[i] or close[i] > h4_aligned[i]
         
         if position == 0:  # Flat - look for entry
             if long_breakout and trending and vol_confirm:
