@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# - Long: price breaks above Camarilla H3 (1d) + 1d volume > 1.5x 20-period MA + chop > 61.8 (range)
-# - Short: price breaks below Camarilla L3 (1d) + 1d volume > 1.5x 20-period MA + chop > 61.8 (range)
-# - Exit: close-based reversal - exit long when price < Camarilla L3, exit short when price > Camarilla H3
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
+# - Long: price breaks above 4h Donchian upper channel (20) + 1d volume > 1.3x 20-period MA + chop > 61.8 (range)
+# - Short: price breaks below 4h Donchian lower channel (20) + 1d volume > 1.3x 20-period MA + chop > 61.8 (range)
+# - Exit: close-based reversal - exit long when price < Donchian lower channel, exit short when price > Donchian upper channel
 # - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
 # - Position sizing: 0.25 (discrete level)
-# - Uses Camarilla pivots for structure, 1d volume for confirmation, chop filter to avoid strong trends
+# - Uses Donchian channels for structure, 1d volume for confirmation, chop filter to avoid strong trends
 # - Target: 75-150 total trades over 4 years (19-38/year) to stay within HARD MAX: 400 total
-# - Works in both bull and bear: chop filter identifies ranging markets where Camarilla levels hold, volume confirms genuine breakouts
+# - Works in both bull and bear: chop filter identifies ranging markets where Donchian levels hold, volume confirms genuine breakouts
 
-name = "4h_1d_camarilla_breakout_vol_chop_v1"
+name = "4h_1d_donchian_breakout_vol_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -57,11 +57,15 @@ def generate_signals(prices):
     
     atr_14_4h = wilders_smoothing(tr, 14)
     
-    # Calculate Camarilla pivot levels from 1d data
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), etc.
-    # But we only need H3 and L3 for breakouts
-    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
+    # Calculate Donchian channels (20-period) for 4h
+    def rolling_max(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    
+    def rolling_min(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
+    
+    donchian_upper_20 = rolling_max(high_4h, 20)
+    donchian_lower_20 = rolling_min(low_4h, 20)
     
     # Calculate 1d volume moving average (20-period)
     volume_1d_series = pd.Series(volume_1d)
@@ -98,7 +102,7 @@ def generate_signals(prices):
     for i in range(20, n):  # Start after warmup period (need at least 20 for calculations)
         # Skip if any required data is invalid
         if (np.isnan(volume_ma_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i])):
+            np.isnan(atr_14_4h[i]) or np.isnan(donchian_upper_20[i]) or np.isnan(donchian_lower_20[i])):
             signals[i] = 0.0
             continue
         
@@ -110,20 +114,20 @@ def generate_signals(prices):
         volume_ma_current = volume_ma_aligned[i]
         chop_current = chop_aligned[i]
         
-        # Volume spike condition: current 1d volume > 1.5x 20-period MA
-        volume_spike = volume_1d_current > 1.5 * volume_ma_current
+        # Volume spike condition: current 1d volume > 1.3x 20-period MA
+        volume_spike = volume_1d_current > 1.3 * volume_ma_current
         
         # Chop regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
         chop_filter = chop_current > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla H3 + volume spike + chop filter
-            if (close_price > camarilla_h3[i] and volume_spike and chop_filter):
+            # Long entry: price breaks above Donchian upper channel + volume spike + chop filter
+            if (close_price > donchian_upper_20[i] and volume_spike and chop_filter):
                 position = 1
                 entry_price = close_price
                 signals[i] = 0.25
-            # Short entry: price breaks below Camarilla L3 + volume spike + chop filter
-            elif (close_price < camarilla_l3[i] and volume_spike and chop_filter):
+            # Short entry: price breaks below Donchian lower channel + volume spike + chop filter
+            elif (close_price < donchian_lower_20[i] and volume_spike and chop_filter):
                 position = -1
                 entry_price = close_price
                 signals[i] = -0.25
@@ -133,8 +137,8 @@ def generate_signals(prices):
             # Calculate stoploss level
             if position == 1:  # Long position
                 stop_loss = entry_price - 2.0 * atr_14_4h[i]
-                # Exit conditions: price < Camarilla L3 OR stoploss hit
-                if close_price < camarilla_l3[i] or close_price <= stop_loss:
+                # Exit conditions: price < Donchian lower channel OR stoploss hit
+                if close_price < donchian_lower_20[i] or close_price <= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
@@ -142,8 +146,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1, Short position
                 stop_loss = entry_price + 2.0 * atr_14_4h[i]
-                # Exit conditions: price > Camarilla H3 OR stoploss hit
-                if close_price > camarilla_h3[i] or close_price >= stop_loss:
+                # Exit conditions: price > Donchian upper channel OR stoploss hit
+                if close_price > donchian_upper_20[i] or close_price >= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
