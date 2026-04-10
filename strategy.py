@@ -3,21 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Williams Fractal confluence with 1w trend filter
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# - Williams Fractal: Bearish = High[2] < High[0] and High[2] < High[1] and High[0] < High[1] and High[0] < High[3] and High[0] < High[4]
-#                  Bullish = Low[2] > Low[0] and Low[2] > Low[1] and Low[0] < Low[1] and Low[0] > Low[3] and Low[0] > Low[4]
-# - Long when Bull Power > 0 AND Bearish Fractal (sell signal) AND price > 1w EMA50
-# - Short when Bear Power > 0 AND Bullish Fractal (buy signal) AND price < 1w EMA50
-# - Exit when Elder Ray power crosses zero (Bull Power <= 0 for longs, Bear Power <= 0 for shorts)
-# - Uses 1w EMA50 for trend filter to avoid counter-trend trades
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above H3 (1d Camarilla) AND price > 1d EMA50 AND volume > 1.8x 20-bar avg
+# - Short when price breaks below L3 (1d Camarilla) AND price < 1d EMA50 AND volume > 1.8x 20-bar avg
+# - Exit when price crosses back to 1d EMA50 (mean reversion to trend)
+# - Uses 1d EMA50 for trend filter to align with medium-term direction
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-30 trades/year on 6h timeframe (48-120 total over 4 years)
-# - Elder Ray measures bull/bear power behind moves; Williams Fractal provides timing
-# - Works in both bull (trend continuation) and bear (counter-trend bounces) markets
+# - Target: 12-25 trades/year on 12h timeframe (50-100 total over 4 years)
+# - Camarilla pivots work well in ranging/bear markets; volume confirmation filters false breakouts
+# - 12h timeframe reduces noise vs lower TFs while capturing meaningful moves
 
-name = "6h_1w_elder_ray_fractal_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,51 +23,41 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute Elder Ray (13-period EMA)
-    close_s = pd.Series(prices['close'])
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = prices['high'].values - ema13
-    bear_power = ema13 - prices['low'].values
+    # Pre-compute 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute Williams Fractals on 6h data
-    high = prices['high'].values
-    low = prices['low'].values
-    bearish_fractal = np.zeros(n, dtype=bool)
-    bullish_fractal = np.zeros(n, dtype=bool)
-    # Williams Fractal: need 2 bars on each side
-    for i in range(2, n-2):
-        # Bearish fractal: highest high in middle with lower highs on both sides
-        if (high[i] > high[i-1] and high[i] > high[i-2] and 
-            high[i] > high[i+1] and high[i] > high[i+2]):
-            bearish_fractal[i] = True
-        # Bullish fractal: lowest low in middle with higher lows on both sides
-        if (low[i] < low[i-1] and low[i] < low[i-2] and 
-            low[i] < low[i+1] and low[i] < low[i+2]):
-            bullish_fractal[i] = True
+    # Camarilla formula: range = high - low
+    # H3 = close + (high - low) * 1.1/4
+    # L3 = close - (high - low) * 1.1/4
+    range_1d = high_1d - low_1d
+    h3 = close_1d + (range_1d * 1.1 / 4)
+    l3 = close_1d - (range_1d * 1.1 / 4)
     
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Pre-compute volume confirmation: > 1.8x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
+    
+    # Pre-compute 1d EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align HTF arrays to LTF
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute aligned 1w data
-    c_1w = df_1w['close'].values
-    c_1w_aligned = align_htf_to_ltf(prices, df_1w, c_1w)
-    
-    # Pre-compute 1w EMA(50) for trend filter
-    ema50_1w = pd.Series(c_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
     for i in range(50, n):  # Start after EMA50 warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(c_1w_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -80,31 +67,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long when Bull Power > 0 AND Bearish Fractal (sell signal = potential top) with volume spike AND in 1w uptrend
-            if (bull_power[i] > 0 and 
-                bearish_fractal[i] and 
-                vol_spike.iloc[i] and
-                prices['close'].iloc[i] > ema50_1w_aligned[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above H3 AND in 1d uptrend with volume spike
+            if (prices['close'].iloc[i] > h3_aligned[i] and 
+                prices['close'].iloc[i] > ema50_1d_aligned[i] and 
+                vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when Bear Power > 0 AND Bullish Fractal (buy signal = potential bottom) with volume spike AND in 1w downtrend
-            elif (bear_power[i] > 0 and 
-                  bullish_fractal[i] and 
-                  vol_spike.iloc[i] and
-                  prices['close'].iloc[i] < ema50_1w_aligned[i]):
+            # Short when price breaks below L3 AND in 1d downtrend with volume spike
+            elif (prices['close'].iloc[i] < l3_aligned[i] and 
+                  prices['close'].iloc[i] < ema50_1d_aligned[i] and 
+                  vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit when Elder Ray power crosses zero (trend weakness)
+        else:  # Have position - look for exit to trend
+            # Exit when price crosses back to 1d EMA50 (mean reversion to trend)
             exit_signal = False
             if position == 1:  # Long position
-                if bull_power[i] <= 0:
+                if prices['close'].iloc[i] < ema50_1d_aligned[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if bear_power[i] <= 0:
+                if prices['close'].iloc[i] > ema50_1d_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
