@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above 1d Donchian upper channel AND 1w close > 1w EMA20 (bullish trend)
-# - Short when price breaks below 1d Donchian lower channel AND 1w close < 1w EMA20 (bearish trend)
-# - Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-# - Exit: opposite Donchian breakout or volume drops below average
+# Hypothesis: 12h Williams Alligator with 1d regime filter and volume confirmation
+# - Williams Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3)
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND price > Lips AND 1d ADX > 25 (trending regime) AND volume confirmation
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND price < Lips AND 1d ADX > 25 (trending regime) AND volume confirmation
+# - Volume confirmation: 12h volume > 1.3x 20-period volume SMA
+# - Exit: opposite Alligator alignment or loss of volume confirmation
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 7-25 trades/year on 1d timeframe to stay within fee drag limits
-# - Works in both bull and bear: trend filter ensures we only trade with higher timeframe momentum
+# - Target: 12-37 trades/year on 12h timeframe to stay within fee drag limits
+# - Uses 1d timeframe for ADX regime filter to avoid overtrading
 
-name = "1d_1w_donchian_trend_volume_v1"
-timeframe = "1d"
+name = "12h_1d_alligator_regime_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,8 +23,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,51 +36,125 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 1d Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
+    # Calculate Williams Alligator components (SMMA = smoothed moving average)
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        if len(data) < period:
+            return np.full(len(data), np.nan)
+        result = np.full(len(data), np.nan)
+        # First value is simple SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_PRICE) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Calculate 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Alligator components
+    jaw = smma(close, 13)  # Jaw: 13-period SMMA
+    teeth = smma(close, 8)  # Teeth: 8-period SMMA
+    lips = smma(close, 5)   # Lips: 5-period SMMA
     
-    # Calculate 1w close for trend comparison
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Shift the lines as per Alligator definition
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
     
-    # Calculate 1d volume SMA for regime filter
+    # Set NaN for shifted values that rolled from end
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # Calculate 1d ADX for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        """Wilder's smoothing (EMA with alpha=1/period)"""
+        if len(data) < period:
+            return np.full(len(data), np.nan)
+        result = np.full(len(data), np.nan)
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        alpha = 1.0 / period
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]):
+                result[i] = np.nanmean(data[i-period+1:i+1])
+            else:
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    period = 14
+    tr_smoothed = wilders_smoothing(tr, period)
+    plus_dm_smoothed = wilders_smoothing(plus_dm, period)
+    minus_dm_smoothed = wilders_smoothing(minus_dm, period)
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period)
+    
+    # Align HTF indicators to LTF
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 12h volume SMA for regime filter
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(40, n):  # Start after warmup for indicators
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or
-            np.isnan(volume_sma_20[i])):
+        if (np.isnan(lips_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(jaw_shifted[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Volume confirmation: 12h volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
         
-        # Trend filter: 1w close vs 1w EMA20
-        trend_bullish = close_1w_aligned[i] > ema_20_1w_aligned[i]
-        trend_bearish = close_1w_aligned[i] < ema_20_1w_aligned[i]
+        # Alligator alignment signals
+        bullish_alignment = lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i]
+        bearish_alignment = lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i]
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # Break above previous upper channel
-        breakout_down = close[i] < donchian_lower[i-1]  # Break below previous lower channel
+        # Price relative to Lips (entry filter)
+        price_above_lips = close[i] > lips_shifted[i]
+        price_below_lips = close[i] < lips_shifted[i]
         
-        # Exit conditions: opposite breakout or loss of volume confirmation
-        exit_long = breakout_down or not vol_confirm
-        exit_short = breakout_up or not vol_confirm
+        # Regime filter: 1d ADX > 25 (trending market)
+        trending_regime = adx_aligned[i] > 25
+        
+        # Entry signals
+        enter_long = bullish_alignment and price_above_lips and vol_confirm and trending_regime
+        enter_short = bearish_alignment and price_below_lips and vol_confirm and trending_regime
+        
+        # Exit conditions: opposite alignment or loss of confirmation
+        exit_long = bearish_alignment or not vol_confirm or not trending_regime
+        exit_short = bullish_alignment or not vol_confirm or not trending_regime
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and trend_bullish and vol_confirm:
+            if enter_long:
                 position = 1
                 signals[i] = 0.25
-            elif breakout_down and trend_bearish and vol_confirm:
+            elif enter_short:
                 position = -1
                 signals[i] = -0.25
             else:
