@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and chop regime filter
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and chop regime filter
 # - Primary: 4h price breaks above/below Donchian channel (20-period) from prior 4h session
-# - HTF: 1d volume > 1.5x 20-period MA for confirmation (avoids low-volume breakouts)
+# - HTF: 1d volume > 1.3x 20-period MA for confirmation (avoids low-volume breakouts)
 # - Regime filter: 4h Choppiness Index (14) < 38.2 to ensure trending market (avoids chop)
 # - Long: Close > Upper Donchian + volume confirmation + chop trending
 # - Short: Close < Lower Donchian + volume confirmation + chop trending
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Works in bull/bear: Donchian adapts to volatility, volume filters false breakouts, chop regime avoids whipsaws
 # - Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
 
-name = "4h_1d_donchian_volume_chop_v1"
+name = "4h_1d_donchian_volume_chop_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -94,9 +94,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        # Volume confirmation: current 1d volume > 1.3x 20-period MA
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
         
         # Chop regime filter: CHOP < 38.2 = trending, CHOP > 61.8 = ranging
         chop_trending = chop_aligned[i] < 38.2
