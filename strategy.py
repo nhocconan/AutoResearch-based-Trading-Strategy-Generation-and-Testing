@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and 1w trend filter
-# - Primary: 4h price breaking above/below Camarilla H3/L3 levels from prior 1d session
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and 1w trend filter
+# - Primary: 12h price breaking above/below Camarilla H3/L3 levels from prior 1d session
 # - HTF volume filter: 1d volume > 1.8x 20-period MA for institutional participation
 # - HTF trend filter: 1w close > 1w EMA20 for long bias, < EMA20 for short bias
 # - Entry: Long when close > H3 + volume filter + 1w uptrend; Short when close < L3 + volume filter + 1w downtrend
 # - Exit: Price retouches Camarilla pivot point (PP) from prior 1d session
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 50-150 total trades over 4 years (12-38/year) for 4h timeframe
+# - Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 # - Works in bull/bear: Camarilla levels adapt to volatility, volume confirms validity, 1w trend ensures alignment with higher timeframe momentum
 
-name = "4h_1d_1w_camarilla_pivot_trend_v1"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_pivot_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -85,7 +85,8 @@ def generate_signals(prices):
         volume_confirm = volume_1d_aligned[i] > 1.8 * volume_ma_20_1d_aligned[i]
         
         # Trend filter: 1w close > EMA20 for uptrend, < EMA20 for downtrend
-        trend_up = close_1w[-1] > ema_20_1w[-1] if len(close_1w) > 0 else False  # Use latest completed 1w bar
+        # Use the latest completed 1w bar (already aligned)
+        trend_up = close_1w[-1] > ema_20_1w[-1] if len(close_1w) > 0 else False
         trend_down = close_1w[-1] < ema_20_1w[-1] if len(close_1w) > 0 else False
         
         if position == 0:  # Flat - look for new entries
