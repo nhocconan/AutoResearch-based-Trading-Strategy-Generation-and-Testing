@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h volume confirmation and chop regime filter
-# - Long when price breaks above Camarilla H4 level AND 12h volume > 1.3x 20-period volume SMA AND chop < 61.8 (trending regime)
-# - Short when price breaks below Camarilla L4 level AND 12h volume > 1.3x 20-period volume SMA AND chop < 61.8 (trending regime)
-# - Exit: opposite Camarilla breakout or chop > 61.8 (range regime)
-# - Uses 4h for price action and Camarilla levels, 12h for volume confirmation, 4h for chop regime
-# - Camarilla pivots provide institutional support/resistance levels that work in both bull and bear markets
-# - Volume confirmation ensures breakouts have conviction
-# - Chop regime filter avoids false signals in ranging markets
-# - Target: 20-50 trades/year to minimize fee drag while capturing meaningful moves
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
+# - Long when price breaks above Camarilla H3 AND 4h EMA21 > EMA50 (bullish trend) AND hour in 08-20 UTC
+# - Short when price breaks below Camarilla L3 AND 4h EMA21 < EMA50 (bearish trend) AND hour in 08-20 UTC
+# - Exit: opposite Camarilla breakout (L3 for long, H3 for short)
+# - Uses 1h for Camarilla calculation and entry timing, 4h for trend direction
+# - Session filter reduces noise trades during low-volume hours
+# - Camarilla pivots provide mathematically derived support/resistance levels
+# - Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
+# - Works in both bull and bear markets by following 4h trend direction
 
-name = "4h_12h_camarilla_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "1h_4h_camarilla_breakout_trend_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,107 +26,90 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for volume confirmation (MTF rule compliance)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Pre-compute session hours ONCE before loop (Rule 10 compliance)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
+    # Load 4h data ONCE before loop for trend calculation (MTF rule compliance)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return signals
     
-    # Pre-compute volume SMA for 12h data (20-period)
-    volume_12h = df_12h['volume'].values
-    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    # Calculate 4h EMAs for trend filter
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Pre-compute 4h data for Camarilla and chop calculations
-    # Calculate Camarilla pivot levels for 4h data (using prior period's high/low/close)
+    # Pre-compute 1h Camarilla pivots (using prior period's high/low/close)
     # Camarilla levels: H4 = Close + 1.1*(High-Low)/2, L4 = Close - 1.1*(High-Low)/2
-    camarilla_h4 = close + 1.1 * (high - low) / 2.0
-    camarilla_l4 = close - 1.1 * (high - low) / 2.0
+    # H3 = Close + 1.1*(High-Low)/4, L3 = Close - 1.1*(High-Low)/4
+    # We'll use H3/L3 for breakouts
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = np.nan
+    low_shift[0] = np.nan
+    close_shift[0] = np.nan
     
-    # Pre-compute Chopiness Index for 4h data (14-period)
-    # Chop = 100 * log10(sum(ATR(1)/14) / log10(TrueRange(14))) 
-    # Simplified: Chop = 100 * log10(ATR(14) / (TrueRange(14) * sqrt(14))) 
-    # Even simpler approximation: Chop = 100 * log10(sum(abs(close - close.shift(1))/14) / log10(max(high, low) - min(high, low)) over 14)
-    # We'll use a practical approximation: Chop = 100 * log10(ATR(14) / (TrueRange(14) * sqrt(14))) 
-    # For simplicity, we'll use: Chop = 100 * log10(ATR(14) / (max(high, low) - min(high, low)) * sqrt(14))
-    # Actually, let's use a more standard approach: Chop = 100 * log10(sum(ATR(1)/14) / log10(TrueRange(14)))
-    # We'll implement a workable version:
+    camarilla_range = high_shift - low_shift
+    camarilla_h3 = close_shift + 1.1 * camarilla_range / 4.0
+    camarilla_l3 = close_shift - 1.1 * camarilla_range / 4.0
     
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Calculate ATR (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Chop Index: 100 * log10(sum(ATR(1)/14) / log10(TrueRange(14)))
-    # We'll approximate: Chop = 100 * log10(atr / (pd.Series(tr).rolling(14).mean().values * np.sqrt(14)))
-    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    chop = 100 * np.log10(atr / (tr_ma * np.sqrt(14) + 1e-10))  # Add small epsilon to avoid division by zero
-    chop = np.where(chop < 0, 100, chop)  # Ensure chop is between 0-100
-    chop = np.where(chop > 100, 100, chop)
-    
-    for i in range(20, n):  # Start after 20-bar warmup
+    for i in range(1, n):  # Start after 1-bar warmup for shift
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4[i]) or np.isnan(camarilla_l4[i]) or 
-            np.isnan(volume_sma_20_12h_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.3x 20-period volume SMA
-        vol_confirm = volume[i] > 1.3 * volume_sma_20_12h_aligned[i]
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Chop regime filter: chop < 61.8 indicates trending regime (good for breakouts)
-        trending_regime = chop[i] < 61.8
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # Trend filter from 4h
+        bullish_trend = ema_21_4h_aligned[i] > ema_50_4h_aligned[i]
+        bearish_trend = ema_21_4h_aligned[i] < ema_50_4h_aligned[i]
         
         # Camarilla breakout signals
-        breakout_long = close[i] > camarilla_h4[i-1]  # Break above prior period's H4
-        breakout_short = close[i] < camarilla_l4[i-1]  # Break below prior period's L4
+        breakout_long = close[i] > camarilla_h3[i]
+        breakout_short = close[i] < camarilla_l3[i]
         
-        # Exit conditions: opposite breakout or chop > 61.8 (range regime)
-        exit_long = close[i] < camarilla_l4[i-1] or chop[i] > 61.8
-        exit_short = close[i] > camarilla_h4[i-1] or chop[i] > 61.8
+        # Exit conditions: opposite Camarilla breakout
+        exit_long = close[i] < camarilla_l3[i]
+        exit_short = close[i] > camarilla_h3[i]
         
         # Trading logic
-        if vol_confirm and trending_regime:
-            # Long: Camarilla breakout above H4
-            if breakout_long:
-                if position != 1:  # Only signal on new long entry
-                    position = 1
-                    signals[i] = 0.25
-                else:
-                    signals[i] = 0.25
-            # Short: Camarilla breakout below L4
-            elif breakout_short:
-                if position != -1:  # Only signal on new short entry
-                    position = -1
-                    signals[i] = -0.25
-                else:
-                    signals[i] = -0.25
+        if bullish_trend and breakout_long:
+            if position != 1:  # Only signal on new long entry
+                position = 1
+                signals[i] = 0.20
             else:
-                # Check for exits
-                if position == 1 and exit_long:
-                    position = 0
-                    signals[i] = 0.0
-                elif position == -1 and exit_short:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    # Maintain current position
-                    signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+                signals[i] = 0.20
+        elif bearish_trend and breakout_short:
+            if position != -1:  # Only signal on new short entry
+                position = -1
+                signals[i] = -0.20
+            else:
+                signals[i] = -0.20
         else:
-            # No volume confirmation or not trending: exit any position
-            if position != 0:
+            # Check for exits
+            if position == 1 and exit_long:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # Maintain current position
+                signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
