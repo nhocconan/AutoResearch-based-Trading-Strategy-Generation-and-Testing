@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
-# - Long when price breaks above Camarilla H3 level + volume > 2.0x 20-period 1d volume SMA + CHOP(14) < 40 (trending)
-# - Short when price breaks below Camarilla L3 level + volume > 2.0x 20-period 1d volume SMA + CHOP(14) < 40 (trending)
-# - Exit: price returns to Camarilla pivot point (mean reversion)
+# Hypothesis: 6h Williams %R extreme + 1d ADX trend filter + volume spike
+# - Long when Williams %R(14) < -80 (oversold) + ADX(14) > 25 (trending) + 6h volume > 1.5x 20-period 6h volume SMA
+# - Short when Williams %R(14) > -20 (overbought) + ADX(14) > 25 (trending) + 6h volume > 1.5x 20-period 6h volume SMA
+# - Exit: Williams %R returns to -50 level (mean reversion)
 # - Position sizing: 0.25 discrete level
-# - Camarilla levels derived from 1d OHLC provide institutional support/resistance
-# - Volume spike confirms institutional participation
-# - Choppiness filter ensures we only trade in trending markets to avoid false breakouts
-# - Works in bull/bear: breakouts occur in all regimes, CHOP filter prevents chop whipsaws
+# - Williams %R identifies overextended moves in any market regime
+# - ADX filter ensures we only trade during trending periods to avoid chop
+# - Volume spike confirms institutional participation in the reversal
+# - Works in bull/bear: mean reversion occurs in all regimes, ADX filter prevents false signals in sideways markets
 
-name = "12h_1d_camarilla_volume_chop_v2"
-timeframe = "12h"
+name = "6h_1d_williamsr_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,41 +36,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Camarilla pivot levels on 1d timeframe
-    # Camarilla levels: based on previous day's OHLC
-    # H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), etc.
-    # L4 = close - 1.5*(high-low), L3 = close - 1.125*(high-low), etc.
-    # Pivot = (high + low + close) / 3
+    # Calculate Williams %R on 6h timeframe (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # Range: -100 to 0, where -80+ is oversold, -20- is overbought
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high_14 - lowest_low_14) != 0,
+        (highest_high_14 - close) / (highest_high_14 - lowest_low_14) * -100,
+        -50  # default to neutral when range is zero
+    )
     
-    # Shift by 1 to use previous day's levels (no look-ahead)
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    prev_close = df_1d['close'].shift(1)
-    
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    h3 = prev_close + 1.125 * range_hl  # Strong resistance
-    l3 = prev_close - 1.125 * range_hl  # Strong support
-    h4 = prev_close + 1.5 * range_hl    # Ultimate resistance
-    l4 = prev_close - 1.5 * range_hl    # Ultimate support
-    
-    # Align Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3.values)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3.values)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
-    
-    # Calculate 1d volume SMA for confirmation (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    
-    # Calculate Choppiness Index on 1d timeframe (14-period)
-    # CHOP = 100 * log10(sum(ATR)/ (n * (max(high)-min(low)))) / log10(n)
-    # Lower CHOP = trending, Higher CHOP = ranging
-    # We want CHOP < 40 for trending markets
+    # Calculate ADX on 1d timeframe (14-period)
+    # ADX measures trend strength regardless of direction
+    # TR = max(high-low, |high-close_prev|, |low-close_prev|)
+    # +DM = max(high - high_prev, 0) if > low_prev - low else 0
+    # -DM = max(low_prev - low, 0) if > high - high_prev else 0
+    # DM+ = smoothed +DM, DM- = smoothed -DM
+    # DX = |DM+ - DM-| / (DM+ + DM-) * 100
+    # ADX = smoothed DX
     
     # True Range
     tr1 = df_1d['high'] - df_1d['low']
@@ -79,50 +63,67 @@ def generate_signals(prices):
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     tr_1d.iloc[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]  # first bar
     
-    # Sum of ATR over 14 periods
-    atr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    up_move = df_1d['high'].diff()
+    down_move = -df_1d['low'].diff()  # negative because low decreases when price falls
     
-    # Max high and min low over 14 periods
-    max_high_14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Choppiness Index
-    chop_1d = np.where(
-        (max_high_14 - min_low_14) != 0,
-        100 * np.log10(atr_sum_14 / (14 * (max_high_14 - min_low_14))) / np.log10(14),
-        50  # default to neutral when range is zero
-    )
+    # Smoothed values using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        if len(values) >= period:
+            # First value is simple average
+            result[period-1] = np.nansum(values[:period])
+            # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+            for i in range(period, len(values)):
+                result[i] = result[i-1] - (result[i-1]/period) + values[i]
+        return result
     
-    # Align Choppiness Index to 12h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    tr_14 = wilders_smoothing(tr_1d, 14)
+    plus_dm_14 = wilders_smoothing(plus_dm, 14)
+    minus_dm_14 = wilders_smoothing(minus_dm, 14)
+    
+    # DI+ and DI-
+    plus_di_14 = np.where(tr_14 != 0, plus_dm_14 / tr_14 * 100, 0)
+    minus_di_14 = np.where(tr_14 != 0, minus_dm_14 / tr_14 * 100, 0)
+    
+    # DX and ADX
+    dx_14 = np.where((plus_di_14 + minus_di_14) != 0, 
+                     np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14) * 100, 
+                     0)
+    adx_14 = wilders_smoothing(dx_14, 14)
+    
+    # Align HTF indicators to 6h timeframe
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    
+    # Calculate 6h volume SMA for confirmation (20-period)
+    volume_sma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx_14_aligned[i]) or np.isnan(volume_sma_20_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume for confirmation (aligned to 12h)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20_6h[i]
         
-        # Regime filter: CHOP < 40 indicates trending market (lower = more trending)
-        regime_filter = chop_1d_aligned[i] < 40
+        # Trend filter: ADX > 25 indicates strong trend
+        trend_filter = adx_14_aligned[i] > 25
         
-        # Camarilla breakout entry conditions
-        # Long: price breaks above H3 level + volume confirmation + trending regime
-        # Short: price breaks below L3 level + volume confirmation + trending regime
-        long_entry = (close[i] > h3_aligned[i] and 
-                     vol_confirm and 
-                     regime_filter)
-        short_entry = (close[i] < l3_aligned[i] and 
-                      vol_confirm and 
-                      regime_filter)
+        # Williams %R extreme conditions
+        williams_oversold = williams_r[i] < -80
+        williams_overbought = williams_r[i] > -20
         
-        # Exit conditions: price returns to Camarilla pivot point (mean reversion)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Entry conditions
+        long_entry = williams_oversold and trend_filter and vol_confirm
+        short_entry = williams_overbought and trend_filter and vol_confirm
+        
+        # Exit conditions: Williams %R returns to -50 level
+        exit_long = williams_r[i] >= -50
+        exit_short = williams_r[i] <= -50
         
         if position == 0:  # Flat - look for entry
             if long_entry:
