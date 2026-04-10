@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
-# - Long when price breaks above Camarilla H3 level + 1d volume > 1.8x 20-period volume SMA + CHOP > 61.8 (range market)
-# - Short when price breaks below Camarilla L3 level + 1d volume > 1.8x 20-period volume SMA + CHOP > 61.8 (range market)
-# - Exit: price returns to opposite Camarilla level (L3 for long, H3 for short)
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and choppiness regime filter
+# - Long when Williams %R(14) crosses above -80 (oversold) + 1d volume > 1.8x 20-period volume SMA + CHOP > 61.8 (range market)
+# - Short when Williams %R(14) crosses below -20 (overbought) + 1d volume > 1.8x 20-period volume SMA + CHOP > 61.8 (range market)
+# - Exit: Williams %R returns to opposite extreme (-20 for long, -80 for short) or reverse signal
 # - Position sizing: 0.25 discrete level
-# - Works in bull/bear: Camarilla levels adapt to volatility, volume confirms institutional interest, CHOP filter avoids trending markets where breakouts fail
+# - Williams %R identifies exhaustion points in ranging markets, volume confirms participation, CHOP filter ensures proper market structure
+# - Works in bull/bear: mean reversion effective in both regimes when volatility is contained
 # - 4h timeframe targets 20-50 trades/year with strict entry conditions
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_williamsr_mean_reversion_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,14 +35,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low)
-    #           L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
-    range_1d = df_1d['high'] - df_1d['low']
-    camarilla_h3 = df_1d['close'] + 1.125 * range_1d
-    camarilla_l3 = df_1d['close'] - 1.125 * range_1d
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3.values)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3.values)
+    # Calculate 1d Williams %R(14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Calculate 1d volume SMA(20) for confirmation
     volume_1d = df_1d['volume'].values
@@ -61,12 +62,15 @@ def generate_signals(prices):
     ll = df_1d['low'].rolling(window=14, min_periods=14).min().values
     # Choppiness Index: 100 * log10(sum(tr1)/(hh-ll)) / log10(14)
     chop_raw = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    # Handle division by zero and invalid values
+    chop_raw = np.where((hh - ll) == 0, 50, chop_raw)
+    chop_raw = np.where(np.isnan(chop_raw) | np.isinf(chop_raw), 50, chop_raw)
     chop = align_htf_to_ltf(prices, df_1d, chop_raw)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or 
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -74,20 +78,25 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
         vol_confirm = vol_1d_current[i] > 1.8 * volume_sma_20_1d_aligned[i]
         
-        # Regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion breakouts)
+        # Regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion)
         ranging_market = chop[i] > 61.8
         
-        # Breakout conditions
-        long_breakout = close[i] > camarilla_h3_aligned[i]
-        short_breakout = close[i] < camarilla_l3_aligned[i]
+        # Williams %R conditions
+        wr = williams_r_aligned[i]
+        wr_prev = williams_r_aligned[i-1] if i > 0 else -50
         
-        # Exit conditions: return to opposite Camarilla level
-        long_exit = close[i] < camarilla_l3_aligned[i]
-        short_exit = close[i] > camarilla_h3_aligned[i]
+        # Long when WR crosses above -80 from below (exiting oversold)
+        long_signal = (wr_prev <= -80) and (wr > -80)
+        # Short when WR crosses below -20 from above (exiting overbought)
+        short_signal = (wr_prev >= -20) and (wr < -20)
+        
+        # Exit conditions: WR returns to opposite extreme
+        long_exit = wr >= -20  # WR reaches overbought territory
+        short_exit = wr <= -80  # WR reaches oversold territory
         
         # Entry conditions
-        long_entry = long_breakout and vol_confirm and ranging_market
-        short_entry = short_breakout and vol_confirm and ranging_market
+        long_entry = long_signal and vol_confirm and ranging_market
+        short_entry = short_signal and vol_confirm and ranging_market
         
         if position == 0:  # Flat - look for entry
             if long_entry:
