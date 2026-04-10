@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
 # - Long when price breaks above H3 level AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
 # - Short when price breaks below L3 level AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
 # - Exit when price returns to Pivot level (mean reversion to equilibrium)
 # - Uses 1d EMA50 for trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Target: 25-40 trades/year on 4h timeframe (100-160 total over 4 years)
 # - Camarilla pivots work well in ranging markets; trend filter adds directional bias in trends
-# - Primary timeframe 12h reduces trade frequency vs lower TF, minimizing fee drag
-# - Works in both bull and bear: trend filter captures direction, pivot breaks catch reversals/continuations
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,7 +48,7 @@ def generate_signals(prices):
     
     # Pre-compute 1d EMA(50) for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = ema50_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Pre-compute volume confirmation: > 2.0x 20-period average
@@ -77,13 +75,13 @@ def generate_signals(prices):
         if position == 0:  # Flat - look for new breakout entries
             # Long when price breaks above H3 AND 1d uptrend with volume spike
             if (prices['close'].iloc[i] > h3_aligned[i] and 
-                prices['close'].iloc[i] > ema50_1d_aligned[i] and  # price above 1d EMA50
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # 1d EMA50 rising
                 vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
             # Short when price breaks below L3 AND 1d downtrend with volume spike
             elif (prices['close'].iloc[i] < l3_aligned[i] and 
-                  prices['close'].iloc[i] < ema50_1d_aligned[i] and  # price below 1d EMA50
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # 1d EMA50 falling
                   vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
