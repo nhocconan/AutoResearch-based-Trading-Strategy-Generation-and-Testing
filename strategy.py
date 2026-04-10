@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 12h trend filter and volume confirmation
-# - Primary signal: 6h price breaks above R4 or below S4 Camarilla levels from prior 12h bar
-# - Trend filter: 12h EMA(20) slope > 0 for longs, < 0 for shorts (avoid counter-trend)
-# - Volume filter: 6h volume > 1.5x 24-period average volume (momentum confirmation)
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend filter + volume spike confirmation
+# - Primary signal: Price breaks above Donchian(20) high for long, below Donchian(20) low for short
+# - Trend filter: 1d HMA(21) slope > 0 for longs, < 0 for shorts (institutional trend on daily)
+# - Volume filter: 4h volume > 1.5x 20-period average volume (momentum confirmation)
 # - Position size: 0.25 discrete level to minimize fee churn
-# - Stoploss: 1.5x ATR(10) on 6h for tight risk control
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
-# - Works in bull/bear: Breakouts capture momentum; EMA filter avoids false breakouts in ranging markets
+# - Stoploss: 2.0x ATR(14) on 4h
+# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - Works in bull/bear: Donchian breakouts capture trends; HMA filter avoids counter-trend trades in ranging markets
 
-name = "6h_12h_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,50 +22,44 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h EMA(20) and its slope for trend filter
-    close_12h = df_12h['close'].values
-    ema_20 = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_slope = ema_20 - np.roll(ema_20, 1)
-    ema_slope[0] = 0
-    ema_slope_pos = ema_slope > 0  # Uptrend
-    ema_slope_neg = ema_slope < 0  # Downtrend
-    ema_slope_pos_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_pos)
-    ema_slope_neg_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_neg)
+    # Pre-compute 1d HMA(21) and its slope for trend filter
+    close_1d = df_1d['close'].values
+    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n))
+    half_n = 21 // 2
+    sqrt_n = int(np.sqrt(21))
+    wma_half = pd.Series(close_1d).ewm(span=half_n, adjust=False).mean().values
+    wma_full = pd.Series(close_1d).ewm(span=21, adjust=False).mean().values
+    raw_hma = 2 * wma_half - wma_full
+    hma_21 = pd.Series(raw_hma).ewm(span=sqrt_n, adjust=False).mean().values
+    hma_slope = hma_21 - np.roll(hma_21, 1)
+    hma_slope[0] = 0
+    hma_slope_pos = hma_slope > 0  # Uptrend
+    hma_slope_neg = hma_slope < 0  # Downtrend
+    hma_slope_pos_aligned = align_htf_to_ltf(prices, df_1d, hma_slope_pos)
+    hma_slope_neg_aligned = align_htf_to_ltf(prices, df_1d, hma_slope_neg)
     
-    # Pre-compute 12h Camarilla pivot levels (based on prior 12h bar)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    r4 = pivot + range_12h * 1.500  # R4
-    s4 = pivot - range_12h * 1.500  # S4
-    r3 = pivot + range_12h * 1.250  # R3
-    s3 = pivot - range_12h * 1.250  # S3
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    # Pre-compute 4h Donchian(20) channels
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 6h volume spike filter
-    volume_6h = prices['volume'].values
-    avg_volume_24 = pd.Series(volume_6h).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume_6h > (1.5 * avg_volume_24)
+    # Pre-compute 4h volume spike filter
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (1.5 * avg_volume_20)
     
-    # Pre-compute 6h ATR(10) for stoploss
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    # Pre-compute 4h ATR(14) for stoploss
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(prices['close'].values, 1))
+    tr3 = np.abs(low_4h - np.roll(prices['close'].values, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -73,39 +67,39 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_slope_pos_aligned[i]) or np.isnan(ema_slope_neg_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(atr_10[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(hma_slope_pos_aligned[i]) or np.isnan(hma_slope_neg_aligned[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price drops below R3 OR stoploss hit
-            if close_6h[i] < r3_aligned[i] or close_6h[i] < entry_price - 1.5 * atr_10[i]:
+            # Exit: Price breaks below Donchian low OR stoploss hit
+            if prices['close'].values[i] < donchian_low[i] or prices['close'].values[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price rises above S3 OR stoploss hit
-            if close_6h[i] > s3_aligned[i] or close_6h[i] > entry_price + 1.5 * atr_10[i]:
+            # Exit: Price breaks above Donchian high OR stoploss hit
+            if prices['close'].values[i] > donchian_high[i] or prices['close'].values[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with trend and volume filters
+            # Look for Donchian breakout with trend and volume filters
             if vol_spike[i]:
-                # Long: price breaks above R4 in uptrend
-                if close_6h[i] > r4_aligned[i] and ema_slope_pos_aligned[i]:
+                # Long: Price breaks above Donchian high in uptrend
+                if prices['close'].values[i] > donchian_high[i] and hma_slope_pos_aligned[i]:
                     position = 1
-                    entry_price = close_6h[i]
+                    entry_price = prices['close'].values[i]
                     signals[i] = 0.25
-                # Short: price breaks below S4 in downtrend
-                elif close_6h[i] < s4_aligned[i] and ema_slope_neg_aligned[i]:
+                # Short: Price breaks below Donchian low in downtrend
+                elif prices['close'].values[i] < donchian_low[i] and hma_slope_neg_aligned[i]:
                     position = -1
-                    entry_price = close_6h[i]
+                    entry_price = prices['close'].values[i]
                     signals[i] = -0.25
     
     return signals
