@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation
-# - 6h Williams Fractals: bearish fractal (high with 2 lower highs on both sides) = potential resistance
-#   bullish fractal (low with 2 higher lows on both sides) = potential support
-# - Breakout long: price closes above recent bearish fractal level with volume spike
-#   Breakout short: price closes below recent bullish fractal level with volume spike
+# Hypothesis: 12h Williams Fractal breakout with 1d trend filter and volume confirmation
+# - Williams Fractals from 1d: bearish fractal (sell signal) when middle high is highest of 5 bars
+# - Bullish fractal (buy signal) when middle low is lowest of 5 bars
 # - 1d ADX(14) > 25 to ensure trending market and avoid chop
-# - Volume confirmation: current 6h volume > 2.0x 20-period average
-# - Designed for 6h timeframe: targets 12-37 trades/year to avoid fee drag
+# - Volume confirmation: current 12h volume > 2.0x 20-period average
+# - ATR-based trailing stop: exit long when price < highest_high - 3.0*ATR, exit short when price > lowest_low + 3.0*ATR
+# - Designed for 12h timeframe: targets 12-37 trades/year to avoid fee drag
 # - Works in bull/bear markets: ADX filter ensures we trade with higher timeframe trend
 # - Uses discrete position sizing (0.25) to minimize fee churn
 
-name = "6h_1d_williams_fractal_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_williams_fractal_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,19 +27,32 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d ADX(14) for trend filter
+    # Pre-compute 1d Williams Fractals
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range
+    # Williams Fractals: need 5 bars (2 left, 2 right)
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
+    
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: middle high is highest of 5
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        
+        # Bullish fractal: middle low is lowest of 5
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Pre-compute 1d ADX(14) for trend filter
     tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr2 = np.abs(high_1d - np.roll(high_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(low_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
-    # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
                        np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
     dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
@@ -48,84 +60,95 @@ def generate_signals(prices):
     dm_plus[0] = 0
     dm_minus[0] = 0
     
-    # Smoothed values
     tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
     dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Indicators
     di_plus = 100 * dm_plus_14 / tr_14
     di_minus = 100 * dm_minus_14 / tr_14
     
-    # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF indicators to 12h timeframe with extra delay for fractals (need 2 extra bars for confirmation)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 6h Williams Fractals
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h Donchian channels (20-period) for exit
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    # Williams Fractals: need 5 points (2 left, center, 2 right)
-    bearish_fractal = np.full(n, np.nan)  # resistance level
-    bullish_fractal = np.full(n, np.nan)  # support level
+    # Donchian upper band: highest high over past 20 periods
+    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower band: lowest low over past 20 periods
+    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    for i in range(2, n-2):
-        # Bearish fractal: high[i] is highest among high[i-2:i+3]
-        if (high_6h[i] > high_6h[i-1] and high_6h[i] > high_6h[i-2] and
-            high_6h[i] > high_6h[i+1] and high_6h[i] > high_6h[i+2]):
-            bearish_fractal[i] = high_6h[i]
-        
-        # Bullish fractal: low[i] is lowest among low[i-2:i+3]
-        if (low_6h[i] < low_6h[i-1] and low_6h[i] < low_6h[i-2] and
-            low_6h[i] < low_6h[i+1] and low_6h[i] < low_6h[i+2]):
-            bullish_fractal[i] = low_6h[i]
+    # Pre-compute 12h volume confirmation
+    volume_12h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h > (2.0 * avg_volume_20)
     
-    # Forward fill fractal levels to use them as support/resistance until broken
-    bearish_fractal_ff = pd.Series(bearish_fractal).ffill().values
-    bullish_fractal_ff = pd.Series(bullish_fractal).ffill().values
-    
-    # Pre-compute 6h volume confirmation
-    volume_6h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_6h > (2.0 * avg_volume_20)
+    # Pre-compute 12h ATR(14) for trailing stop
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_14 = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    highest_high = 0.0  # for trailing stop
+    lowest_low = 0.0    # for trailing stop
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(bearish_fractal_ff[i]) or 
-            np.isnan(bullish_fractal_ff[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price re-enters below the bearish fractal level (failed breakout)
-            if close_6h[i] < bearish_fractal_ff[i]:
+            # Update highest high for trailing stop
+            if close_12h[i] > highest_high:
+                highest_high = close_12h[i]
+            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
+            if close_12h[i] < highest_high - 3.0 * atr_14[i] or close_12h[i] < highest_20[i]:
                 position = 0
+                highest_high = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price re-enters above the bullish fractal level (failed breakout)
-            if close_6h[i] > bullish_fractal_ff[i]:
+            # Update lowest low for trailing stop
+            if close_12h[i] < lowest_low:
+                lowest_low = close_12h[i]
+            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
+            if close_12h[i] > lowest_low + 3.0 * atr_14[i] or close_12h[i] > lowest_20[i]:
                 position = 0
+                lowest_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for fractal breakout with trend and volume filters
+            # Look for Williams Fractal breakout with trend and volume filters
             if vol_spike[i] and adx_aligned[i] > 25:
-                # Breakout long: price closes above recent bearish fractal (resistance)
-                if close_6h[i] > bearish_fractal_ff[i]:
+                # Breakout long: price closes above bullish fractal level
+                if not np.isnan(bullish_fractal_aligned[i]) and close_12h[i] > bullish_fractal_aligned[i]:
                     position = 1
+                    entry_price = close_12h[i]
+                    highest_high = close_12h[i]
                     signals[i] = 0.25
-                # Breakout short: price closes below recent bullish fractal (support)
-                elif close_6h[i] < bullish_fractal_ff[i]:
+                # Breakout short: price closes below bearish fractal level
+                elif not np.isnan(bearish_fractal_aligned[i]) and close_12h[i] < bearish_fractal_aligned[i]:
                     position = -1
+                    entry_price = close_12h[i]
+                    lowest_low = close_12h[i]
                     signals[i] = -0.25
     
     return signals
