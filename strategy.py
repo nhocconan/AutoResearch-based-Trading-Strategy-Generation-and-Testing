@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above Donchian upper (20) AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
-# - Short when price breaks below Donchian lower (20) AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
-# - Exit when price crosses the 10-bar EMA (mean reversion to short-term trend)
-# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation
+# - Long when price breaks above 20-day high AND 1w EMA200 rising AND volume > 1.5x 20-bar avg
+# - Short when price breaks below 20-day low AND 1w EMA200 falling AND volume > 1.5x 20-bar avg
+# - Exit with ATR-based trailing stop: signal=0 when long and price < highest_high - 2*ATR(14) or short and price < lowest_low + 2*ATR(14)
+# - Uses 1w EMA200 for strong trend filter to avoid counter-trend trades in bear markets
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Donchian channels provide structure; trend filter adds directional bias in both bull and bear markets
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Donchian breakouts work well in trending markets; 1w EMA200 filter avoids whipsaws in ranging/bear markets
 
-name = "4h_1d_donchian_breakout_trend_volume_v1"
-timeframe = "4h"
+name = "1d_donchian_breakout_1w_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,34 +22,47 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels (20-period)
+    # Pre-compute 1w EMA(200) for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Pre-compute Donchian channels (20-period) from daily data
     high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
     low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d_arr = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d_arr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Pre-compute ATR(14) for trailing stop
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute volume confirmation: > 2.0x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
-    
-    # Pre-compute 10-bar EMA for exit signal
-    ema10 = prices['close'].ewm(span=10, adjust=False, min_periods=10).mean().values
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Track highest high since entry for trailing stop (long)
+    highest_since_entry = np.full(n, np.nan)
+    # Track lowest low since entry for trailing stop (short)
+    lowest_since_entry = np.full(n, np.nan)
+    
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i]) or
-            np.isnan(ema10[i])):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(atr[i]) or 
+            np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -60,36 +73,43 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian upper AND 1d uptrend with volume spike
+            # Long when price breaks above 20-day high AND 1w uptrend with volume spike
             if (prices['close'].iloc[i] > high_20[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[max(0, i-1)] and  # 1d EMA50 rising
+                prices['close'].iloc[i] > ema200_1w_aligned[i] and  # price above 1w EMA200
                 vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below Donchian lower AND 1d downtrend with volume spike
+                highest_since_entry[i] = prices['high'].iloc[i]  # initialize tracking
+            # Short when price breaks below 20-day low AND 1w downtrend with volume spike
             elif (prices['close'].iloc[i] < low_20[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[max(0, i-1)] and  # 1d EMA50 falling
+                  prices['close'].iloc[i] < ema200_1w_aligned[i] and  # price below 1w EMA200
                   vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
+                lowest_since_entry[i] = prices['low'].iloc[i]  # initialize tracking
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to short-term EMA (mean reversion)
-            # Exit when price crosses the 10-bar EMA
-            exit_signal = False
+                # Reset tracking when flat
+                highest_since_entry[i] = np.nan
+                lowest_since_entry[i] = np.nan
+        else:  # Have position - trail stop and check for exit
+            # Update tracking levels
             if position == 1:  # Long position
-                if prices['close'].iloc[i] < ema10[i]:
-                    exit_signal = True
-            elif position == -1:  # Short position
-                if prices['close'].iloc[i] > ema10[i]:
-                    exit_signal = True
-            
-            if exit_signal:
-                position = 0
-                signals[i] = 0.0
-            else:
-                if position == 1:
+                highest_since_entry[i] = max(highest_since_entry[i-1], prices['high'].iloc[i])
+                # Exit when price drops below highest_high - 2*ATR (trailing stop)
+                if prices['close'].iloc[i] < highest_since_entry[i] - 2.0 * atr[i]:
+                    position = 0
+                    signals[i] = 0.0
+                    highest_since_entry[i] = np.nan
+                else:
                     signals[i] = 0.25
+            elif position == -1:  # Short position
+                lowest_since_entry[i] = min(lowest_since_entry[i-1], prices['low'].iloc[i])
+                # Exit when price rises above lowest_low + 2*ATR (trailing stop)
+                if prices['close'].iloc[i] > lowest_since_entry[i] + 2.0 * atr[i]:
+                    position = 0
+                    signals[i] = 0.0
+                    lowest_since_entry[i] = np.nan
                 else:
                     signals[i] = -0.25
     
