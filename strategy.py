@@ -3,123 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal Breakout with 12h/1d regime filter
-# - Primary: 6h timeframe for lower trade frequency and reduced fee drag
-# - HTF: 12h for trend direction (EMA21), 1d for Williams Fractal confirmation
-# - Long: Price breaks above recent bearish fractal high + 12h EMA21 uptrend + 1d bullish fractal intact
-# - Short: Price breaks below recent bullish fractal low + 12h EMA21 downtrend + 1d bearish fractal intact
-# - Exit: Price reverts to 6h EMA50 or breaks opposite fractal level
-# - Position sizing: 0.25 (discrete level)
-# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
-# - Works in bull/bear: Fractals capture swing points; EMA filter avoids counter-trend traps
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR regime filter
+# - Primary: 4h timeframe for optimal trade frequency (target 75-200 total trades over 4 years)
+# - HTF: 1d for volume spike detection and ATR-based volatility regime
+# - Long: Price breaks above 20-period Donchian high + 1d volume > 2.0x 20-period MA + 1d ATR > 50th percentile
+# - Short: Price breaks below 20-period Donchian low + 1d volume > 2.0x 20-period MA + 1d ATR > 50th percentile
+# - Exit: Price reverts to 20-period Donchian midpoint (mean reversion) or ATR-based trailing stop
+# - Position sizing: 0.25 (discrete level to balance risk and return)
+# - Works in bull/bear: Donchian breakouts capture trends, volume confirmation filters false breakouts, ATR regime avoids low-vol chop
 
-name = "6h_12h_1d_fractal_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need enough data for calculations
+    if n < 50:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLCV
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
-    # Pre-compute 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Pre-compute 1d data for Williams Fractals
+    # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h EMA21 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_21_12h = close_12h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    # Calculate 4h Donchian Channel (20-period)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Calculate 6h EMA50 for exit
-    close_6h_series = pd.Series(close_6h)
-    ema_50_6h = close_6h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ATR(14) for volatility regime filter
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Williams Fractals on 1d (requires 5-bar window: n-2, n-1, n, n+1, n+2)
-    # Bearish fractal: high[n] is highest among high[n-2:n+3]
-    # Bullish fractal: low[n] is lowest among low[n-2:n+3]
-    n_1d = len(high_1d)
-    bearish_fractal = np.full(n_1d, np.nan)
-    bullish_fractal = np.full(n_1d, np.nan)
+    # Calculate 1d ATR percentile rank (using 50-bar lookback for stability)
+    atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    for i in range(2, n_1d - 2):
-        # Bearish fractal: current high is highest of 5 bars
-        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        # Bullish fractal: current low is lowest of 5 bars
-        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Williams fractals need 2 extra 1d bars for confirmation (center bar + 2 future bars)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Calculate 6h rolling max/min for breakout levels (using recent 20 bars)
-    high_6h_series = pd.Series(high_6h)
-    low_6h_series = pd.Series(low_6h)
-    rolling_max_20 = high_6h_series.rolling(window=20, min_periods=20).max().values
-    rolling_min_20 = low_6h_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 1d volume moving average (20-period) for volume confirmation
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(ema_21_12h_aligned[i]) or np.isnan(ema_50_6h[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(rolling_max_20[i]) or np.isnan(rolling_min_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Regime conditions
+        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
+        
+        # Volume confirmation: current 1d volume > 2.0x 20-period MA
+        volume_spike = volume_1d[i // 24] > 2.0 * volume_ma_20_1d_aligned[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above recent 6h high + 12h EMA21 uptrend + 1d bullish fractal intact
-            # 12h EMA21 uptrend: current price > EMA21
-            # 1d bullish fractal intact: bullish fractal level is valid (not NaN)
-            if (close_6h[i] > rolling_max_20[i] and 
-                close_6h[i] > ema_21_12h_aligned[i] and 
-                not np.isnan(bullish_fractal_aligned[i])):
+            # Long entry: Price breaks above Donchian high + vol regime + volume spike
+            if (close_4h[i] > donchian_high[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below recent 6h low + 12h EMA21 downtrend + 1d bearish fractal intact
-            # 12h EMA21 downtrend: current price < EMA21
-            # 1d bearish fractal intact: bearish fractal level is valid (not NaN)
-            elif (close_6h[i] < rolling_min_20[i] and 
-                  close_6h[i] < ema_21_12h_aligned[i] and 
-                  not np.isnan(bearish_fractal_aligned[i])):
+            # Short entry: Price breaks below Donchian low + vol regime + volume spike
+            elif (close_4h[i] < donchian_low[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price reverts to 6h EMA50 (mean reversion)
-            # 2. Price breaks opposite recent 6h extreme (stop loss)
+            # 1. Price reverts to Donchian midpoint (mean reversion)
+            # 2. ATR-based trailing stop: 3 * ATR from extreme price
             
             if position == 1:  # Long position
+                # Calculate highest high since entry for trailing stop
+                # Simplified: use recent 10-bar high as proxy for entry extreme
+                recent_high = np.max(high_4h[max(0, i-10):i+1])
+                trailing_stop = recent_high - 3.0 * atr_1d[i // 24]  # Use 1d ATR scaled
+                
                 exit_condition = (
-                    close_6h[i] < ema_50_6h[i] or  # Reverted to EMA50
-                    close_6h[i] < rolling_min_20[i]  # Break below recent low (stop loss)
+                    close_4h[i] < donchian_mid[i] or  # Reverted to midpoint
+                    close_4h[i] < trailing_stop       # ATR trailing stop hit
                 )
                 if exit_condition:
                     position = 0
@@ -127,9 +111,13 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
+                # Calculate lowest low since entry for trailing stop
+                recent_low = np.min(low_4h[max(0, i-10):i+1])
+                trailing_stop = recent_low + 3.0 * atr_1d[i // 24]  # Use 1d ATR scaled
+                
                 exit_condition = (
-                    close_6h[i] > ema_50_6h[i] or  # Reverted to EMA50
-                    close_6h[i] > rolling_max_20[i]  # Break above recent high (stop loss)
+                    close_4h[i] > donchian_mid[i] or  # Reverted to midpoint
+                    close_4h[i] > trailing_stop       # ATR trailing stop hit
                 )
                 if exit_condition:
                     position = 0
