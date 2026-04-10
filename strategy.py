@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout with 1d volume confirmation and ADX trend filter
-# - Long when price breaks above upper BB(20,2) + 1d volume > 1.5x 20-period volume SMA + ADX(14) > 25 (trending market)
-# - Short when price breaks below lower BB(20,2) + 1d volume > 1.5x 20-period volume SMA + ADX(14) > 25 (trending market)
-# - Exit: price returns to middle BB(20) or opposite signal
-# - Position sizing: 0.25 discrete level
-# - Bollinger squeeze identifies low volatility breakouts, volume confirms participation, ADX ensures trending conditions
+# Hypothesis: 4h Donchian channel breakout with 1d volume spike and ADX trend filter
+# - Long when price breaks above Donchian(20) upper + 1d volume > 2.0x 20-period volume SMA + ADX(14) > 20
+# - Short when price breaks below Donchian(20) lower + 1d volume > 2.0x 20-period volume SMA + ADX(14) > 20
+# - Exit: price returns to Donchian middle or opposite signal
+# - Position sizing: 0.30 discrete level
+# - Donchian breakouts capture volatility expansion, volume confirms institutional participation, ADX filters chop
 # - Works in bull/bear: breakouts effective in both regimes when volatility compresses then expands
-# - 4h timeframe targets 20-50 trades/year with strict entry conditions
+# - 4h timeframe targets 30-60 trades/year with strict entry conditions (volume spike >2x reduces false breakouts)
 
-name = "4h_1d_bb_squeeze_breakout_v1"
+name = "4h_1d_donchian_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,14 +35,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Bollinger Bands (20,2)
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_bb = sma_20 + (bb_std * std_20)
-    lower_bb = sma_20 - (bb_std * std_20)
-    middle_bb = sma_20
+    # Calculate 4h Donchian Channel (20)
+    dc_period = 20
+    upper_dc = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
+    lower_dc = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
+    middle_dc = (upper_dc + lower_dc) / 2.0
     
     # Calculate 4h ADX(14) for trend filter
     # True Range
@@ -74,42 +71,42 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    volume_1d_current_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(adx[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or np.isnan(adx[i]) or 
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_1d_current_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period SMA (spike)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-        vol_confirm = vol_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (strong spike)
+        vol_confirm = volume_1d_current_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: ADX > 25 indicates trending market (good for breakouts)
-        trending_market = adx[i] > 25
+        # Trend filter: ADX > 20 indicates trending market (good for breakouts)
+        trending_market = adx[i] > 20
         
-        # Bollinger Band conditions
-        bb_upper = upper_bb[i]
-        bb_lower = lower_bb[i]
-        bb_middle = middle_bb[i]
+        # Donchian Channel conditions
+        dc_upper = upper_dc[i]
+        dc_lower = lower_dc[i]
+        dc_middle = middle_dc[i]
         price = close[i]
         
-        # Entry conditions: price breaks BB bands with volume and trend confirmation
-        long_entry = (price > bb_upper) and vol_confirm and trending_market
-        short_entry = (price < bb_lower) and vol_confirm and trending_market
+        # Entry conditions: price breaks Donchian bands with volume and trend confirmation
+        long_entry = (price > dc_upper) and vol_confirm and trending_market
+        short_entry = (price < dc_lower) and vol_confirm and trending_market
         
-        # Exit conditions: price returns to middle BB
-        long_exit = price < bb_middle
-        short_exit = price > bb_middle
+        # Exit conditions: price returns to middle Donchian
+        long_exit = price < dc_middle
+        short_exit = price > dc_middle
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif short_entry:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -117,12 +114,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         else:  # position == -1 (Short position) - look for exit
             if short_exit:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
