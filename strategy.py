@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + ADX(14) trend filter
-# - Long when price breaks above 20-period Donchian high (12h) + ADX(14) > 25 + 1d volume > 2.0x 20-period volume SMA
-# - Short when price breaks below 20-period Donchian low (12h) + same ADX and volume conditions
-# - Exit: price returns to 12-period Donchian midpoint (mean of high/low)
-# - Position sizing: 0.30 discrete level
-# - Donchian channels provide clear trend-following breakout levels
-# - ADX filter ensures we only trade in trending markets, avoiding chop
-# - Volume confirmation ensures breakout strength
-# - Target: 12-37 trades/year on 12h timeframe to minimize fee drag
+# Hypothesis: 12h KAMA trend direction + 1d RSI(14) mean reversion + volume confirmation
+# - Long when 12h KAMA is rising (bullish trend) AND 1d RSI < 30 (oversold) AND 1d volume > 1.5x 20-period volume SMA
+# - Short when 12h KAMA is falling (bearish trend) AND 1d RSI > 70 (overbought) AND 1d volume > 1.5x 20-period volume SMA
+# - Exit: opposite RSI extreme (RSI > 50 for long exit, RSI < 50 for short exit) or KAMA direction reversal
+# - Position sizing: 0.25 discrete level
+# - KAMA adapts to market noise, reducing false signals in choppy markets
+# - 1d RSI provides mean-reversion edge within the larger 12h trend
+# - Volume confirmation ensures institutional participation
+# - Target: 12-30 trades/year on 12h timeframe to minimize fee drag
 
-name = "12h_donchian_volume_adx_v1"
+name = "12h_kama_rsi_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -36,84 +36,90 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate 12h KAMA (adaptive trend indicator)
+    # Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=1))
+    change = np.insert(change, 0, 0)  # align length
+    volatility = np.abs(np.diff(close, n=1))
+    volatility = np.insert(volatility, 0, 0)
     
-    # Calculate 12h ADX for trend filter
-    # True Range
-    tr1 = np.maximum(high - low, 
-                     np.maximum(np.abs(high - np.roll(close, 1)), 
-                                np.abs(low - np.roll(close, 1))))
-    tr1[0] = high[0] - low[0]
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    atr_period = 14
-    atr = pd.Series(tr1).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Sum over 10-period window
+    er_window = 10
+    sum_change = pd.Series(change).rolling(window=er_window, min_periods=er_window).sum().values
+    sum_volatility = pd.Series(volatility).rolling(window=er_window, min_periods=er_window).sum().values
     
     # Avoid division by zero
-    atr_safe = np.where(atr == 0, np.finfo(float).eps, atr)
+    er = np.where(sum_volatility == 0, 0, sum_change / sum_volatility)
     
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=atr_period, min_periods=atr_period).mean().values / atr_safe
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=atr_period, min_periods=atr_period).mean().values / atr_safe
+    # Smoothing constants
+    fastest = 2 / (2 + 1)   # EMA(2)
+    slowest = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fastest - slowest) + slowest) ** 2
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    # Handle division by zero in DX calculation
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_window] = close[er_window]  # seed value
+    
+    for i in range(er_window + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # KAMA direction: 1 if rising, -1 if falling, 0 if flat
+    kama_dir = np.zeros_like(kama)
+    kama_dir[1:] = np.where(kama[1:] > kama[:-1], 1, np.where(kama[1:] < kama[:-1], -1, 0))
+    
+    # Calculate 1d RSI(14)
+    rsi_period = 14
+    delta = np.diff(df_1d['close'].values)
+    delta = np.insert(delta, 0, 0)
+    
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=rsi_period, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).rolling(window=rsi_period, min_periods=rsi_period).mean().values
+    
+    # Avoid division by zero
+    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
+    rsi = 100 - (100 / (1 + rs))
     
     # Calculate 1d volume SMA for confirmation
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Align Donchian levels to 12h timeframe (already in 12h, but keep for consistency)
-    donchian_high_aligned = donchian_high  # Already in primary timeframe
-    donchian_low_aligned = donchian_low
-    donchian_mid_aligned = donchian_mid
-    adx_aligned = adx
+    # Align HTF indicators to 12h timeframe
+    kama_dir_aligned = align_htf_to_ltf(prices, df_1d, kama_dir)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(kama_dir_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume for volume spike confirmation
-        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
+        # Volume confirmation: current 1d volume > 1.5x 20-period SMA
+        vol_confirm = volume_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (strong volume spike)
-        vol_confirm = volume_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Entry conditions
+        long_entry = (kama_dir_aligned[i] == 1) and (rsi_aligned[i] < 30) and vol_confirm
+        short_entry = (kama_dir_aligned[i] == -1) and (rsi_aligned[i] > 70) and vol_confirm
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
-        
-        # Donchian breakout signals
-        long_entry = (close[i] > donchian_high_aligned[i]) and trending and vol_confirm
-        short_entry = (close[i] < donchian_low_aligned[i]) and trending and vol_confirm
-        exit_long = close[i] < donchian_mid_aligned[i]  # Exit long when price crosses below midpoint
-        exit_short = close[i] > donchian_mid_aligned[i]  # Exit short when price crosses above midpoint
+        # Exit conditions: RSI mean reversion or trend change
+        exit_long = (rsi_aligned[i] > 50) or (kama_dir_aligned[i] != 1)
+        exit_short = (rsi_aligned[i] < 50) or (kama_dir_aligned[i] != -1)
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -121,12 +127,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
             if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
