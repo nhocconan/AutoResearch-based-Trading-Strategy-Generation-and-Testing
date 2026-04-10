@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume confirmation + 1d chop regime filter
-# - Long when close > Donchian(20) high AND volume > 1.5x 20-period average AND 1d chop < 38.2 (trending)
-# - Short when close < Donchian(20) low AND volume > 1.5x 20-period average AND 1d chop < 38.2 (trending)
-# - Exit when price crosses Donchian(10) midpoint OR chop > 61.8 (range regime)
+# Hypothesis: 4h TRIX + volume spike + 1d chop regime filter
+# - Long when TRIX crosses above zero AND volume > 1.5x 20-period average AND 1d chop < 38.2 (trending)
+# - Short when TRIX crosses below zero AND volume > 1.5x 20-period average AND 1d chop < 38.2 (trending)
+# - Exit when TRIX crosses zero in opposite direction with volume confirmation
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Donchian breakout captures strong trends with structure
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - TRIX identifies momentum changes with reduced whipsaw
 # - Volume confirmation ensures breakouts have conviction
-# - Chop filter ensures we only trade in trending conditions where breakouts work
+# - Chop filter ensures we only trade in trending conditions where momentum works
 
-name = "12h_1d_donchian_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_trix_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,25 +24,26 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h Donchian channels
-    high = prices['high'].values
-    low = prices['low'].values
+    # Pre-compute 4h TRIX (15-period triple EMA)
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) for breakout signals
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA1, EMA2, EMA3 for TRIX
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
     
-    # Donchian(10) for exit signals
-    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    donchian_mid_10 = (highest_high_10 + lowest_low_10) / 2
+    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
+    trix = np.zeros_like(close)
+    trix[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
+    trix[0] = 0
+    # Handle division by zero
+    trix = np.where(ema3 == 0, 0, trix)
     
-    # Pre-compute 12h volume confirmation
+    # Pre-compute 4h volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -73,22 +74,19 @@ def generate_signals(prices):
     chop = 100 * np.log10(tr_sum / range_max_min) / np.log10(14)
     chop = np.concatenate([np.full(13, np.nan), chop[13:]])  # align indices
     
-    # Chop regime: < 38.2 = trending (good for breakout)
-    chop_trend = chop < 38.2
-    chop_range = chop > 61.8  # for regime exit
+    # Chop regime: < 38.2 = trending (good for momentum)
+    chop_trending = chop < 38.2
     
-    # Align HTF indicators to 12h timeframe
-    chop_trend_aligned = align_htf_to_ltf(prices, df_1d, chop_trend)
-    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
+    # Align HTF indicators to 4h timeframe
+    chop_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_trending)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(chop_trend_aligned[i]) or 
-            np.isnan(chop_range_aligned[i])):
+        if (np.isnan(trix[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(chop_trending_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -98,26 +96,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price > Donchian(20) high AND volume spike AND chop trend
-            if (close[i] > highest_high_20[i] and 
+            # Long conditions: TRIX crosses above zero AND volume spike AND chop trending
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
                 volume_spike[i] and 
-                chop_trend_aligned[i]):
+                chop_trending_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price < Donchian(20) low AND volume spike AND chop trend
-            elif (close[i] < lowest_low_20[i] and 
+            # Short conditions: TRIX crosses below zero AND volume spike AND chop trending
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
                   volume_spike[i] and 
-                  chop_trend_aligned[i]):
+                  chop_trending_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Donchian(10) midpoint OR chop > 61.8 (range regime)
+            # Exit when TRIX crosses zero in opposite direction with volume confirmation
             exit_long = (position == 1 and 
-                        (close[i] < donchian_mid_10[i] or chop_range_aligned[i]))
+                        trix[i] < 0 and trix[i-1] >= 0 and 
+                        volume_spike[i])
             exit_short = (position == -1 and 
-                         (close[i] > donchian_mid_10[i] or chop_range_aligned[i]))
+                         trix[i] > 0 and trix[i-1] <= 0 and 
+                         volume_spike[i])
             
             if exit_long or exit_short:
                 position = 0
