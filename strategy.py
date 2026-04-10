@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 6h Donchian upper channel in 1d uptrend (close > EMA50) with volume spike
-# - Short when price breaks below 6h Donchian lower channel in 1d downtrend (close < EMA50) with volume spike
+# Hypothesis: 12h Camarilla pivot long/short with 1d trend filter and volume confirmation
+# - Long when price touches Camarilla L3 support in 1d uptrend (close > EMA200) with volume spike
+# - Short when price touches Camarilla H3 resistance in 1d downtrend (close < EMA200) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(14) or price reverts to Donchian midpoint
-# - Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-# - Works in both bull and bear markets by following 1d trend direction
+# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(14) or price reverts to Camarilla pivot
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Works in bull/bear via trend filter and mean-reversion exit at pivot levels
 
-name = "6h_1d_donchian_breakout_volume_trend_atr_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_volume_trend_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,9 +31,9 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA(200) for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # 1d ATR(14) for stoploss
     tr1 = high_1d - low_1d
@@ -52,12 +52,14 @@ def generate_signals(prices):
     vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # 6h Donchian channels (20-period)
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    donchian_upper = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # 1d Camarilla pivot levels (based on previous day)
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H3 = close + 1.1*(high-low)*1.1/4
+    # L3 = close - 1.1*(high-low)*1.1/4
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -66,41 +68,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: ATR-based stoploss or price reverts to Donchian midpoint (mean reversion)
+            # Exit: ATR-based stoploss or price reverts to Camarilla pivot (mean reversion)
             if (prices['close'].iloc[i] < entry_price - 2.0 * entry_atr or 
-                prices['close'].iloc[i] > donchian_mid[i]):
+                prices['close'].iloc[i] > camarilla_h3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: ATR-based stoploss or price reverts to Donchian midpoint (mean reversion)
+            # Exit: ATR-based stoploss or price reverts to Camarilla pivot (mean reversion)
             if (prices['close'].iloc[i] > entry_price + 2.0 * entry_atr or 
-                prices['close'].iloc[i] < donchian_mid[i]):
+                prices['close'].iloc[i] < camarilla_l3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with trend and volume filters
+            # Look for Camarilla L3/H3 touch with trend and volume filters
             if vol_spike_1d_aligned[i]:
-                # Long signal: price breaks above upper channel in 1d uptrend
-                if (prices['high'].iloc[i] > donchian_upper[i] and 
-                    prices['close'].iloc[i] > ema_50_1d_aligned[i]):
+                # Long signal: price touches L3 support in 1d uptrend
+                if (prices['low'].iloc[i] <= camarilla_l3_aligned[i] and 
+                    prices['close'].iloc[i] > ema_200_1d_aligned[i]):
                     position = 1
                     entry_price = prices['close'].iloc[i]
                     entry_atr = atr_14_1d_aligned[i]
                     signals[i] = 0.25
-                # Short signal: price breaks below lower channel in 1d downtrend
-                elif (prices['low'].iloc[i] < donchian_lower[i] and 
-                      prices['close'].iloc[i] < ema_50_1d_aligned[i]):
+                # Short signal: price touches H3 resistance in 1d downtrend
+                elif (prices['high'].iloc[i] >= camarilla_h3_aligned[i] and 
+                      prices['close'].iloc[i] < ema_200_1d_aligned[i]):
                     position = -1
                     entry_price = prices['close'].iloc[i]
                     entry_atr = atr_14_1d_aligned[i]
