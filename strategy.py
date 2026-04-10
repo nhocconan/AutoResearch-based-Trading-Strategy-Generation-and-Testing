@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 12h ATR filter
+# Hypothesis: 4h Donchian breakout with 1d volume spike and 1w trend filter
 # - Primary signal: Price breaks above/below Donchian(20) channel on 4h
-# - Volume filter: 1d volume > 1.5x 20-period average volume (institutional participation)
-# - ATR filter: 12h ATR(14) < 0.025 * price (low volatility environment for cleaner breakouts)
+# - Volume filter: 1d volume > 1.5x 20-period average volume (ensures strong participation)
+# - Trend filter: 1w close > 1w EMA(50) for longs, < EMA(50) for shorts (avoids counter-trend trades)
 # - Position size: 0.25 discrete level to minimize fee churn
 # - Stoploss: 2.0x ATR(20) on 4h
 # - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
 
-name = "4h_1d_12h_donchian_volume_atr_v2"
+name = "4h_1d_1w_donchian_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,8 +22,8 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_1d) < 50 or len(df_12h) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute 1d volume spike filter
@@ -32,19 +32,10 @@ def generate_signals(prices):
     vol_spike = volume_1d > (1.5 * avg_volume_20)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Pre-compute 12h ATR(14) for volatility filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    tr_12h1 = high_12h - low_12h
-    tr_12h2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr_12h3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
-    tr_12h[0] = tr_12h1[0]
-    atr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_filter = (atr_14 / close_12h) < 0.025  # ATR < 2.5% of price
-    atr_filter_aligned = align_htf_to_ltf(prices, df_12h, atr_filter)
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     # Pre-compute 4h Donchian channels (20-period)
     high_4h = prices['high'].values
@@ -69,7 +60,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_spike_aligned[i]) or np.isnan(atr_filter_aligned[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(ema_50_aligned[i]) or
             np.isnan(atr_20[i])):
             signals[i] = 0.0
             continue
@@ -90,15 +81,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakouts with volume and volatility filters
-            if vol_spike_aligned[i] and atr_filter_aligned[i]:
-                # Long: price breaks above Donchian high
-                if close_4h[i] > donchian_high[i]:
+            # Look for Donchian breakouts with volume and trend filters
+            if vol_spike_aligned[i]:
+                # Long: price breaks above Donchian high AND above 1w EMA(50)
+                if close_4h[i] > donchian_high[i] and close_4h[i] > ema_50_aligned[i]:
                     position = 1
                     entry_price = close_4h[i]
                     signals[i] = 0.25
-                # Short: price breaks below Donchian low
-                elif close_4h[i] < donchian_low[i]:
+                # Short: price breaks below Donchian low AND below 1w EMA(50)
+                elif close_4h[i] < donchian_low[i] and close_4h[i] < ema_50_aligned[i]:
                     position = -1
                     entry_price = close_4h[i]
                     signals[i] = -0.25
