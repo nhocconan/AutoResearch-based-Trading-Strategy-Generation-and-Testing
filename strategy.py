@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Regime Filter
-# - Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# - Regime: ADX(14) from 1d - ADX > 25 = trending, ADX < 20 = ranging
-# - Entry: Long when Bull Power > 0 AND ADX > 25 (strong uptrend)
-#          Short when Bear Power > 0 AND ADX > 25 (strong downtrend)
-# - Exit: Opposite signal or ADX < 20 (regime change to ranging)
-# - Position sizing: 0.25 discrete levels
-# - Uses 1d for regime/trend filter, 6h for Elder Ray calculation
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 300 total
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and 1w trend filter
+# - Entry: Long when price breaks above S4 level + 1d volume > 2.0x 20-period average + 1w close > 1w open (bullish weekly candle)
+#          Short when price breaks below R4 level + 1d volume > 2.0x 20-period average + 1w close < 1w open (bearish weekly candle)
+# - Exit: Close-based reversal - exit long when price < S3, exit short when price > R3
+# - Position sizing: 0.25 (discrete levels to minimize fee churn)
+# - Uses Camarilla pivots from 1d for structure, volume for confirmation, 1w for trend filter
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 200 total
+# - Designed for 12h timeframe to reduce trade frequency and avoid fee drag, with HTF filters for robustness
 
-name = "6h_1d_elder_ray_regime_v1"
-timeframe = "6h"
+name = "12h_1d_1w_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,91 +23,108 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h OHLC
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    # Pre-compute 1d OHLC for Elder Ray and ADX
+    # Pre-compute 1d OHLC for Camarilla pivots and volume
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 13-period EMA for Elder Ray (1d)
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Pre-compute 1w OHLC for trend filter
+    open_1w = df_1w['open'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Elder Ray components (1d)
-    bull_power_1d = high_1d - ema_13_1d  # Bull Power = High - EMA(13)
-    bear_power_1d = ema_13_1d - low_1d   # Bear Power = EMA(13) - Low
+    # Calculate Camarilla pivot levels from 1d
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # S1 = Close - Range * 1.1 / 12
+    # S2 = Close - Range * 1.1 / 6
+    # S3 = Close - Range * 1.1 / 4
+    # S4 = Close - Range * 1.1 / 2
+    # R1 = Close + Range * 1.1 / 12
+    # R2 = Close + Range * 1.1 / 6
+    # R3 = Close + Range * 1.1 / 4
+    # R4 = Close + Range * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    s2_1d = close_1d - range_1d * 1.1 / 6.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
+    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    r2_1d = close_1d + range_1d * 1.1 / 6.0
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    r4_1d = close_1d + range_1d * 1.1 / 2.0
     
-    # Calculate ADX(14) from 1d
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate 1d volume moving average (20-period)
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate 1w bullish/bearish candle
+    bullish_week = close_1w > open_1w  # True for bullish weekly candle
+    bearish_week = close_1w < open_1w  # True for bearish weekly candle
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / np.where(atr_1d == 0, 1, atr_1d)
-    di_minus = 100 * dm_minus_smooth / np.where(atr_1d == 0, 1, atr_1d)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align all HTF data to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align all HTF data to 12h timeframe
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    bullish_week_aligned = align_htf_to_ltf(prices, df_1w, bullish_week.astype(float))
+    bearish_week_aligned = align_htf_to_ltf(prices, df_1w, bearish_week.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(s4_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(bullish_week_aligned[i]) or 
+            np.isnan(bearish_week_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Get current 12h close
+        close_price = close_12h[i]
+        
+        # Get current 1d volume for confirmation
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_confirmation = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Long entry: Bull Power > 0 AND ADX > 25 (strong uptrend)
-            if bull_power_aligned[i] > 0 and adx_aligned[i] > 25:
+            # Long entry: price breaks above S4 + volume confirmation + bullish weekly candle
+            if (close_price > s4_1d_aligned[i] and 
+                volume_confirmation and 
+                bullish_week_aligned[i] > 0.5):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Bear Power > 0 AND ADX > 25 (strong downtrend)
-            elif bear_power_aligned[i] > 0 and adx_aligned[i] > 25:
+            # Short entry: price breaks below R4 + volume confirmation + bearish weekly candle
+            elif (close_price < r4_1d_aligned[i] and 
+                  volume_confirmation and 
+                  bearish_week_aligned[i] > 0.5):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Opposite signal OR ADX < 20 (regime change to ranging)
-            if position == 1:  # Long position
-                if bear_power_aligned[i] > 0 or adx_aligned[i] < 20:
+            # Exit long when price < S3
+            # Exit short when price > R3
+            if position == 1:
+                if close_price < s3_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
-            else:  # position == -1 (Short position)
-                if bull_power_aligned[i] > 0 or adx_aligned[i] < 20:
+            else:  # position == -1
+                if close_price > r3_1d_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
