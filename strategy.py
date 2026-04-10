@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with daily trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level AND 1d EMA50 > EMA200 (bullish trend)
-# - Short when price breaks below Camarilla L3 level AND 1d EMA50 < EMA200 (bearish trend)
-# - Volume confirmation: 4h volume > 1.3x 20-period 4h volume SMA
-# - Exit: Price returns to Camarilla Pivot level or opposite breakout with volume
+# Hypothesis: 6h Camarilla pivot breakout with weekly trend filter and volume confirmation
+# - Long when price breaks above Camarilla R4 AND weekly close > weekly open (bullish weekly candle)
+# - Short when price breaks below Camarilla S4 AND weekly close < weekly open (bearish weekly candle)
+# - Volume confirmation: 6h volume > 2.0x 20-period 6h volume SMA
+# - Exit: price retests Camarilla PP (pivot point) or opposite R4/S4 breakout with volume
 # - Position sizing: 0.25 discrete level
-# - Uses 1d EMA trend filter to avoid counter-trend trades in choppy markets
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Weekly trend filter ensures alignment with higher timeframe momentum, reducing counter-trend whipsaw
 
-name = "4h_1d_camarilla_ema_volume_v1"
-timeframe = "4h"
+name = "6h_1w_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,79 +30,74 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d HTF data ONCE before loop
+    # Calculate Camarilla pivot levels from daily OHLC
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return signals
     
-    # Calculate 1d EMA50 and EMA200 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Camarilla calculations: based on previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    r4 = pp + ((prev_high - prev_low) * 1.1 / 2)
+    s4 = pp - ((prev_high - prev_low) * 1.1 / 2)
+    r3 = pp + ((prev_high - prev_low) * 1.1 / 4)
+    s3 = pp - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Align 1d EMA to 4h timeframe (completed 1d bar only)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align daily Camarilla levels to 6h timeframe (completed 1d bar only)
+    pp_6h = align_htf_to_ltf(prices, df_1d, pp)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
-    # H4 = Pivot + 1.1*Range/2, L4 = Pivot - 1.1*Range/2
-    # H3 = Pivot + 1.1*Range/4, L3 = Pivot - 1.1*Range/4
-    # H2 = Pivot + 1.1*Range/6, L2 = Pivot - 1.1*Range/6
-    # H1 = Pivot + 1.1*Range/12, L1 = Pivot - 1.1*Range/12
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Weekly trend filter: bullish if weekly close > weekly open
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        weekly_bullish = np.ones(len(prices))  # default to bullish if no weekly data
+        weekly_bearish = np.zeros(len(prices))
+    else:
+        weekly_open = df_1w['open'].values
+        weekly_close = df_1w['close'].values
+        weekly_bullish_raw = weekly_close > weekly_open
+        weekly_bearish_raw = weekly_close < weekly_open
+        weekly_bullish = align_htf_to_ltf(prices, df_1w, weekly_bullish_raw.astype(float))
+        weekly_bearish = align_htf_to_ltf(prices, df_1w, weekly_bearish_raw.astype(float))
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    h3_1d = pivot_1d + 1.1 * range_1d / 4.0
-    l3_1d = pivot_1d - 1.1 * range_1d / 4.0
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # Calculate 20-period volume SMA for confirmation
+    # Volume confirmation: 6h volume > 2.0x 20-period volume SMA
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Track entry price for reference
+    # Track entry price for potential re-entry prevention
     entry_price = np.full(n, np.nan)
     
-    # Warmup period: need enough data for 1d EMA200
-    warmup = max(200, 20)  # 1d EMA200 needs 200 days, plus 20 for volume SMA
-    
-    for i in range(warmup, n):
+    for i in range(20, n):  # Start after volume SMA warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(h3_1d_aligned[i]) or 
-            np.isnan(l3_1d_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(pp_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(weekly_bullish[i]) or np.isnan(weekly_bearish[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: 1d EMA50 > EMA200 for bullish, < for bearish
-        bullish_trend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
-        bearish_trend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
-        
-        # Volume confirmation: 4h volume > 1.3x 20-period volume SMA
-        vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
-        
-        # Camarilla breakout signals
-        breakout_up = close[i] > h3_1d_aligned[i]   # Break above H3
-        breakout_down = close[i] < l3_1d_aligned[i]  # Break below L3
+        # Volume confirmation: 6h volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > 2.0 * volume_sma_20[i]
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and bullish_trend and vol_confirm:
+            # Long: break above R4 with weekly bullish bias and volume
+            if close[i] > r4_6h[i] and weekly_bullish[i] > 0.5 and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 entry_price[i] = close[i]
-            elif breakout_down and bearish_trend and vol_confirm:
+            # Short: break below S4 with weekly bearish bias and volume
+            elif close[i] < s4_6h[i] and weekly_bearish[i] > 0.5 and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 entry_price[i] = close[i]
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit on return to pivot or opposite breakout with volume
-            exit_condition = (close[i] < pivot_1d_aligned[i]) or \
-                           (breakout_down and vol_confirm)
+            # Exit on retest of pivot point or opposite S4 break with volume
+            exit_condition = (close[i] < pp_6h[i]) or \
+                           (close[i] < s4_6h[i] and vol_confirm)
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
@@ -110,9 +105,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            # Exit on return to pivot or opposite breakout with volume
-            exit_condition = (close[i] > pivot_1d_aligned[i]) or \
-                           (breakout_up and vol_confirm)
+            # Exit on retest of pivot point or opposite R4 break with volume
+            exit_condition = (close[i] > pp_6h[i]) or \
+                           (close[i] > r4_6h[i] and vol_confirm)
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
