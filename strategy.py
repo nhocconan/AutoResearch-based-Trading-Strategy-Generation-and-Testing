@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + volume confirmation + 1d chop regime filter
-# - Long when price breaks above 20-period 12h Donchian upper band with volume > 1.5x 20-bar avg AND 1d chop < 61.8 (trending)
-# - Short when price breaks below 20-period 12h Donchian lower band with volume > 1.5x 20-bar avg AND 1d chop < 61.8 (trending)
-# - Exit when price crosses 12h EMA(20) in opposite direction
-# - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
-# - Donchian breakouts capture strong trends, chop filter avoids whipsaws in ranging markets
-# - Volume confirmation ensures breakout validity
+# Hypothesis: 1h RSI mean reversion + 4h trend filter + 1d volume spike filter
+# - RSI(14) < 30 for long, > 70 for short on 1h timeframe (mean reversion entries)
+# - 4h EMA(50) trend filter: long only when price > EMA50, short only when price < EMA50
+# - 1d volume confirmation: volume > 1.5x 20-bar average to avoid low-volatility false signals
+# - Session filter: 08-20 UTC to avoid Asian session noise
+# - Discrete position sizing: ±0.20 to limit drawdown and reduce fee churn
+# - Target: ~25 trades/year (100 total over 4 years) to stay within fee drag limits
+# - Works in bull/bear: mean reversion effective in ranging markets, trend filter avoids counter-trend trades
 
-name = "12h_1d_donchian_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "1h_4h_1d_rsi_meanrev_volume_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,97 +22,73 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 4h EMA(50) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Donchian upper and lower bands
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    volume_20_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = df_1d['volume'].values > (1.5 * volume_20_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Align Donchian bands to 12h timeframe (completed 12h bar only)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    # Pre-compute 1h RSI(14)
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Pre-compute 12h EMA(20) for exit signal
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
-    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
-    
-    # Pre-compute 1d Chopiness Index (14-period) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # Calculate ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate max/min high/low over 14 periods
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Calculate Chopiness Index: 100 * log10(sum(atr14) / (max_high - min_low)) / log10(14)
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    chop_denominator = max_high_14 - min_low_14
-    chop_raw = 100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14)
-    chop_1d = np.where(chop_denominator > 0, chop_raw, 50.0)  # Default to 50 when denominator <= 0
-    
-    # Align Chopiness Index to 12h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Define trending regime: chop < 61.8
-    trending_regime = chop_1d_aligned < 61.8
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(volume_20_avg[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(rsi[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long signal: price breaks above Donchian upper with volume spike and trending regime
-            if (prices['close'].iloc[i] > donchian_upper_aligned[i] and 
-                vol_spike.iloc[i] and 
-                trending_regime[i]):
+            # Long signal: RSI < 30 (oversold) + 4h uptrend + 1d volume spike
+            if (rsi[i] < 30 and 
+                prices['close'].iloc[i] > ema_50_4h_aligned[i] and 
+                vol_spike_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short signal: price breaks below Donchian lower with volume spike and trending regime
-            elif (prices['close'].iloc[i] < donchian_lower_aligned[i] and 
-                  vol_spike.iloc[i] and 
-                  trending_regime[i]):
+                signals[i] = 0.20
+            # Short signal: RSI > 70 (overbought) + 4h downtrend + 1d volume spike
+            elif (rsi[i] > 70 and 
+                  prices['close'].iloc[i] < ema_50_4h_aligned[i] and 
+                  vol_spike_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Have position - look for exit
-            # Exit when price crosses 12h EMA(20) in opposite direction
-            if position == 1 and prices['close'].iloc[i] < ema_20_12h_aligned[i]:
+            # Exit when RSI returns to neutral zone (40-60)
+            if position == 1 and rsi[i] > 40:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and prices['close'].iloc[i] > ema_20_12h_aligned[i]:
+            elif position == -1 and rsi[i] < 60:
                 position = 0
                 signals[i] = 0.0
             # Hold position otherwise
             else:
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
