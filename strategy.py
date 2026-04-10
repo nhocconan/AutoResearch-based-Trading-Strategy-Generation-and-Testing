@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above H3 level AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
-# - Short when price breaks below L3 level AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
-# - Exit when price returns to Pivot level (mean reversion to equilibrium)
-# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high AND 1d ADX > 25 AND volume > 1.5x 20-bar avg
+# - Short when price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 1.5x 20-bar avg
+# - Exit when price crosses Donchian midpoint (mean reversion to equilibrium)
+# - Uses 1d ADX(14) for trend filter to ensure we only trade in strong trends
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Camarilla pivots work well in ranging markets; trend filter adds directional bias in trends
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian breakouts capture strong momentum; ADX filter avoids whipsaws in ranging markets
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,43 +26,69 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute Camarilla pivot levels from daily data
+    # Pre-compute Donchian channels (20-period) on 4h data
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
+    
+    # Pre-compute 1d ADX(14) for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # H3, L3 levels (most important for breakouts)
-    h3 = close_1d + (range_1d * 1.1 / 4)
-    l3 = close_1d - (range_1d * 1.1 / 4)
-    # Pivot level for exit
-    piv = pivot
+    # Calculate Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Align HTF levels to LTF
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    piv_aligned = align_htf_to_ltf(prices, df_1d, piv)
+    # Smooth TR and DM using Wilder's smoothing (EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d_arr = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d_arr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
     
-    # Pre-compute volume confirmation: > 2.0x 20-period average
+    # Calculate DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align HTF ADX to LTF
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(piv_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_20_avg[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -73,28 +99,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 1d uptrend with volume spike
-            if (prices['close'].iloc[i] > h3_aligned[i] and 
-                prices['close'].iloc[i] > ema50_1d_aligned[i] and  # price above 1d EMA50
+            # Long when price breaks above Donchian high AND strong trend with volume spike
+            if (prices['close'].iloc[i] > high_20[i] and 
+                adx_aligned[i] > 25 and 
                 vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND 1d downtrend with volume spike
-            elif (prices['close'].iloc[i] < l3_aligned[i] and 
-                  prices['close'].iloc[i] < ema50_1d_aligned[i] and  # price below 1d EMA50
+            # Short when price breaks below Donchian low AND strong trend with volume spike
+            elif (prices['close'].iloc[i] < low_20[i] and 
+                  adx_aligned[i] > 25 and 
                   vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot (mean reversion)
-            # Exit when price returns to pivot level
+        else:  # Have position - look for exit to Donchian midpoint (mean reversion)
+            # Exit when price crosses Donchian midpoint
             exit_signal = False
             if position == 1:  # Long position
-                if prices['close'].iloc[i] <= piv_aligned[i]:
+                if prices['close'].iloc[i] <= donchian_mid[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if prices['close'].iloc[i] >= piv_aligned[i]:
+                if prices['close'].iloc[i] >= donchian_mid[i]:
                     exit_signal = True
             
             if exit_signal:
