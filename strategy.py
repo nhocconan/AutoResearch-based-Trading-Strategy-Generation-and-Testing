@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR volatility filter
-# - Primary: 12h price breaks above/below Camarilla H3/L3 levels (strong support/resistance)
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR volatility filter
+# - Primary: 4h price breaks above/below Camarilla H3/L3 levels (strong support/resistance)
 # - Volume filter: 1d volume > 1.3x 20-period volume MA to confirm breakout with participation
 # - Volatility filter: ATR(14) < 0.6 * 50-period ATR MA to avoid extreme volatility whipsaws
 # - Exit: Price returns to Camarilla H4/L4 levels
@@ -12,8 +12,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Works in bull/bear: Camarilla levels adapt to volatility, volume confirms institutional interest,
 #   volatility filter avoids choppy markets, effective in both bull and bear markets
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Camarilla pivot levels for 12h timeframe (based on previous bar)
+    # Calculate Camarilla pivot levels for 4h timeframe (based on previous bar)
     # Camarilla: H4 = close + 1.1*(high-low)/2, H3 = close + 1.1*(high-low)/4
     #            L3 = close - 1.1*(high-low)/4, L4 = close - 1.1*(high-low)/2
     prev_high = np.roll(high, 1)
