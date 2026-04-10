@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot Breakout + 12h Volume Spike + ATR Trailing Stop
-# - 4h Camarilla pivot levels (H3/L3) act as institutional support/resistance
-# - Breakout above H3 or below L3 with 12h volume spike confirms institutional participation
+# Hypothesis: 1d Weekly Camarilla Pivot Breakout + Volume Spike + ATR Trailing Stop
+# - Weekly Camarilla pivot levels (H3/L3) act as strong institutional support/resistance
+# - Breakout above H3 or below L3 with daily volume spike confirms institutional participation
 # - ATR(14) trailing stop (2.0x) manages risk and adapts to volatility
-# - Discrete position sizing (0.25) minimizes fee churn
-# - Target: 15-35 trades/year (60-140 total over 4 years) to avoid fee drag
-# - Works in bull/bear: Camarilla levels adapt to price action, volume filter avoids false breakouts, ATR stop controls drawdown
+# - Works in bull/bear: Weekly Camarilla levels adapt to price action, volume filter avoids false breakouts
+# - Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag
 
-name = "4h_12h_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "1d_weekly_camarilla_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,53 +19,48 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load HTF data ONCE before loop: weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 12h ATR volume for confirmation (14-period ATR)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Pre-compute weekly ATR volume for confirmation (14-period ATR)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1_12h[0] = np.nan
-    tr2_12h[0] = np.nan
-    tr3_12h[0] = np.nan
-    tr_12h = np.maximum.reduce([tr1_12h, tr2_12h, tr3_12h])
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    tr1_1w = high_1w - low_1w
+    tr2_1w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3_1w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1_1w[0] = np.nan
+    tr2_1w[0] = np.nan
+    tr3_1w[0] = np.nan
+    tr_1w = np.maximum.reduce([tr1_1w, tr2_1w, tr3_1w])
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
     
-    # 12h ATR volume: volume / ATR (normalizes volume by volatility)
-    atr_volume_12h = volume_12h / atr_12h
-    atr_volume_ma_20_12h = pd.Series(atr_volume_12h).rolling(window=20, min_periods=20).mean().values
-    atr_volume_ma_aligned = align_htf_to_ltf(prices, df_12h, atr_volume_ma_20_12h)
+    # Weekly ATR volume: volume / ATR (normalizes volume by volatility)
+    atr_volume_1w = volume_1w / atr_1w
+    atr_volume_ma_20_1w = pd.Series(atr_volume_1w).rolling(window=20, min_periods=20).mean().values
+    atr_volume_ma_aligned = align_htf_to_ltf(prices, df_1w, atr_volume_ma_20_1w)
     
-    # Pre-compute 4h Camarilla pivot levels from previous day
-    # Need daily OHLC for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Pre-compute weekly Camarilla pivot levels from previous week
+    # Need weekly OHLC for pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels for each day: based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: H4/H3/L3/L4 from previous day
+    # Camarilla levels: H3/L3 from previous week
     # H3 = close + 1.1*(high-low)/2
     # L3 = close - 1.1*(high-low)/2
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2.0
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2.0
+    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w) / 2.0
+    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w) / 2.0
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Camarilla levels to 1d timeframe (use previous week's levels)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
-    # Pre-compute 4h ATR for trailing stop (14-period)
+    # Pre-compute 1d ATR for trailing stop (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -98,12 +92,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 12h ATR volume for filter (aligned)
-        atr_volume_12h_current = atr_volume_12h
-        atr_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_volume_12h_current)
+        # Get current weekly ATR volume for filter (aligned)
+        atr_volume_1w_current = atr_volume_1w
+        atr_volume_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_volume_1w_current)
         
-        # Volume confirmation: current 12h ATR volume > 1.8x 20-day average
-        volume_confirm = atr_volume_12h_aligned[i] > 1.8 * atr_volume_ma_aligned[i]
+        # Volume confirmation: current weekly ATR volume > 1.8x 20-week average
+        volume_confirm = atr_volume_1w_aligned[i] > 1.8 * atr_volume_ma_aligned[i]
         
         # Price levels for breakout
         current_close = prices['close'].iloc[i]
