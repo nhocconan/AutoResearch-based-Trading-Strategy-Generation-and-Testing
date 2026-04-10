@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR volatility filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR volatility filter
 # - Entry: Long when price breaks above Donchian upper band (20, 1d) + 1d volume > 1.5x 20-period average + ATR(14, 4h) > 0.25 * ATR(50, 4h)
 #          Short when price breaks below Donchian lower band (20, 1d) + same volume and volatility filters
 # - Exit: Close-based reversal - exit long when price < Donchian lower band (20, 1d), exit short when price > Donchian upper band (20, 1d)
