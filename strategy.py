@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume spike confirmation
-# - Long when price is above Ichimoku cloud (Senkou Span A & B) AND 1d close > 1d EMA50 (bullish regime) AND volume > 1.5x 20-period average
-# - Short when price is below Ichimoku cloud AND 1d close < 1d EMA50 (bearish regime) AND volume > 1.5x 20-period average
-# - Exit when price crosses Tenkan-Kijun (TK) line in opposite direction
+# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume spike
+# - Long when Williams %R(14) < -80 (oversold) AND 1d EMA(50) > EMA(200) (bullish trend) AND volume > 1.5x 20-period average
+# - Short when Williams %R(14) > -20 (overbought) AND 1d EMA(50) < EMA(200) (bearish trend) AND volume > 1.5x 20-period average
+# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Ichimoku cloud provides dynamic support/resistance that adapts to volatility
-# - 1d EMA50 filter ensures we trade with higher timeframe trend
-# - Volume confirmation reduces false breakouts
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Williams %R identifies extreme momentum exhaustion points
+# - 1d EMA filter ensures we trade with the higher timeframe trend
+# - Volume confirmation reduces false signals
 
-name = "6h_1d_ichimoku_trend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_williamsr_meanreversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,56 +24,46 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC and volume
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 6h volume confirmation (20-period average)
+    # Pre-compute 12h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 6h Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Pre-compute 12h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Pre-compute 1d EMA50 for trend filter
+    # Pre-compute 1d EMAs for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    bullish_regime_1d = close_1d > ema50_1d
-    bearish_regime_1d = close_1d < ema50_1d
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align HTF indicators to 6h timeframe
-    bullish_regime_aligned = align_htf_to_ltf(prices, df_1d, bullish_regime_1d)
-    bearish_regime_aligned = align_htf_to_ltf(prices, df_1d, bearish_regime_1d)
+    # 1d trend: bullish when EMA50 > EMA200, bearish when EMA50 < EMA200
+    bullish_trend = ema_50_1d > ema_200_1d
+    bearish_trend = ema_50_1d < ema_200_1d
+    
+    # Align HTF indicators to 12h timeframe
+    bullish_trend_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend)
+    bearish_trend_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
-            np.isnan(senkou_b[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(bullish_regime_aligned[i]) or np.isnan(bearish_regime_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(bullish_trend_aligned[i]) or np.isnan(bearish_trend_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -82,29 +72,25 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Determine cloud boundaries (top and bottom of cloud)
-        cloud_top = np.maximum(senkou_a[i], senkou_b[i])
-        cloud_bottom = np.minimum(senkou_a[i], senkou_b[i])
-        
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price above cloud AND bullish 1d regime AND volume spike
-            if (close[i] > cloud_top and 
-                bullish_regime_aligned[i] and 
+            # Long conditions: Williams %R oversold AND bullish 1d trend AND volume spike
+            if (williams_r[i] < -80 and 
+                bullish_trend_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price below cloud AND bearish 1d regime AND volume spike
-            elif (close[i] < cloud_bottom and 
-                  bearish_regime_aligned[i] and 
+            # Short conditions: Williams %R overbought AND bearish 1d trend AND volume spike
+            elif (williams_r[i] > -20 and 
+                  bearish_trend_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit on TK cross
-            # Exit when price crosses Tenkan-Kijun line in opposite direction
-            exit_long = (position == 1 and close[i] < tenkan[i])
-            exit_short = (position == -1 and close[i] > kijun[i])
+        else:  # Have position - look for exit at Williams %R = -50
+            # Exit when Williams %R crosses -50 (mean reversion midpoint)
+            exit_long = (position == 1 and williams_r[i] >= -50)
+            exit_short = (position == -1 and williams_r[i] <= -50)
             
             if exit_long or exit_short:
                 position = 0
