@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
 # - Long: Price breaks above Donchian(20) high + price > 1d EMA50 (uptrend) + 1d volume > 1.5x 20-period MA
 # - Short: Price breaks below Donchian(20) low + price < 1d EMA50 (downtrend) + 1d volume > 1.5x 20-period MA
 # - Exit: Price returns to Donchian(20) midpoint or opposite signal
 # - Position sizing: 0.25 (discrete level)
-# - Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and fee drag
+# - Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag
 # - Uses 1d HTF for trend and volume to filter false breakouts in choppy markets
 # - Donchian breakout captures momentum; 1d EMA/volume ensures alignment with higher timeframe momentum
 # - Works in bull/bear: breakouts in trends with institutional participation
 
-name = "12h_1d_donchian_breakout_trend_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,12 +27,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLCV
-    open_12h = prices['open'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    volume_12h = prices['volume'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -40,9 +40,9 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian(20) for 12h
-    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian(20) for 4h
+    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Calculate 1d EMA(50) for trend filter
@@ -64,10 +64,10 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get current 12h close
-        close_price = close_12h[i]
+        # Get current 4h close
+        close_price = close_4h[i]
         
-        # Get aligned 1d data for current 12h bar (completed 1d bar)
+        # Get aligned 1d data for current 4h bar (completed 1d bar)
         ema_50_current = ema_50_aligned[i]
         volume_ma_current = volume_ma_aligned[i]
         volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
