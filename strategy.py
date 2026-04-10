@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(10) breakout + 1d volume spike + 1d chop regime filter
-# - Long when price breaks above Donchian(10) high AND 1d volume > 2.0x 20-period average AND 1d chop > 61.8 (range)
-# - Short when price breaks below Donchian(10) low AND 1d volume > 2.0x 20-period average AND 1d chop > 61.8 (range)
-# - Exit when price returns to Donchian(10) middle
+# Hypothesis: 4h Williams %R extreme + 1d volume regime filter
+# - Long when Williams %R(14) crosses above -80 (oversold) AND 1d volume > 1.2x 20-period average
+# - Short when Williams %R(14) crosses below -20 (overbought) AND 1d volume > 1.2x 20-period average
+# - Exit when Williams %R returns to -50 (mean reversion) or opposite extreme
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in range markets via mean reversion at Donchian extremes with volume confirmation
-# - Chop filter ensures we only trade in ranging conditions where breakouts are more likely to fail
-# - 12h timeframe reduces trade frequency vs lower TFs, minimizing fee drag
-# - Volume spike requirement ensures participation, reducing false breakouts
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Works in both bull and bear markets via mean reversion at extremes with volume confirmation
+# - Volume filter ensures we trade on genuine participation, not low-volume spikes
 
-name = "12h_1d_donchian_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_williamsr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,64 +23,41 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute 12h Donchian channels (10) - shorter period for more sensitivity
+    # Pre-compute 4h Williams %R (14)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    donchian_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    donchian_middle = (donchian_high + donchian_low) / 2
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Pre-compute 1d volume confirmation
-    df_1d_vol = df_1d['volume'].values
-    vol_ma_1d = pd.Series(df_1d_vol).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d_vol > (2.0 * vol_ma_1d)  # Higher threshold for 1d
+    # Pre-compute 4h volume confirmation
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.2 * vol_ma)
     
-    # Pre-compute 1d chop regime (choppiness index)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d volume regime (20-period average)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    volume_regime = vol_1d > vol_ma_1d  # Above average volume = active market
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - np.roll(close_1d, 1)[1:])
-    tr3 = np.abs(low_1d[1:] - np.roll(close_1d, 1)[1:])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # first element is NaN
-    
-    # ATR(14)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    
-    # Max(high) - Min(low) over 14 periods
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_max_min = max_high - min_low
-    
-    # Chop = 100 * log10(tr_sum / range_max_min) / log10(14)
-    chop = 100 * np.log10(tr_sum / range_max_min) / np.log10(14)
-    chop = np.concatenate([np.full(13, np.nan), chop[13:]])  # align indices
-    
-    # Chop regime: > 61.8 = ranging (good for mean reversion at extremes)
-    chop_range = chop > 61.8
-    
-    # Align HTF indicators to 12h timeframe
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
-    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
+    # Align HTF indicators to 4h timeframe
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(chop_range_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(volume_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -92,24 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Donchian high AND 1d volume spike AND chop range
-            if (close[i] > donchian_high[i-1] and  # breakout above previous period's high
-                volume_spike_1d_aligned[i] and 
-                chop_range_aligned[i]):
+            # Long conditions: Williams %R crosses above -80 (oversold) AND volume confirmation AND 1d active market
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # crossed above -80
+                volume_confirm[i] and 
+                volume_regime_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND 1d volume spike AND chop range
-            elif (close[i] < donchian_low[i-1] and  # breakout below previous period's low
-                  volume_spike_1d_aligned[i] and 
-                  chop_range_aligned[i]):
+            # Short conditions: Williams %R crosses below -20 (overbought) AND volume confirmation AND 1d active market
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # crossed below -20
+                  volume_confirm[i] and 
+                  volume_regime_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when price returns to Donchian middle
-            exit_long = (position == 1 and close[i] <= donchian_middle[i])
-            exit_short = (position == -1 and close[i] >= donchian_middle[i])
+            # Exit when Williams %R returns to -50 (mean) or opposite extreme with volume
+            exit_long = (position == 1 and 
+                        (williams_r[i] >= -50 or
+                         (williams_r[i] < -80 and volume_confirm[i])))  # re-enter extreme
+            exit_short = (position == -1 and 
+                         (williams_r[i] <= -50 or
+                          (williams_r[i] > -20 and volume_confirm[i])))
             
             if exit_long or exit_short:
                 position = 0
