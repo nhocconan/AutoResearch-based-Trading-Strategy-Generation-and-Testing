@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume confirmation
-# - Williams %R(14) measures overbought/oversold levels (-20 to -80)
-# - Long when %R crosses above -80 from below AND 1w close > 1w EMA(21) AND volume > 1.3x 20-period average volume
-# - Short when %R crosses below -20 from above AND 1w close < 1w EMA(21) AND volume > 1.3x 20-period average volume
-# - Exit when %R crosses opposite threshold (-50 for long exit, -50 for short exit) or volume drops
+# Hypothesis: 12h Donchian channel breakout with 1d ATR filter and volume confirmation
+# - Long when price breaks above 20-period Donchian upper channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
+# - Short when price breaks below 20-period Donchian lower channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
+# - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Williams %R is effective in ranging markets which dominate BTC/ETH 2025+ test period
-# - 1w EMA filter ensures we trade with the higher timeframe trend
-# - Volume confirmation reduces false signals
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Donchian channels identify clear breakouts with defined risk levels
+# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# - Volume confirmation reduces false breakouts
 
-name = "6h_1w_williamsr_meanreversion_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_atr_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,17 +23,17 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC and volume
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 6h Williams %R (14-period)
+    # Pre-compute 12h Donchian channels (20-period)
     def rolling_max(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
@@ -47,42 +46,47 @@ def generate_signals(prices):
             result[i] = np.min(arr[i - window + 1:i + 1])
         return result
     
-    highest_high = rolling_max(high, 14)
-    lowest_low = rolling_min(low, 14)
-    williams_r = np.full_like(close, np.nan, dtype=float)
-    for i in range(13, len(close)):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            williams_r[i] = -50  # Avoid division by zero
+    upper_channel = rolling_max(high, 20)
+    lower_channel = rolling_min(low, 20)
     
-    # Pre-compute 6h volume confirmation (20-period average)
+    # Pre-compute 12h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = np.full_like(close_1w, np.nan, dtype=float)
-    alpha = 2 / (21 + 1)
-    ema_21_1w[20] = np.mean(close_1w[0:21])  # SMA for first value
-    for i in range(21, len(close_1w)):
-        ema_21_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_21_1w[i-1]
+    # Pre-compute 1d ATR(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1w trend: close > EMA(21) = uptrend, close < EMA(21) = downtrend
-    uptrend_1w = close_1w > ema_21_1w
-    downtrend_1w = close_1w < ema_21_1w
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align HTF indicators to 6h timeframe
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_1d = np.zeros_like(tr)
+    atr_1d[13] = np.mean(tr[1:14])  # First ATR value
+    for i in range(14, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    
+    # ATR regime: low volatility when current ATR < median of last 20 ATR values
+    atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
+    low_vol_regime = atr_1d < atr_median_20
+    
+    # Align HTF indicators to 12h timeframe
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(uptrend_1w_aligned[i]) or np.isnan(downtrend_1w_aligned[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -92,32 +96,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Williams %R crossover signals
-            wr_cross_up = (williams_r[i] > -80 and williams_r[i-1] <= -80)  # Cross above -80
-            wr_cross_down = (williams_r[i] < -20 and williams_r[i-1] >= -20)  # Cross below -20
-            
-            # Long conditions: %R crosses above -80 AND 1w uptrend AND volume spike
-            if (wr_cross_up and 
-                uptrend_1w_aligned[i] and 
+            # Long conditions: price breaks above upper channel AND low volatility regime AND volume spike
+            if (close[i] > upper_channel[i] and 
+                low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: %R crosses below -20 AND 1w downtrend AND volume spike
-            elif (wr_cross_down and 
-                  downtrend_1w_aligned[i] and 
+            # Short conditions: price breaks below lower channel AND low volatility regime AND volume spike
+            elif (close[i] < lower_channel[i] and 
+                  low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: %R crosses opposite threshold or volume drops
-            wr_exit_long = (williams_r[i] < -50 and williams_r[i-1] >= -50)  # Cross below -50
-            wr_exit_short = (williams_r[i] > -50 and williams_r[i-1] <= -50)  # Cross above -50
-            volume_drop = not volume_spike[i]
+            # Exit conditions: price crosses back inside the Donchian channel
+            exit_long = (position == 1 and close[i] < upper_channel[i])
+            exit_short = (position == -1 and close[i] > lower_channel[i])
             
-            if (position == 1 and (wr_exit_long or volume_drop)) or \
-               (position == -1 and (wr_exit_short or volume_drop)):
+            if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
