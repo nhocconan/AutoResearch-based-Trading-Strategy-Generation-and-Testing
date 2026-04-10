@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR regime filter
-# - Entry: Long when price breaks above Donchian upper (20, 1d) + 1d volume > 1.3x 20-period average + ATR(14, 1d) > 0.5 * ATR(50, 1d) (volatility expansion filter)
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and volatility expansion filter
+# - Entry: Long when price breaks above Donchian upper (20, 1d) + 1d volume > 1.3x 20-period average + ATR(14, 1d) > 0.5 * ATR(50, 1d)
 #          Short when price breaks below Donchian lower (20, 1d) + same volume and volatility filters
 # - Exit: Close-based reversal - exit long when price < Donchian lower (20, 1d), exit short when price > Donchian upper (20, 1d)
 # - Stoploss: ATR-based - exit when price moves against position by 2.5 * ATR(14) on 4h
@@ -12,6 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Target: 75-200 total trades over 4 years (19-50/year) to stay within HARD MAX: 400 total
 # - Donchian channels from 1d provide key support/resistance, volume spike confirms participation,
 #   volatility expansion filter (ATR ratio) ensures we trade during genuine breakouts, not low-volatility squeezes
+# - Works in bull markets via breakouts, works in bear markets via shorting breakdowns with volume confirmation
 
 name = "4h_1d_donchian_volume_volatility_v1"
 timeframe = "4h"
