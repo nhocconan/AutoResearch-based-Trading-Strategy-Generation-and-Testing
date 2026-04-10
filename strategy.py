@@ -3,131 +3,116 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w volume spike + 1w chop regime filter
-# - Primary signal: Price breaks above/below 20-period Donchian channel on 1d
-# - Volume confirmation: 1w volume > 1.5x 20-period average volume (avoid low-participation breakouts)
-# - Regime filter: 1w Choppiness Index > 61.8 (range market) enables mean reversion at Donchian bands
-# - Works in bull/bear: In trends (CHOP < 38.2), breakouts continue; in ranges (CHOP > 61.8), fade Donchian touches
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter
+# - Primary signal: 6h Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13)
+# - Regime filter: 1d ADX > 25 (trending market) enables Elder Ray signals
+# - In trending markets: Long when Bull Power > 0 and rising, Short when Bear Power < 0 and falling
+# - Works in bull/bear: ADX filter avoids whipsaws in ranging markets, captures strong trends
 # - Position size: 0.25 discrete level to minimize fee churn
-# - Target: 30-100 total trades over 4 years (7-25/year) per 1d strategy guidelines
-# - ATR-based stoploss: exit when price moves against position by 2.5x ATR(20)
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - No stoploss: exit on opposite signal (mean reversion via Elder Ray)
 
-name = "1d_1w_donchian_volume_chop_v1"
-timeframe = "1d"
+name = "6h_1d_elderray_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1w volume spike filter
-    volume_1w = df_1w['volume'].values
-    avg_volume_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1w > (1.5 * avg_volume_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike)
-    
-    # Pre-compute 1w Choppiness Index
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute 1d ADX(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    tr[0] = tr1[0]
     
-    # ATR(14) and sum of true ranges
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Choppiness Index: 100 * log10(tr_sum_14 / (hh_14 - ll_14)) / log10(14)
-    chop_raw = np.where((hh_14 - ll_14) > 0,
-                        100 * np.log10(tr_sum_14 / (hh_14 - ll_14)) / np.log10(14),
-                        50)  # neutral when no range
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_raw, additional_delay_bars=0)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    # Pre-compute 1d Donchian Channel (20)
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    adx_trending = adx > 25
+    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending)
     
-    # Pre-compute 1d ATR(20) for stoploss
-    tr_1d1 = high_1d - low_1d
-    tr_1d2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr_1d3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr_1d1, np.maximum(tr_1d2, tr_1d3))
-    tr_1d[0] = tr_1d1[0]
-    atr_20 = pd.Series(tr_1d).rolling(window=20, min_periods=20).mean().values
+    # Pre-compute 6h EMA13 for Elder Ray
+    close_6h = prices['close'].values
+    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    bull_power = high_6h - ema_13  # Higher = stronger bulls
+    bear_power = low_6h - ema_13   # Lower (more negative) = stronger bears
+    
+    # Elder Ray signals: look for divergence from zero with momentum
+    bull_power_rising = bull_power > np.roll(bull_power, 1)
+    bear_power_falling = bear_power < np.roll(bear_power, 1)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(atr_20[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx_trending_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Donchian mean reversion OR stoploss hit
-            if close_1d[i] < donchian_mid[i] or close_1d[i] < entry_price - 2.5 * atr_20[i]:
+            # Exit: Bear Power rises above -0.5 * ATR(20) approximation OR opposite signal
+            atr_approx = np.abs(high_6h[i] - low_6h[i])  # simple range proxy
+            if bear_power[i] > -0.5 * atr_approx or bear_power[i] > np.roll(bear_power, 1)[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Donchian mean reversion OR stoploss hit
-            if close_1d[i] > donchian_mid[i] or close_1d[i] > entry_price + 2.5 * atr_20[i]:
+            # Exit: Bull Power falls below 0.5 * ATR(20) approximation OR opposite signal
+            atr_approx = np.abs(high_6h[i] - low_6h[i])
+            if bull_power[i] < 0.5 * atr_approx or bull_power[i] < np.roll(bull_power, 1)[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakouts with volume spike and chop regime filter
-            # In ranging markets (CHOP > 61.8): fade Donchian touches (mean reversion)
-            # In trending markets (CHOP < 38.2): breakout continuation
-            if volume_spike_aligned[i]:
-                if chop_aligned[i] > 61.8:  # ranging market - mean reversion
-                    # Long: price touches lower Donchian band
-                    if close_1d[i] <= donchian_low[i] * 1.001:  # small buffer for noise
-                        position = 1
-                        entry_price = close_1d[i]
-                        signals[i] = 0.25
-                    # Short: price touches upper Donchian band
-                    elif close_1d[i] >= donchian_high[i] * 0.999:
-                        position = -1
-                        entry_price = close_1d[i]
-                        signals[i] = -0.25
-                elif chop_aligned[i] < 38.2:  # trending market - breakout continuation
-                    # Long: price breaks above upper Donchian band
-                    if close_1d[i] > donchian_high[i]:
-                        position = 1
-                        entry_price = close_1d[i]
-                        signals[i] = 0.25
-                    # Short: price breaks below lower Donchian band
-                    elif close_1d[i] < donchian_low[i]:
-                        position = -1
-                        entry_price = close_1d[i]
-                        signals[i] = -0.25
+            # Look for Elder Ray signals in trending market (ADX > 25)
+            if adx_trending_aligned[i]:
+                # Long: Bull Power positive AND rising (bulls in control and gaining strength)
+                if bull_power[i] > 0 and bull_power_rising[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short: Bear Power negative AND falling (bears in control and gaining strength)
+                elif bear_power[i] < 0 and bear_power_falling[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
