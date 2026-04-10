@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level with volume > 1.8x average AND 12h close > 12h EMA20
-# - Short when price breaks below Camarilla L3 level with volume > 1.8x average AND 12h close < 12h EMA20
-# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.9x average
-# - Uses 12h trend filter to avoid counter-trend trades in bear markets (2025+)
-# - Higher volume threshold (1.8x) reduces false breakouts and trade frequency
-# - Targets 15-30 trades/year (60-120 total over 4 years) to avoid fee drag
+# Hypothesis: 4h Camarilla pivot breakout with 12h EMA trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level with volume > 1.5x 20-period average AND 12h close > 12h EMA20
+# - Short when price breaks below Camarilla L3 level with volume > 1.5x 20-period average AND 12h close < 12h EMA20
+# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.8x average
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Targets 20-40 trades/year (80-160 total over 4 years) to avoid fee drag
+# - 12h trend filter avoids counter-trend trades in bear markets (2025+)
 
-name = "4h_12h_camarilla_breakout_volume_trend_v1"
+name = "4h_12h_camarilla_breakout_volume_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -30,29 +30,24 @@ def generate_signals(prices):
     ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
-    # Pre-compute volume confirmation: > 1.8x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
-    # Pre-compute volume filter: < 0.9x average volume for exit (loss of momentum)
-    vol_weak = prices['volume'] < (0.9 * volume_20_avg)
+    # Pre-compute volume filter: < 0.8x average volume for exit (loss of momentum)
+    vol_weak = prices['volume'] < (0.8 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute aligned 12h data properly
+    # Pre-compute aligned 12h OHLC data
     h_12h = df_12h['high'].values
     l_12h = df_12h['low'].values
     c_12h = df_12h['close'].values
     
-    # Align them to 4h timeframe
     h_12h_aligned = align_htf_to_ltf(prices, df_12h, h_12h)
     l_12h_aligned = align_htf_to_ltf(prices, df_12h, l_12h)
     c_12h_aligned = align_htf_to_ltf(prices, df_12h, c_12h)
-    
-    # Pre-compute 12h EMA(20) for trend filter
-    ema20_12h = pd.Series(c_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
     for i in range(20, n):
         # Skip if any required data is invalid
@@ -67,8 +62,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get previous completed 12h bar values (need to shift by 2 to avoid look-ahead)
-        # Since 4h timeframe, there are 3 bars per 12h bar
+        # Get previous completed 12h bar values
         if i >= 6:  # Need at least 6 4h bars (2x 12h bars) to get previous 12h bar's data
             # Get index of previous completed 12h bar
             prev_12h_idx = i - 3  # Look back 3 bars (one 12h period)
@@ -104,7 +98,7 @@ def generate_signals(prices):
                     else:  # Have position - look for exit
                         # Exit conditions:
                         # 1. Price retreats to Camarilla H4/L4 levels
-                        # 2. Volume drops below 0.9x average (loss of momentum)
+                        # 2. Volume drops below 0.8x average (loss of momentum)
                         if position == 1:  # Long position
                             if (prices['close'].iloc[i] < camarilla_h4 or 
                                 vol_weak.iloc[i]):
