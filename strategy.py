@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 (1d) AND 1w EMA(21) > EMA(50) (bullish trend) AND 12h volume > 1.5x 20-bar avg
-# - Short when price breaks below Camarilla L3 (1d) AND 1w EMA(21) < EMA(50) (bearish trend) AND 12h volume > 1.5x 20-bar avg
-# - Exit when price returns to Camarilla pivot point (1d) or opposite H3/L3 level
+# Hypothesis: 1d Bollinger Band breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above upper BB(20,2) AND 1w EMA(21) > EMA(50) (bullish trend) AND 1d volume > 1.5x 20-bar avg
+# - Short when price breaks below lower BB(20,2) AND 1w EMA(21) < EMA(50) (bearish trend) AND 1d volume > 1.5x 20-bar avg
+# - Exit when price returns to middle BB(20) (mean reversion)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Camarilla levels provide intraday support/resistance; 1w EMA filter ensures alignment with higher timeframe trend
+# - Bollinger Bands capture volatility expansion; 1w EMA filter ensures alignment with higher timeframe trend
 # - Volume confirmation avoids low-liquidity false signals
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: breakouts in trends, mean reversion in ranges via pivot returns
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
 
-name = "12h_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "1d_1w_bb_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,9 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 50 or len(df_1w) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     # Pre-compute 1w EMA trend filter: EMA(21) vs EMA(50)
@@ -35,31 +33,24 @@ def generate_signals(prices):
     ema_bullish = ema_21 > ema_50
     ema_bearish = ema_21 < ema_50
     
-    # Align 1w EMA trend to 12h timeframe
+    # Align 1w EMA trend to 1d timeframe
     ema_bullish_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish)
     ema_bearish_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish)
     
-    # Pre-compute 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute Bollinger Bands (20,2) on 1d data
+    close = prices['close'].values
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20
     
-    # Camarilla calculations
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    h3 = pivot + (range_1d * 1.1 / 4)
-    l3 = pivot - (range_1d * 1.1 / 4)
-    h4 = pivot + (range_1d * 1.1 / 2)
-    l4 = pivot - (range_1d * 1.1 / 2)
+    # BB conditions: breakout above upper, breakout below lower, exit at middle
+    bb_breakout_up = close > upper_bb
+    bb_breakout_down = close < lower_bb
+    bb_exit = np.abs(close - middle_bb) < (0.1 * std_20)  # Within 10% of std from middle
     
-    # Align Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
+    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * volume_20_avg)
@@ -70,9 +61,8 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_spike[i])):
+            np.isnan(bb_breakout_up[i]) or np.isnan(bb_breakout_down[i]) or
+            np.isnan(bb_exit[i]) or np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -82,29 +72,24 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        price = prices['close'].iloc[i]
-        
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 1w bullish trend AND volume spike
-            if (price > h3_aligned[i] and 
+        if position == 0:  # Flat - look for new BB breakout entries
+            # Long when price breaks above upper BB AND 1w bullish trend AND volume spike
+            if (bb_breakout_up[i] and 
                 ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND 1w bearish trend AND volume spike
-            elif (price < l3_aligned[i] and 
+            # Short when price breaks below lower BB AND 1w bearish trend AND volume spike
+            elif (bb_breakout_down[i] and 
                   ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit conditions: price returns to pivot or opposite H3/L3 level
-            if position == 1:  # Long position
-                exit_signal = (price <= pivot_aligned[i]) or (price >= h4_aligned[i])
-            else:  # Short position
-                exit_signal = (price >= pivot_aligned[i]) or (price <= l4_aligned[i])
+        else:  # Have position - look for exit to middle BB (mean reversion)
+            # Exit when price returns to middle BB
+            exit_signal = bb_exit[i]
             
             if exit_signal:
                 position = 0
