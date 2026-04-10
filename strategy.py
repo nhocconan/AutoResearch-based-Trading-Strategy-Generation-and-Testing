@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 12h volume confirmation and chop regime filter
-# - Primary: 4h Williams %R(14) < -80 for long, > -20 for short (extreme oversold/overbought)
+# Hypothesis: 4h Elder Ray Index with 12h volume confirmation and chop regime filter
+# - Primary: 4h Elder Ray Bull Power (EMA13) > 0 for long, Bear Power (EMA13) < 0 for short
 # - Volume filter: 12h volume > 1.3x 20-period volume MA to confirm institutional interest
 # - Regime filter: Choppiness Index(14) > 61.8 (ranging market) for mean reversion to work
-# - Exit: Williams %R returns to -50 level (mean reversion)
+# - Exit: Elder Ray power crosses zero (momentum exhaustion)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Williams %R captures extremes, chop filter ensures mean reversion environment
+# - Works in bull/bear: Elder Ray shows bull/bear power, chop filter ensures mean reversion environment
 # - Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
 
-name = "4h_12h_williamsr_meanrev_volume_chop_v1"
+name = "4h_12h_elder_ray_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,18 +35,15 @@ def generate_signals(prices):
     # Pre-compute HTF data
     volume_12h = df_12h['volume'].values
     
-    # Calculate Williams %R(14) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Calculate EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Avoid division by zero
-    hl_range = highest_high - lowest_low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    
-    williams_r = -100 * ((highest_high - close) / hl_range)
+    # Calculate Elder Ray Bull Power and Bear Power
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
     # Calculate 12h volume confirmation: volume > 1.3x 20-period volume MA
-    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_12h = pd.Series(volume_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
     
     # Calculate 14-period Choppiness Index for regime filter (using 4h data)
@@ -76,8 +73,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_ma_20_12h_aligned[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(volume_ma_20_12h_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -86,28 +83,28 @@ def generate_signals(prices):
         vol_confirm = volume_12h_current[i] > 1.3 * volume_ma_20_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold) + vol confirmation + chop filter
-            if (williams_r[i] < -80 and 
+            # Long entry: Bull Power > 0 (bullish momentum) + vol confirmation + chop filter
+            if (bull_power[i] > 0 and 
                 vol_confirm and chop_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R > -20 (overbought) + vol confirmation + chop filter
-            elif (williams_r[i] > -20 and 
+            # Short entry: Bear Power < 0 (bearish momentum) + vol confirmation + chop filter
+            elif (bear_power[i] < 0 and 
                   vol_confirm and chop_filter[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to Williams %R = -50 (mean reversion)
-            # Exit: Williams %R returns to -50 level (mean reversion)
+        else:  # Have position - look for exit when power crosses zero (momentum exhaustion)
+            # Exit: Elder Ray power crosses zero
             if position == 1:  # Long position
-                if williams_r[i] >= -50:
+                if bull_power[i] <= 0:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if williams_r[i] <= -50:
+                if bear_power[i] >= 0:
                     position = 0
                     signals[i] = 0.0
                 else:
