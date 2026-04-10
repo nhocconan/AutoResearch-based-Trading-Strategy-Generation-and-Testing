@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
-# - Primary: 4h timeframe for optimal balance of signal quality and trade frequency
-# - HTF: 1d for volatility regime (ATR percentile) and volume spike detection
-# - Long: Price breaks above 20-period Donchian high + 1d ATR > 30th percentile + volume > 1.5x 20-period MA
-# - Short: Price breaks below 20-period Donchian low + 1d ATR > 30th percentile + volume > 1.5x 20-period MA
-# - Exit: Price reverts to 20-period Donchian midpoint (mean reversion) or ATR-based stoploss
+# Hypothesis: 4h Donchian breakout with 1d volume and ATR regime filter
+# - Primary: 4h timeframe (proven sweet spot for trade frequency and Sharpe)
+# - HTF: 1d for volatility (ATR percentile) and volume confirmation
+# - Long: Price breaks above 20-period Donchian high + 1d ATR > 40th percentile + volume > 1.5x 20-period MA
+# - Short: Price breaks below 20-period Donchian low + 1d ATR > 40th percentile + volume > 1.5x 20-period MA
+# - Exit: Price reverts to 20-period Donchian midpoint (mean reversion)
 # - Position sizing: 0.25 (discrete level)
-# - Target: 80-160 total trades over 4 years (20-40/year) - within 4h sweet spot
-# - Works in bull/bear: Donchian breakouts capture trends, ATR filter avoids low-vol whipsaws, volume confirms conviction
+# - Target: 75-200 total trades over 4 years (19-50/year) - within 4h sweet spot
+# - Works in bull/bear: Donchian breakouts capture trends, mean reversion exit works in ranging markets (2025)
 
-name = "4h_1d_donchian_atr_volume_v3"
+name = "4h_1d_donchian_atr_volume_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -41,9 +41,11 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     
     # Calculate 4h Donchian Channel (20-period)
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_20 + lowest_20) / 2.0
+    high_roll = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_roll
+    donchian_low = low_roll
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     # Calculate 1d ATR(14) for volatility regime filter
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
@@ -67,44 +69,42 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or 
             np.isnan(atr_percentile_aligned[i]) or 
             np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime conditions
-        # 1d volatility regime: ATR > 30th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 30
+        # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 40
         
         # Volume confirmation: current 1d volume > 1.5x 20-period MA
         volume_spike = volume_1d[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long entry: Price breaks above Donchian high + vol regime + volume spike
-            if (close_4h[i] > highest_20[i] and vol_regime and volume_spike):
+            if (close_4h[i] > donchian_high[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
             # Short entry: Price breaks below Donchian low + vol regime + volume spike
-            elif (close_4h[i] < lowest_20[i] and vol_regime and volume_spike):
+            elif (close_4h[i] < donchian_low[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions:
-            # 1. Price reverts to Donchian midpoint (mean reversion)
-            # 2. ATR-based stoploss (2.5x ATR from entry) - simplified as midpoint reversion for now
-            
+            # Exit condition: Price reverts to Donchian midpoint (mean reversion)
             if position == 1:  # Long position
-                exit_condition = close_4h[i] < donchian_mid[i]  # Reverted to midpoint
+                exit_condition = close_4h[i] < donchian_mid[i]
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                exit_condition = close_4h[i] > donchian_mid[i]  # Reverted to midpoint
+                exit_condition = close_4h[i] > donchian_mid[i]
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
