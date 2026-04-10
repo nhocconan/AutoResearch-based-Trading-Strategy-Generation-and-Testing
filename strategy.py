@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1d ADX > 25
-# - Long when price breaks above Donchian upper band AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX > 25
-# - Short when price breaks below Donchian lower band AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX > 25
-# - Exit: price returns to Donchian midpoint (mid-band) or ATR-based trailing stop (2.5*ATR)
-# - Uses 12h for price action (Donchian channels), 1d for volume and ADX confirmation
-# - Donchian breakouts capture strong momentum moves; volume confirms breakout validity; ADX filters weak/choppy markets
-# - Tight entry conditions target 12-37 trades/year to minimize fee drag while maintaining edge
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and ADX > 20 filter
+# - Long when price breaks above Camarilla H3 level AND 1d volume > 2.0x 20-period volume SMA AND 1d ADX > 20
+# - Short when price breaks below Camarilla L3 level AND 1d volume > 2.0x 20-period volume SMA AND 1d ADX > 20
+# - Exit: price returns to Camarilla pivot point (PP) or ATR-based trailing stop (2.0*ATR)
+# - Uses 12h for price action (Camarilla levels from prior 1d), 1d for volume and ADX confirmation
+# - Camarilla levels provide structured support/resistance; volume confirms breakout validity; ADX filters weak markets
+# - Tight entry conditions target 15-35 trades/year to minimize fee drag while maintaining edge
 # - Works in bull (breakouts up) and bear (breakouts down) with volume and trend filters
 
-name = "12h_1d_donchian_volume_adx_v1"
+name = "12h_1d_camarilla_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -78,14 +78,28 @@ def generate_signals(prices):
     adx_1d = wilders_smoothing(dx_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Pre-compute Donchian channels on 12h (primary timeframe)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Pre-compute Camarilla levels on 12h using prior 1d OHLC
+    # Camarilla levels: based on prior day's range
+    # H4 = close + 1.1*(high-low)*1.1/2
+    # H3 = close + 1.1*(high-low)*1.1/4
+    # H2 = close + 1.1*(high-low)*1.1/6
+    # H1 = close + 1.1*(high-low)*1.1/12
+    # PP = (high+low+close)/3
+    # L1 = close - 1.1*(high-low)*1.1/12
+    # L2 = close - 1.1*(high-low)*1.1/6
+    # L3 = close - 1.1*(high-low)*1.1/4
+    # L4 = close - 1.1*(high-low)*1.1/2
     
-    upper_band = highest_high
-    lower_band = lowest_low
-    mid_band = (upper_band + lower_band) / 2.0
+    # Align 1d OHLC to 12h for Camarilla calculation
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    
+    # Calculate Camarilla levels
+    rang = high_1d_aligned - low_1d_aligned
+    H3 = close_1d_aligned + 1.1 * rang * 1.1 / 4
+    L3 = close_1d_aligned - 1.1 * rang * 1.1 / 4
+    PP = (high_1d_aligned + low_1d_aligned + close_1d_aligned) / 3.0
     
     # ATR for dynamic stoploss (using 12h data)
     tr_12h1 = np.abs(high[1:] - low[:-1])
@@ -95,52 +109,52 @@ def generate_signals(prices):
     tr_12h = np.concatenate([[np.nan], tr_12h])
     atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(lookback, n):
+    for i in range(1, n):  # Start from 1 to ensure we have prior day data
         # Skip if any required data is invalid
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(PP[i]) or 
             np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
             np.isnan(atr_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
+        # Volume confirmation: 1d volume > 2.0x 20-period volume SMA
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        vol_confirm = vol_1d_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: 1d ADX > 25 indicates strong trend
-        trend_filter = adx_1d_aligned[i] > 25.0
+        # Trend filter: 1d ADX > 20 indicates strong trend
+        trend_filter = adx_1d_aligned[i] > 20.0
         
         # Only trade when both volume confirmation and trend filter are present
         if vol_confirm and trend_filter:
-            # Long breakout: price breaks above Donchian upper band
-            if close[i] > upper_band[i]:
+            # Long breakout: price breaks above Camarilla H3 level
+            if close[i] > H3[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25  # Maintain position
-            # Short breakout: price breaks below Donchian lower band
-            elif close[i] < lower_band[i]:
+            # Short breakout: price breaks below Camarilla L3 level
+            elif close[i] < L3[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
                 else:
                     signals[i] = -0.25  # Maintain position
-            # Exit: price returns to mid-band (within 0.1% of band width)
-            elif abs(close[i] - mid_band[i]) < (upper_band[i] - lower_band[i]) * 0.001:
+            # Exit: price returns to pivot point (within 0.1% of H3-L3 range)
+            elif abs(close[i] - PP[i]) < (H3[i] - L3[i]) * 0.001:
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
             # Alternative exit: ATR-based trailing stop
-            elif position == 1 and close[i] < (highest_high_since_entry - 2.5 * atr_12h[i]):
+            elif position == 1 and close[i] < (highest_high_since_entry - 2.0 * atr_12h[i]):
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
-            elif position == -1 and close[i] > (lowest_low_since_entry + 2.5 * atr_12h[i]):
+            elif position == -1 and close[i] > (lowest_low_since_entry + 2.0 * atr_12h[i]):
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
