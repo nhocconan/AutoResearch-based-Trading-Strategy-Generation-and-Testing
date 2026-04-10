@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout + 12h RSI filter + volume confirmation
-# - Primary: 4h price breaks Camarilla H3/L3 levels for institutional breakout
-# - HTF: 12h RSI(14) > 55 for long bias, < 45 for short bias (momentum filter)
-# - Volume: 4h volume > 1.5x 20-period MA for participation confirmation
-# - Long: Price breaks above Camarilla H3 + 12h RSI > 55 + volume confirmation
-# - Short: Price breaks below Camarilla L3 + 12h RSI < 45 + volume confirmation
-# - Exit: Price crosses Camarilla pivot point (mean reversion to median)
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# - Works in bull/bear: Camarilla captures breakouts, RSI filters counter-trend moves, volume confirms participation
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and 1d volume spike
+# - Primary: 1h RSI(14) < 30 for long, > 70 for short (mean reversion)
+# - HTF trend: 4h close > 20-period EMA for long bias, < 20-period EMA for short bias
+# - HTF volume: 1d volume > 1.5x 20-period MA for participation confirmation
+# - Session filter: 08-20 UTC to avoid low-liquidity hours
+# - Long: RSI<30 + 4h EMA uptrend + 1d volume spike + session
+# - Short: RSI>70 + 4h EMA downtrend + 1d volume spike + session
+# - Exit: RSI crosses 50 (mean reversion midpoint)
+# - Position sizing: 0.20 (discrete level to minimize fee churn)
+# - Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
+# - Works in bull/bear: RSI mean reversion works in ranges, 4h EMA filter avoids counter-trend trades, volume confirms participation
 
-name = "4h_12h_camarilla_rsi_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_rsi_ema_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,8 +25,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,104 +37,81 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    close_4h = df_4h['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Camarilla pivot levels (based on previous bar)
-    camarilla_h3 = np.full(len(close), np.nan)
-    camarilla_l3 = np.full(len(close), np.nan)
-    camarilla_pivot = np.full(len(close), np.nan)
-    
-    for i in range(1, len(close)):
-        if not (np.isnan(high[i-1]) or np.isnan(low[i-1]) or np.isnan(close[i-1])):
-            # Calculate pivot point from previous bar
-            camarilla_pivot[i] = (high[i-1] + low[i-1] + close[i-1]) / 3.0
-            range_prev = high[i-1] - low[i-1]
-            camarilla_h3[i] = camarilla_pivot[i] + range_prev * 1.1 / 4.0
-            camarilla_l3[i] = camarilla_pivot[i] - range_prev * 1.1 / 4.0
-    
-    # Calculate 4h volume moving average (20-period)
-    volume_ma_20 = np.full(len(volume), np.nan)
-    for i in range(19, len(volume)):
-        if not np.isnan(volume[i-19:i+1]).any():
-            volume_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Calculate 12h RSI (14-period)
-    delta = np.diff(close_12h, prepend=close_12h[0])
+    # Calculate 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     
-    avg_gain = np.full(len(gain), np.nan)
-    avg_loss = np.full(len(loss), np.nan)
+    # Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Wilder's smoothing
-    for i in range(len(gain)):
-        if i < 14:
-            if i == 0:
-                avg_gain[i] = gain[i]
-                avg_loss[i] = loss[i]
-            else:
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    avg_gain = wilders_smoothing(gain, 14)
+    avg_loss = wilders_smoothing(loss, 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    rs = np.full(len(avg_gain), np.nan)
-    rsi_12h = np.full(len(avg_gain), np.nan)
-    for i in range(len(avg_gain)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi_12h[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi_12h[i] = 100.0 if avg_gain[i] > 0 else 0.0
+    # Calculate 4h EMA(20)
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Align HTF indicators to 4h timeframe
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+    # Calculate 1d volume MA(20)
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     for i in range(30, n):
-        # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(camarilla_pivot[i]) or np.isnan(volume_ma_20[i]) or 
-            np.isnan(rsi_12h_aligned[i]) or np.isnan(volume_12h_aligned[i])):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period MA
-        volume_confirm = volume[i] > 1.5 * volume_ma_20[i]
-        
-        # RSI filters: >55 for long bias, <45 for short bias
-        rsi_long_bias = rsi_12h_aligned[i] > 55
-        rsi_short_bias = rsi_12h_aligned[i] < 45
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above Camarilla H3 + RSI long bias + volume confirmation
-            if close[i] > camarilla_h3[i] and rsi_long_bias and volume_confirm:
+            # Long entry: RSI<30 + 4h EMA uptrend + volume spike + session
+            if (rsi[i] < 30 and close[i] > ema_4h_aligned[i] and volume_confirm):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Price breaks below Camarilla L3 + RSI short bias + volume confirmation
-            elif close[i] < camarilla_l3[i] and rsi_short_bias and volume_confirm:
+                signals[i] = 0.20
+            # Short entry: RSI>70 + 4h EMA downtrend + volume spike + session
+            elif (rsi[i] > 70 and close[i] < ema_4h_aligned[i] and volume_confirm):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Price crosses Camarilla pivot point (mean reversion to median)
+            # Exit: RSI crosses 50 (mean reversion midpoint)
             if position == 1:  # Long position
-                if close[i] <= camarilla_pivot[i]:
+                if rsi[i] >= 50:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1 (Short position)
-                if close[i] >= camarilla_pivot[i]:
+                if rsi[i] <= 50:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
