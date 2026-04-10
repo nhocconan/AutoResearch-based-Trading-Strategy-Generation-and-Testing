@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ATR Regime Filter
-# - Primary: 6h Elder Ray (Bull Power = Close - EMA13, Bear Power = EMA13 - Close)
-# - HTF regime: 1d ATR(14) / ATR(50) > 1.2 = high volatility (trend mode), < 0.8 = low volatility (range mode)
-# - In high volatility: trend follow (long when Bull Power > 0 and rising, short when Bear Power > 0 and rising)
-# - In low volatility: mean revert (long when Bull Power < -0.5*ATR6h and turning up, short when Bear Power < -0.5*ATR6h and turning down)
-# - Volume confirmation: 6h volume > 1.5x 20-period MA
-# - Position sizing: 0.25
-# - Works in bull/bear: adapts to volatility regime, uses Elder Ray for momentum/mean reversion, volume confirms participation
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1w trend filter
+# - Primary: 4h price breaking above/below Donchian(20) channels from prior 20 bars
+# - HTF volume filter: 12h volume > 1.5x 20-period MA for institutional participation
+# - HTF trend filter: 1w close > 1w EMA50 for long bias, < EMA50 for short bias
+# - Entry: Long when close > upper Donchian + volume filter + 1w uptrend; Short when close < lower Donchian + volume filter + 1w downtrend
+# - Exit: Price retouches the middle of Donchian channel (mean of upper/lower) or opposite band touch
+# - Position sizing: 0.25 (discrete level to minimize fee churn)
+# - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# - Works in bull/bear: Donchian adapts to volatility, volume confirms validity, 1w trend ensures alignment with higher timeframe momentum
 
-name = "6h_1d_elder_ray_regime_v1"
-timeframe = "6h"
+name = "4h_12h_1w_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,8 +23,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_12h) < 30 or len(df_1w) < 20:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -33,40 +35,35 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate ATR for 6h (primary)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # first bar
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Donchian(20) channels from prior 20 bars (lookback period)
+    def calculate_donchian(high, low, lookback=20):
+        upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+        lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+        middle = (upper + lower) / 2.0
+        return upper, lower, middle
     
-    # Calculate EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = close - ema_13  # Close - EMA13
-    bear_power = ema_13 - close  # EMA13 - Close
+    # Calculate Donchian on prior 20 bars (shifted by 1 to avoid look-ahead)
+    upper_20, lower_20, middle_20 = calculate_donchian(high, low, lookback=20)
+    # Shift by 1 to use only prior completed bars for channel calculation
+    upper_20 = np.concatenate([np.full(20, np.nan), upper_20[:-1]])
+    lower_20 = np.concatenate([np.full(20, np.nan), lower_20[:-1]])
+    middle_20 = np.concatenate([np.full(20, np.nan), middle_20[:-1]])
     
-    # Calculate 1d ATR regime filter
-    tr1d = high_1d - low_1d
-    tr1d_hl = np.abs(high_1d - np.roll(close_1d, 1))
-    tr1d_ll = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1d[0] = high_1d[0] - low_1d[0]
-    tr1d_hl[0] = np.abs(high_1d[0] - close_1d[0])
-    tr1d_ll[0] = np.abs(low_1d[0] - close_1d[0])
-    tr_1d = np.maximum(tr1d, np.maximum(tr1d_hl, tr1d_ll))
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_50_1d = pd.Series(tr_1d).rolling(window=50, min_periods=50).mean().values
-    atr_ratio_1d = atr_14_1d / np.where(atr_50_1d != 0, atr_50_1d, 1e-10)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # Calculate 12h volume MA(20)
+    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
     
-    # Calculate 6h volume MA(20)
-    volume_ma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1w EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -77,70 +74,41 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(atr_6h[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
-            np.isnan(volume_ma_20_6h[i]) or not in_session[i]):
+        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or np.isnan(middle_20[i]) or
+            np.isnan(volume_ma_20_12h_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period MA
-        volume_confirm = volume[i] > 1.5 * volume_ma_20_6h[i]
+        # Volume confirmation: current 12h volume > 1.5x 20-period MA
+        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+        volume_confirm = volume_12h_aligned[i] > 1.5 * volume_ma_20_12h_aligned[i]
         
-        # Regime filters
-        high_vol = atr_ratio_1d_aligned[i] > 1.2  # ATR(14)/ATR(50) > 1.2
-        low_vol = atr_ratio_1d_aligned[i] < 0.8   # ATR(14)/ATR(50) < 0.8
+        # Trend filter: 1w close > EMA50 for uptrend, < EMA50 for downtrend
+        trend_up = close_1w[-1] > ema_50_1w[-1] if len(close_1w) > 0 else False
+        trend_down = close_1w[-1] < ema_50_1w[-1] if len(close_1w) > 0 else False
         
         if position == 0:  # Flat - look for new entries
-            if high_vol:  # High volatility: trend follow
-                # Long: Bull Power > 0 and rising (current > previous)
-                # Short: Bear Power > 0 and rising (current > previous)
-                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and volume_confirm:
-                    position = 1
-                    signals[i] = 0.25
-                elif bear_power[i] > 0 and bear_power[i] > bear_power[i-1] and volume_confirm:
-                    position = -1
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
-            elif low_vol:  # Low volatility: mean revert
-                # Long: Bull Power < -0.5*ATR6h and turning up (current > previous)
-                # Short: Bear Power < -0.5*ATR6h and turning down (current < previous)
-                if bull_power[i] < -0.5 * atr_6h[i] and bull_power[i] > bull_power[i-1] and volume_confirm:
-                    position = 1
-                    signals[i] = 0.25
-                elif bear_power[i] < -0.5 * atr_6h[i] and bear_power[i] < bear_power[i-1] and volume_confirm:
-                    position = -1
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
-            else:  # Neutral regime - no trade
+            # Long entry: close > upper Donchian + volume confirmation + 1w uptrend
+            if (close[i] > upper_20[i] and volume_confirm and trend_up):
+                position = 1
+                signals[i] = 0.25
+            # Short entry: close < lower Donchian + volume confirmation + 1w downtrend
+            elif (close[i] < lower_20[i] and volume_confirm and trend_down):
+                position = -1
+                signals[i] = -0.25
+            else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: regime change or power reversal
+            # Exit: Price retouches middle of Donchian channel OR touches opposite band
             if position == 1:  # Long position
-                exit_condition = False
-                if high_vol and (bull_power[i] <= 0 or bull_power[i] < bull_power[i-1]):
-                    exit_condition = True  # Trend follow exit: power <= 0 or falling
-                elif low_vol and bull_power[i] >= -0.2 * atr_6h[i]:
-                    exit_condition = True  # Mean revert exit: power back to neutral
-                elif not (high_vol or low_vol):  # Neutral regime exit
-                    exit_condition = True
-                
-                if exit_condition:
+                if close[i] <= middle_20[i] or close[i] >= upper_20[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                exit_condition = False
-                if high_vol and (bear_power[i] <= 0 or bear_power[i] < bear_power[i-1]):
-                    exit_condition = True  # Trend follow exit: power <= 0 or falling
-                elif low_vol and bear_power[i] >= -0.2 * atr_6h[i]:
-                    exit_condition = True  # Mean revert exit: power back to neutral
-                elif not (high_vol or low_vol):  # Neutral regime exit
-                    exit_condition = True
-                
-                if exit_condition:
+                if close[i] >= middle_20[i] or close[i] <= lower_20[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
