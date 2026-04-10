@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and choppiness regime filter
-# - Long when price breaks above H3 level AND volume > 1.5x 20-bar average AND CHOP(14) < 38.2 (trending)
-# - Short when price breaks below L3 level AND volume > 1.5x 20-bar average AND CHOP(14) < 38.2 (trending)
-# - Exit when price returns to Pivot Point (PP) level
-# - Uses discrete position sizing (0.25) to balance return and drawdown
-# - Camarilla levels from 1d provide institutional support/resistance
-# - Volume confirmation avoids low-liquidity false breakouts
-# - Choppiness filter ensures we only trade in trending regimes (avoids whipsaws in ranging markets)
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# - Works in both bull and bear markets: breakouts capture momentum, regime filter avoids counter-trend trades
+# Hypothesis: 12h Williams Alligator trend + 1d volume spike + chop regime filter
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
+# - Trend up: Lips > Teeth > Jaw; Trend down: Lips < Teeth < Jaw
+# - Enter long in Alligator uptrend + volume spike + chop < 61.8 (trending regime)
+# - Enter short in Alligator downtrend + volume spike + chop < 61.8
+# - Exit when Alligator reverses (Lips crosses Teeth) or chop > 61.8 (range regime)
+# - Uses discrete position sizing (0.25) to balance return and fee drag
+# - Alligator catches sustained trends; volume confirms institutional participation
+# - Chop filter avoids whipsaws in ranging markets (critical for 2025 bear/range)
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_camarilla_breakout_volume_chop_v2"
-timeframe = "4h"
+name = "12h_1d_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,65 +28,54 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute Williams Alligator on 12h data
+    median_price = (prices['high'].values + prices['low'].values) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3)
     
-    # Calculate pivot point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate Camarilla levels
-    range_1d = high_1d - low_1d
-    h3 = pp + (range_1d * 1.1 / 4.0)
-    l3 = pp - (range_1d * 1.1 / 4.0)
+    # Alligator trends: Lips > Teeth > Jaw (up), Lips < Teeth < Jaw (down)
+    alligator_up = (lips > teeth) & (teeth > jaw)
+    alligator_down = (lips < teeth) & (teeth < jaw)
     
-    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    # Pre-compute 1d volume confirmation: > 1.8x 20-period average
     volume_1d = df_1d['volume'].values
     volume_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.5 * volume_20_avg_1d)
+    vol_spike_1d = volume_1d > (1.8 * volume_20_avg_1d)
     
-    # Pre-compute Choppiness Index on 1d: CHOP(14) < 38.2 = trending
-    # CHOP = 100 * log10(sum(ATR(14)) / (n * (max_high - min_low))) / log10(n)
-    tr_1d = np.maximum(
-        high_1d[1:] - low_1d[1:],
-        np.maximum(
-            np.abs(high_1d[1:] - close_1d[:-1]),
-            np.abs(low_1d[1:] - close_1d[:-1])
-        )
-    )
-    # Pad TR array to match length
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_14_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = 14 * (max_high_14 - min_low_14)
-    chop_raw = np.where(
-        (chop_denominator > 0) & (~np.isnan(sum_atr_14)),
-        100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14),
-        50.0  # Default to neutral when undefined
-    )
-    chop_1d = chop_raw
-    chop_trending = chop_1d < 38.2  # Trending regime
-    
-    # Align HTF indicators to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align HTF indicators to 12h timeframe
+    alligator_up_aligned = align_htf_to_ltf(prices, df_1d, alligator_up.values if hasattr(alligator_up, 'values') else alligator_up)
+    alligator_down_aligned = align_htf_to_ltf(prices, df_1d, alligator_down.values if hasattr(alligator_down, 'values') else alligator_down)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    chop_trending_aligned = align_htf_to_ltf(prices, df_1d, chop_trending)
     
-    # Pre-compute session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # Pre-compute Choppiness Index on 12h data (regime filter)
+    atr_period = 14
+    high_low = prices['high'].values - prices['low'].values
+    high_close = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
+    low_close = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
+    high_close[0] = high_low[0]
+    low_close[0] = high_low[0]
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    hh = pd.Series(prices['high'].values).rolling(window=atr_period, min_periods=atr_period).max().values
+    ll = pd.Series(prices['low'].values).rolling(window=atr_period, min_periods=atr_period).min().values
+    
+    # Avoid division by zero
+    sum_atr = pd.Series(atr).rolling(window=atr_period, min_periods=atr_period).sum().values
+    range_hl = hh - ll
+    chop = np.where(range_hl != 0, 100 * np.log10(sum_atr / range_hl) / np.log10(atr_period), 50)
+    
+    # Chop regime: < 61.8 = trending (good for Alligator), > 61.8 = ranging (avoid)
+    chop_trending = chop < 61.8
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pp_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_trending_aligned[i])):
+        if (np.isnan(alligator_up_aligned[i]) or np.isnan(alligator_down_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_trending[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -96,33 +85,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Apply session filter
-        if not in_session[i]:
-            # Outside session: flatten position
-            position = 0
-            signals[i] = 0.0
-            continue
-        
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND volume spike AND trending regime
-            if (prices['close'].iloc[i] > h3_aligned[i] and
-                vol_spike_1d_aligned[i] and
-                chop_trending_aligned[i]):
+        if position == 0:  # Flat - look for new Alligator entries
+            # Long when Alligator uptrend + volume spike + chop trending
+            if (alligator_up_aligned[i] and 
+                vol_spike_1d_aligned[i] and 
+                chop_trending[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND volume spike AND trending regime
-            elif (prices['close'].iloc[i] < l3_aligned[i] and
-                  vol_spike_1d_aligned[i] and
-                  chop_trending_aligned[i]):
+            # Short when Alligator downtrend + volume spike + chop trending
+            elif (alligator_down_aligned[i] and 
+                  vol_spike_1d_aligned[i] and 
+                  chop_trending[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to Pivot Point (mean reversion)
-            # Exit when price returns to Pivot Point level
-            exit_signal = np.abs(prices['close'].iloc[i] - pp_aligned[i]) < (0.1 * pp_aligned[i])
+        else:  # Have position - look for exit conditions
+            # Exit when Alligator reverses OR chop enters ranging regime
+            alligator_reverse = (position == 1 and not alligator_up_aligned[i]) or \
+                               (position == -1 and not alligator_down_aligned[i])
+            chop_range = not chop_trending[i]
             
-            if exit_signal:
+            if alligator_reverse or chop_range:
                 position = 0
                 signals[i] = 0.0
             else:
