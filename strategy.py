@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and 1w trend filter
-# - Long when price breaks above 4h Camarilla R4 level AND 1d volume > 1.5x 20-period volume SMA AND 1w close > 1w EMA20
-# - Short when price breaks below 4h Camarilla S4 level AND 1d volume > 1.5x 20-period volume SMA AND 1w close < 1w EMA20
-# - Exit: price retreats to Camarilla pivot point (PP) or volume drops below average
-# - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 19-50 trades/year on 4h timeframe to stay within fee drag limits
-# - Uses Camarilla levels from 1d timeframe for structure, 4h for execution timing
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
+# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
+# - Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d close > 1d EMA50 AND 6h volume > 1.5x 20-period volume SMA
+# - Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d close < 1d EMA50 AND 6h volume > 1.5x 20-period volume SMA
+# - Exit: Elder Power crosses zero or volume drops below average
+# - Uses 1d EMA50 for trend filter to avoid counter-trend trades in bear markets
+# - Volume spike requirement reduces false breakouts and overtrading
+# - Target: 12-35 trades/year on 6h timeframe (50-140 total over 4 years) to stay within fee drag limits
 
-name = "4h_1d_1w_camarilla_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_elder_ray_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,8 +23,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,70 +35,60 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 1d Camarilla pivot levels from 1d OHLC
-    # Camarilla formula: PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1/2
-    # S4 = PP - (H - L) * 1.1/2
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_range = high_1d - low_1d
-    camarilla_r4 = camarilla_pp + camarilla_range * 1.1 / 2.0
-    camarilla_s4 = camarilla_pp - camarilla_range * 1.1 / 2.0
+    # Calculate 1d close for trend comparison
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Align 1d Camarilla levels to 4h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = ema_13 - low   # EMA13 - Low
     
-    # Calculate 1w close for trend comparison
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-    
-    # Calculate 1d volume SMA for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    
-    # Calculate 4h volume SMA for confirmation
-    volume_sma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h volume SMA for confirmation
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(40, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_sma_20_4h[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(close_1d_aligned[i]) or
+            np.isnan(ema_13[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA AND 1d volume > 1.5x 20-period volume SMA
-        vol_confirm_4h = volume[i] > 1.5 * volume_sma_20_4h[i]
-        vol_confirm_1d = volume_1d[i // 6] > 1.5 * volume_sma_20_1d_aligned[i] if i // 6 < len(volume_1d) else False
-        vol_confirm = vol_confirm_4h and vol_confirm_1d
+        # Volume confirmation: 6h volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Trend filter: 1w close vs 1w EMA20
-        trend_bullish = close_1w_aligned[i] > ema_20_1w_aligned[i]
-        trend_bearish = close_1w_aligned[i] < ema_20_1w_aligned[i]
+        # Trend filter: 1d close vs 1d EMA50
+        trend_bullish = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_bearish = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Camarilla breakout signals
-        breakout_up = close[i] > camarilla_r4_aligned[i-1]  # Break above previous R4
-        breakout_down = close[i] < camarilla_s4_aligned[i-1]  # Break below previous S4
+        # Elder Ray signals with momentum confirmation
+        # Long: Bull Power positive AND Bear Power rising (increasing = less negative)
+        # Short: Bear Power negative AND Bull Power falling (decreasing = less positive)
+        if i >= 1:
+            bull_power_rising = bull_power[i] > bull_power[i-1]
+            bear_power_falling = bear_power[i] < bear_power[i-1]
+        else:
+            bull_power_rising = False
+            bear_power_falling = False
         
-        # Exit conditions: price retreats to pivot point or loss of volume confirmation
-        exit_long = close[i] < camarilla_pp_aligned[i] or not vol_confirm
-        exit_short = close[i] > camarilla_pp_aligned[i] or not vol_confirm
+        long_entry = bull_power[i] > 0 and bull_power_rising and trend_bullish and vol_confirm
+        short_entry = bear_power[i] < 0 and bear_power_falling and trend_bearish and vol_confirm
+        
+        # Exit conditions: Elder Power crosses zero or loss of volume confirmation
+        exit_long = bull_power[i] <= 0 or not vol_confirm
+        exit_short = bear_power[i] >= 0 or not vol_confirm
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and trend_bullish and vol_confirm:
+            if long_entry:
                 position = 1
                 signals[i] = 0.25
-            elif breakout_down and trend_bearish and vol_confirm:
+            elif short_entry:
                 position = -1
                 signals[i] = -0.25
             else:
