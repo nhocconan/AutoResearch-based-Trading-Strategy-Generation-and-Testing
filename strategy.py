@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and ATR filter
-# - Primary signal: Price breaks above/below Donchian(20) channel on 1d
-# - Volume filter: 1w volume > 1.5x 20-period average volume (institutional participation)
-# - ATR filter: 1w ATR(14) < 0.04 * price (low volatility for cleaner breakouts)
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume confirmation and trend filter
+# - Primary signal: Bollinger Band width at 20-period low + price breaks above/below bands
+# - Volume filter: 1d volume > 1.3x 30-period average volume (institutional participation)
+# - Trend filter: Price > 1d EMA50 for longs, Price < 1d EMA50 for shorts (avoid counter-trend)
 # - Position size: 0.25 discrete level to minimize fee churn
-# - Stoploss: 2.0x ATR(20) on 1d
-# - Target: 7-25 trades/year (30-100 total over 4 years) per 1d strategy guidelines
-# - Works in bull/bear: Breakouts capture strong moves; filters avoid chop/false signals
+# - Stoploss: Opposite Bollinger Band (long exits at lower band, short exits at upper band)
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Works in bull/bear: Squeeze breakouts capture volatility expansion; filters avoid false signals
 
-name = "1d_1w_donchian_volume_atr_v1"
-timeframe = "1d"
+name = "6h_1d_bb_squeeze_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,85 +22,72 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w volume spike filter
-    volume_1w = df_1w['volume'].values
-    avg_volume_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1w > (1.5 * avg_volume_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1w, vol_spike)
+    # Pre-compute 1d volume spike filter
+    volume_1d = df_1d['volume'].values
+    avg_volume_30 = pd.Series(volume_1d).rolling(window=30, min_periods=30).mean().values
+    vol_spike = volume_1d > (1.3 * avg_volume_30)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Pre-compute 1w ATR(14) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    tr_1w1 = high_1w - low_1w
-    tr_1w2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr_1w3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_1w = np.maximum(tr_1w1, np.maximum(tr_1w2, tr_1w3))
-    tr_1w[0] = tr_1w1[0]
-    atr_14 = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    atr_filter = (atr_14 / close_1w) < 0.04  # ATR < 4% of price
-    atr_filter_aligned = align_htf_to_ltf(prices, df_1w, atr_filter)
+    # Pre-compute 6h Bollinger Bands (20, 2.0)
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
     
-    # Pre-compute 1d Donchian channels (20-period)
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
+    sma_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + (2.0 * std_20)
+    bb_lower = sma_20 - (2.0 * std_20)
+    bb_width = (bb_upper - bb_lower) / sma_20  # Normalized width
     
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Pre-compute 1d ATR(20) for stoploss
-    tr_1d1 = high_1d - low_1d
-    tr_1d2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr_1d3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr_1d1, np.maximum(tr_1d2, tr_1d3))
-    tr_1d[0] = tr_1d1[0]
-    atr_20 = pd.Series(tr_1d).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Band squeeze: width at 20-period low
+    bb_width_min = pd.Series(bb_width).rolling(window=20, min_periods=20).min().values
+    bb_squeeze = bb_width <= bb_width_min
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_spike_aligned[i]) or np.isnan(atr_filter_aligned[i]) or
-            np.isnan(atr_20[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(bb_squeeze[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Donchian mean reversion OR stoploss hit
-            if close_1d[i] < donchian_low[i] or close_1d[i] < entry_price - 2.0 * atr_20[i]:
+            # Exit: price closes below Bollinger middle band (mean reversion)
+            if close_6h[i] < sma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Donchian mean reversion OR stoploss hit
-            if close_1d[i] > donchian_high[i] or close_1d[i] > entry_price + 2.0 * atr_20[i]:
+            # Exit: price closes above Bollinger middle band (mean reversion)
+            if close_6h[i] > sma_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakouts with volume and volatility filters
-            if vol_spike_aligned[i] and atr_filter_aligned[i]:
-                # Long: price breaks above Donchian high
-                if close_1d[i] > donchian_high[i]:
+            # Look for Bollinger Band squeeze breakouts with volume and trend filters
+            if bb_squeeze[i] and vol_spike_aligned[i]:
+                # Long: price breaks above upper band AND above 1d EMA50 (uptrend)
+                if close_6h[i] > bb_upper[i] and close_6h[i] > ema_50_aligned[i]:
                     position = 1
-                    entry_price = close_1d[i]
                     signals[i] = 0.25
-                # Short: price breaks below Donchian low
-                elif close_1d[i] < donchian_low[i]:
+                # Short: price breaks below lower band AND below 1d EMA50 (downtrend)
+                elif close_6h[i] < bb_lower[i] and close_6h[i] < ema_50_aligned[i]:
                     position = -1
-                    entry_price = close_1d[i]
                     signals[i] = -0.25
     
     return signals
