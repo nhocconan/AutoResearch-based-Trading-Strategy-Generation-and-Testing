@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot Breakout with 1d volume and ATR regime filter
-# - Primary: 4h timeframe for optimal trade frequency (target: 75-200 total trades over 4 years)
-# - HTF: 1d for volatility (ATR percentile) and volume confirmation
-# - Long: Price breaks above H3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Short: Price breaks below L3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4
+# Hypothesis: 6h Williams Alligator + 1d Elder Ray Regime Filter
+# - Primary: 6h timeframe for lower trade frequency and reduced fee drag
+# - HTF: 1d for Elder Ray (Bull/Bear Power) regime detection and Williams Alligator alignment
+# - Williams Alligator (6h): Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs
+# - Elder Ray (1d): Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# - Long: Alligator aligned bullish (Lips > Teeth > Jaw) + 1d Bull Power > 0 + 1d Bear Power < 0
+# - Short: Alligator aligned bearish (Lips < Teeth < Jaw) + 1d Bear Power < 0 + 1d Bull Power < 0
+# - Exit: Alligator alignment reverses (Lips crosses Teeth)
 # - Position sizing: 0.25 (discrete level)
-# - Session filter: 08-20 UTC to reduce noise trades
-# - Works in bull/bear: Camarilla pivots capture mean reversion in ranging markets (2025) and breakouts in trending markets
+# - Works in bull/bear: Alligator catches trends, Elder Ray filters regime strength
+# - Target: 50-120 total trades over 4 years (12-30/year) - within 6h sweet spot
 
-name = "4h_1d_camarilla_pivot_v1"
-timeframe = "4h"
+name = "6h_1d_alligator_elderray_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,108 +29,82 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLCV
-    open_4h = prices['open'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # Pre-compute 6h OHLCV
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Camarilla Pivot Points (based on previous 1d)
-    # Align 1d OHLC to 4h bars (using previous 1d bar's OHLC)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    # Calculate Williams Alligator on 6h
+    # Jaw: 13-period SMA, shifted 8 bars
+    jaw = pd.Series(close_6h).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMA, shifted 5 bars
+    teeth = pd.Series(close_6h).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMA, shifted 3 bars
+    lips = pd.Series(close_6h).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate Camarilla levels for each 4h bar (using previous 1d OHLC)
-    rng = high_1d_aligned - low_1d_aligned
-    h3 = close_1d_aligned + 1.25 * rng  # Long entry: break above H3
-    l3 = close_1d_aligned - 1.25 * rng  # Short entry: break below L3
-    h4 = close_1d_aligned + 1.5 * rng   # Long exit: break above H4 (take profit)
-    l4 = close_1d_aligned - 1.5 * rng   # Short exit: break below L4 (take profit)
-    pivot = (high_1d_aligned + low_1d_aligned + close_1d_aligned) / 3.0  # Mean reversion exit
+    # Calculate Elder Ray on 1d
+    # EMA(13) of close
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Bull Power = High - EMA(13)
+    bull_power_1d = high_1d - ema_13_1d
+    # Bear Power = Low - EMA(13)
+    bear_power_1d = low_1d - ema_13_1d
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ATR percentile rank (using 30-bar lookback)
-    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
-    
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Align 1d indicators to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
+    for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime conditions
-        # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 40
+        # Williams Alligator alignment
+        # Bullish: Lips > Teeth > Jaw
+        alligator_bullish = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        # Bearish: Lips < Teeth < Jaw
+        alligator_bearish = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d[i // 24] > 1.3 * volume_ma_20_1d_aligned[i]
+        # Elder Ray regime (from 1d)
+        # Strong bull: Bull Power > 0 and Bear Power < 0
+        strong_bull = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0
+        # Strong bear: Bear Power < 0 and Bull Power < 0
+        strong_bear = bear_power_aligned[i] < 0 and bull_power_aligned[i] < 0
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above H3 resistance + vol regime + volume spike
-            if (close_4h[i] > h3[i] and vol_regime and volume_spike):
+            # Long entry: Bullish Alligator + Strong Bull regime
+            if alligator_bullish and strong_bull:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below L3 support + vol regime + volume spike
-            elif (close_4h[i] < l3[i] and vol_regime and volume_spike):
+            # Short entry: Bearish Alligator + Strong Bear regime
+            elif alligator_bearish and strong_bear:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions:
-            # 1. Price reverts to Pivot Point (mean reversion)
-            # 2. Price breaks opposite H4/L4 level (take profit)
-            
+            # Exit: Alligator alignment reverses (Lips crosses Teeth)
             if position == 1:  # Long position
-                exit_condition = (
-                    close_4h[i] < pivot[i] or  # Reverted to pivot
-                    close_4h[i] > h4[i]        # Break above H4 (take profit)
-                )
+                exit_condition = lips[i] < teeth[i]  # Lips crossed below Teeth
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                exit_condition = (
-                    close_4h[i] > pivot[i] or  # Reverted to pivot
-                    close_4h[i] < l4[i]        # Break below L4 (take profit)
-                )
+                exit_condition = lips[i] > teeth[i]  # Lips crossed above Teeth
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
