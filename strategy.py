@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w chop regime filter
-# - Primary signal: Price breaks above/below 20-period Donchian channel on 4h
-# - Volume confirmation: 1d volume > 1.5x 20-period average volume (avoid low-participation breakouts)
-# - Regime filter: 1w Choppiness Index > 61.8 (range) for mean reversion, < 38.2 (trend) for continuation
-# - Works in bull/bear: In trends (CHOP < 38.2), breakouts continue; in ranges (CHOP > 61.8), fade Donchian touches
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR volatility filter + 1w Choppiness regime
+# - Primary signal: Price breaks above/below 20-period Donchian channel on 4h with volume confirmation
+# - Volatility filter: 1d ATR(14) > 1.2x 20-period average ATR (ensures sufficient volatility for breakout)
+# - Regime filter: 1w Choppiness Index > 50 (any non-trending market enables mean reversion at Donchian mid)
+# - In ranging markets (CHOP > 50): fade Donchian extremes toward mid-line (mean reversion)
+# - In trending markets (CHOP <= 50): breakout continuation in direction of break
 # - Position size: 0.25 discrete level to minimize fee churn
 # - Target: 20-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
-# - ATR-based stoploss: exit when price moves against position by 2.5x ATR(20)
+# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(20)
 
-name = "4h_1d_1w_donchian_volume_chop_v3"
+name = "4h_1d_1w_donchian_vol_chop_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,11 +28,20 @@ def generate_signals(prices):
     if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 1d volume spike filter
-    volume_1d = df_1d['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * avg_volume_20)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Pre-compute 1d ATR volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr_1d1 = high_1d - low_1d
+    tr_1d2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr_1d3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr_1d1, np.maximum(tr_1d2, tr_1d3))
+    tr_1d[0] = tr_1d1[0]
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    avg_atr_20 = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr_14_1d > (1.2 * avg_atr_20)
+    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
     
     # Pre-compute 1w Choppiness Index
     high_1w = df_1w['high'].values
@@ -83,14 +93,14 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_filter_aligned[i]) or np.isnan(chop_aligned[i]) or
             np.isnan(atr_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: Donchian mean reversion OR stoploss hit
-            if close_4h[i] < donchian_mid[i] or close_4h[i] < entry_price - 2.5 * atr_20[i]:
+            if close_4h[i] < donchian_mid[i] or close_4h[i] < entry_price - 2.0 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -98,28 +108,28 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: Donchian mean reversion OR stoploss hit
-            if close_4h[i] > donchian_mid[i] or close_4h[i] > entry_price + 2.5 * atr_20[i]:
+            if close_4h[i] > donchian_mid[i] or close_4h[i] > entry_price + 2.0 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakouts with volume spike and chop regime filter
-            # In ranging markets (CHOP > 61.8): fade Donchian touches (mean reversion)
-            # In trending markets (CHOP < 38.2): breakout continuation
-            if volume_spike_aligned[i]:
-                if chop_aligned[i] > 61.8:  # ranging market - mean reversion
-                    # Long: price touches lower Donchian band
-                    if close_4h[i] <= donchian_low[i] * 1.001:  # small buffer for noise
+            # Look for Donchian breakouts with volatility filter and chop regime
+            # In ranging markets (CHOP > 50): mean reversion at Donchian extremes
+            # In trending markets (CHOP <= 50): breakout continuation
+            if vol_filter_aligned[i]:
+                if chop_aligned[i] > 50.0:  # ranging market - mean reversion
+                    # Long: price at lower Donchian band
+                    if close_4h[i] <= donchian_low[i] * 1.0005:  # tiny buffer for noise
                         position = 1
                         entry_price = close_4h[i]
                         signals[i] = 0.25
-                    # Short: price touches upper Donchian band
-                    elif close_4h[i] >= donchian_high[i] * 0.999:
+                    # Short: price at upper Donchian band
+                    elif close_4h[i] >= donchian_high[i] * 0.9995:
                         position = -1
                         entry_price = close_4h[i]
                         signals[i] = -0.25
-                elif chop_aligned[i] < 38.2:  # trending market - breakout continuation
+                else:  # trending market - breakout continuation
                     # Long: price breaks above upper Donchian band
                     if close_4h[i] > donchian_high[i]:
                         position = 1
