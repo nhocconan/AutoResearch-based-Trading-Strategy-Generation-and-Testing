@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
-# - Long when price breaks above Camarilla H3 AND 4h EMA21 > EMA50 (bullish trend) AND hour in 08-20 UTC
-# - Short when price breaks below Camarilla L3 AND 4h EMA21 < EMA50 (bearish trend) AND hour in 08-20 UTC
-# - Exit: opposite Camarilla breakout (L3 for long, H3 for short)
-# - Uses 1h for Camarilla calculation and entry timing, 4h for trend direction
-# - Session filter reduces noise trades during low-volume hours
-# - Camarilla pivots provide mathematically derived support/resistance levels
-# - Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
-# - Works in both bull and bear markets by following 4h trend direction
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
+# - Long when: BB width < 20th percentile (squeeze) AND price breaks above upper BB AND 1w close > 1w EMA50 (bullish trend) AND volume > 1.5x volume SMA20
+# - Short when: BB width < 20th percentile (squeeze) AND price breaks below lower BB AND 1w close < 1w EMA50 (bearish trend) AND volume > 1.5x volume SMA20
+# - Exit: opposite BB breakout or BB width expands above 50th percentile
+# - Uses Bollinger squeeze to identify low volatility periods before expansion
+# - Weekly trend filter ensures we trade in direction of higher timeframe momentum
+# - Volume confirmation prevents false breakouts
+# - Target: 15-25 trades/year to minimize fee drag while capturing explosive moves
 
-name = "1h_4h_camarilla_breakout_trend_session_v1"
-timeframe = "1h"
+name = "6h_1w_bb_squeeze_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,90 +25,95 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute session hours ONCE before loop (Rule 10 compliance)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    
-    # Load 4h data ONCE before loop for trend calculation (MTF rule compliance)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1w data ONCE before loop for trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return signals
     
-    # Calculate 4h EMAs for trend filter
-    close_4h = df_4h['close'].values
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pre-compute 1h Camarilla pivots (using prior period's high/low/close)
-    # Camarilla levels: H4 = Close + 1.1*(High-Low)/2, L4 = Close - 1.1*(High-Low)/2
-    # H3 = Close + 1.1*(High-Low)/4, L3 = Close - 1.1*(High-Low)/4
-    # We'll use H3/L3 for breakouts
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    close_shift = np.roll(close, 1)
-    high_shift[0] = np.nan
-    low_shift[0] = np.nan
-    close_shift[0] = np.nan
+    # Pre-compute Bollinger Bands for 6h data (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
     
-    camarilla_range = high_shift - low_shift
-    camarilla_h3 = close_shift + 1.1 * camarilla_range / 4.0
-    camarilla_l3 = close_shift - 1.1 * camarilla_range / 4.0
+    # Pre-compute BB width percentiles (using 50-period lookback)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_pct_20 = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
+    bb_width_pct_50 = bb_width_series.rolling(window=50, min_periods=50).quantile(0.50).values
     
-    for i in range(1, n):  # Start after 1-bar warmup for shift
+    # Pre-compute volume SMA for 6h data (20-period)
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(20, n):  # Start after 20-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i])):
+        if (np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+            np.isnan(bb_width_pct_20[i]) or np.isnan(bb_width_pct_50[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Squeeze condition: BB width below 20th percentile (low volatility)
+        squeeze = bb_width[i] < bb_width_pct_20[i]
         
-        if not in_session:
-            signals[i] = 0.0
-            continue
+        # Breakout conditions
+        breakout_upper = close[i] > upper_bb[i-1]  # Break above prior period's upper BB
+        breakout_lower = close[i] < lower_bb[i-1]  # Break below prior period's lower BB
         
-        # Trend filter from 4h
-        bullish_trend = ema_21_4h_aligned[i] > ema_50_4h_aligned[i]
-        bearish_trend = ema_21_4h_aligned[i] < ema_50_4h_aligned[i]
+        # Weekly trend filter
+        above_1w_trend = close > ema_50_1w_aligned[i]  # Price above weekly EMA50
+        below_1w_trend = close < ema_50_1w_aligned[i]  # Price below weekly EMA50
         
-        # Camarilla breakout signals
-        breakout_long = close[i] > camarilla_h3[i]
-        breakout_short = close[i] < camarilla_l3[i]
+        # Volume confirmation: 6h volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Exit conditions: opposite Camarilla breakout
-        exit_long = close[i] < camarilla_l3[i]
-        exit_short = close[i] > camarilla_h3[i]
+        # Exit conditions: opposite breakout or volatility expansion (BB width > 50th percentile)
+        exit_long = breakout_lower or bb_width[i] > bb_width_pct_50[i]
+        exit_short = breakout_upper or bb_width[i] > bb_width_pct_50[i]
         
         # Trading logic
-        if bullish_trend and breakout_long:
-            if position != 1:  # Only signal on new long entry
-                position = 1
-                signals[i] = 0.20
+        if squeeze and vol_confirm:
+            # Long: BB squeeze breakout above upper BB with bullish weekly trend
+            if breakout_upper and above_1w_trend:
+                if position != 1:  # Only signal on new long entry
+                    position = 1
+                    signals[i] = 0.25
+                else:
+                    signals[i] = 0.25
+            # Short: BB squeeze breakout below lower BB with bearish weekly trend
+            elif breakout_lower and below_1w_trend:
+                if position != -1:  # Only signal on new short entry
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = 0.20
-        elif bearish_trend and breakout_short:
-            if position != -1:  # Only signal on new short entry
-                position = -1
-                signals[i] = -0.20
-            else:
-                signals[i] = -0.20
+                # Check for exits
+                if position == 1 and exit_long:
+                    position = 0
+                    signals[i] = 0.0
+                elif position == -1 and exit_short:
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    # Maintain current position
+                    signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
         else:
-            # Check for exits
-            if position == 1 and exit_long:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and exit_short:
+            # No squeeze or no volume confirmation: exit any position
+            if position != 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                # Maintain current position
-                signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+                signals[i] = 0.0
     
     return signals
