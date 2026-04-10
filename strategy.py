@@ -53,7 +53,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2
     camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # AlCamarilla levels to 4h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
