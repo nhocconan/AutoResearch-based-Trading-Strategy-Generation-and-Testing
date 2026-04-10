@@ -44,6 +44,9 @@ def generate_signals(prices):
     # Align 1d volume MA to 4h timeframe
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
+    # Align raw 1d volume to 4h timeframe for volume confirmation
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    
     # Pre-compute 4h ATR(14) for trailing stop
     tr1 = high_4h - low_4h
     tr2 = np.abs(high_4h - np.roll(close_4h, 1))
@@ -63,7 +66,8 @@ def generate_signals(prices):
     for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_4h[i])):
+            np.isnan(volume_ma_aligned[i]) or np.isnan(volume_1d_aligned[i]) or 
+            np.isnan(atr_4h[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -72,17 +76,10 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 4h close and volume for breakout detection
+        # Get current 4h close
         close_price = close_4h[i]
-        # Note: We don't have 4h volume in the volume confirmation per hypothesis
-        # Using 1d volume as the confirmation filter (institutional interest)
         
         # Volume confirmation: 1d volume > 1.5x 20-period average
-        # Need to get the 1d volume for current day - align raw 1d volume
-        df_1d_current = get_htf_data(prices, '1d')  # This is safe - we already loaded it above
-        # Actually, we need to align the raw 1d volume, not just its MA
-        volume_1d_raw = df_1d['volume'].values
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_raw)
         volume_confirmation = volume_1d_aligned[i] > 1.5 * volume_ma_aligned[i]
         
         if position == 0:  # Flat - look for new entries
