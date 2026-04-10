@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 12h EMA trend filter and 1d volume spike filter
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and 1d volume spike filter
 # - Entry: Long when price breaks above 4h Donchian upper channel (20) + 1d volume > 2.0x 20-period average + 12h EMA(50) > EMA(200)
 #          Short when price breaks below 4h Donchian lower channel (20) + same volume and trend filters
 # - Exit: Close-based reversal - exit long when price < 4h Donchian lower channel, exit short when price > 4h Donchian upper channel
