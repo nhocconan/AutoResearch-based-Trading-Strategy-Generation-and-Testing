@@ -6,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d trend filter
 # - Long when price breaks above 20-period Donchian high with 1d volume spike and 1d uptrend (close > EMA50)
 # - Short when price breaks below 20-period Donchian low with 1d volume spike and 1d downtrend (close < EMA50)
-# - Uses 4h timeframe targeting 19-50 trades/year (75-200 total over 4 years) to minimize fee drag
+# - Uses 4h timeframe targeting 20-50 trades/year (75-200 total over 4 years) to minimize fee drag
 # - 1d volume > 1.8x 20-period average confirms breakout strength
 # - 1d EMA50 filter ensures trading with daily trend direction
 # - Discrete position sizing (0.25) to minimize fee churn
