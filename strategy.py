@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion + 12h volume spike + 1w choppiness regime
-# - Primary: 4h Williams %R extreme (<80 for short, >20 for long) indicates overbought/oversold
-# - Volume filter: 12h volume > 1.5x 20-period volume MA to confirm reversal strength
-# - Regime filter: 1w choppiness index > 61.8 (range market) for mean reversion effectiveness
-# - Exit: Williams %R returns to neutral zone (50) or opposite extreme
+# Hypothesis: 4h Donchian breakout with 12h volume confirmation and 1w choppiness regime filter
+# - Primary: 4h price breaks above/below 20-period Donchian channel for trend continuation
+# - Volume filter: 12h volume > 1.3x 20-period volume MA to confirm breakout strength
+# - Regime filter: 1w choppiness index < 38.2 indicates trending market (favorable for breakouts)
+# - Exit: Price returns to Donchian midpoint (mean reversion within channel) or opposite breakout
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Williams %R captures reversals, volume confirms genuine moves,
-#   chop filter avoids whipsaws in strong trends, effective in ranging markets
+# - Works in bull/bear: Donchian captures breakouts, volume confirms institutional interest,
+#   chop filter avoids false breakouts in ranging markets, effective in both bull and bear trends
 
-name = "4h_12h_1w_williamsr_meanreversion_v1"
+name = "4h_12h_1w_donchian_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -46,13 +46,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 14-period Williams %R for 4h timeframe
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    williams_r = np.where((highest_high_14 - lowest_low_14) != 0, williams_r, -50.0)
+    # Calculate 20-period Donchian channel for 4h timeframe
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high_20 + lowest_low_20) / 2
     
-    # Calculate 12h volume confirmation: volume > 1.5x 20-period volume MA
+    # Calculate 12h volume confirmation: volume > 1.3x 20-period volume MA
     volume_ma_20_12h = pd.Series(volume_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
     
@@ -72,41 +71,41 @@ def generate_signals(prices):
     chop_1w = chop_raw
     chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_ma_20_12h_aligned[i]) or 
-            np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(volume_ma_20_12h_aligned[i]) or np.isnan(chop_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.5x 20-period MA
+        # Volume confirmation: 12h volume > 1.3x 20-period MA
         vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)
-        vol_confirm = vol_12h_current[i] > 1.5 * volume_ma_20_12h_aligned[i]
+        vol_confirm = vol_12h_current[i] > 1.3 * volume_ma_20_12h_aligned[i]
         
-        # Regime filter: chop > 61.8 indicates ranging market (good for mean reversion)
-        regime_filter = chop_1w_aligned[i] > 61.8
+        # Regime filter: chop < 38.2 indicates trending market (good for breakouts)
+        regime_filter = chop_1w_aligned[i] < 38.2
         
-        if position == 0:  # Flat - look for new entries at Williams %R extremes
-            # Long entry: Williams %R oversold (> -20) + vol confirmation + chop regime
-            if williams_r[i] > -20 and vol_confirm and regime_filter:
+        if position == 0:  # Flat - look for new Donchian breakouts
+            # Long entry: Price breaks above upper Donchian + vol confirmation + trending regime
+            if close[i] > highest_high_20[i] and vol_confirm and regime_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R overbought (< -80) + vol confirmation + chop regime
-            elif williams_r[i] < -80 and vol_confirm and regime_filter:
+            # Short entry: Price breaks below lower Donchian + vol confirmation + trending regime
+            elif close[i] < lowest_low_20[i] and vol_confirm and regime_filter:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit when Williams %R returns to neutral
-            # Exit: Williams %R returns to neutral zone (-50) or opposite extreme
+        else:  # Have position - look for exit when price returns to midpoint or opposite breakout
+            # Exit: Price returns to Donchian midpoint or breaks opposite channel
             if position == 1:  # Long position
-                if williams_r[i] >= -50:
+                if close[i] <= donchian_mid[i] or close[i] < lowest_low_20[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if williams_r[i] <= -50:
+                if close[i] >= donchian_mid[i] or close[i] > highest_high_20[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
