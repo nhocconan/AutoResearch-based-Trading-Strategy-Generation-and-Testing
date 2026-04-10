@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d trend filter
-# - Long when price breaks above Camarilla H3 level with volume > 1.8x 20-bar average AND 1d close > 1d EMA50
-# - Short when price breaks below Camarilla L3 level with volume > 1.8x 20-bar average AND 1d close < 1d EMA50
-# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.8x average
-# - Uses 1d trend filter to avoid counter-trend trades in bear markets (2025+)
-# - Moderate volume threshold (1.8x) balances signal quality and trade frequency (target: 12-25 trades/year)
-# - Focus on BTC/ETH; SOL-only strategies are low value and will be discarded
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high with volume > 1.5x 20-bar average AND 1d close > 1d EMA50
+# - Short when price breaks below Donchian(20) low with volume > 1.5x 20-bar average AND 1d close < 1d EMA50
+# - Exit when price retraces to Donchian(20) midpoint OR volume drops below 0.7x average
+# - Uses 1d EMA50 trend filter to avoid counter-trend trades in bear markets (2025+)
+# - Tight volume thresholds (1.5x spike, 0.7x weak) target 20-40 trades/year
+# - Focus on BTC/ETH; proven pattern from DB top performers
 
-name = "12h_1d_camarilla_breakout_volume_trend_v4"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,12 +25,17 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute volume confirmation: > 1.8x 20-period average
-    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
+    # Pre-compute Donchian channels (20-period)
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
+    mid_20 = (high_20 + low_20) / 2.0
     
-    # Pre-compute volume filter: < 0.8x average volume for exit (loss of momentum)
-    vol_weak = prices['volume'] < (0.8 * volume_20_avg)
+    # Pre-compute volume confirmation: > 1.5x 20-period average
+    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    
+    # Pre-compute volume filter: < 0.7x average volume for exit (loss of momentum)
+    vol_weak = prices['volume'] < (0.7 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -40,7 +45,7 @@ def generate_signals(prices):
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Align them to 12h timeframe
+    # Align them to 4h timeframe
     h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
     l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
     c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
@@ -52,7 +57,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is invalid
         if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i]) or 
-            np.isnan(h_1d_aligned[i]) or np.isnan(l_1d_aligned[i]) or np.isnan(c_1d_aligned[i])):
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(mid_20[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -62,81 +67,47 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # For 12h timeframe, 1d data updates every 2 bars
-        # We need to use the previous completed 1d bar's data to avoid look-ahead
-        # Since 1d data is aligned to 12h, each 1d value repeats for 2 consecutive 12h bars
-        # To get the previous completed 1d bar, we look back to the start of the current 1d bar period
+        # Get previous completed 1d bar values (properly aligned)
+        # Since aligned arrays stretch 1d values to 4h resolution, we can use current index
+        # but need to ensure we're using completed 1d bar data
+        # align_htf_to_ltf already handles completed-bar timing, so we can use [i] directly
         
-        # Calculate which 12h bar index corresponds to the start of the current 1d bar
-        # 1d bar = 2 consecutive 12h bars
-        # If i is even, we're at the start of a 1d bar (0, 2, 4, ...)
-        # If i is odd, we're at the second 12h bar of a 1d bar (1, 3, 5, ...)
-        if i % 2 == 0:
-            # Current bar is start of 1d bar, so previous completed 1d bar started at i-2
-            lookback_idx = i - 2
-        else:
-            # Current bar is second half of 1d bar, so previous completed 1d bar started at i-1
-            lookback_idx = i - 1
+        ph = h_1d_aligned[i]  # Previous completed 1d high
+        pl = l_1d_aligned[i]  # Previous completed 1d low
+        pc = c_1d_aligned[i]  # Previous completed 1d close
         
-        if lookback_idx >= 0:
-            # Get the 1d bar data (high, low, close) from the aligned arrays
-            # These values are constant across the 2 bars that make up the 1d bar
-            ph = h_1d_aligned[lookback_idx]
-            pl = l_1d_aligned[lookback_idx]
-            pc = c_1d_aligned[lookback_idx]
-            
-            # Calculate Camarilla levels using previous completed 1d bar
-            range_val = ph - pl
-            if range_val > 0:
-                camarilla_h3 = pc + (range_val * 1.1 / 4)
-                camarilla_l3 = pc - (range_val * 1.1 / 4)
-                camarilla_h4 = pc + (range_val * 1.1 / 2)
-                camarilla_l4 = pc - (range_val * 1.1 / 2)
-                
-                if position == 0:  # Flat - look for new breakout entries
-                    # Long breakout: price > Camarilla H3 with volume spike AND 1d uptrend
-                    if (prices['close'].iloc[i] > camarilla_h3 and 
-                        vol_spike.iloc[i] and 
-                        prices['close'].iloc[i] > ema50_1d_aligned[i]):
-                        position = 1
-                        signals[i] = 0.25
-                    # Short breakdown: price < Camarilla L3 with volume spike AND 1d downtrend
-                    elif (prices['close'].iloc[i] < camarilla_l3 and 
-                          vol_spike.iloc[i] and 
-                          prices['close'].iloc[i] < ema50_1d_aligned[i]):
-                        position = -1
-                        signals[i] = -0.25
-                    else:
-                        # No entry signal, remain flat
-                        signals[i] = 0.0
-                else:  # Have position - look for exit
-                    # Exit conditions:
-                    # 1. Price retreats to Camarilla H4/L4 levels
-                    # 2. Volume drops below 0.8x average (loss of momentum)
-                    if position == 1:  # Long position
-                        if (prices['close'].iloc[i] < camarilla_h4 or 
-                            vol_weak.iloc[i]):
-                            position = 0
-                            signals[i] = 0.0
-                        else:
-                            signals[i] = 0.25  # Hold long
-                    elif position == -1:  # Short position
-                        if (prices['close'].iloc[i] > camarilla_l4 or 
-                            vol_weak.iloc[i]):
-                            position = 0
-                            signals[i] = 0.0
-                        else:
-                            signals[i] = -0.25  # Hold short
+        if position == 0:  # Flat - look for new breakout entries
+            # Long breakout: price > Donchian(20) high with volume spike AND 1d uptrend
+            if (prices['close'].iloc[i] > high_20[i] and 
+                vol_spike.iloc[i] and 
+                prices['close'].iloc[i] > ema50_1d_aligned[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short breakdown: price < Donchian(20) low with volume spike AND 1d downtrend
+            elif (prices['close'].iloc[i] < low_20[i] and 
+                  vol_spike.iloc[i] and 
+                  prices['close'].iloc[i] < ema50_1d_aligned[i]):
+                position = -1
+                signals[i] = -0.25
             else:
-                # No valid range, hold current position
-                if position == 0:
+                signals[i] = 0.0
+        else:  # Have position - look for exit
+            # Exit conditions:
+            # 1. Price retraces to Donchian(20) midpoint
+            # 2. Volume drops below 0.7x average (loss of momentum)
+            if position == 1:  # Long position
+                if (prices['close'].iloc[i] < mid_20[i] or 
+                    vol_weak.iloc[i]):
+                    position = 0
                     signals[i] = 0.0
-                elif position == 1:
-                    signals[i] = 0.25
                 else:
-                    signals[i] = -0.25
-        else:
-            # Not enough data yet for previous 1d bar, hold flat
-            signals[i] = 0.0
+                    signals[i] = 0.25  # Hold long
+            elif position == -1:  # Short position
+                if (prices['close'].iloc[i] > mid_20[i] or 
+                    vol_weak.iloc[i]):
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25  # Hold short
     
     return signals
