@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d volume and ATR regime filter
-# - Primary: 12h timeframe for lower trade frequency (~12-37/year)
-# - HTF: 1d for volume confirmation and ATR volatility regime
-# - Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs
-# - Long: Lips > Teeth > Jaw (bullish alignment) + 1d volume > 1.5x 20-period MA + 1d ATR > 50th percentile
-# - Short: Lips < Teeth < Jaw (bearish alignment) + same filters
-# - Exit: When Alligator lines re-cross (Lips crosses Teeth) or ATR drops below 30th percentile
+# Hypothesis: 4h Donchian Breakout with 12h ATR regime and volume confirmation
+# - Primary: 4h timeframe for optimal trade frequency (target 20-50/year)
+# - HTF: 12h for ATR percentile (volatility regime filter)
+# - Long: Price breaks above Donchian(20) high + 12h ATR > 50th percentile + volume > 1.5x 20-period MA
+# - Short: Price breaks below Donchian(20) low + 12h ATR > 50th percentile + volume > 1.5x 20-period MA
+# - Exit: ATR-based trailing stop (3*ATR from extreme) or Donchian(10) opposite break
 # - Position sizing: 0.25 (discrete level)
-# - Works in bull/bear: Alligator catches trends; volatility regime avoids chop; volume confirms conviction
+# - Works in bull/bear: Donchian captures breakouts in trending markets, ATR filter avoids low-vol chop, volume confirms conviction
+# - Target: 75-200 total trades over 4 years (19-50/year) - within 4h sweet spot
 
-name = "12h_1d_alligator_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,115 +23,110 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLCV
-    open_12h = prices['open'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    volume_12h = prices['volume'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
-    # Pre-compute 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Pre-compute 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate Williams Alligator on 12h
-    # Jaw: 13-period SMMA, shifted 8 bars
-    # Teeth: 8-period SMMA, shifted 5 bars  
-    # Lips: 5-period SMMA, shifted 3 bars
-    def smma(values, period):
-        """Smoothed Moving Average"""
-        if len(values) < period:
-            return np.full_like(values, np.nan, dtype=float)
-        result = np.full_like(values, np.nan, dtype=float)
-        # First value is SMA
-        result[period-1] = np.mean(values[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # Calculate 4h Donchian channels (20-period for entry, 10-period for exit)
+    high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    high_10 = pd.Series(high_4h).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(low_4h).rolling(window=10, min_periods=10).min().values
     
-    jaw_raw = smma(close_12h, 13)
-    teeth_raw = smma(close_12h, 8)
-    lips_raw = smma(close_12h, 5)
+    # Calculate 12h ATR(14) for volatility regime filter
+    tr1 = pd.Series(high_12h).shift(1) - pd.Series(low_12h).shift(1)
+    tr2 = abs(pd.Series(high_12h) - pd.Series(close_12h).shift(1))
+    tr3 = abs(pd.Series(low_12h) - pd.Series(close_12h).shift(1))
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr_12h.rolling(window=14, min_periods=14).mean().values
     
-    # Apply shifts (Jaw shifted 8, Teeth shifted 5, Lips shifted 3)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
-    # First few values will be invalid due to roll, but we'll check for NaN anyway
-    
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ATR percentile rank (using 30-bar lookback)
-    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
+    # Calculate 12h ATR percentile rank (using 50-bar lookback for stability)
+    atr_percentile = pd.Series(atr_12h).rolling(window=50, min_periods=20).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_12h, atr_percentile)
     
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Calculate 12h volume moving average (20-period) for volume confirmation
+    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    long_extreme = 0.0  # highest high since entering long
+    short_extreme = 0.0  # lowest low since entering short
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
             np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+            np.isnan(volume_ma_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime conditions
-        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        # 12h volatility regime: ATR > 50th percentile (avoid low-vol chop)
         vol_regime = atr_percentile_aligned[i] > 50
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period MA
-        volume_spike = volume_1d[i // 288] > 1.5 * volume_ma_20_1d_aligned[i]  # 288 = 12h bars per day
+        # Volume confirmation: current 12h volume > 1.5x 20-period MA
+        volume_spike = volume_12h[i // 3] > 1.5 * volume_ma_20_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Lips > Teeth > Jaw (bullish alignment) + vol regime + volume spike
-            if (lips[i] > teeth[i] > jaw[i] and vol_regime and volume_spike):
+            # Long entry: Price breaks above Donchian(20) high + vol regime + volume spike
+            if (close_4h[i] > high_20[i] and vol_regime and volume_spike):
                 position = 1
+                long_extreme = high_4h[i]
                 signals[i] = 0.25
-            # Short entry: Lips < Teeth < Jaw (bearish alignment) + vol regime + volume spike
-            elif (lips[i] < teeth[i] < jaw[i] and vol_regime and volume_spike):
+            # Short entry: Price breaks below Donchian(20) low + vol regime + volume spike
+            elif (close_4h[i] < low_20[i] and vol_regime and volume_spike):
                 position = -1
+                short_extreme = low_4h[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
+            # Update extremes
+            if position == 1:  # Long position
+                long_extreme = max(long_extreme, high_4h[i])
+            else:  # Short position
+                short_extreme = min(short_extreme, low_4h[i])
+            
+            # Calculate ATR-based trailing stop (using 4h ATR)
+            tr1_4h = pd.Series(high_4h).shift(1) - pd.Series(low_4h).shift(1)
+            tr2_4h = abs(pd.Series(high_4h) - pd.Series(close_4h).shift(1))
+            tr3_4h = abs(pd.Series(low_4h) - pd.Series(close_4h).shift(1))
+            tr_4h = pd.concat([tr1_4h, tr2_4h, tr3_4h], axis=1).max(axis=1)
+            atr_4h = tr_4h.rolling(window=14, min_periods=14).mean().values
+            
             # Exit conditions:
-            # 1. Alligator lines re-cross (Lips crosses Teeth) - trend weakening
-            # 2. ATR drops below 30th percentile (low volatility environment)
+            # 1. ATR trailing stop (3*ATR from extreme)
+            # 2. Donchian(10) opposite break (take profit)
             
             if position == 1:  # Long position
-                exit_condition = (
-                    lips[i] <= teeth[i] or  # Lips crossed below Teeth
-                    atr_percentile_aligned[i] < 30  # Low volatility
-                )
+                atr_stop = long_extreme - 3.0 * atr_4h[i] if not np.isnan(atr_4h[i]) else low_4h[i]
+                donchian_exit = close_4h[i] < low_10[i]
+                exit_condition = (close_4h[i] < atr_stop) or donchian_exit
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                exit_condition = (
-                    lips[i] >= teeth[i] or  # Lips crossed above Teeth
-                    atr_percentile_aligned[i] < 30  # Low volatility
-                )
+                atr_stop = short_extreme + 3.0 * atr_4h[i] if not np.isnan(atr_4h[i]) else high_4h[i]
+                donchian_exit = close_4h[i] > high_10[i]
+                exit_condition = (close_4h[i] > atr_stop) or donchian_exit
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
