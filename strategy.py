@@ -9,16 +9,16 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Volume confirmation: 4h volume > 1.3x 20-period volume SMA
 # - Exit: opposite Donchian breakout or volume drops below average
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 19-50 trades/year on 4h timeframe to stay within fee drag limits
-# - Uses 1d EMA50 as HTF trend filter to avoid counter-trend trades in ranging markets
+# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Works in bull markets via trend-following breakouts, in bear markets via short opportunities
 
-name = "4h_1d_donchian_trend_volume_v2"
+name = "4h_1d_donchian_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -52,7 +52,7 @@ def generate_signals(prices):
     # Calculate 4h volume SMA for regime filter
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(50, n):  # Start after warmup for indicators
+    for i in range(60, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(close_1d_aligned[i]) or
@@ -67,7 +67,7 @@ def generate_signals(prices):
         trend_bullish = close_1d_aligned[i] > ema_50_1d_aligned[i]
         trend_bearish = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Donchian breakout signals
+        # Donchian breakout signals (using previous bar's channel to avoid look-ahead)
         breakout_up = close[i] > donchian_upper[i-1]  # Break above previous upper channel
         breakout_down = close[i] < donchian_lower[i-1]  # Break below previous lower channel
         
