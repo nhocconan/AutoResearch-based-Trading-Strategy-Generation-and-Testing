@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + chop regime filter
-# - Primary: 12h Donchian breakout (20-period) for trend continuation
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter
+# - Primary: 4h Donchian breakout (20-period) for trend continuation
 # - HTF: 1d volume > 2.0x 24-period MA for institutional participation confirmation
-# - Regime filter: 12h Choppiness Index (14) < 38.2 = trending market (breakout continuation)
+# - Regime filter: 4h Choppiness Index (14) < 38.2 = trending market (breakout continuation)
 # - Long: Price breaks above Donchian(20) upper + volume confirmation + chop trending
 # - Short: Price breaks below Donchian(20) lower + volume confirmation + chop trending
 # - Exit: Price crosses Donchian(20) midpoint (mean reversion to median)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
 # - Works in bull/bear: Donchian captures breakouts in trending markets, volume filters weak moves, chop filter avoids false breakouts in ranging markets
-# - Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe
+# - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
 
-name = "12h_1d_donchian_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,7 +40,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     donchian_upper = np.full(len(close), np.nan)
     donchian_lower = np.full(len(close), np.nan)
     donchian_mid = np.full(len(close), np.nan)
@@ -51,7 +51,7 @@ def generate_signals(prices):
             donchian_lower[i] = np.min(low[i-19:i+1])
             donchian_mid[i] = (donchian_upper[i] + donchian_lower[i]) / 2.0
     
-    # Calculate 12h Choppiness Index (14)
+    # Calculate 4h Choppiness Index (14)
     chop = np.full(len(close), np.nan)
     
     # True Range
@@ -84,7 +84,7 @@ def generate_signals(prices):
         if not np.isnan(volume_1d[i-23:i+1]).any():
             volume_ma_24_1d[i] = np.mean(volume_1d[i-23:i+1])
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     volume_ma_24_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_24_1d)
     
     signals = np.zeros(n)
