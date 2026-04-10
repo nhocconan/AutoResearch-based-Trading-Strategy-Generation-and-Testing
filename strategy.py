@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR volume confirmation and chop regime filter
-# - Long when price breaks above Donchian upper band (20) AND 1d ATR ratio > 1.3 (expanding volatility) AND chop < 61.8 (trending market)
-# - Short when price breaks below Donchian lower band (20) AND 1d ATR ratio > 1.3 AND chop < 61.8
-# - Exit when price returns to Donchian middle band (20-period average)
+# Hypothesis: 4h Williams %R mean reversion with 1d chop regime filter
+# - Long when Williams %R(14) crosses above -80 (oversold) AND 1d chop > 61.8 (ranging market)
+# - Short when Williams %R(14) crosses below -20 (overbought) AND 1d chop > 61.8 (ranging market)
+# - Exit when Williams %R returns to -50 (mean reversion)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Donchian breakouts work in both bull and bear markets when combined with volatility expansion and trend filter
-# - ATR ratio filter ensures we trade during genuine volatility expansion, not chop
+# - Williams %R works well in ranging markets which are common in bear/range regimes like 2025+
+# - Chop filter ensures we only trade when market is ranging (avoid trending markets where mean reversion fails)
 # - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
 
-name = "4h_1d_donchian_atr_chop_v1"
+name = "4h_1d_williamsr_chop_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,22 +31,27 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Pre-compute 4h Donchian channels (20-period)
-    def rolling_max(arr, window):
+    # Pre-compute 4h Williams %R (14-period)
+    def highest_high(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
             result[i] = np.max(arr[i - window + 1:i + 1])
         return result
     
-    def rolling_min(arr, window):
+    def lowest_low(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
             result[i] = np.min(arr[i - window + 1:i + 1])
         return result
     
-    donchian_high = rolling_max(high, 20)
-    donchian_low = rolling_min(low, 20)
-    donchian_mid = (donchian_high + donchian_low) / 2
+    hh = highest_high(high, 14)
+    ll = lowest_low(low, 14)
+    williams_r = np.zeros_like(close)
+    for i in range(13, len(close)):
+        if hh[i] != ll[i]:  # Avoid division by zero
+            williams_r[i] = -100 * (hh[i] - close[i]) / (hh[i] - ll[i])
+        else:
+            williams_r[i] = -50.0  # Neutral when range is zero
     
     # Pre-compute 4h Choppiness Index (14-period)
     def true_range(h, l, c_prev):
@@ -74,19 +79,19 @@ def generate_signals(prices):
         atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
     # Calculate Choppiness Index
-    hh = rolling_max(high, 14)
-    ll = rolling_min(low, 14)
+    hh_chop = highest_high(high, 14)
+    ll_chop = lowest_low(low, 14)
     chop = np.zeros_like(close)
     for i in range(13, len(close)):
-        if hh[i] > ll[i]:
-            log_sum = np.log10(rolling_sum(tr, 14)[i] / (hh[i] - ll[i]))
+        if hh_chop[i] > ll_chop[i]:
+            log_sum = np.log10(rolling_sum(tr, 14)[i] / (hh_chop[i] - ll_chop[i]))
             chop[i] = 100 * log_sum / np.log10(14)
         else:
             chop[i] = 50.0
     
-    chop_regime = chop < 61.8  # Trending market
+    chop_regime = chop > 61.8  # Ranging market (chop > 61.8)
     
-    # Pre-compute 1d ATR ratio (current ATR / 20-period average ATR)
+    # Pre-compute 1d Choppiness Index (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -103,28 +108,28 @@ def generate_signals(prices):
     for i in range(14, len(tr_1d)):
         atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
     
-    # Calculate 20-period average of 1d ATR
-    atr_ma_1d = np.zeros_like(atr_1d)
-    for i in range(19, len(atr_1d)):
-        atr_ma_1d[i] = np.mean(atr_1d[i-19:i+1])
+    # Calculate 1d Choppiness Index
+    hh_1d = highest_high(high_1d, 14)
+    ll_1d = lowest_low(low_1d, 14)
+    chop_1d = np.zeros_like(close_1d)
+    for i in range(13, len(close_1d)):
+        if hh_1d[i] > ll_1d[i]:
+            log_sum = np.log10(rolling_sum(tr_1d, 14)[i] / (hh_1d[i] - ll_1d[i]))
+            chop_1d[i] = 100 * log_sum / np.log10(14)
+        else:
+            chop_1d[i] = 50.0
     
-    # ATR ratio: current ATR / average ATR (values > 1 indicate expanding volatility)
-    atr_ratio_1d = np.ones_like(atr_1d)
-    valid_ma = (atr_ma_1d > 0) & ~np.isnan(atr_ma_1d)
-    atr_ratio_1d[valid_ma] = atr_1d[valid_ma] / atr_ma_1d[valid_ma]
+    chop_regime_1d = chop_1d > 61.8  # 1d ranging market
     
     # Align HTF indicators to 4h timeframe
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
+    chop_regime_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(atr_ratio_1d_aligned[i]) or 
-            np.isnan(chop_regime_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(chop_regime_1d_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -134,24 +139,20 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Donchian high AND ATR ratio > 1.3 AND chop regime (trending)
-            if (close[i] > donchian_high[i] and 
-                atr_ratio_1d_aligned[i] > 1.3 and 
-                chop_regime_aligned[i]):
+            # Long conditions: Williams %R crosses above -80 (oversold) AND 1d chop regime (ranging)
+            if i > 0 and williams_r[i-1] <= -80 and williams_r[i] > -80 and chop_regime_1d_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND ATR ratio > 1.3 AND chop regime (trending)
-            elif (close[i] < donchian_low[i] and 
-                  atr_ratio_1d_aligned[i] > 1.3 and 
-                  chop_regime_aligned[i]):
+            # Short conditions: Williams %R crosses below -20 (overbought) AND 1d chop regime (ranging)
+            elif i > 0 and williams_r[i-1] >= -20 and williams_r[i] < -20 and chop_regime_1d_aligned[i]:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price returns to Donchian middle band (mean reversion)
-            exit_long = (position == 1 and close[i] < donchian_mid[i])
-            exit_short = (position == -1 and close[i] > donchian_mid[i])
+            # Exit conditions: Williams %R returns to -50 (mean reversion)
+            exit_long = (position == 1 and williams_r[i] >= -50)
+            exit_short = (position == -1 and williams_r[i] <= -50)
             
             if exit_long or exit_short:
                 position = 0
