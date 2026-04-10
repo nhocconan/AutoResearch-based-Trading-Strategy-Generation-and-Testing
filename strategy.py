@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation
-# - Long when price > Alligator Jaw (13-period SMMA) in 1w uptrend (close > EMA50) with volume spike
-# - Short when price < Alligator Jaw in 1w downtrend (close < EMA50) with volume spike
+# Hypothesis: 12h TRIX + volume spike + choppiness regime filter
+# - TRIX(15) crossing zero line as momentum signal
+# - Volume > 1.5x 20-period average for confirmation
+# - Choppiness Index(14) > 61.8 for ranging market (mean reversion) or < 38.2 for trending
+# - In ranging markets (CHOP > 61.8): fade TRIX crosses (sell on bullish cross, buy on bearish cross)
+# - In trending markets (CHOP < 38.2): follow TRIX crosses (buy on bullish cross, sell on bearish cross)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets 7-25 trades/year (30-100 total over 4 years) to avoid fee drag
-# - Weekly trend filter reduces false signals in ranging markets
-# - Williams Alligator (SMMA-based) provides smooth trend following with less whipsaw
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Works in both bull and bear markets by adapting to regime
 
-name = "1d_1w_alligator_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_trix_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,66 +23,78 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w indicators
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 1d indicators
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # TRIX(15): triple exponential moving average
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = pd.Series(ema3).pct_change() * 100  # Percentage change
+    trix_values = trix.values
     
-    # 1w volume confirmation: > 2.0x 20-period average
-    avg_volume_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (2.0 * avg_volume_20_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
+    # Align TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
     
-    # Pre-compute Williams Alligator on primary timeframe (1d)
-    # Williams Alligator uses Smoothed Moving Average (SMMA)
-    # SMMA formula: SMMA(i) = (SMMA(i-1) * (period-1) + close(i)) / period
-    def smma(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Volume confirmation: > 1.5x 20-period average
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (1.5 * avg_volume_20)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    close = prices['close'].values
-    # Alligator lines: Jaw (13, 8), Teeth (8, 5), Lips (5, 3)
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
+    # Choppiness Index(14)
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high,n) - min(low,n))))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    range_14 = max_high_14 - min_low_14
+    range_14 = np.where(range_14 == 0, 1e-10, range_14)
+    
+    chop = 100 * np.log10(atr_14 / (np.log10(14) * range_14))
+    chop_values = chop
+    
+    # Align Choppiness Index to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     atr_stop_multiplier = 2.5
     
-    # Pre-compute ATR for stoploss (using 1d data)
-    high_low = prices['high'] - prices['low']
-    high_close = np.abs(prices['high'] - prices['close'].shift(1))
-    low_close = np.abs(prices['low'] - prices['close'].shift(1))
+    # Calculate ATR for stoploss (using 1d data)
+    high_low = df_1d['high'] - df_1d['low']
+    high_close = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    low_close = np.abs(df_1d['low'] - df_1d['close'].shift(1))
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_ranges = np.nanmax(ranges.values, axis=1)
-    atr_14 = pd.Series(true_ranges).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d = pd.Series(true_ranges).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    for i in range(50, n):  # Start after Alligator warmup
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_spike_1w_aligned[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(vol_spike_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # ATR-based stoploss
-            if prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14[i]:
+            if prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14_1d_aligned[i]:
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
@@ -89,30 +103,54 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # ATR-based stoploss
-            if prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14[i]:
+            if prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14_1d_aligned[i]:
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long signal: price > Alligator Jaw in 1w uptrend with volume spike
-            # Additionally require Teeth > Lips for bullish alignment
-            if (prices['close'].iloc[i] > jaw[i] and 
-                teeth[i] > lips[i] and 
-                prices['close'].iloc[i] > ema_50_1w_aligned[i] and 
-                vol_spike_1w_aligned[i]):
-                position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = 0.25
-            # Short signal: price < Alligator Jaw in 1w downtrend with volume spike
-            # Additionally require Teeth < Lips for bearish alignment
-            elif (prices['close'].iloc[i] < jaw[i] and 
-                  teeth[i] < lips[i] and 
-                  prices['close'].iloc[i] < ema_50_1w_aligned[i] and 
-                  vol_spike_1w_aligned[i]):
-                position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = -0.25
+            # TRIX zero line cross signals
+            trix_now = trix_aligned[i]
+            trix_prev = trix_aligned[i-1] if i > 0 else 0
+            
+            bullish_cross = trix_prev <= 0 and trix_now > 0
+            bearish_cross = trix_prev >= 0 and trix_now < 0
+            
+            # Regime-based logic
+            chop_now = chop_aligned[i]
+            is_ranging = chop_now > 61.8  # Choppy/ranging market
+            is_trending = chop_now < 38.2  # Trending market
+            
+            # Volume confirmation
+            vol_confirmed = vol_spike_aligned[i]
+            
+            # In ranging markets: mean reversion (fade the move)
+            # In trending markets: trend following
+            if is_ranging and vol_confirmed:
+                # Fade TRIX crosses in ranging markets
+                if bullish_cross:
+                    # Sell on bullish TRIX cross (expecting mean reversion down)
+                    position = -1
+                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                    signals[i] = -0.25
+                elif bearish_cross:
+                    # Buy on bearish TRIX cross (expecting mean reversion up)
+                    position = 1
+                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                    signals[i] = 0.25
+                    
+            elif is_trending and vol_confirmed:
+                # Follow TRIX crosses in trending markets
+                if bullish_cross:
+                    # Buy on bullish TRIX cross
+                    position = 1
+                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                    signals[i] = 0.25
+                elif bearish_cross:
+                    # Sell on bearish TRIX cross
+                    position = -1
+                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                    signals[i] = -0.25
     
     return signals
