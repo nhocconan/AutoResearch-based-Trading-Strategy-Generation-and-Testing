@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and ADX trend filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.8x 20-period volume SMA AND ADX(14) > 25
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.8x 20-period volume SMA AND ADX(14) > 25
-# - Exit: ATR(14) trailing stop (2.5*ATR) from highest/lowest since entry
-# - Uses 4h for price action (Camarilla levels), 1d for volume/ADX confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX trend filter
+# - Long when price breaks above Donchian upper band (20-period high) AND 1d volume > 2.0x 20-period volume SMA AND ADX(14) > 25
+# - Short when price breaks below Donchian lower band (20-period low) AND 1d volume > 2.0x 20-period volume SMA AND ADX(14) > 25
+# - Exit: ATR(14) trailing stop (2.0*ATR) from highest/lowest since entry
+# - Uses 4h for price action (Donchian channels), 1d for volume/ADX confirmation
 # - Volume spike confirms institutional interest; ADX filter ensures trending markets only
-# - Camarilla pivots derived from prior completed 1d bar to avoid look-ahead
+# - Donchian bands derived from prior completed 4h bars to avoid look-ahead
 # - Tight entries target ~25-35 trades/year to minimize fee drag (proven winners: ETH test Sharpe 1.47)
 # - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) with volume/ADX filters
 
-name = "4h_1d_camarilla_volspike_adx_v1"
+name = "4h_1d_donchian_volspike_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -71,14 +71,13 @@ def generate_signals(prices):
     adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Pre-compute Camarilla pivot levels from prior completed 1d bar
-    # Camarilla levels based on prior 1d OHLC (using previous completed 1d bar)
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Pre-compute Donchian channels from prior completed 4h bar (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to complete)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Donchian levels to 4h timeframe (wait for 20-period to complete)
+    highest_20_aligned = align_htf_to_ltf(prices, prices, highest_20)
+    lowest_20_aligned = align_htf_to_ltf(prices, prices, lowest_20)
     
     # ATR for dynamic stoploss (using 4h data)
     tr1 = np.abs(high[1:] - low[:-1])
@@ -94,23 +93,23 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
             np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
             np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.8x 20-period volume SMA
+        # Volume confirmation: 1d volume > 2.0x 20-period volume SMA
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 1.8 * volume_sma_20_1d_aligned[i]
+        vol_confirm = vol_1d_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
         # ADX filter: ADX > 25 indicates strong trend (good for breakouts)
         adx_filter = adx_1d_aligned[i] > 25
         
         # Only trade when both volume confirmation and ADX filter are present
         if vol_confirm and adx_filter:
-            # Long: price breaks above Camarilla H3
-            if close[i] > camarilla_h3_aligned[i]:
+            # Long: price breaks above Donchian upper band
+            if close[i] > highest_20_aligned[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
@@ -118,8 +117,8 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
                     highest_high_since_entry[i] = max(highest_high_since_entry[i-1] if i > 0 else high[i], high[i])
-            # Short: price breaks below Camarilla L3
-            elif close[i] < camarilla_l3_aligned[i]:
+            # Short: price breaks below Donchian lower band
+            elif close[i] < lowest_20_aligned[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
@@ -140,11 +139,11 @@ def generate_signals(prices):
             
             # Check for ATR trailing stop exit
             if position == 1 and not np.isnan(highest_high_since_entry[i]):
-                if close[i] < (highest_high_since_entry[i] - 2.5 * atr_4h[i]):
+                if close[i] < (highest_high_since_entry[i] - 2.0 * atr_4h[i]):
                     position = 0
                     signals[i] = 0.0
             elif position == -1 and not np.isnan(lowest_low_since_entry[i]):
-                if close[i] > (lowest_low_since_entry[i] + 2.5 * atr_4h[i]):
+                if close[i] > (lowest_low_since_entry[i] + 2.0 * atr_4h[i]):
                     position = 0
                     signals[i] = 0.0
         else:
