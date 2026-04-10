@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout + 1d volume spike + 1d ADX trend filter
-# - Long: price breaks above Camarilla H3 (1d) AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
-# - Short: price breaks below Camarilla L3 (1d) AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
+# Hypothesis: 4h Camarilla pivot long/short + 1d volume spike + ATR stoploss
+# - Long: price touches Camarilla L3 (1.118*H + 0.882*L) from 1d AND volume > 2.0x 20-period average
+# - Short: price touches Camarilla H3 (1.118*L + 0.882*H) from 1d AND volume > 2.0x 20-period average
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - ATR-based stoploss (2.0x ATR(12h)) to manage risk
-# - Designed for 12h timeframe: targets 12-37 trades/year to avoid fee drag
-# - Works in bull/bear markets: ADX filter ensures we only trade strong trends, avoiding chop
-# - Camarilla levels from 1d provide institutional support/resistance levels
+# - ATR-based stoploss (2.0x ATR(14)) to manage risk
+# - Designed for 4h timeframe: targets 19-50 trades/year to avoid fee drag
+# - Works in bull/bear markets: Camarilla levels act as support/resistance in ranging markets,
+#   while volume spike filters for institutional interest during breakouts/retests
 
-name = "12h_1d_camarilla_adx_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,69 +26,37 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla pivot levels (based on previous day)
+    # Pre-compute 1d Camarilla levels (based on previous day's range)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point and Camarilla levels for each day
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Camarilla levels for each 1d bar
+    # L3 = Close - (High - Low) * 1.118/4
+    # H3 = Close + (High - Low) * 1.118/4
+    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.118 / 4
+    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.118 / 4
     
-    # Camarilla levels
-    h3 = pivot + (range_1d * 1.1 / 4.0)
-    l3 = pivot - (range_1d * 1.1 / 4.0)
-    h4 = pivot + (range_1d * 1.1 / 2.0)
-    l4 = pivot - (range_1d * 1.1 / 2.0)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     
-    # Pre-compute 1d ADX(14) for trend filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Pre-compute 4h volume confirmation
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (2.0 * avg_volume_20)
+    
+    # Pre-compute 4h ATR(14) for stoploss
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Pre-compute 1d volume confirmation
-    volume_1d = df_1d['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.5 * avg_volume_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
-    
-    # Pre-compute 12h ATR(14) for stoploss
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h[0] = tr1_12h[0]
-    atr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    
-    # Align HTF arrays to LTF
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -96,14 +64,14 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_spike_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Exit: price < Camarilla L3 OR stoploss hit
-            if close_12h[i] < l3_aligned[i] or close_12h[i] < entry_price - 2.0 * atr_14[i]:
+            if close_4h[i] < camarilla_l3_aligned[i] or close_4h[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -111,23 +79,23 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Exit: price > Camarilla H3 OR stoploss hit
-            if close_12h[i] > h3_aligned[i] or close_12h[i] > entry_price + 2.0 * atr_14[i]:
+            if close_4h[i] > camarilla_h3_aligned[i] or close_4h[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with ADX trend and volume filters
-            if vol_spike_aligned[i] and adx_aligned[i] > 25:
-                # Long: price > Camarilla H3(1d)
-                if close_12h[i] > h3_aligned[i]:
+            # Look for Camarilla level touch with volume confirmation
+            if vol_spike[i]:
+                # Long: price touches or crosses above Camarilla L3
+                if close_4h[i] >= camarilla_l3_aligned[i]:
                     position = 1
-                    entry_price = close_12h[i]
+                    entry_price = close_4h[i]
                     signals[i] = 0.25
-                # Short: price < Camarilla L3(1d)
-                elif close_12h[i] < l3_aligned[i]:
+                # Short: price touches or crosses below Camarilla H3
+                elif close_4h[i] <= camarilla_h3_aligned[i]:
                     position = -1
-                    entry_price = close_12h[i]
+                    entry_price = close_4h[i]
                     signals[i] = -0.25
     
     return signals
