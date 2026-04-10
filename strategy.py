@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation
-# - Donchian channels from 1d: upper/lower 20-period for breakout detection
-# - 1w ADX(14) > 25 to ensure strong weekly trend and avoid choppy/ranging markets
-# - Volume confirmation: current 1d volume > 1.8x 20-period average to confirm institutional participation
-# - Designed for 1d timeframe: targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag
-# - Works in bull/bear markets: weekly ADX filter ensures we only trade with strong higher timeframe trend
-# - Uses discrete position sizing (0.30) to balance return potential and drawdown control
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter and volume confirmation
+# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (1d)
+# - Regime: Bull if Bull Power > 0 and rising, Bear if Bear Power < 0 and falling
+# - Entry: Long when Bull Power > 0 and rising + volume spike, Short when Bear Power < 0 and falling + volume spike
+# - Volume confirmation: current 6h volume > 1.8x 20-period average
+# - Designed for 6h timeframe: targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Works in bull/bear markets: regime filter adapts to higher timeframe momentum
+# - Uses discrete position sizing (0.25) to minimize fee churn
 
-name = "1d_1w_donchian_adx_volume_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_regime_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,97 +23,69 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1w ADX(14) for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute 1d EMA13 for Elder Ray
+    close_1d = df_1d['close'].values
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Pre-compute 1d Donchian channels (20-period)
+    # Elder Ray components
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    bull_power = high_1d - ema_13
+    bear_power = low_1d - ema_13
     
-    # Donchian upper/lower bands
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Regime filter: Bull Power rising and Bear Power falling
+    bull_power_rising = bull_power > np.roll(bull_power, 1)
+    bear_power_falling = bear_power < np.roll(bear_power, 1)
+    bull_power_rising[0] = False
+    bear_power_falling[0] = False
     
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    bull_regime = (bull_power > 0) & bull_power_rising
+    bear_regime = (bear_power < 0) & bear_power_falling
     
-    # Pre-compute 1d volume confirmation
-    volume_1d = df_1d['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.8 * avg_volume_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    bull_regime_aligned = align_htf_to_ltf(prices, df_1d, bull_regime.astype(float))
+    bear_regime_aligned = align_htf_to_ltf(prices, df_1d, bear_regime.astype(float))
+    
+    # Pre-compute 6h volume confirmation
+    volume_6h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_6h > (1.8 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(bull_regime_aligned[i]) or np.isnan(bear_regime_aligned[i]) or 
+            np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Donchian lower (trend reversal)
-            if prices['close'].iloc[i] < donchian_lower_aligned[i]:
+            # Exit: regime turns bearish or volume drops
+            if bear_regime_aligned[i] > 0.5 or not vol_spike[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Donchian upper (trend reversal)
-            if prices['close'].iloc[i] > donchian_upper_aligned[i]:
+            # Exit: regime turns bullish or volume drops
+            if bull_regime_aligned[i] > 0.5 or not vol_spike[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with trend and volume filters
-            if vol_spike_aligned[i] and adx_aligned[i] > 25:
-                # Breakout long: price closes above Donchian upper (bullish breakout)
-                if prices['close'].iloc[i] > donchian_upper_aligned[i]:
+            # Look for regime-aligned entries with volume confirmation
+            if vol_spike[i]:
+                if bull_regime_aligned[i] > 0.5:
                     position = 1
-                    signals[i] = 0.30
-                # Breakout short: price closes below Donchian lower (bearish breakout)
-                elif prices['close'].iloc[i] < donchian_lower_aligned[i]:
+                    signals[i] = 0.25
+                elif bear_regime_aligned[i] > 0.5:
                     position = -1
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
