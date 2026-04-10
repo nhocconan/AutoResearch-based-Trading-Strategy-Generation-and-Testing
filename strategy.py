@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d ADX regime filter + volume confirmation
-# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# - ADX > 25 indicates trending market (use 1d timeframe for regime)
-# - In trending markets (ADX > 25): go long when Bull Power > 0 and rising, short when Bear Power < 0 and falling
-# - In ranging markets (ADX <= 25): mean revert at extreme Elder Ray values
-# - Volume confirmation: require volume > 1.5x 20-period average
+# Hypothesis: 12h Camarilla pivot breakout with weekly trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 (1d) AND weekly HMA(34) is rising AND volume > 1.5x 20-period average
+# - Short when price breaks below Camarilla L3 (1d) AND weekly HMA(34) is falling AND volume > 1.5x 20-period average
+# - Exit when price crosses Camarilla Pivot point (1d) OR opposite breakout occurs
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Elder Ray measures price strength relative to trend (EMA)
-# - ADX regime filter ensures we trade with the market structure
-# - Works in both bull (trend following) and bear (mean reversion in ranges) markets
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Camarilla pivots provide institutional support/resistance levels
+# - Weekly HMA filter ensures we trade with the higher timeframe trend
+# - Volume confirmation reduces false breakouts
 
-name = "6h_1d_elder_ray_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_hma_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,80 +24,90 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 5 or len(df_1w) < 34:
         return np.zeros(n)
     
-    # Pre-compute 6h indicators
+    # Pre-compute 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA(13) for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # High - EMA(13)
-    bear_power = low - ema13   # Low - EMA(13)
-    
-    # Elder Ray momentum (slope)
-    bull_power_slope = np.diff(bull_power, prepend=np.nan)
-    bear_power_slope = np.diff(bear_power, prepend=np.nan)
-    bull_rising = bull_power_slope > 0
-    bear_falling = bear_power_slope < 0
-    
-    # Pre-compute 6h volume confirmation
+    # Pre-compute 12h volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 1d ADX for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d Camarilla levels (based on previous day)
+    # Camarilla: H4, H3, H2, H1, L1, L2, L3, L4
+    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
+    # Using previous day's OHLC
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift(1)).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    camarilla_pivot = (prev_high + prev_low + prev_close) / 3
     
-    # Directional Movement
-    dm_plus = pd.Series(high_1d).diff()
-    dm_minus = -pd.Series(low_1d).diff()
-    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
-    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(arr, period):
-        return pd.Series(arr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    # Pre-compute 1w HMA(34) for trend filter
+    close_1w = df_1w['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    def wma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, n + 1)
+        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
     
-    period = 14
-    atr = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    # Calculate WMA for n/2 and n
+    n = 34
+    half_n = n // 2
+    sqrt_n = int(np.sqrt(n))
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+    wma_half = wma(close_1w, half_n)
+    wma_full = wma(close_1w, n)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = wilders_smoothing(dx, period)
+    # Handle array lengths
+    wma_half_padded = np.full_like(close_1w, np.nan)
+    wma_full_padded = np.full_like(close_1w, np.nan)
     
-    # ADX > 25 indicates trending market
-    adx_trending = adx > 25
+    if len(wma_half) > 0:
+        wma_half_padded[half_n-1:half_n-1+len(wma_half)] = wma_half
+    if len(wma_full) > 0:
+        wma_full_padded[n-1:n-1+len(wma_full)] = wma_full
     
-    # Align HTF indicators to 6h timeframe
-    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending)
+    # 2*WMA(n/2) - WMA(n)
+    diff = 2 * wma_half_padded - wma_full_padded
+    # WMA(sqrt(n)) of the diff
+    wma_diff = wma(diff, sqrt_n)
+    wma_diff_padded = np.full_like(close_1w, np.nan)
+    if len(wma_diff) > 0:
+        wma_diff_padded[sqrt_n-1:sqrt_n-1+len(wma_diff)] = wma_diff
+    
+    hma_1w = wma_diff_padded
+    
+    # HMA slope (rising/falling)
+    hma_slope = np.diff(hma_1w, prepend=np.nan)
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
+    
+    # Align HTF indicators to 12h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising)
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(adx_trending_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -109,50 +117,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            if adx_trending_aligned[i]:  # Trending market
-                # Long: Bull Power > 0 and rising
-                if bull_power[i] > 0 and bull_rising[i] and volume_spike[i]:
-                    position = 1
-                    signals[i] = 0.25
-                # Short: Bear Power < 0 and falling
-                elif bear_power[i] < 0 and bear_falling[i] and volume_spike[i]:
-                    position = -1
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
-            else:  # Ranging market
-                # Mean reversion at extreme Elder Ray values
-                # Long when Bear Power is extremely negative (oversold)
-                # Short when Bull Power is extremely positive (overbought)
-                bull_extreme = bull_power[i] > np.percentile(bull_power[max(0, i-100):i+1], 80) if i >= 20 else False
-                bear_extreme = bear_power[i] < np.percentile(bear_power[max(0, i-100):i+1], 20) if i >= 20 else False
-                
-                if bear_extreme and volume_spike[i]:  # Oversold - go long
-                    position = 1
-                    signals[i] = 0.25
-                elif bull_extreme and volume_spike[i]:  # Overbought - go short
-                    position = -1
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+            # Long conditions: price breaks above Camarilla H3 AND weekly HMA rising AND volume spike
+            if (close[i] > camarilla_h3_aligned[i] and 
+                hma_rising_aligned[i] and 
+                volume_spike[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short conditions: price breaks below Camarilla L3 AND weekly HMA falling AND volume spike
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  hma_falling_aligned[i] and 
+                  volume_spike[i]):
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions
-            if position == 1:  # Long position
-                # Exit long when Bull Power turns negative or loses momentum
-                exit_long = bull_power[i] <= 0 or not bull_rising[i]
-                # Also exit if we get a short signal in ranging market
-                if not adx_trending_aligned[i]:
-                    bear_extreme = bear_power[i] < np.percentile(bear_power[max(0, i-100):i+1], 20) if i >= 20 else False
-                    exit_long = exit_long or bear_extreme
-            else:  # Short position
-                # Exit short when Bear Power turns positive or loses momentum
-                exit_short = bear_power[i] >= 0 or not bear_falling[i]
-                # Also exit if we get a long signal in ranging market
-                if not adx_trending_aligned[i]:
-                    bull_extreme = bull_power[i] > np.percentile(bull_power[max(0, i-100):i+1], 80) if i >= 20 else False
-                    exit_short = exit_short or bull_extreme
+            # Exit conditions: price crosses Camarilla Pivot OR opposite breakout occurs
+            exit_long = (position == 1 and 
+                        (close[i] < camarilla_pivot_aligned[i] or close[i] < camarilla_l3_aligned[i]))
+            exit_short = (position == -1 and 
+                         (close[i] > camarilla_pivot_aligned[i] or close[i] > camarilla_h3_aligned[i]))
             
-            if (position == 1 and exit_long) or (position == -1 and exit_short):
+            if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
