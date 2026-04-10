@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike filter and ATR(14) trailing stop
-# - Uses tighter Camarilla H3/L3 levels (vs H4/L4) for more frequent but still selective breakouts
-# - Volume confirmation: 1d volume > 1.8x 20-day average to ensure institutional participation
-# - ATR trailing stop (2.5 * ATR) balances profit protection vs whipsaw avoidance
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR volume filter and 1w trend filter
+# - Donchian breakout captures momentum moves with clear structure
+# - 1d ATR volume filter ensures breakouts occur with institutional participation
+# - 1w EMA trend filter ensures alignment with higher timeframe direction
+# - ATR(14) trailing stop (2.0x) manages risk without whipsaw
 # - Position size: 0.25 discrete to minimize fee churn
-# - Designed for 15-25 trades/year (60-100 total over 4 years) to avoid fee drag
-# - Works in bull/bear: Camarilla adapts to volatility, volume filters weak moves, ATR stop manages risk
+# - Target: 20-30 trades/year (80-120 total over 4 years) to avoid fee drag
+# - Works in bull/bear: Donchian adapts to volatility, volume filter avoids false breakouts, trend filter avoids counter-trend trades
 
-name = "4h_1d_camarilla_h3l3_breakout_volume_v1"
+name = "4h_1d_1w_donchian_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,37 +23,44 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla levels (based on previous day's OHLC)
+    # Pre-compute 1d ATR for volume filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Camarilla calculations: based on previous day's range
-    range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + range_1d * 1.1/2
-    camarilla_l4 = close_1d - range_1d * 1.1/2
-    camarilla_h3 = close_1d + range_1d * 1.1/4
-    camarilla_l3 = close_1d - range_1d * 1.1/4
-    
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Pre-compute 1d volume average (20-period) for spike filter
     volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Pre-compute 4h ATR for trailing stop (14-period)
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1_1d[0] = np.nan
+    tr2_1d[0] = np.nan
+    tr3_1d[0] = np.nan
+    tr_1d = np.maximum.reduce([tr1_1d, tr2_1d, tr3_1d])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d ATR volume: volume / ATR (normalizes volume by volatility)
+    atr_volume_1d = volume_1d / atr_1d
+    atr_volume_ma_20_1d = pd.Series(atr_volume_1d).rolling(window=20, min_periods=20).mean().values
+    atr_volume_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_volume_ma_20_1d)
+    
+    # Pre-compute 1w EMA for trend filter (21-period)
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Pre-compute 4h Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 4h ATR for trailing stop (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -70,9 +78,9 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr_volume_ma_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or 
+            np.isnan(atr[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -81,22 +89,26 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 1d volume for spike filter (aligned)
-        volume_1d_current = df_1d['volume'].values
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
+        # Get current 1d ATR volume for filter (aligned)
+        atr_volume_1d_current = atr_volume_1d
+        atr_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_volume_1d_current)
         
-        # Volume confirmation: current 1d volume > 1.8x 20-day average (stricter filter)
-        volume_spike = volume_1d_aligned[i] > 1.8 * vol_ma_aligned[i]
+        # Volume confirmation: current 1d ATR volume > 1.5x 20-day average
+        volume_confirm = atr_volume_1d_aligned[i] > 1.5 * atr_volume_ma_aligned[i]
+        
+        # Trend filter: price above/below 1w EMA
+        trend_long = prices['close'].iloc[i] > ema_21_1w_aligned[i]
+        trend_short = prices['close'].iloc[i] < ema_21_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price > Camarilla H3 AND volume spike
-            if prices['close'].iloc[i] > h3_aligned[i] and volume_spike:
+            # Long conditions: price > Donchian high AND volume confirmation AND uptrend
+            if prices['close'].iloc[i] > donchian_high[i] and volume_confirm and trend_long:
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: price < Camarilla L3 AND volume spike
-            elif prices['close'].iloc[i] < l3_aligned[i] and volume_spike:
+            # Short conditions: price < Donchian low AND volume confirmation AND downtrend
+            elif prices['close'].iloc[i] < donchian_low[i] and volume_confirm and trend_short:
                 position = -1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 lowest_since_entry = prices['low'].iloc[i]
@@ -107,15 +119,15 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # Exit conditions: price < Camarilla L4 (stop loss) OR ATR trailing stop
-                exit_long = prices['close'].iloc[i] < l4_aligned[i]  # Stop loss at L4
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr[i]
+                # Exit conditions: price < Donchian low (stop loss) OR ATR trailing stop
+                exit_long = prices['close'].iloc[i] < donchian_low[i]  # Stop loss at Donchian low
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.0 * atr[i]
                 exit_condition = exit_long or trailing_stop
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # Exit conditions: price > Camarilla H4 (stop loss) OR ATR trailing stop
-                exit_short = prices['close'].iloc[i] > h4_aligned[i]  # Stop loss at H4
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr[i]
+                # Exit conditions: price > Donchian high (stop loss) OR ATR trailing stop
+                exit_short = prices['close'].iloc[i] > donchian_high[i]  # Stop loss at Donchian high
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr[i]
                 exit_condition = exit_short or trailing_stop
             
             if exit_condition:
