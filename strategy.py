@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend direction with 1w Williams %R mean reversion and volume confirmation
-# - Long when KAMA(1d, ER=10) rising AND Williams %R(1w) < -80 (oversold) AND 1d volume > 1.5x 20-bar avg
-# - Short when KAMA(1d, ER=10) falling AND Williams %R(1w) > -20 (overbought) AND 1d volume > 1.5x 20-bar avg
-# - Exit when Williams %R returns to -50 (mean reversion to equilibrium)
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter + volume confirmation
+# - Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# - Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX(14) > 25 (strong trend) AND 6h volume > 1.5x 20-bar avg
+# - Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX(14) > 25 AND 6h volume > 1.5x 20-bar avg
+# - Exit when either power crosses zero (trend weakening) OR volume drops below average
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - KAMA adapts to market noise, reducing whipsaw in ranging markets
-# - Williams %R captures short-term exhaustion on weekly timeframe
-# - Volume confirmation avoids low-liquidity false signals
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Elder Ray measures bull/bear strength relative to EMA; ADX filters for trending markets only
+# - Volume confirmation ensures institutional participation
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in bull markets (strong uptrends) and bear markets (strong downtrends), avoids ranging markets
 
-name = "1d_1w_kama_williamsr_volume_trend_v2"
-timeframe = "1d"
+name = "6h_1d_elder_ray_adx_regime_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +24,78 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w Williams %R(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute 1d ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1w) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    williams_oversold = williams_r < -80
-    williams_overbought = williams_r > -20
-    williams_exit = np.abs(williams_r + 50) < 2.5  # Within 2.5 of -50
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align 1w Williams %R to 1d timeframe
-    williams_oversold_aligned = align_htf_to_ltf(prices, df_1w, williams_oversold)
-    williams_overbought_aligned = align_htf_to_ltf(prices, df_1w, williams_overbought)
-    williams_exit_aligned = align_htf_to_ltf(prices, df_1w, williams_exit)
+    # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(values, period):
+        result = np.full_like(values, np.nan)
+        alpha = 1.0 / period
+        for i in range(len(values)):
+            if np.isnan(result[i-1]) if i > 0 else True:
+                result[i] = values[i]
+            else:
+                result[i] = alpha * values[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Pre-compute 1d KAMA trend direction (ER=10, fast=2, slow=30)
+    period = 14
+    atr = wilders_smoothing(tr, period)
+    dm_plus_smooth = wilders_smoothing(dm_plus, period)
+    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, period)
+    
+    # ADX > 25 indicates strong trend
+    adx_strong = adx > 25
+    
+    # Align 1d ADX regime to 6h timeframe
+    adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong)
+    
+    # Pre-compute Elder Ray on 6h data: Bull Power and Bear Power
     close = prices['close'].values
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])).reshape(-1, 1), axis=1)  # simplified
-    # Correct ER calculation: ER = |net change| / sum of absolute changes
-    net_change = np.abs(np.diff(close, prepend=close[0]))
-    sum_abs_change = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=10, min_periods=1).sum().values
-    er = np.where(sum_abs_change > 0, net_change / sum_abs_change, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    sc = np.where(np.isnan(sc), 0, sc)
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
-    # Handle first element
-    kama_rising[0] = False
-    kama_falling[0] = False
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    # EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    
+    # Bull Power = High - EMA(13)
+    bull_power = high - ema_13
+    # Bear Power = EMA(13) - Low
+    bear_power = ema_13 - low
+    
+    # Elder Ray signals
+    bull_power_pos = bull_power > 0
+    bear_power_pos = bear_power > 0
+    
+    # Pre-compute 6h volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * volume_20_avg)
@@ -76,9 +105,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_rising[i]) or np.isnan(kama_falling[i]) or
-            np.isnan(williams_oversold_aligned[i]) or np.isnan(williams_overbought_aligned[i]) or
-            np.isnan(williams_exit_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(adx_strong_aligned[i]) or np.isnan(bull_power_pos[i]) or
+            np.isnan(bear_power_pos[i]) or np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -88,24 +116,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new mean reversion entries
-            # Long when KAMA rising AND Williams %R oversold AND volume spike
-            if (kama_rising[i] and 
-                williams_oversold_aligned[i] and 
+        if position == 0:  # Flat - look for new trend entries
+            # Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX strong trend AND volume spike
+            if (bull_power_pos[i] and 
+                not bear_power_pos[i] and  # Bear Power < 0
+                adx_strong_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when KAMA falling AND Williams %R overbought AND volume spike
-            elif (kama_falling[i] and 
-                  williams_overbought_aligned[i] and 
+            # Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX strong trend AND volume spike
+            elif (bear_power_pos[i] and 
+                  not bull_power_pos[i] and  # Bull Power < 0
+                  adx_strong_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to Williams %R = -50 (mean reversion)
-            # Exit when Williams %R returns to equilibrium (-50)
-            exit_signal = williams_exit_aligned[i]
+        else:  # Have position - look for exit
+            # Exit when either power crosses zero (trend weakening) OR volume drops below average
+            exit_signal = (not bull_power_pos[i] and position == 1) or \
+                          (not bear_power_pos[i] and position == -1) or \
+                          (not vol_spike[i])
             
             if exit_signal:
                 position = 0
