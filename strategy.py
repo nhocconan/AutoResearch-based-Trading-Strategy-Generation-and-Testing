@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d ATR filter and 6h volume confirmation
-# - Long when price breaks above 20-period 6h Donchian high AND ATR(14) on 1d > ATR(50) on 1d (expanding volatility)
-# - Short when price breaks below 20-period 6h Donchian low AND ATR(14) on 1d > ATR(50) on 1d
-# - Volume confirmation: 6h volume > 1.5x 20-period 6h volume SMA
-# - Exit: Donchian midpoint reversion or opposite breakout with volume
+# Hypothesis: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above Camarilla H4 level AND 1w close > 1w EMA20 (uptrend)
+# - Short when price breaks below Camarilla L4 level AND 1w close < 1w EMA20 (downtrend)
+# - Volume confirmation: 12h volume > 1.5x 20-period 12h volume SMA
+# - Exit: price touches Camarilla L3/H3 levels or opposite breakout with volume
 # - Position sizing: 0.25 discrete level
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - ATR filter from 1d ensures trades occur during volatile regimes, reducing whipsaw in ranging markets
-# - Using 6h primary timeframe with 1d HTF for volatility regime (proven edge from session best: 6h_1d_camarilla_volspike_trend_v1 Sharpe=0.543)
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Uses 1w EMA for trend filter to avoid counter-trend trades in strong trends
+# - Camarilla levels provide precise intraday support/resistance from prior 1d range
 
-name = "6h_1d_donchian_atr_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_pivot_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -31,69 +31,87 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 20-period Donchian channels on 6h
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
-    
-    # Load 1d HTF data ONCE before loop (MTF Rule #1)
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate ATR(14) and ATR(50) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50_1d = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # Align 1d ATR to 6h timeframe (completed 1d bar only)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
-    
-    # Calculate 20-period volume SMA on 6h for confirmation
+    # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Track entry extreme for exit logic
+    # Load HTF data: 1w for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return signals
+    
+    # Calculate 1w EMA20 for trend
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Track entry price for stoploss (optional)
     entry_price = np.full(n, np.nan)
     
-    for i in range(donchian_period, n):
+    for i in range(20, n):  # Start after volume SMA warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(volume_sma_20[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR(14) on 1d > ATR(50) on 1d (expanding volatility regime)
-        vol_regime = atr_14_1d_aligned[i] > atr_50_1d_aligned[i]
+        # Need prior 1d high/low for Camarilla calculation
+        if i < 1:
+            signals[i] = 0.0
+            continue
+            
+        # Calculate Camarilla levels from prior 1d bar
+        # Camarilla uses prior day's range
+        prior_high = high[i-1]
+        prior_low = low[i-1]
+        prior_close = close[i-1]
         
-        # Volume confirmation: 6h volume > 1.5x 20-period volume SMA
+        if np.isnan(prior_high) or np.isnan(prior_low) or np.isnan(prior_close):
+            signals[i] = 0.0
+            continue
+            
+        range_val = prior_high - prior_low
+        if range_val <= 0:
+            signals[i] = 0.0
+            continue
+            
+        # Camarilla levels
+        # H4 = close + 1.1 * range * 1.1 / 2
+        # L4 = close - 1.1 * range * 1.1 / 2
+        # H3 = close + 1.1 * range * 1.1 / 4
+        # L3 = close - 1.1 * range * 1.1 / 4
+        camarilla_h4 = prior_close + 1.1 * range_val * 1.1 / 2
+        camarilla_l4 = prior_close - 1.1 * range_val * 1.1 / 2
+        camarilla_h3 = prior_close + 1.1 * range_val * 1.1 / 4
+        camarilla_l3 = prior_close - 1.1 * range_val * 1.1 / 4
+        
+        # Volume confirmation: 12h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Donchian breakout signals on 6h
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
+        # Trend filter: 1w close vs EMA20
+        trend_up = close_1w[-1] > ema_20_1w[-1] if len(close_1w) > 0 else False  # Simplified - use aligned
+        trend_down = close_1w[-1] < ema_20_1w[-1] if len(close_1w) > 0 else False
+        
+        # Use aligned EMA for proper timing
+        trend_up = close[i] > ema_20_1w_aligned[i]
+        trend_down = close[i] < ema_20_1w_aligned[i]
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and vol_regime and vol_confirm:
+            # Long: break above H4 with uptrend and volume
+            if close[i] > camarilla_h4 and trend_up and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 entry_price[i] = close[i]
-            elif breakout_down and vol_regime and vol_confirm:
+            # Short: break below L4 with downtrend and volume
+            elif close[i] < camarilla_l4 and trend_down and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 entry_price[i] = close[i]
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit on Donchian midpoint reversion or opposite breakout with volume
-            exit_condition = (close[i] < donchian_mid[i]) or \
-                           (breakout_down and vol_confirm)
+            # Exit: touch L3 or opposite break below L4 with volume
+            exit_condition = (close[i] <= camarilla_l3) or \
+                           (close[i] < camarilla_l4 and vol_confirm)
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
@@ -101,9 +119,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            # Exit on Donchian midpoint reversion or opposite breakout with volume
-            exit_condition = (close[i] > donchian_mid[i]) or \
-                           (breakout_up and vol_confirm)
+            # Exit: touch H3 or opposite break above H4 with volume
+            exit_condition = (close[i] >= camarilla_h3) or \
+                           (close[i] > camarilla_h4 and vol_confirm)
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
