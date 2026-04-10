@@ -3,42 +3,45 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level with volume > 1.5x average AND 4h close > 4h EMA20
-# - Short when price breaks below Camarilla L3 level with volume > 1.5x average AND 4h close < 4h EMA20
-# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.8x average
-# - Uses 4h trend filter to avoid counter-trend trades and 1d session filter (08-20 UTC) to reduce noise
-# - Targets 15-30 trades/year (60-120 total over 4 years) to avoid fee drag
-# - Uses 1h timeframe for entry timing with 4h/1d for signal direction
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
+# - Weekly pivot levels computed from prior week's OHLC
+# - Long when price breaks above Donchian upper band AND close > weekly pivot point AND volume > 1.5x average
+# - Short when price breaks below Donchian lower band AND close < weekly pivot point AND volume > 1.5x average
+# - Exit when price crosses weekly pivot point in opposite direction OR volume drops below 0.8x average
+# - Weekly pivot filter ensures trades align with higher timeframe structure, reducing counter-trend whipsaws
+# - Volume confirmation filters low-momentum breakouts
+# - Targets ~25 trades/year (100 total over 4 years) to avoid fee drag
+# - Works in bull markets via breakouts, in bear via short breakdowns with weekly pivot as trend filter
 
-name = "1h_4h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "1h"
+name = "6h_1w_donchian_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
-    
-    # Pre-compute session filter (08-20 UTC) ONCE before loop
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Pre-compute 4h EMA(20) for trend filter
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Pre-compute weekly pivot points: (H+L+C)/3 from prior completed week
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Pre-compute 1d close for trend filter (longer-term bias)
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Calculate pivot point for each week
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Align weekly pivot to 6h timeframe (completed weekly pivot only)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # Pre-compute Donchian channels (20-period) on 6h data
+    lookback = 20
+    highest_high = prices['high'].rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = prices['low'].rolling(window=lookback, min_periods=lookback).min().values
     
     # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -50,112 +53,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute aligned 4h data for Camarilla calculation
-    h_4h = df_4h['high'].values
-    l_4h = df_4h['low'].values
-    c_4h = df_4h['close'].values
-    
-    # Align them to 1h timeframe
-    h_4h_aligned = align_htf_to_ltf(prices, df_4h, h_4h)
-    l_4h_aligned = align_htf_to_ltf(prices, df_4h, l_4h)
-    c_4h_aligned = align_htf_to_ltf(prices, df_4h, c_4h)
-    
-    for i in range(20, n):
-        # Skip if outside trading session
-        if not in_session.iloc[i]:
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.20  # Hold long
-            else:
-                signals[i] = -0.20  # Hold short
-            continue
-        
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(volume_20_avg[i]) or np.isnan(h_4h_aligned[i]) or 
-            np.isnan(l_4h_aligned[i]) or np.isnan(c_4h_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        # Get previous completed 4h bar values (need to shift by 4 to avoid look-ahead)
-        # Since 1h timeframe, there are 4 bars per 4h bar
-        if i >= 8:  # Need at least 8 1h bars (2x 4h bars) to get previous 4h bar's data
-            # Get index of previous completed 4h bar
-            prev_4h_idx = i - 4  # Look back 4 bars (one 4h period)
-            
-            if prev_4h_idx >= 0 and not (np.isnan(h_4h_aligned[prev_4h_idx]) or 
-                                        np.isnan(l_4h_aligned[prev_4h_idx]) or 
-                                        np.isnan(c_4h_aligned[prev_4h_idx])):
-                ph = h_4h_aligned[prev_4h_idx]  # Previous 4h period's high
-                pl = l_4h_aligned[prev_4h_idx]  # Previous 4h period's low
-                pc = c_4h_aligned[prev_4h_idx]  # Previous 4h period's close
-                
-                # Calculate Camarilla levels
-                range_val = ph - pl
-                if range_val > 0:
-                    camarilla_h3 = pc + (range_val * 1.1 / 4)
-                    camarilla_l3 = pc - (range_val * 1.1 / 4)
-                    camarilla_h4 = pc + (range_val * 1.1 / 2)
-                    camarilla_l4 = pc - (range_val * 1.1 / 2)
-                    
-                    if position == 0:  # Flat - look for new breakout entries
-                        # Long breakout: price > Camarilla H3 with volume spike AND 4h uptrend AND 1d uptrend
-                        if (prices['close'].iloc[i] > camarilla_h3 and 
-                            vol_spike.iloc[i] and 
-                            prices['close'].iloc[i] > ema20_4h_aligned[i] and
-                            prices['close'].iloc[i] > ema20_1d_aligned[i]):
-                            position = 1
-                            signals[i] = 0.20
-                        # Short breakdown: price < Camarilla L3 with volume spike AND 4h downtrend AND 1d downtrend
-                        elif (prices['close'].iloc[i] < camarilla_l3 and 
-                              vol_spike.iloc[i] and 
-                              prices['close'].iloc[i] < ema20_4h_aligned[i] and
-                              prices['close'].iloc[i] < ema20_1d_aligned[i]):
-                            position = -1
-                            signals[i] = -0.20
-                    else:  # Have position - look for exit
-                        # Exit conditions:
-                        # 1. Price retreats to Camarilla H4/L4 levels
-                        # 2. Volume drops below 0.8x average (loss of momentum)
-                        if position == 1:  # Long position
-                            if (prices['close'].iloc[i] < camarilla_h4 or 
-                                vol_weak.iloc[i]):
-                                position = 0
-                                signals[i] = 0.0
-                            else:
-                                signals[i] = 0.20  # Hold long
-                        elif position == -1:  # Short position
-                            if (prices['close'].iloc[i] > camarilla_l4 or 
-                                vol_weak.iloc[i]):
-                                position = 0
-                                signals[i] = 0.0
-                            else:
-                                signals[i] = -0.20  # Hold short
-                else:
-                    # Hold current position
-                    if position == 0:
-                        signals[i] = 0.0
-                    elif position == 1:
-                        signals[i] = 0.20
-                    else:
-                        signals[i] = -0.20
-            else:
-                # Hold current position
-                if position == 0:
+        if position == 0:  # Flat - look for new breakout entries
+            # Long breakout: price > Donchian upper band AND close > weekly pivot AND volume spike
+            if (prices['close'].iloc[i] > highest_high[i] and 
+                prices['close'].iloc[i] > weekly_pivot_aligned[i] and 
+                vol_spike.iloc[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short breakdown: price < Donchian lower band AND close < weekly pivot AND volume spike
+            elif (prices['close'].iloc[i] < lowest_low[i] and 
+                  prices['close'].iloc[i] < weekly_pivot_aligned[i] and 
+                  vol_spike.iloc[i]):
+                position = -1
+                signals[i] = -0.25
+        else:  # Have position - look for exit
+            # Exit conditions:
+            # 1. Price crosses weekly pivot point in opposite direction
+            # 2. Volume drops below 0.8x average (loss of momentum)
+            if position == 1:  # Long position
+                if (prices['close'].iloc[i] < weekly_pivot_aligned[i] or 
+                    vol_weak.iloc[i]):
+                    position = 0
                     signals[i] = 0.0
-                elif position == 1:
-                    signals[i] = 0.20
                 else:
-                    signals[i] = -0.20
-        else:
-            # Not enough data yet, hold flat
-            signals[i] = 0.0
+                    signals[i] = 0.25  # Hold long
+            elif position == -1:  # Short position
+                if (prices['close'].iloc[i] > weekly_pivot_aligned[i] or 
+                    vol_weak.iloc[i]):
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25  # Hold short
     
     return signals
