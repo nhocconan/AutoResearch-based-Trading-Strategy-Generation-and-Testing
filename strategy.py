@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX(14) regime filter
-# - Long when price breaks above 20-period Donchian upper + 1d volume > 2.0x 20-period volume SMA + ADX < 25 (range/low trend)
-# - Short when price breaks below 20-period Donchian lower + 1d volume > 2.0x 20-period volume SMA + ADX < 25
-# - Exit: price returns to 20-period Donchian midpoint (mean reversion within channel)
-# - Position sizing: 0.25 discrete level
-# - Donchian breakouts capture momentum, volume confirms participation, ADX filter avoids strong trends where breakouts fail
-# - Works in bull/bear: breakouts effective in trending markets, ADX filter prevents trading against strong counter-trend moves
-# - 4h timeframe targets 75-200 trades over 4 years (19-50/year) with strict entry conditions to minimize fee drag
+# Hypothesis: 6h Elder Ray + 1d Regime Filter
+# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13) on 6h
+# - Regime: 1d ADX < 20 (range) for mean reversion, ADX > 25 (trend) for momentum
+# - In range (ADX<20): fade extreme Elder Ray (long when Bear Power < -0.5*ATR, short when Bull Power > 0.5*ATR)
+# - In trend (ADX>25): follow Elder Ray (long when Bull Power > 0.5*ATR, short when Bear Power < -0.5*ATR)
+# - Volume confirmation: 6h volume > 1.5x 20-period volume SMA
+# - Position sizing: 0.25 discrete
+# - Works in bull/bear: adapts to regime, avoids whipsaw in strong trends, captures reversals in ranges
 
-name = "4h_1d_donchian_volume_adx_v3"
-timeframe = "4h"
+name = "6h_1d_elderray_regime_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -35,77 +35,97 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Donchian Channel(20)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Calculate 6h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 4h ADX(14) for regime filter (avoid strong trends)
-    # True Range
+    # Calculate 6h Elder Ray
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Calculate 6h ATR(14) for power thresholds
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
                                 np.abs(low - np.roll(close, 1))))
     tr1[0] = high[0] - low[0]
+    atr = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 6h volume SMA(20) for confirmation
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d ADX(14) for regime filter
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
+    
+    # True Range
+    tr1_1d = np.maximum(df_1d_high - df_1d_low, 
+                        np.maximum(np.abs(df_1d_high - np.roll(df_1d_close, 1)), 
+                                   np.abs(df_1d_low - np.roll(df_1d_close, 1))))
+    tr1_1d[0] = df_1d_high[0] - df_1d_low[0]
     # Plus Directional Movement
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    plus_dm[0] = 0
+    plus_dm_1d = np.where((df_1d_high - np.roll(df_1d_high, 1)) > (np.roll(df_1d_low, 1) - df_1d_low), 
+                          np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0), 0)
+    plus_dm_1d[0] = 0
     # Minus Directional Movement
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    minus_dm[0] = 0
+    minus_dm_1d = np.where((np.roll(df_1d_low, 1) - df_1d_low) > (df_1d_high - np.roll(df_1d_high, 1)), 
+                           np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0), 0)
+    minus_dm_1d[0] = 0
     # Smoothed values
-    atr = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr1_1d).rolling(window=14, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm_1d).rolling(window=14, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm_1d).rolling(window=14, min_periods=14).mean().values / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     # Handle division by zero and invalid values
-    plus_di = np.where(atr == 0, 0, plus_di)
-    minus_di = np.where(atr == 0, 0, minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = np.where(np.isnan(adx) | np.isinf(adx), 0, adx)
+    plus_di_1d = np.where(atr_1d == 0, 0, plus_di_1d)
+    minus_di_1d = np.where(atr_1d == 0, 0, minus_di_1d)
+    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
+    adx_1d = np.where(np.isnan(adx_1d) | np.isinf(adx_1d), 0, adx_1d)
     
-    # Calculate 1d volume SMA(20) for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Current 1d volume for spike detection (aligned to LTF)
-    volume_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-    
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_1d_current[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (volume spike)
-        vol_confirm = volume_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 6h volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Regime filter: ADX < 25 indicates ranging/low trend market (favorable for breakout mean reversion)
-        ranging_market = adx[i] < 25
+        # Regime filters
+        ranging_market = adx_1d_aligned[i] < 20   # ADX < 20 = range/low trend
+        trending_market = adx_1d_aligned[i] > 25  # ADX > 25 = strong trend
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # Price breaks above upper channel
-        breakout_down = close[i] < donchian_lower[i-1]  # Price breaks below lower channel
+        # Elder Ray power thresholds
+        bull_threshold = 0.5 * atr[i]
+        bear_threshold = -0.5 * atr[i]
         
-        # Entry conditions: Donchian breakout with volume and regime confirmation
-        long_entry = breakout_up and vol_confirm and ranging_market
-        short_entry = breakout_down and vol_confirm and ranging_market
+        # Signals based on regime
+        if ranging_market:
+            # In range: fade extreme Elder Ray (mean reversion)
+            long_signal = bear_power[i] < bear_threshold and vol_confirm
+            short_signal = bull_power[i] > bull_threshold and vol_confirm
+        elif trending_market:
+            # In trend: follow Elder Ray (momentum)
+            long_signal = bull_power[i] > bull_threshold and vol_confirm
+            short_signal = bear_power[i] < bear_threshold and vol_confirm
+        else:
+            # Transition regime (ADX 20-25): no trade
+            long_signal = False
+            short_signal = False
         
-        # Exit conditions: price returns to Donchian midpoint (mean reversion within channel)
-        long_exit = close[i] <= donchian_mid[i]  # Exit long when price returns to or below midpoint
-        short_exit = close[i] >= donchian_mid[i]  # Exit short when price returns to or above midpoint
+        # Exit conditions: power returns to neutral zone
+        long_exit = bull_power[i] > -0.1 * atr[i]  # Exit long when bull power improves
+        short_exit = bear_power[i] < 0.1 * atr[i]   # Exit short when bear power improves
         
         if position == 0:  # Flat - look for entry
-            if long_entry:
+            if long_signal:
                 position = 1
                 signals[i] = 0.25
-            elif short_entry:
+            elif short_signal:
                 position = -1
                 signals[i] = -0.25
             else:
