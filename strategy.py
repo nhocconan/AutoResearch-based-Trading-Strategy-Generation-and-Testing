@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d ADX trend filter
-# - Long when price breaks above 20-period 4h Donchian high AND 12h volume > 1.5x 20-period average AND 1d ADX > 25
-# - Short when price breaks below 20-period 4h Donchian low AND 12h volume > 1.5x 20-period average AND 1d ADX > 25
-# - Exit when price returns to 4h Donchian midpoint (mean reversion to equilibrium)
+# Hypothesis: 4h Williams %R mean reversion with 12h volume spike and 1d ADX trend filter
+# - Long when Williams %R(14) crosses above -80 (oversold) AND 12h volume > 2.0x 20-period average AND 1d ADX > 20
+# - Short when Williams %R(14) crosses below -20 (overbought) AND 12h volume > 2.0x 20-period average AND 1d ADX > 20
+# - Exit when Williams %R returns to -50 (mean reversion to equilibrium)
 # - Uses discrete position sizing 0.25 to minimize fee churn
-# - Target: 30-60 trades/year on 4h (120-240 total over 4 years)
-# - Works in bull/bear: volume confirms breakout strength, daily ADX ensures we only trade in trending markets
-# - 4h Donchian provides clear structure, 12h volume confirms participation, 1d ADX filters regime
+# - Target: 30-50 trades/year on 4h (120-200 total over 4 years)
+# - Works in bull/bear: volume confirms participation, daily ADX ensures we only trade when trend exists,
+#   Williams %R captures mean reversion within the trend
 
-name = "4h_12h_1d_donchian_volume_adx_v1"
+name = "4h_12h_1d_williamsr_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,19 +27,19 @@ def generate_signals(prices):
     if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 4h Donchian channels (20-period)
+    # Pre-compute 4h Williams %R(14)
     high_4h = prices['high'].values
     low_4h = prices['low'].values
     close_4h = prices['close'].values
     
-    donchian_high = np.full_like(high_4h, np.nan, dtype=float)
-    donchian_low = np.full_like(low_4h, np.nan, dtype=float)
-    donchian_mid = np.full_like(high_4h, np.nan, dtype=float)
-    
-    for i in range(19, len(high_4h)):
-        donchian_high[i] = np.max(high_4h[i-19:i+1])
-        donchian_low[i] = np.min(low_4h[i-19:i+1])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    williams_r = np.full_like(close_4h, np.nan, dtype=float)
+    for i in range(13, len(high_4h)):
+        highest_high = np.max(high_4h[i-13:i+1])
+        lowest_low = np.min(low_4h[i-13:i+1])
+        if highest_high != lowest_low:
+            williams_r[i] = ((highest_high - close_4h[i]) / (highest_high - lowest_low)) * -100
+        else:
+            williams_r[i] = -50  # avoid division by zero
     
     # Pre-compute 12h volume average (20-period)
     volume_12h = df_12h['volume'].values
@@ -110,20 +110,24 @@ def generate_signals(prices):
                     adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
     # Align HTF indicators to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, prices, donchian_high)  # 4h data already in prices
-    donchian_low_aligned = align_htf_to_ltf(prices, prices, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, prices, donchian_mid)
+    williams_r_aligned = align_htf_to_ltf(prices, prices, williams_r)  # 4h data already in prices
     vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    prev_williams_r = np.full(n, np.nan)  # for crossover detection
     
     for i in range(100, n):  # Start after warmup
+        # Store previous Williams %R for crossover detection
+        if i > 0:
+            prev_williams_r[i] = williams_r_aligned[i-1]
+        else:
+            prev_williams_r[i] = np.nan
+        
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(prev_williams_r[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -132,32 +136,34 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (1.5x average)
+        # Volume spike condition (2.0x average)
         vol_series = prices['volume'].values
         vol_ma_4h = np.full_like(vol_series, np.nan, dtype=float)
         for j in range(19, i+1):
             vol_ma_4h[j] = np.mean(vol_series[j-19:j+1])
-        vol_spike = not np.isnan(vol_ma_4h[i]) and vol_series[i] > 1.5 * vol_ma_4h[i]
+        vol_spike = not np.isnan(vol_ma_4h[i]) and vol_series[i] > 2.0 * vol_ma_4h[i]
         
         close_price = prices['close'].values[i]
+        williams_now = williams_r_aligned[i]
+        williams_prev = prev_williams_r[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: break above 4h Donchian high AND volume spike AND 1d trending (ADX > 25)
-            if (close_price > donchian_high_aligned[i] and vol_spike and 
-                adx_1d_aligned[i] > 25):
+            # Long conditions: Williams %R crosses above -80 (from below) AND volume spike AND 1d trending (ADX > 20)
+            if (williams_prev <= -80 and williams_now > -80 and vol_spike and 
+                adx_1d_aligned[i] > 20):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: break below 4h Donchian low AND volume spike AND 1d trending (ADX > 25)
-            elif (close_price < donchian_low_aligned[i] and vol_spike and 
-                  adx_1d_aligned[i] > 25):
+            # Short conditions: Williams %R crosses below -20 (from above) AND volume spike AND 1d trending (ADX > 20)
+            elif (williams_prev >= -20 and williams_now < -20 and vol_spike and 
+                  adx_1d_aligned[i] > 20):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price returns to 4h Donchian midpoint (mean reversion)
-            exit_long = (position == 1 and close_price <= donchian_mid_aligned[i])
-            exit_short = (position == -1 and close_price >= donchian_mid_aligned[i])
+            # Exit conditions: Williams %R returns to -50 (mean reversion)
+            exit_long = (position == 1 and williams_now >= -50)
+            exit_short = (position == -1 and williams_now <= -50)
             
             if exit_long or exit_short:
                 position = 0
