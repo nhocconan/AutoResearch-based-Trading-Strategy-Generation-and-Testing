@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
-# - Long when Williams %R(14) < -80 (oversold) AND 1d close > 1d EMA200 (uptrend) AND volume > 1.5x 20-bar avg
-# - Short when Williams %R(14) > -20 (overbought) AND 1d close < 1d EMA200 (downtrend) AND volume > 1.5x 20-bar avg
-# - Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
-# - Uses 1d EMA200 for trend filter to avoid counter-trend trades
+# Hypothesis: 1d KAMA trend with 1w EMA filter and volume confirmation
+# - Long when price > KAMA(14) AND 1w EMA50 rising AND volume > 1.5x 20-bar avg
+# - Short when price < KAMA(14) AND 1w EMA50 falling AND volume > 1.5x 20-bar avg
+# - Exit on opposite KAMA cross or when 1w EMA flips
+# - Uses weekly EMA50 for strong trend filter to avoid whipsaws
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 30-50 trades/year on 4h timeframe (120-200 total over 4 years)
-# - Williams %R is effective for mean reversion in ranging markets; trend filter adds directional bias
+# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
 
-name = "4h_1d_williamsr_meanreversion_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_kama_ema_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,28 +21,25 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA(200) for trend filter
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Pre-compute KAMA(14) on 1d close
+    close = prices['close'].values
+    direction = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility > 0, direction / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Pre-compute Williams %R(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -54,7 +50,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+        if (np.isnan(kama[i]) or np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
@@ -65,28 +61,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new mean reversion entries
-            # Long when Williams %R < -80 (oversold) AND 1d uptrend with volume spike
-            if (williams_r_aligned[i] < -80 and 
-                prices['close'].iloc[i] > ema200_1d_aligned[i] and  # price above 1d EMA200
-                vol_spike.iloc[i]):
+        if position == 0:  # Flat - look for new entries
+            # Long when price > KAMA AND 1w uptrend with volume spike
+            if (close[i] > kama[i] and 
+                close[i] > ema50_1w_aligned[i] and  # price above 1w EMA50
+                vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when Williams %R > -20 (overbought) AND 1d downtrend with volume spike
-            elif (williams_r_aligned[i] > -20 and 
-                  prices['close'].iloc[i] < ema200_1d_aligned[i] and  # price below 1d EMA200
-                  vol_spike.iloc[i]):
+            # Short when price < KAMA AND 1w downtrend with volume spike
+            elif (close[i] < kama[i] and 
+                  close[i] < ema50_1w_aligned[i] and  # price below 1w EMA50
+                  vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit when Williams %R crosses -50
+        else:  # Have position - look for exit
+            # Exit when price crosses KAMA in opposite direction OR 1w EMA flips
             exit_signal = False
             if position == 1:  # Long position
-                if williams_r_aligned[i] > -50:  # Exit when no longer oversold
+                if close[i] < kama[i] or close[i] < ema50_1w_aligned[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if williams_r_aligned[i] < -50:  # Exit when no longer overbought
+                if close[i] > kama[i] or close[i] > ema50_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
