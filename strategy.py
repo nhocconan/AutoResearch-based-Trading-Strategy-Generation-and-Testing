@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume confirmation and 1w EMA trend filter
-# - Long when price breaks above Donchian(20) high AND 1d ATR-scaled volume > 2.0 AND 1w close > 1w EMA(50)
-# - Short when price breaks below Donchian(20) low AND 1d ATR-scaled volume > 2.0 AND 1w close < 1w EMA(50)
-# - Exit when price crosses Donchian(20) midpoint
+# Hypothesis: 1d Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above Donchian(20) high AND 1d volume > 1.8x 20-period average AND 1w close > 1w EMA(50)
+# - Short when price breaks below Donchian(20) low AND 1d volume > 1.8x 20-period average AND 1w close < 1w EMA(50)
+# - Exit when price crosses Donchian(20) midpoint (mean reversion in ranging markets)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - ATR-scaled volume (volume/ATR) normalizes for volatility, reducing false breakouts in low-vol periods
+# - Donchian provides objective breakout levels; volume confirms institutional participation
 # - Weekly EMA filter ensures we trade with the higher timeframe trend
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
 
-name = "4h_1d_1w_donchian_atr_volume_trend_v1"
-timeframe = "4h"
+name = "1d_donchian_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,18 +22,17 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC
+    # Pre-compute 1d OHLC
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Donchian channels (20-period) with min_periods
+    # Pre-compute 1d Donchian channels (20-period)
     def highest_high(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
@@ -50,7 +49,7 @@ def generate_signals(prices):
     donchian_low = lowest_low(low, 20)
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Pre-compute 4h ATR (14-period) for volatility normalization and stoploss
+    # Pre-compute 1d ATR (14-period) for stoploss
     def true_range(h, l, c_prev):
         tr1 = h - l
         tr2 = np.abs(h - c_prev)
@@ -67,34 +66,14 @@ def generate_signals(prices):
     for i in range(14, len(tr)):
         atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Pre-compute 1d ATR-scaled volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    atr_1d = np.zeros_like(df_1d['high'].values)
-    tr_1d = np.zeros_like(df_1d['high'].values)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ATR
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(high_1d)):
-        tr_1d[i] = true_range(high_1d[i], low_1d[i], close_1d[i-1])
-    
-    atr_1d[13] = np.mean(tr_1d[1:15])
-    for i in range(14, len(tr_1d)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
-    
-    # Avoid division by zero
-    atr_1d_safe = np.where(atr_1d == 0, np.nan, atr_1d)
-    vol_atr_ratio_1d = vol_1d / atr_1d_safe
-    
+    # Pre-compute 1d volume average (20-period)
     def rolling_mean(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
             result[i] = np.mean(arr[i - window + 1:i + 1])
         return result
     
-    vol_atr_ma_1d = rolling_mean(vol_atr_ratio_1d, 20)
+    vol_ma = rolling_mean(volume, 20)
     
     # Pre-compute 1w EMA(50)
     close_1w = df_1w['close'].values
@@ -104,8 +83,7 @@ def generate_signals(prices):
         for i in range(50, len(close_1w)):
             ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 48) / 50  # EMA(50)
     
-    # Align HTF indicators to 4h timeframe
-    vol_atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_atr_ma_1d)
+    # Align HTF indicators to 1d timeframe
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
@@ -114,7 +92,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_atr_ma_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -124,17 +102,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Volume spike condition using ATR-scaled volume (more robust than raw volume)
-            vol_spike = vol_atr_ma_1d_aligned[i] > 2.0
+            # Volume spike condition
+            vol_spike = volume[i] > 1.8 * vol_ma[i]
             
             # Long conditions: Donchian breakout up AND volume spike AND 1w uptrend
             if (close[i] > donchian_high[i] and vol_spike and 
-                close_1w[i] > ema_50_1w_aligned[i]):
+                close[i] > ema_50_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
             # Short conditions: Donchian breakout down AND volume spike AND 1w downtrend
             elif (close[i] < donchian_low[i] and vol_spike and 
-                  close_1w[i] < ema_50_1w_aligned[i]):
+                  close[i] < ema_50_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
