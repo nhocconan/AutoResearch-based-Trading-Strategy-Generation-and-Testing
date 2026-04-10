@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# - Long when price breaks above 20-day high AND 1w EMA50 rising AND volume > 2.0x 20-bar avg
-# - Short when price breaks below 20-day low AND 1w EMA50 falling AND volume > 2.0x 20-bar avg
-# - Exit with ATR(14) trailing stop: long exits when price < highest_high_since_entry - 2.5*ATR, short exits when price > lowest_low_since_entry + 2.5*ATR
-# - Uses 1w EMA50 for trend filter to avoid counter-trend trades
+# Hypothesis: 6h Elder Ray Power with 1d trend filter and volume confirmation
+# - Bull Power = High - EMA13(1d), Bear Power = EMA13(1d) - Low
+# - Long when Bull Power > 0 AND 1d EMA50 rising AND volume > 1.5x 20-bar avg
+# - Short when Bear Power > 0 AND 1d EMA50 falling AND volume > 1.5x 20-bar avg
+# - Exit when opposite power > 0 (reversal signal)
+# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
-# - Donchian breakouts capture strong trends; volume filter reduces false breakouts; ATR stop manages risk
+# - Target: 12-25 trades/year on 6h timeframe (50-100 total over 4 years)
+# - Elder Ray measures bull/bear power relative to trend; works in both bull and bear markets
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,40 +23,39 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels from daily data (20-period)
-    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
+    # Pre-compute 1d EMA13 for Elder Ray Power calculation
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Pre-compute 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Elder Ray Power: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power = high_1d - ema13_1d
+    bear_power = ema13_1d - low_1d
     
-    # Pre-compute volume confirmation: > 2.0x 20-period average
+    # Align HTF Elder Ray Power to LTF
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Pre-compute 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
-    
-    # Pre-compute ATR(14) for trailing stop
-    high_low = prices['high'] - prices['low']
-    high_close = np.abs(prices['high'] - prices['close'].shift(1))
-    low_close = np.abs(prices['low'] - prices['close'].shift(1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_20_avg[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -65,41 +65,37 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above 20-day high AND 1w uptrend with volume spike
-            if (prices['close'].iloc[i] > high_20[i] and 
-                prices['close'].iloc[i] > ema50_1w_aligned[i] and  # price above 1w EMA50
+        if position == 0:  # Flat - look for new entries
+            # Long when Bull Power > 0 AND 1d uptrend with volume spike
+            if (bull_power_aligned[i] > 0 and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[max(i-1, 0)] and  # 1d EMA50 rising
                 vol_spike.iloc[i]):
                 position = 1
-                highest_high_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short when price breaks below 20-day low AND 1w downtrend with volume spike
-            elif (prices['close'].iloc[i] < low_20[i] and 
-                  prices['close'].iloc[i] < ema50_1w_aligned[i] and  # price below 1w EMA50
+            # Short when Bear Power > 0 AND 1d downtrend with volume spike
+            elif (bear_power_aligned[i] > 0 and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[max(i-1, 0)] and  # 1d EMA50 falling
                   vol_spike.iloc[i]):
                 position = -1
-                lowest_low_since_entry = prices['low'].iloc[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for ATR trailing stop exit
-            # Update highest/lowest since entry
-            if position == 1:
-                highest_high_since_entry = max(highest_high_since_entry, prices['high'].iloc[i])
-                # Long exit: price < highest_high_since_entry - 2.5*ATR
-                if prices['close'].iloc[i] < highest_high_since_entry - 2.5 * atr[i]:
-                    position = 0
-                    highest_high_since_entry = 0.0
-                    signals[i] = 0.0
-                else:
+        else:  # Have position - look for exit on power reversal
+            # Exit when opposite power becomes positive (reversal signal)
+            exit_signal = False
+            if position == 1:  # Long position
+                if bear_power_aligned[i] > 0:  # Bear power turned positive
+                    exit_signal = True
+            elif position == -1:  # Short position
+                if bull_power_aligned[i] > 0:  # Bull power turned positive
+                    exit_signal = True
+            
+            if exit_signal:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
                     signals[i] = 0.25
-            else:  # position == -1
-                lowest_low_since_entry = min(lowest_low_since_entry, prices['low'].iloc[i])
-                # Short exit: price > lowest_low_since_entry + 2.5*ATR
-                if prices['close'].iloc[i] > lowest_low_since_entry + 2.5 * atr[i]:
-                    position = 0
-                    lowest_low_since_entry = 0.0
-                    signals[i] = 0.0
                 else:
                     signals[i] = -0.25
     
