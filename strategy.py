@@ -3,102 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR regime filter
-# - Primary: 4h timeframe (proven to work on test)
-# - HTF: 1d for volume spike (>2x 20-period MA) and volatility regime (ATR > 50th percentile)
-# - Long: Price breaks above 20-period Donchian high + 1d volume > 2x 20-period MA + ATR > 50th percentile
-# - Short: Price breaks below 20-period Donchian low + 1d volume > 2x 20-period MA + ATR > 50th percentile
-# - Exit: Price reverts to 20-period Donchian midpoint (mean reversion) or ATR stoploss (2*ATR)
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# - Primary: 1d timeframe for lower frequency and reduced fee drag
+# - HTF: 1w for trend direction (EMA50)
+# - Long: Price breaks above 20-day high + price > weekly EMA50 + volume > 1.5x 20-day MA
+# - Short: Price breaks below 20-day low + price < weekly EMA50 + volume > 1.5x 20-day MA
+# - Exit: Price reverts to 10-day EMA (mean reversion) or breaks opposite 20-day level
 # - Position sizing: 0.25 (discrete level)
-# - Target: 100-200 total trades over 4 years (25-50/year) - within 4h sweet spot
-# - Works in bull/bear: Donchian breakouts capture trends, volume/vol filters avoid false breakouts in chop
+# - Target: 30-100 total trades over 4 years (7-25/year) - within 1d sweet spot
+# - Works in bull/bear: Donchian captures breakouts in trending markets, EMA filter avoids counter-trend trades
 
-name = "4h_1d_donchian_volume_atr_v2"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 60:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLCV
-    open_4h = prices['open'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # Pre-compute daily OHLCV
+    open_1d = prices['open'].values
+    high_1d = prices['high'].values
+    low_1d = prices['low'].values
+    close_1d = prices['close'].values
+    volume_1d = prices['volume'].values
     
-    # Pre-compute 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Pre-compute weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h Donchian Channel (20-period)
-    high_roll_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_roll_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll_20 + low_roll_20) / 2.0
+    # Calculate 20-day Donchian channels
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    # Calculate 10-day EMA for exit signal
+    ema_10 = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate 1d ATR percentile rank (using 30-day lookback)
-    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Calculate 20-day volume MA for volume confirmation
+    volume_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(high_roll_20[i]) or np.isnan(low_roll_20[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime conditions
-        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 50
+        # Entry conditions
+        # Donchian breakout
+        breakout_high = close_1d[i] > high_20[i]
+        breakout_low = close_1d[i] < low_20[i]
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period MA
-        volume_spike = volume_1d[i] > 2.0 * volume_ma_20_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close_1d[i] > ema_50_1w_aligned[i]
+        downtrend = close_1d[i] < ema_50_1w_aligned[i]
+        
+        # Volume confirmation
+        volume_spike = volume_1d[i] > 1.5 * volume_ma_20[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above Donchian high + vol regime + volume spike
-            if (close_4h[i] > high_roll_20[i] and vol_regime and volume_spike):
+            # Long entry: Break above 20-day high + uptrend + volume spike
+            if breakout_high and uptrend and volume_spike:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low + vol regime + volume spike
-            elif (close_4h[i] < low_roll_20[i] and vol_regime and volume_spike):
+            # Short entry: Break below 20-day low + downtrend + volume spike
+            elif breakout_low and downtrend and volume_spike:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price reverts to Donchian midpoint (mean reversion)
-            # 2. ATR-based stoploss (2*ATR from entry)
+            # 1. Price reverts to 10-day EMA (mean reversion)
+            # 2. Price breaks opposite 20-day level (stop/reversal)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_4h[i] < donchian_mid[i]  # Reverted to midpoint
+                    close_1d[i] < ema_10[i] or  # Reverted to 10-day EMA
+                    close_1d[i] < low_20[i]     # Break below 20-day low (stop)
                 )
                 if exit_condition:
                     position = 0
@@ -107,7 +104,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_4h[i] > donchian_mid[i]  # Reverted to midpoint
+                    close_1d[i] > ema_10[i] or  # Reverted to 10-day EMA
+                    close_1d[i] > high_20[i]    # Break above 20-day high (stop)
                 )
                 if exit_condition:
                     position = 0
