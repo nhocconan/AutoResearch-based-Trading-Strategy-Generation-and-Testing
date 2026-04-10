@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and ADX regime filter
-# - Uses 1d Camarilla pivot levels (H4/L4) as significant support/resistance
-# - Long when price breaks above H4 with volume confirmation, short when breaks below L4
-# - ADX(14) on 1d timeframe filters for trending markets (ADX > 25) to avoid false breakouts in ranging conditions
-# - ATR(14) trailing stop (2.5x) adapts to volatility and manages risk
+# Hypothesis: 12h Williams Alligator with 1d volume spike and ADX regime filter
+# - Uses Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) on 12h timeframe
+# - Long when Lips > Teeth > Jaw (bullish alignment) with volume confirmation
+# - Short when Lips < Teeth < Jaw (bearish alignment) with volume confirmation
+# - ADX(14) on 1d timeframe filters for trending markets (ADX > 20) to avoid false signals in ranging conditions
+# - Volume confirmation: current 12h volume > 1.5x 20-period average
 # - Discrete position sizing (0.25) minimizes fee churn
-# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within HARD MAX: 200 total
-# - Camarilla pivots work well in 12h/1d timeframes with volume confirmation, proven effective in both bull and bear markets
+# - Target: 15-40 trades/year (60-160 total over 4 years) to stay within HARD MAX: 400 total
+# - Williams Alligator excels in trending markets and avoids whipsaws in ranging conditions
+# - Works in both bull and bear markets by capturing strong trends while filtering noise
 
-name = "12h_1d_camarilla_breakout_volume_adx_v1"
+name = "12h_1d_williams_alligator_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -26,31 +28,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLC for Camarilla pivots
+    # Pre-compute 1d OHLC for ADX calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d timeframe
-    # Pivot = (High + Low + Close) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = High - Low
-    range_1d = high_1d - low_1d
-    # Camarilla levels: H4 = Close + Range * 1.1/2, L4 = Close - Range * 1.1/2
-    camarilla_h4_1d = close_1d + range_1d * 1.1 / 2.0
-    camarilla_l4_1d = close_1d - range_1d * 1.1 / 2.0
-    
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
-    
-    # Pre-compute 1d volume and its 20-day moving average for volume confirmation
-    volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    
-    # Pre-compute 1d ADX(14) for regime filter (trending market detection)
-    # ADX calculation requires +DI and -DI
+    # Pre-compute 1d ADX(14) for regime filter
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -85,31 +68,34 @@ def generate_signals(prices):
     # Align ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Pre-compute 12h ATR for trailing stop
+    # Pre-compute 12h Williams Alligator
     high_12h = prices['high'].values
     low_12h = prices['low'].values
     close_12h = prices['close'].values
     
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1_12h[0] = np.nan
-    tr2_12h[0] = np.nan
-    tr3_12h[0] = np.nan
-    tr_12h = np.maximum.reduce([tr1_12h, tr2_12h, tr3_12h])
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    # Median price = (High + Low) / 2
+    median_price = (high_12h + low_12h) / 2.0
+    
+    # Williams Alligator lines (all SMAs)
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
+    
+    jaw = pd.Series(median_price).rolling(window=jaw_period, min_periods=jaw_period).mean().values
+    teeth = pd.Series(median_price).rolling(window=teeth_period, min_periods=teeth_period).mean().values
+    lips = pd.Series(median_price).rolling(window=lips_period, min_periods=lips_period).mean().values
+    
+    # Pre-compute 12h volume and its 20-period moving average
+    volume_12h = prices['volume'].values
+    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0  # for trailing stop
-    lowest_since_entry = 0.0   # for trailing stop
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(atr_12h[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(volume_ma_20_12h[i]) or np.isnan(adx_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -118,51 +104,34 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 1d volume for filter (use raw volume, aligned)
-        volume_1d_current = volume_1d
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
+        # Williams Alligator conditions
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Volume confirmation: current 1d volume > 2.0x 20-day average
-        volume_confirm = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x 20-period average
+        volume_confirm = volume_12h[i] > 1.5 * volume_ma_20_12h[i]
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending_market = adx_aligned[i] > 25.0
-        
-        close_price = close_12h[i]
+        # Regime filter: ADX > 20 indicates trending market
+        trending_market = adx_aligned[i] > 20.0
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla H4 AND volume confirmation AND trending market
-            if close_price > camarilla_h4_aligned[i] and volume_confirm and trending_market:
+            # Long conditions: bullish Alligator alignment AND volume confirmation AND trending market
+            if bullish_alignment and volume_confirm and trending_market:
                 position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla L4 AND volume confirmation AND trending market
-            elif close_price < camarilla_l4_aligned[i] and volume_confirm and trending_market:
+            # Short conditions: bearish Alligator alignment AND volume confirmation AND trending market
+            elif bearish_alignment and volume_confirm and trending_market:
                 position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                lowest_since_entry = prices['low'].iloc[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit or trailing stop
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # ATR trailing stop: exit when price drops 2.5*ATR from highest point
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr_12h[i]
-                exit_condition = trailing_stop
-            else:  # position == -1
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # ATR trailing stop: exit when price rises 2.5*ATR from lowest point
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr_12h[i]
-                exit_condition = trailing_stop
-            
-            if exit_condition:
+        else:  # Have position - look for exit
+            # Exit when Alligator alignment breaks (Lips crosses Teeth)
+            if position == 1 and lips[i] <= teeth[i]:
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
+                signals[i] = 0.0
+            elif position == -1 and lips[i] >= teeth[i]:
+                position = 0
                 signals[i] = 0.0
             else:
                 if position == 1:
