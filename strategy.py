@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
-# - Long when price breaks above Donchian upper band (20-period high) AND 1d volume > 1.3x 20-period volume SMA AND chop > 61.8 (ranging market)
-# - Short when price breaks below Donchian lower band (20-period low) AND 1d volume > 1.3x 20-period volume SMA AND chop > 61.8
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d chop regime filter
+# - Long when price breaks above Donchian upper band (20-period high) AND 12h volume > 1.25x 20-period volume SMA AND 1d chop > 61.8 (ranging market)
+# - Short when price breaks below Donchian lower band (20-period low) AND 12h volume > 1.25x 20-period volume SMA AND 1d chop > 61.8
 # - Exit: price crosses Donchian midpoint (mean of upper and lower band)
-# - Uses 4h for price action (Donchian channels), 1d for volume confirmation and chop filter
-# - Donchian captures volatility-based support/resistance; volume confirms breakout strength; chop filter avoids strong trends
+# - Uses 4h for price action (Donchian channels), 12h for volume confirmation, 1d for chop filter
 # - Target: 19-50 trades/year to minimize fee drag while capturing high-probability breakouts in ranging markets
+# - Volume confirmation on 12h reduces noise vs 1d; chop filter on 1d ensures ranging regime for mean-reversion exits
 
-name = "4h_1d_donchian_volspike_chop_v1"
+name = "4h_12h_1d_donchian_volspike_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,15 +29,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for volume confirmation and chop filter (MTF rule compliance)
+    # Load 12h data ONCE before loop for volume confirmation (MTF rule compliance)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return signals
+    
+    # Load 1d data ONCE before loop for chop filter (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Calculate 1d volume SMA for confirmation
-    vol_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Calculate 12h volume SMA for confirmation
+    vol_12h = df_12h['volume'].values
+    volume_sma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
     
     # Pre-compute 4h Donchian channels (20-period)
     highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -67,15 +72,15 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(donchian_mid[i]) or np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+            np.isnan(volume_sma_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume (aligned)
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+        # Get current 12h volume (aligned)
+        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h)
         
-        # Volume confirmation: 1d volume > 1.3x 20-period volume SMA
-        vol_confirm = vol_1d_aligned[i] > 1.3 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 12h volume > 1.25x 20-period volume SMA
+        vol_confirm = vol_12h_aligned[i] > 1.25 * volume_sma_20_12h_aligned[i]
         
         # Chop filter: chop > 61.8 indicates ranging market (good for breakout mean reversion)
         chop_filter = chop_1d_aligned[i] > 61.8
