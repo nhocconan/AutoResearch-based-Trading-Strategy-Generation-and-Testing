@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h TRIX(12) momentum with 1d volume spike and ADX(14) > 20 trend filter
-# - Long when TRIX crosses above zero + 1d volume > 1.8x 20-period volume SMA + ADX > 20
-# - Short when TRIX crosses below zero + 1d volume > 1.8x 20-period volume SMA + ADX > 20
-# - Exit: TRIX returns to zero line (momentum fade)
-# - Position sizing: 0.25 discrete level
-# - TRIX filters noise better than MACD, volume confirms institutional interest, ADX avoids chop
-# - Works in bull/bear: momentum divergences effective in both regimes when combined with volume
-# - 12h timeframe targets 15-35 trades/year with strict entry conditions to minimize fee drag
+# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and ADX(14) > 25 trend filter
+# - Long when price breaks above Donchian upper + 1w volume > 1.5x 20-period volume SMA + ADX > 25
+# - Short when price breaks below Donchian lower + 1w volume > 1.5x 20-period volume SMA + ADX > 25
+# - Exit: price returns to Donchian middle (mean reversion) or opposite breakout
+# - Position sizing: 0.30 discrete level
+# - Donchian captures institutional breakouts, volume confirms participation, ADX avoids false breakouts in chop
+# - Works in bull/bear: breakouts occur in both regimes when volume confirms institutional interest
+# - 1d timeframe targets 10-25 trades/year with strict entry conditions to minimize fee drag
 
-name = "12h_1d_trix_volume_adx_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_volume_adx_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,8 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,18 +35,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h TRIX(12,12,12) - triple smoothed EMA of ROC
-    # ROC = (close - close[period]) / close[period] * 100
-    roc_period = 12
-    roc = np.zeros_like(close)
-    roc[roc_period:] = (close[roc_period:] - close[:-roc_period]) / close[:-roc_period] * 100
+    # Calculate 1d Donchian Channel (20-period)
+    donch_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    middle = np.full(n, np.nan)
     
-    # Triple EMA smoothing
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    for i in range(donch_period - 1, n):
+        upper[i] = np.max(high[i-donch_period+1:i+1])
+        lower[i] = np.min(low[i-donch_period+1:i+1])
+        middle[i] = (upper[i] + lower[i]) / 2
     
-    # Calculate 12h ADX(14) for trend filter
+    # Calculate 1d ADX(14) for trend filter
     # True Range
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
@@ -72,59 +72,60 @@ def generate_signals(prices):
     dx = np.where((plus_di + minus_di) == 0, 0, dx)
     adx = np.where(np.isnan(adx) | np.isinf(adx), 0, adx)
     
-    # Calculate 1d volume SMA(20) for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Calculate 1w volume SMA(20) for confirmation
+    volume_1w = df_1w['volume'].values
+    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
     
-    for i in range(100, n):
+    # Warmup period: need enough data for all indicators
+    warmup = max(100, donch_period + 20)  # Ensure Donchian and volume SMA are valid
+    
+    for i in range(warmup, n):
         # Skip if any required data is invalid
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or np.isnan(adx[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_sma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.8x 20-period SMA (volume spike)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-        vol_confirm = vol_1d_current[i] > 1.8 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1w volume > 1.5x 20-period SMA (volume spike)
+        vol_1w_current = align_htf_to_ltf(prices, df_1w, df_1w['volume'].values)
+        vol_confirm = vol_1w_current[i] > 1.5 * volume_sma_20_1w_aligned[i]
         
-        # Trend filter: ADX > 20 indicates trending market (avoid choppy markets)
-        trending_market = adx[i] > 20
+        # Trend filter: ADX > 25 indicates strong trend (avoid choppy markets)
+        trending_market = adx[i] > 25
         
-        # TRIX zero-line crossover signals
-        trix_now = trix[i]
-        trix_prev = trix[i-1]
-        trix_cross_above = (trix_prev <= 0) and (trix_now > 0)
-        trix_cross_below = (trix_prev >= 0) and (trix_now < 0)
+        # Donchian breakout signals
+        breakout_up = close[i] > upper[i-1]  # Break above previous period's upper band
+        breakout_down = close[i] < lower[i-1]  # Break below previous period's lower band
         
-        # Entry conditions: TRIX zero-line cross with volume and trend confirmation
-        long_entry = trix_cross_above and vol_confirm and trending_market
-        short_entry = trix_cross_below and vol_confirm and trending_market
+        # Exit conditions: price returns to middle line (mean reversion)
+        exit_long = close[i] < middle[i]
+        exit_short = close[i] > middle[i]
         
-        # Exit conditions: TRIX returns to zero line (momentum fade)
-        long_exit = trix_now < 0  # Exit long when TRIX goes negative
-        short_exit = trix_now > 0  # Exit short when TRIX goes positive
+        # Entry conditions: Donchian breakout with volume and trend confirmation
+        long_entry = breakout_up and vol_confirm and trending_market
+        short_entry = breakout_down and vol_confirm and trending_market
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif short_entry:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            if long_exit:
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         else:  # position == -1 (Short position) - look for exit
-            if short_exit:
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
