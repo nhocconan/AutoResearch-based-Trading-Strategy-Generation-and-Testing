@@ -3,28 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d pivot confirmation and volume filter
-# - Long when price breaks above 12h Donchian high AND price is above 1d pivot point
-# - Short when price breaks below 12h Donchian low AND price is below 1d pivot point
-# - Volume confirmation: 12h volume > 1.5x 20-period 12h volume SMA
+# Hypothesis: 4h Donchian(20) breakout with daily ATR filter and volume confirmation
+# - Long when price breaks above 20-period Donchian high AND ATR(14) > ATR(50) (expanding volatility)
+# - Short when price breaks below 20-period Donchian low AND ATR(14) > ATR(50)
+# - Volume confirmation: 4h volume > 1.5x 20-period 4h volume SMA
 # - Exit: Donchian midpoint reversion or opposite breakout with volume
 # - Position sizing: 0.25 discrete level
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - 1d pivot provides structural bias, Donchian for breakouts, volume for confirmation
-# - Works in both bull and bear markets by following structure with confirmation
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - ATR filter ensures trades occur during volatile regimes, reducing whipsaw in ranging markets
 
-name = "12h_1d_donchian_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_atr_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
-        return np.zeros(n)
-    
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -42,16 +36,16 @@ def generate_signals(prices):
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
+    # Calculate ATR(14) and ATR(50) for volatility regime filter
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate daily pivot points (using previous day's OHLC)
-    # Pivot = (High + Low + Close) / 3
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
     
     # Track entry extreme for exit logic
     entry_price = np.full(n, np.nan)
@@ -59,27 +53,26 @@ def generate_signals(prices):
     for i in range(donchian_period, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(daily_pivot_aligned[i])):
+            np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.5x 20-period volume SMA
+        # Volatility filter: ATR(14) > ATR(50) (expanding volatility regime)
+        vol_regime = atr_14[i] > atr_50[i]
+        
+        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
         # Donchian breakout signals
         breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
         breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
         
-        # Daily pivot bias
-        price_above_pivot = close[i] > daily_pivot_aligned[i]
-        price_below_pivot = close[i] < daily_pivot_aligned[i]
-        
         if position == 0:  # Flat - look for entry
-            if breakout_up and price_above_pivot and vol_confirm:
+            if breakout_up and vol_regime and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 entry_price[i] = close[i]
-            elif breakout_down and price_below_pivot and vol_confirm:
+            elif breakout_down and vol_regime and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 entry_price[i] = close[i]
