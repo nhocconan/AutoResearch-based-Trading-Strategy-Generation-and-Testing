@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d trend filter and volume confirmation
-# - Long when Williams %R crosses above -80 (oversold) AND 1d close > 1d SMA50 (bullish trend) AND volume > 1.3x 20-period volume SMA
-# - Short when Williams %R crosses below -20 (overbought) AND 1d close < 1d SMA50 (bearish trend) AND volume > 1.3x 20-period volume SMA
-# - Exit: Williams %R crosses below -50 (for long) or above -50 (for short) OR ATR trailing stop (2.0x ATR)
-# - Uses 1d SMA50 for trend bias and 4h Williams %R for precise reversal timing
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above 20-day Donchian high AND 1w close > 1w open (bullish weekly candle) AND volume > 1.5x 20-day volume SMA
+# - Short when price breaks below 20-day Donchian low AND 1w close < 1w open (bearish weekly candle) AND volume > 1.5x 20-day volume SMA
+# - Exit: price reversion to 10-day Donchian midpoint or ATR trailing stop (2.0x ATR)
+# - Uses 1w for signal direction (trend bias) and 1d for precise entry timing
 # - Session filter: 08-20 UTC to avoid low-volume Asian session noise
 # - Position sizing: 0.25 discrete level to control drawdown and minimize fee churn
-# - Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag while maintaining statistical significance
-# - Williams %R is effective at identifying exhaustion points in both bull and bear markets, especially when combined with trend filter
+# - Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag while maintaining statistical significance
+# - Donchian channels provide structural support/resistance that works in both bull and bear markets
 
-name = "4h_1d_williamsr_reversal_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -32,19 +32,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return signals
     
-    # Calculate 1d SMA50 for trend filter
-    close_1d = df_1d['close'].values
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    bullish_trend = close_1d > sma50_1d
-    bearish_trend = close_1d < sma50_1d
-    # Align to 4h timeframe with proper delay (completed 1d bar only)
-    bullish_trend_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend)
-    bearish_trend_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend)
+    # Calculate 1w candle direction (bullish/bearish) for trend filter
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    # Bullish 1w candle: close > open
+    bullish_1w = close_1w > open_1w
+    bearish_1w = close_1w < open_1w
+    # Align to 1d timeframe with proper delay (completed 1w bar only)
+    bullish_1w_aligned = align_htf_to_ltf(prices, df_1w, bullish_1w)
+    bearish_1w_aligned = align_htf_to_ltf(prices, df_1w, bearish_1w)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
@@ -60,12 +61,15 @@ def generate_signals(prices):
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Williams %R(14) for 4h
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate 20-period Donchian channels
+    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid_20 = (donchian_high_20 + donchian_low_20) / 2.0
+    
+    # Calculate 10-period Donchian midpoint for exit
+    donchian_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    donchian_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (donchian_high_10 + donchian_low_10) / 2.0
     
     # Track highest high since entry for trailing stop (long)
     # Track lowest low since entry for trailing stop (short)
@@ -80,28 +84,27 @@ def generate_signals(prices):
             
         # Skip if any required data is invalid
         if (np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(bullish_trend_aligned[i]) or np.isnan(bearish_trend_aligned[i]) or
-            np.isnan(williams_r[i]) or np.isnan(highest_high_14[i]) or np.isnan(lowest_low_14[i])):
+            np.isnan(bullish_1w_aligned[i]) or np.isnan(bearish_1w_aligned[i]) or
+            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or
+            np.isnan(donchian_mid_10[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 4h volume > 1.3x 20-period volume SMA
-        vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
+        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Williams %R signals: cross above -80 (long) or below -20 (short)
-        cross_up_80 = (williams_r[i-1] <= -80) and (williams_r[i] > -80)
-        cross_down_20 = (williams_r[i-1] >= -20) and (williams_r[i] < -20)
-        cross_down_50 = (williams_r[i-1] > -50) and (williams_r[i] <= -50)  # exit long
-        cross_up_50 = (williams_r[i-1] < -50) and (williams_r[i] >= -50)   # exit short
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_high_20[i-1]  # Break above 20-day high
+        breakout_down = close[i] < donchian_low_20[i-1]  # Break below 20-day low
         
         if position == 0:  # Flat - look for entry
-            # Long: Williams %R crosses above -80 AND bullish 1d trend AND volume confirmation
-            if cross_up_80 and bullish_trend_aligned[i] and vol_confirm:
+            # Long: price breaks above 20-day high AND 1w bullish AND volume confirmation
+            if breakout_up and bullish_1w_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 highest_since_entry[i] = high[i]  # Initialize trailing stop
-            # Short: Williams %R crosses below -20 AND bearish 1d trend AND volume confirmation
-            elif cross_down_20 and bearish_trend_aligned[i] and vol_confirm:
+            # Short: price breaks below 20-day low AND 1w bearish AND volume confirmation
+            elif breakout_down and bearish_1w_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 lowest_since_entry[i] = low[i]  # Initialize trailing stop
@@ -118,8 +121,8 @@ def generate_signals(prices):
             # ATR trailing stop: exit if price drops 2.0*ATR below highest high since entry
             trailing_stop = highest_since_entry[i] - 2.0 * atr[i]
             
-            # Exit conditions: trailing stop hit OR Williams %R crosses below -50
-            exit_condition = (close[i] < trailing_stop) or cross_down_50
+            # Exit conditions: trailing stop hit OR reversion to 10-day Donchian midpoint
+            exit_condition = (close[i] < trailing_stop) or (close[i] < donchian_mid_10[i])
             
             if exit_condition:
                 position = 0
@@ -139,8 +142,8 @@ def generate_signals(prices):
             # ATR trailing stop: exit if price rises 2.0*ATR above lowest low since entry
             trailing_stop = lowest_since_entry[i] + 2.0 * atr[i]
             
-            # Exit conditions: trailing stop hit OR Williams %R crosses above -50
-            exit_condition = (close[i] > trailing_stop) or cross_up_50
+            # Exit conditions: trailing stop hit OR reversion to 10-day Donchian midpoint
+            exit_condition = (close[i] > trailing_stop) or (close[i] > donchian_mid_10[i])
             
             if exit_condition:
                 position = 0
