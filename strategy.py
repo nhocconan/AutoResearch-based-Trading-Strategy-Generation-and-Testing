@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout with 1d ATR volatility filter and volume confirmation
-# - Primary: 12h timeframe for lower frequency and reduced fee drag (target: 50-150 trades over 4 years)
-# - HTF: 1d for ATR percentile (volatility regime) and volume spike confirmation
-# - Logic: Enter long when price breaks above H3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-#          Enter short when price breaks below L3 Camarilla pivot + same filters
-#          Exit when price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4 (take profit)
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Camarilla pivots capture mean reversion in ranging markets (2025) and breakouts in trending markets
-# - Avoids overtrading: strict entry conditions (3 confluence factors) + mean-reversion exits limit trade frequency
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR regime filter
+# - Primary: 4h timeframe for optimal trade frequency (target: 75-200 total over 4 years)
+# - HTF: 1d for volume confirmation (volume > 1.5x 20-day MA) and ATR regime (ATR > 50th percentile)
+# - Long: Price breaks above Donchian(20) high + 1d volume spike + ATR regime
+# - Short: Price breaks below Donchian(20) low + 1d volume spike + ATR regime
+# - Exit: Price reverts to Donchian(20) midpoint (mean reversion) or breaks opposite Donchian level
+# - Position sizing: 0.30 (discrete level)
+# - Works in bull/bear: Donchian breakouts capture trends, volume confirmation filters false breakouts,
+#   ATR regime avoids low-vol chop, mean reversion exit works in ranging markets (2025)
 
-name = "12h_1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_atr_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,12 +27,12 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLCV
-    open_12h = prices['open'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    volume_12h = prices['volume'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -40,27 +40,20 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 12h Camarilla Pivot Points (based on previous 1d)
-    # Align daily OHLC to 12h bars (using previous day's OHLC)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    
-    # Calculate Camarilla levels for each 12h bar (using previous day's OHLC)
-    rng = high_1d_aligned - low_1d_aligned
-    h3 = close_1d_aligned + 1.25 * rng  # Long entry: break above H3
-    l3 = close_1d_aligned - 1.25 * rng  # Short entry: break below L3
-    h4 = close_1d_aligned + 1.5 * rng   # Long exit: break above H4 (take profit)
-    l4 = close_1d_aligned - 1.5 * rng   # Short exit: break below L4 (take profit)
-    pivot = (high_1d_aligned + low_1d_aligned + close_1d_aligned) / 3.0  # Mean reversion exit
+    # Calculate 4h Donchian Channel (20-period)
+    # Donchian high: highest high over last 20 periods
+    # Donchian low: lowest low over last 20 periods
+    # Donchian mid: (high + low) / 2
+    high_series = pd.Series(high_4h)
+    low_series = pd.Series(low_4h)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     # Calculate 1d ATR(14) for volatility regime filter
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    close_1d_series = pd.Series(close_1d)
-    tr1 = high_1d_series.shift(1) - low_1d_series.shift(1)
-    tr2 = abs(high_1d_series - close_1d_series.shift(1))
-    tr3 = abs(low_1d_series - close_1d_series.shift(1))
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
     tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
@@ -79,54 +72,55 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or 
             np.isnan(atr_percentile_aligned[i]) or 
             np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime conditions
-        # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 40
+        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d[i] > 1.3 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        volume_spike = volume_1d[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above H3 resistance + vol regime + volume spike
-            if (close_12h[i] > h3[i] and vol_regime and volume_spike):
+            # Long entry: Price breaks above Donchian high + vol regime + volume spike
+            if (close_4h[i] > donchian_high[i] and vol_regime and volume_spike):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Price breaks below L3 support + vol regime + volume spike
-            elif (close_12h[i] < l3[i] and vol_regime and volume_spike):
+                signals[i] = 0.30
+            # Short entry: Price breaks below Donchian low + vol regime + volume spike
+            elif (close_4h[i] < donchian_low[i] and vol_regime and volume_spike):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price reverts to Pivot Point (mean reversion)
-            # 2. Price breaks opposite H4/L4 level (take profit)
+            # 1. Price reverts to Donchian midpoint (mean reversion)
+            # 2. Price breaks opposite Donchian level (take profit/stop)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_12h[i] < pivot[i] or  # Reverted to pivot
-                    close_12h[i] > h4[i]        # Break above H4 (take profit)
+                    close_4h[i] < donchian_mid[i] or  # Reverted to midpoint (mean reversion)
+                    close_4h[i] > donchian_high[i]    # Break above high (trailing stop)
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_12h[i] > pivot[i] or  # Reverted to pivot
-                    close_12h[i] < l4[i]        # Break below L4 (take profit)
+                    close_4h[i] > donchian_mid[i] or  # Reverted to midpoint (mean reversion)
+                    close_4h[i] < donchian_low[i]     # Break below low (trailing stop)
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
