@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 12h ADX > 20
-# - Long when price breaks above 4h Donchian upper band AND 12h volume > 1.3x 20-period volume SMA AND 12h ADX > 20
-# - Short when price breaks below 4h Donchian lower band AND 12h volume > 1.3x 20-period volume SMA AND 12h ADX > 20
-# - Exit: price returns to 4h Donchian mid-band or ATR trailing stop (2.0*ATR)
-# - Uses 4h for price action (Donchian channels), 12h for volume and ADX confirmation
-# - Donchian breakouts capture strong momentum; volume confirms validity; ADX filters weak markets
-# - Tight entries target 20-50 trades/year to minimize fee drag while maintaining edge
-# - Works in bull (breakouts up) and bear (breakouts down) with volume and trend filters
+# Hypothesis: 4h KAMA trend with 12h volume spike and 1d chop regime filter
+# - Long when 4h KAMA is rising AND 12h volume > 2.0x 20-period volume SMA AND 1d chop > 61.8 (range market)
+# - Short when 4h KAMA is falling AND 12h volume > 2.0x 20-period volume SMA AND 1d chop > 61.8
+# - Exit: opposite KAMA direction or chop < 38.2 (trending market)
+# - Uses 4h for trend (KAMA adaptive moving average), 12h for volume confirmation, 1d for regime (chop)
+# - KAMA adapts to market noise, reducing whipsaws in chop; volume confirms breakout validity
+# - Chop regime filter ensures we only trade in ranging markets where mean reversion works
+# - Tight entries target 15-30 trades/year to minimize fee drag while maintaining edge
+# - Works in bull (buy dips in range) and bear (sell rallies in range) with volume and regime filters
 
-name = "4h_12h_donchian_volume_adx_v1"
+name = "4h_12h_1d_kama_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -40,50 +41,60 @@ def generate_signals(prices):
     volume_sma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
     
-    # Calculate 12h ADX(14) for trend strength filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1d data for chop regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return signals
     
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate 1d Chop Index (Ehler's Chopiness Index)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Directional Movement
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # True Range for 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr_1d = np.concatenate([[np.nan], tr_1d])
     
-    # Wilder's smoothing function
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            result[period-1] = np.nanmean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
+    # ATR(14) for 1d
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_sum_1d = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
     
-    atr_12h = wilders_smoothing(tr, 14)
-    plus_di_12h = 100 * wilders_smoothing(plus_dm, 14) / atr_12h
-    minus_di_12h = 100 * wilders_smoothing(minus_dm, 14) / atr_12h
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
-    adx_12h = wilders_smoothing(dx_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Highest high and lowest low over 14 periods for 1d
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    hhll_range_1d = highest_high_1d - lowest_low_1d
     
-    # Pre-compute Donchian channels on 4h (primary timeframe)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Chop Index: 100 * log10(atr_sum / hhll_range) / log10(14)
+    chop_1d = 100 * np.log10(atr_sum_1d / hhll_range_1d) / np.log10(14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    upper_band = highest_high
-    lower_band = lowest_low
-    mid_band = (upper_band + lower_band) / 2.0
+    # Pre-compute KAMA on 4h (primary timeframe)
+    # Efficiency Ratio (ER) over 10 periods
+    change_10 = np.abs(np.concatenate([[np.nan]*10, np.diff(close, n=10)]))
+    volatility_10 = pd.Series(np.abs(np.diff(close))).rolling(window=10, min_periods=1).sum().values
+    volatility_10 = np.concatenate([[np.nan]*9, volatility_10[9:]])  # align with change_10
+    er = np.where(volatility_10 != 0, change_10 / volatility_10, 0)
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start with close at index 9
+    for i in range(10, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # KAMA direction: rising if current > previous, falling if current < previous
+    kama_rising = np.concatenate([[False], np.diff(kama) > 0])
+    kama_falling = np.concatenate([[False], np.diff(kama) < 0])
     
     # ATR for dynamic stoploss (using 4h data)
     tr_4h1 = np.abs(high[1:] - low[:-1])
@@ -93,84 +104,53 @@ def generate_signals(prices):
     tr_4h = np.concatenate([[np.nan], tr_4h])
     atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(lookback, n):
+    for i in range(10, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(volume_sma_20_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or
+        if (np.isnan(kama[i]) or np.isnan(kama_rising[i]) or np.isnan(kama_falling[i]) or
+            np.isnan(volume_sma_20_12h_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
             np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.3x 20-period volume SMA
+        # Volume confirmation: 12h volume > 2.0x 20-period volume SMA
         vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h)
-        vol_confirm = vol_12h_aligned[i] > 1.3 * volume_sma_20_12h_aligned[i]
+        vol_confirm = vol_12h_aligned[i] > 2.0 * volume_sma_20_12h_aligned[i]
         
-        # Trend filter: 12h ADX > 20 indicates sufficient trend strength
-        trend_filter = adx_12h_aligned[i] > 20.0
+        # Regime filter: 1d chop > 61.8 indicates ranging market (mean reversion zone)
+        regime_filter = chop_1d_aligned[i] > 61.8
         
-        # Only trade when both volume confirmation and trend filter are present
-        if vol_confirm and trend_filter:
-            # Long breakout: price breaks above Donchian upper band
-            if close[i] > upper_band[i]:
+        # Only trade when both volume confirmation and regime filter are present
+        if vol_confirm and regime_filter:
+            # Long when KAMA is rising (trend up in ranging market)
+            if kama_rising[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25  # Maintain position
-            # Short breakout: price breaks below Donchian lower band
-            elif close[i] < lower_band[i]:
+            # Short when KAMA is falling (trend down in ranging market)
+            elif kama_falling[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
                 else:
                     signals[i] = -0.25  # Maintain position
-            # Exit: price returns to mid-band (within 0.1% of band width)
-            elif abs(close[i] - mid_band[i]) < (upper_band[i] - lower_band[i]) * 0.001:
-                if position != 0:  # Only signal on exit
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.0  # Maintain flat
-            # Alternative exit: ATR-based trailing stop
-            elif position == 1 and close[i] < (highest_high_since_entry - 2.0 * atr_4h[i]):
-                if position != 0:  # Only signal on exit
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.0  # Maintain flat
-            elif position == -1 and close[i] > (lowest_low_since_entry + 2.0 * atr_4h[i]):
+            # Exit: KAMA direction changes or chop < 38.2 (trending market)
+            elif ((position == 1 and not kama_rising[i]) or
+                  (position == -1 and not kama_falling[i]) or
+                  chop_1d_aligned[i] < 38.2):
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
             else:
-                # Maintain current position and update tracking levels
-                if position == 1:
-                    # Track highest high since entry for trailing stop
-                    if 'highest_high_since_entry' not in locals():
-                        highest_high_since_entry = high[i]
-                    else:
-                        highest_high_since_entry = max(highest_high_since_entry, high[i])
-                    signals[i] = 0.25
-                elif position == -1:
-                    # Track lowest low since entry for trailing stop
-                    if 'lowest_low_since_entry' not in locals():
-                        lowest_low_since_entry = low[i]
-                    else:
-                        lowest_low_since_entry = min(lowest_low_since_entry, low[i])
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+                # Maintain current position
+                signals[i] = 0.25 if position == 1 else -0.25
         else:
             # No trade: exit any position if conditions not met
             if position != 0:
                 position = 0
-                # Reset tracking variables
-                if 'highest_high_since_entry' in locals():
-                    del highest_high_since_entry
-                if 'lowest_low_since_entry' in locals():
-                    del lowest_low_since_entry
                 signals[i] = 0.0
             else:
                 signals[i] = 0.0
