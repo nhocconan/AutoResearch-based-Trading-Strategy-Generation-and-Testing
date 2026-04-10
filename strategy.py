@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d volume regime + ATR trailing stop
-# - Uses Williams Alligator (jaw/teeth/lips) on 12h for trend direction and strength
-# - 1d volume regime filter: only trade when volume > 1.5x 20-day average (avoid low-volume chop)
-# - ATR-based trailing stop: exit when price moves against position by 2.5x ATR(14)
-# - Designed for 12h timeframe to capture medium-term swings in both bull and bear markets
-# - Alligator stays flat in ranging markets, reducing false signals
-# - Volume filter ensures trades occur during sufficient participation
-# - ATR stop adapts to volatility, tightening in low vol, widening in high vol
-# - Target: 15-25 trades/year on 12h (60-100 total over 4 years) to minimize fee drag
+# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above latest bearish fractal high AND 1d close > 1d EMA50 AND volume > 1.8x 20-bar avg
+# - Short when price breaks below latest bullish fractal low AND 1d close < 1d EMA50 AND volume > 1.8x 20-bar avg
+# - Exit when price crosses 1d EMA50 (trend reversal signal)
+# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
+# - Williams Fractals provide natural support/resistance levels from price action
+# - Discrete position sizing (0.25) to minimize fee churn
+# - Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years)
 
-name = "12h_1d_alligator_volume_atrstop_v1"
-timeframe = "12h"
+name = "6h_1d_williams_fractal_breakout_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,47 +26,46 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d volume regime filter
-    volume_20_avg = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_regime = df_1d['volume'] > (1.5 * volume_20_avg)
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    # Pre-compute Williams Fractals from 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Pre-compute ATR(14) for trailing stop
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Williams Fractals: 5-bar pattern
+    # Bearish fractal: high[n-2] is highest of [n-4, n-3, n-2, n-1, n]
+    # Bullish fractal: low[n-2] is lowest of [n-4, n-3, n-2, n-1, n]
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    # Pre-compute 12h Williams Alligator
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: middle bar has highest high
+        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        # Bullish fractal: middle bar has lowest low
+        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    median_price_12h = (df_12h['high'] + df_12h['low']) / 2
-    jaw = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Pre-compute 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Align HTF indicators to LTF with additional delay for fractals (need 2 extra bars for confirmation)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Pre-compute volume confirmation: > 1.8x 20-period average
+    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_regime_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -77,38 +75,37 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Alligator signals: lips > teeth > jaw = uptrend, lips < teeth < jaw = downtrend
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
-                vol_regime_aligned[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above bearish fractal high AND 1d uptrend with volume spike
+            if (prices['close'].iloc[i] > bearish_fractal_aligned[i] and 
+                prices['close'].iloc[i] > ema50_1d_aligned[i] and  # price above 1d EMA50
+                vol_spike.iloc[i]):
                 position = 1
-                entry_price = prices['close'].iloc[i]
-                highest_since_entry = entry_price
                 signals[i] = 0.25
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
-                  vol_regime_aligned[i]):
+            # Short when price breaks below bullish fractal low AND 1d downtrend with volume spike
+            elif (prices['close'].iloc[i] < bullish_fractal_aligned[i] and 
+                  prices['close'].iloc[i] < ema50_1d_aligned[i] and  # price below 1d EMA50
+                  vol_spike.iloc[i]):
                 position = -1
-                entry_price = prices['close'].iloc[i]
-                lowest_since_entry = entry_price
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - manage trailing stop and exit
-            # Update highest/lowest since entry
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # Trailing stop: exit if price drops 2.5*ATR from highest
-                if prices['close'].iloc[i] < highest_since_entry - 2.5 * atr[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
+        else:  # Have position - look for exit on trend reversal
+            # Exit when price crosses 1d EMA50 (trend reversal)
+            exit_signal = False
+            if position == 1:  # Long position
+                if prices['close'].iloc[i] <= ema50_1d_aligned[i]:
+                    exit_signal = True
+            elif position == -1:  # Short position
+                if prices['close'].iloc[i] >= ema50_1d_aligned[i]:
+                    exit_signal = True
+            
+            if exit_signal:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
                     signals[i] = 0.25
-            else:  # position == -1
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # Trailing stop: exit if price rises 2.5*ATR from lowest
-                if prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr[i]:
-                    position = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = -0.25
     
