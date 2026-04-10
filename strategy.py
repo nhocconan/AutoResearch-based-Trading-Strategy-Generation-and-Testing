@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA200 trend filter and volume spike confirmation
-# - Uses Donchian(20) channels from 4h for breakout structure
-# - 1d EMA200 trend filter ensures trades align with long-term trend (works in bull/bear)
-# - Volume confirmation: current volume > 2.0x 20-period average to filter weak breakouts
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation
+# - Donchian(20) breakout provides objective entry structure
+# - 1d EMA200 trend filter ensures alignment with long-term trend (works in bull/bear regimes)
+# - Volume confirmation (current volume > 2.0x 20-period average) filters weak breakouts
 # - Exit: Donchian(10) opposite touch or ATR-based stoploss (2.0*ATR)
-# - Position size: 0.25 (25% of capital) to balance risk and minimize fee drag
-# - Target: 20-40 trades/year on 4h (80-160 total over 4 years) to stay within trade limits
-# - Works in bull/bear: EMA200 adapts to regime changes, volume reduces false signals, Donchian provides objective breakout levels
+# - Position size: 0.25 (25% of capital) to balance risk and minimize fee churn
+# - Target trade frequency: 20-40 trades/year on 4h (80-160 total over 4 years)
+# - Works in both bull and bear: EMA200 adapts to regime, volume reduces false signals, Donchian provides clear breakout levels
 
 name = "4h_1d_donchian_breakout_volume_v1"
 timeframe = "4h"
