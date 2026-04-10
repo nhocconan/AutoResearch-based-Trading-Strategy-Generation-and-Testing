@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX regime filter
-# - Entry: Long when price breaks above Donchian upper (20) + 1d volume > 1.8x 20-period average + 1d ADX > 25
-#          Short when price breaks below Donchian lower (20) + 1d volume > 1.8x 20-period average + 1d ADX > 25
-# - Exit: Close-based reversal - exit long when price < Donchian lower (20), exit short when price > Donchian upper (20)
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ADX regime filter
+# - Entry: Long when price breaks above Camarilla H3 (1d) + 1d volume > 1.5x 20-period average + 1d ADX > 20
+#          Short when price breaks below Camarilla L3 (1d) + 1d volume > 1.5x 20-period average + 1d ADX > 20
+# - Exit: Close-based reversal - exit long when price < Camarilla L3 (1d), exit short when price > Camarilla H3 (1d)
 # - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
 # - Position sizing: 0.25 (discrete level)
 # - Target: 75-200 total trades over 4 years (19-50/year) to stay within HARD MAX: 400 total
-# - Donchian channels from 4h provide structure, volume spike confirms participation,
-#   ADX>25 filters for trending markets (works in both bull and bear via breakouts/breakdowns)
+# - Camarilla levels from 1d provide key support/resistance, volume spike confirms participation,
+#   ADX>20 filters for sufficient trending conditions (works in both bull and bear via breakouts/breakdowns)
 
-name = "4h_donchian_volume_adx_v1"
+name = "4h_1d_camarilla_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,15 +32,23 @@ def generate_signals(prices):
     low_4h = prices['low'].values
     close_4h = prices['close'].values
     
-    # Pre-compute 1d data for volume and ADX
+    # Pre-compute 1d data for Camarilla, volume and ADX
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Camarilla levels (based on previous day)
+    # H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
+    cam_h3 = np.zeros(len(close_1d))
+    cam_l3 = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        high_low = high_1d[i-1] - low_1d[i-1]
+        cam_h3[i] = close_1d[i-1] + 1.125 * high_low
+        cam_l3[i] = close_1d[i-1] - 1.125 * high_low
+    # First day: use same values (no prior day)
+    cam_h3[0] = close_1d[0] + 1.125 * (high_1d[0] - low_1d[0])
+    cam_l3[0] = close_1d[0] - 1.125 * (high_1d[0] - low_1d[0])
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -106,8 +114,8 @@ def generate_signals(prices):
     atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
     # Align all HTF data to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, prices, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, prices, donchian_lower)
+    cam_h3_aligned = align_htf_to_ltf(prices, df_1d, cam_h3)
+    cam_l3_aligned = align_htf_to_ltf(prices, df_1d, cam_l3)
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     atr_4h_aligned = align_htf_to_ltf(prices, prices, atr_4h)
@@ -118,7 +126,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+        if (np.isnan(cam_h3_aligned[i]) or np.isnan(cam_l3_aligned[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(atr_4h_aligned[i])):
             signals[i] = 0.0
@@ -129,21 +137,21 @@ def generate_signals(prices):
         
         # Get current 1d volume for confirmation
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirmation = volume_1d_aligned[i] > 1.8 * volume_ma_aligned[i]
+        volume_confirmation = volume_1d_aligned[i] > 1.5 * volume_ma_aligned[i]
         
-        # ADX filter: > 25 indicates strong trend (reduces whipsaw in chop)
-        adx_filter = adx_aligned[i] > 25.0
+        # ADX filter: > 20 indicates sufficient trend (reduces whipsaw in chop)
+        adx_filter = adx_aligned[i] > 20.0
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper + volume confirmation + ADX filter
-            if (close_price > donchian_upper_aligned[i] and 
+            # Long entry: price breaks above Camarilla H3 + volume confirmation + ADX filter
+            if (close_price > cam_h3_aligned[i] and 
                 volume_confirmation and 
                 adx_filter):
                 position = 1
                 entry_price = close_price
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian lower + volume confirmation + ADX filter
-            elif (close_price < donchian_lower_aligned[i] and 
+            # Short entry: price breaks below Camarilla L3 + volume confirmation + ADX filter
+            elif (close_price < cam_l3_aligned[i] and 
                   volume_confirmation and 
                   adx_filter):
                 position = -1
@@ -155,8 +163,8 @@ def generate_signals(prices):
             # Calculate stoploss level
             if position == 1:  # Long position
                 stop_loss = entry_price - 2.0 * atr_4h_aligned[i]
-                # Exit conditions: price < Donchian lower level OR stoploss hit
-                if close_price < donchian_lower_aligned[i] or close_price <= stop_loss:
+                # Exit conditions: price < Camarilla L3 level OR stoploss hit
+                if close_price < cam_l3_aligned[i] or close_price <= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
@@ -164,8 +172,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1, Short position
                 stop_loss = entry_price + 2.0 * atr_4h_aligned[i]
-                # Exit conditions: price > Donchian upper level OR stoploss hit
-                if close_price > donchian_upper_aligned[i] or close_price >= stop_loss:
+                # Exit conditions: price > Camarilla H3 level OR stoploss hit
+                if close_price > cam_h3_aligned[i] or close_price >= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
