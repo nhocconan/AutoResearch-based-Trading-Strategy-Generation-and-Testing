@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX filter and volume confirmation
 # - Donchian(20) from 4h: breakout above upper band = long, below lower band = short
-# - 1d ADX(14) > 25 to ensure trending market and avoid chop
-# - Volume confirmation: current 4h volume > 1.8x 20-period average
-# - ATR-based trailing stop: exit long when price < highest_high - 2.5*ATR, exit short when price > lowest_low + 2.5*ATR
-# - Designed for 4h timeframe: targets 20-50 trades/year to avoid fee drag
-# - Works in bull/bear markets: ADX filter ensures we trade with higher timeframe trend
-# - Uses discrete position sizing (0.25) to minimize fee churn
+# - 1d ADX(14) > 25 to ensure trending market and avoid chop (works in bull/bear)
+# - Volume confirmation: current 4h volume > 2.0x 20-period average (tighter than 1.8x)
+# - ATR-based trailing stop: exit when price moves against position by 2.5*ATR
+# - Discrete position sizing (0.25) to minimize fee churn
+# - Target: 20-50 trades/year to avoid fee drag
 
-name = "4h_1d_donchian_adx_volume_v1"
+name = "4h_1d_donchian_adx_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,7 +33,7 @@ def generate_signals(prices):
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_4h - np.roll(close_1d, 1)) if 'low_4h' in locals() else np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
@@ -70,10 +69,10 @@ def generate_signals(prices):
     # Donchian lower band: lowest low over past 20 periods
     lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 4h volume confirmation
+    # Pre-compute 4h volume confirmation (tighter threshold: 2.0x)
     volume_4h = prices['volume'].values
     avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_4h > (1.8 * avg_volume_20)
+    vol_spike = volume_4h > (2.0 * avg_volume_20)
     
     # Pre-compute 4h ATR(14) for trailing stop
     tr1_4h = high_4h - low_4h
@@ -100,8 +99,8 @@ def generate_signals(prices):
             # Update highest high for trailing stop
             if close_4h[i] > highest_high:
                 highest_high = close_4h[i]
-            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
-            if close_4h[i] < highest_high - 2.5 * atr_14[i] or close_4h[i] < highest_20[i]:
+            # Exit: trailing stop hit
+            if close_4h[i] < highest_high - 2.5 * atr_14[i]:
                 position = 0
                 highest_high = 0.0
                 signals[i] = 0.0
@@ -112,8 +111,8 @@ def generate_signals(prices):
             # Update lowest low for trailing stop
             if close_4h[i] < lowest_low:
                 lowest_low = close_4h[i]
-            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
-            if close_4h[i] > lowest_low + 2.5 * atr_14[i] or close_4h[i] > lowest_20[i]:
+            # Exit: trailing stop hit
+            if close_4h[i] > lowest_low + 2.5 * atr_14[i]:
                 position = 0
                 lowest_low = 0.0
                 signals[i] = 0.0
