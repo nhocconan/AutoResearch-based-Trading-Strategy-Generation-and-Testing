@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot (R4/S4) continuation filter and volume confirmation
-# - Long when price breaks above 6h Donchian upper (20) AND 1d price > weekly R4 pivot with volume spike
-# - Short when price breaks below 6h Donchian lower (20) AND 1d price < weekly S4 pivot with volume spike
+# Hypothesis: 12h Camarilla pivot with 1d trend filter and volume confirmation
+# - Long when price touches Camarilla L3 support in 1d uptrend (close > EMA50) with volume spike
+# - Short when price touches Camarilla H3 resistance in 1d downtrend (close < EMA50) with volume spike
+# - Exit when price reverts to Camarilla pivot (mean reversion) or ATR-based stoploss
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
-# - Weekly pivot calculated from prior week: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
+# - Targets 50-150 total trades over 4 years (12-37/year) for 12h timeframe
 
-name = "6h_1d_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_volume_trend_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,71 +30,81 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d weekly pivot levels (based on prior week: Mon-Fri)
-    # Calculate weekly OHLC from daily data
-    # We'll approximate: weekly high = max(high_1d over 5 days), etc.
-    # But simpler: use prior 5-day range for weekly pivot
-    # R4 = close + 1.5*(weekly_high - weekly_low)
-    # S4 = close - 1.5*(weekly_high - weekly_low)
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    weekly_range = weekly_high - weekly_low
-    weekly_r4 = close_1d + 1.5 * weekly_range
-    weekly_s4 = close_1d - 1.5 * weekly_range
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1d, weekly_r4)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1d, weekly_s4)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d ATR(14) for stoploss
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_14_1d = np.zeros_like(tr)
+    atr_14_1d[14-1] = np.mean(tr[:14])
+    for i in range(14, len(tr)):
+        atr_14_1d[i] = (atr_14_1d[i-1] * (14-1) + tr[i]) / 14
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     # 1d volume confirmation: > 1.5x 20-period average
     avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # 6h Donchian channels (20-period)
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # 1d Camarilla pivot levels (based on previous day)
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H3 = close + 1.1*(high-low)*1.1/4
+    # L3 = close - 1.1*(high-low)*1.1/4
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    entry_atr = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price breaks below Donchian lower or loses weekly R4 support
-            if (prices['close'].iloc[i] < donchian_low[i] or 
-                prices['close'].iloc[i] < weekly_r4_aligned[i]):
+            # Exit: ATR-based stoploss or price reverts to Camarilla pivot (mean reversion)
+            if (prices['close'].iloc[i] < entry_price - 2.0 * entry_atr or 
+                prices['close'].iloc[i] > camarilla_h3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price breaks above Donchian higher or loses weekly S4 resistance
-            if (prices['close'].iloc[i] > donchian_high[i] or 
-                prices['close'].iloc[i] > weekly_s4_aligned[i]):
+            # Exit: ATR-based stoploss or price reverts to Camarilla pivot (mean reversion)
+            if (prices['close'].iloc[i] > entry_price + 2.0 * entry_atr or 
+                prices['close'].iloc[i] < camarilla_l3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with weekly pivot and volume filters
+            # Look for Camarilla L3/H3 touch with trend and volume filters
             if vol_spike_1d_aligned[i]:
-                # Long signal: price breaks above Donchian higher AND above weekly R4
-                if (prices['close'].iloc[i] > donchian_high[i] and 
-                    prices['close'].iloc[i] > weekly_r4_aligned[i]):
+                # Long signal: price touches L3 support in 1d uptrend
+                if (prices['low'].iloc[i] <= camarilla_l3_aligned[i] and 
+                    prices['close'].iloc[i] > ema_50_1d_aligned[i]):
                     position = 1
+                    entry_price = prices['close'].iloc[i]
+                    entry_atr = atr_14_1d_aligned[i]
                     signals[i] = 0.25
-                # Short signal: price breaks below Donchian lower AND below weekly S4
-                elif (prices['close'].iloc[i] < donchian_low[i] and 
-                      prices['close'].iloc[i] < weekly_s4_aligned[i]):
+                # Short signal: price touches H3 resistance in 1d downtrend
+                elif (prices['high'].iloc[i] >= camarilla_h3_aligned[i] and 
+                      prices['close'].iloc[i] < ema_50_1d_aligned[i]):
                     position = -1
+                    entry_price = prices['close'].iloc[i]
+                    entry_atr = atr_14_1d_aligned[i]
                     signals[i] = -0.25
     
     return signals
