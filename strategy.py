@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above H3 Camarilla level (from prior 1d) AND 1d EMA(50) > EMA(200) (bullish trend) AND 12h volume > 1.8x 20-bar avg
-# - Short when price breaks below L3 Camarilla level (from prior 1d) AND 1d EMA(50) < EMA(200) (bearish trend) AND 12h volume > 1.8x 20-bar avg
-# - Exit when price retouches the prior 1d close (mean reversion to equilibrium)
+# Hypothesis: 4h Donchian(20) breakout with 1d HMA trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high AND 1d HMA(21) rising (uptrend) AND 4h volume > 1.5x 20-bar avg
+# - Short when price breaks below Donchian(20) low AND 1d HMA(21) falling (downtrend) AND 4h volume > 1.5x 20-bar avg
+# - Exit when price crosses opposite Donchian level or HMA trend reverses
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Camarilla levels identify intraday support/resistance; 1d EMA filter ensures alignment with higher timeframe trend
-# - Volume confirmation avoids low-liquidity false breakouts
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: breakouts capture momentum in trends, mean reversion exit works in ranges
+# - Donchian captures breakouts; 1d HMA filter ensures alignment with daily trend
+# - Volume confirmation avoids low-liquidity false signals
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Works in both bull and bear markets: breakouts occur in all regimes, trend filter prevents counter-trend trades
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_hma_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,47 +27,57 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA trend filter: EMA(50) vs EMA(200)
+    # Pre-compute 1d HMA(21) trend: rising/falling
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_bullish = ema_50 > ema_200
-    ema_bearish = ema_50 < ema_200
+    half_length = 21 // 2
+    sqrt_length = int(np.sqrt(21))
     
-    # Align 1d EMA trend to 12h timeframe
-    ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
-    ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
+    # Calculate HMA: WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    # Pre-compute 1d Camarilla pivot levels (based on prior day OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    wma_half = np.array([wma(close_1d[i-half_length+1:i+1], half_length) if i >= half_length-1 else np.nan 
+                         for i in range(len(close_1d))])
+    wma_full = np.array([wma(close_1d[i-21+1:i+1], 21) if i >= 20 else np.nan 
+                         for i in range(len(close_1d))])
+    raw_hma = 2 * wma_half - wma_full
+    hma = np.array([wma(raw_hma[i-sqrt_length+1:i+1], sqrt_length) if i >= sqrt_length-1 else np.nan 
+                    for i in range(len(raw_hma))])
     
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H3 = close + 1.1*(high-low)/2
-    # L3 = close - 1.1*(high-low)/2
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    prior_close = close_1d  # Exit level
+    # HMA trend: rising if current > previous, falling if current < previous
+    hma_rising = np.zeros_like(hma, dtype=bool)
+    hma_falling = np.zeros_like(hma, dtype=bool)
+    for i in range(1, len(hma)):
+        if not np.isnan(hma[i]) and not np.isnan(hma[i-1]):
+            hma_rising[i] = hma[i] > hma[i-1]
+            hma_falling[i] = hma[i] < hma[i-1]
     
-    # Align Camarilla levels to 12h timeframe (with 1-bar delay for completed 1d bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    prior_close_aligned = align_htf_to_ltf(prices, df_1d, prior_close)
+    # Align 1d HMA trend to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising)
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling)
     
-    # Pre-compute 12h volume confirmation: > 1.8x 20-period average
+    # Pre-compute Donchian(20) channels on 4h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 4h volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * volume_20_avg)
+    vol_spike = volume > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(prior_close_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -78,25 +88,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 1d bullish trend AND volume spike
-            if (prices['high'].iloc[i] > camarilla_h3_aligned[i] and 
-                ema_bullish_aligned[i] and 
+            # Long when price breaks above Donchian high AND 1d HMA rising AND volume spike
+            if (close[i] > highest_high[i] and 
+                hma_rising_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND 1d bearish trend AND volume spike
-            elif (prices['low'].iloc[i] < camarilla_l3_aligned[i] and 
-                  ema_bearish_aligned[i] and 
+            # Short when price breaks below Donchian low AND 1d HMA falling AND volume spike
+            elif (close[i] < lowest_low[i] and 
+                  hma_falling_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to prior 1d close (mean reversion)
-            # Exit when price touches prior 1d close
-            long_exit = (position == 1 and prices['low'].iloc[i] <= prior_close_aligned[i])
-            short_exit = (position == -1 and prices['high'].iloc[i] >= prior_close_aligned[i])
-            exit_signal = long_exit or short_exit
+        else:  # Have position - look for exit conditions
+            # Exit when price crosses opposite Donchian level or HMA trend reverses
+            exit_signal = False
+            if position == 1:  # Long position
+                if close[i] < lowest_low[i] or not hma_rising_aligned[i]:
+                    exit_signal = True
+            else:  # Short position
+                if close[i] > highest_high[i] or not hma_falling_aligned[i]:
+                    exit_signal = True
             
             if exit_signal:
                 position = 0
