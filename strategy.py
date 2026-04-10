@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d volume spike and chop regime filter
-# - Long when Williams %R(14) crosses above -80 (oversold reversal) AND 1d volume > 1.8x 20-period volume SMA AND chop > 61.8 (ranging market)
-# - Short when Williams %R(14) crosses below -20 (overbought reversal) AND 1d volume > 1.8x 20-period volume SMA AND chop > 61.8
-# - Exit: Williams %R crosses above -20 for longs or below -80 for shorts
-# - Uses 4h for price action (Williams %R), 1d for volume confirmation, 4h for chop filter
-# - Williams %R catches reversals in ranging markets; volume spike confirms participation; chop filter avoids trending markets where reversals fail
-# - Tight entries target ~20-30 trades/year to minimize fee drag
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and chop regime filter
+# - Long when price breaks above Donchian(20) upper band AND 1d volume > 1.5x 20-period volume SMA AND chop > 61.8 (ranging market)
+# - Short when price breaks below Donchian(20) lower band AND 1d volume > 1.5x 20-period volume SMA AND chop > 61.8
+# - Exit: price crosses Donchian midline (10-period average of upper/lower)
+# - Uses 4h for price action (Donchian), 1d for volume confirmation, 4h for chop filter
+# - Donchian breakouts capture momentum; volume confirms participation; chop filter avoids strong trends where breakouts fail
+# - Target: 20-30 trades/year to minimize fee drag
 
-name = "4h_1d_williamsr_volspike_chop_v1"
+name = "4h_1d_donchian_volspike_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,11 +39,12 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 4h Williams %R (14-period)
-    highest_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_14 - close) / (highest_14 - lowest_14)
-    williams_r = np.where((highest_14 - lowest_14) == 0, -50, williams_r)  # avoid division by zero
+    # Pre-compute 4h Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_20
+    donchian_lower = lowest_20
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
     # Pre-compute 4h Chopiness Index (14-period) for regime filter
     tr1 = np.abs(high[1:] - low[:-1])
@@ -57,31 +58,31 @@ def generate_signals(prices):
     chop = 100 * np.log10(atr_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
     chop = np.where((highest_high_14 - lowest_low_14) == 0, 50, chop)  # avoid division by zero
     
-    for i in range(14, n):  # Start after warmup period
+    for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(chop[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.8x 20-period volume SMA
+        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 1.8 * volume_sma_20_1d_aligned[i]
+        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Chop filter: chop > 61.8 indicates ranging market (good for reversals)
+        # Chop filter: chop > 61.8 indicates ranging market (good for breakout mean reversion)
         chop_filter = chop[i] > 61.8
         
         # Only trade when both volume confirmation and chop filter are present
         if vol_confirm and chop_filter:
-            # Long: Williams %R crosses above -80 (oversold reversal)
-            if i > 0 and williams_r[i-1] <= -80 and williams_r[i] > -80:
+            # Long: price breaks above Donchian upper band
+            if close[i] > donchian_upper[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25
-            # Short: Williams %R crosses below -20 (overbought reversal)
-            elif i > 0 and williams_r[i-1] >= -20 and williams_r[i] < -20:
+            # Short: price breaks below Donchian lower band
+            elif close[i] < donchian_lower[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
@@ -91,11 +92,11 @@ def generate_signals(prices):
                 # Maintain position
                 signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
             
-            # Exit conditions: Williams %R crosses above -20 for longs or below -80 for shorts
-            if position == 1 and williams_r[i] >= -20:
+            # Exit conditions: price crosses Donchian midline
+            if position == 1 and close[i] < donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and williams_r[i] <= -80:
+            elif position == -1 and close[i] > donchian_middle[i]:
                 position = 0
                 signals[i] = 0.0
         else:
