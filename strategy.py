@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 (1d) AND 1d EMA(50) > EMA(200) (bullish trend) AND 1d volume > 1.8x 20-bar avg
-# - Short when price breaks below Camarilla L3 (1d) AND 1d EMA(50) < EMA(200) (bearish trend) AND 1d volume > 1.8x 20-bar avg
-# - Exit when price returns to Camarilla pivot point (mean reversion to equilibrium)
-# - Uses discrete position sizing (0.25) to balance return and drawdown
-# - Camarilla levels provide intraday support/resistance based on prior day's range
-# - 1d EMA filter ensures alignment with higher timeframe trend to avoid counter-trend trades
-# - Volume confirmation avoids low-liquidity false signals
+# Hypothesis: 12h Williams Alligator + Elder Ray + Volume Spike
+# - Long when: Alligator bullish (jaw < teeth < lips) AND Elder Bull Power > 0 AND 1d volume > 2.0x 20-bar avg
+# - Short when: Alligator bearish (jaw > teeth > lips) AND Elder Bear Power < 0 AND 1d volume > 2.0x 20-bar avg
+# - Exit when: Alligator reverses (jaws cross teeth) OR Elder power crosses zero
+# - Uses discrete position sizing (0.25) to control drawdown
+# - Alligator identifies trend direction and strength
+# - Elder Ray measures bull/bear power behind the move
+# - Volume confirmation ensures institutional participation
+# - Works in bull markets (riding trends) and bear markets (shorting rallies)
 # - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: breakouts in trends, mean reversion in ranges
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
+name = "12h_1d_alligator_elder_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -28,40 +28,36 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA trend filter: EMA(50) vs EMA(200)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_bullish_1d = ema_50_1d > ema_200_1d
-    ema_bearish_1d = ema_50_1d < ema_200_1d
-    
-    # Pre-compute 1d volume confirmation: > 1.8x 20-period average
-    volume_1d = df_1d['volume'].values
-    volume_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.8 * volume_20_avg_1d)
-    
-    # Pre-compute 1d Camarilla pivot levels
+    # Pre-compute 1d Williams Alligator (SMAs of median price)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    median_1d = (high_1d + low_1d) / 2  # Typical price approximation
     
-    # Camarilla calculations
-    rang = high_1d - low_1d
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
-    camarilla_h3 = camarilla_pivot + (rang * 1.1 / 4)
-    camarilla_l3 = camarilla_pivot - (rang * 1.1 / 4)
-    camarilla_h4 = camarilla_pivot + (rang * 1.1 / 2)
-    camarilla_l4 = camarilla_pivot - (rang * 1.1 / 2)
+    jaw_1d = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth_1d = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips_1d = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Alligator relationships
+    alligator_bullish_1d = (jaw_1d < teeth_1d) & (teeth_1d < lips_1d)
+    alligator_bearish_1d = (jaw_1d > teeth_1d) & (teeth_1d > lips_1d)
+    
+    # Pre-compute 1d Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power_1d = high_1d - ema_13_1d  # Bull power: High - EMA
+    bear_power_1d = low_1d - ema_13_1d   # Bear power: Low - EMA
+    
+    # Pre-compute 1d volume confirmation: > 2.0x 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * volume_20_avg_1d)
     
     # Align HTF indicators to 12h timeframe
-    ema_bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish_1d)
-    ema_bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish_1d)
+    alligator_bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, alligator_bullish_1d)
+    alligator_bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, alligator_bearish_1d)
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Session filter: 08-20 UTC (avoid low liquidity Asian session)
     hours = prices.index.hour  # prices.index is DatetimeIndex
@@ -72,10 +68,9 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_bullish_1d_aligned[i]) or np.isnan(ema_bearish_1d_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(camarilla_pivot_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
+        if (np.isnan(alligator_bullish_1d_aligned[i]) or np.isnan(alligator_bearish_1d_aligned[i]) or
+            np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -92,25 +87,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 1d bullish trend AND volume spike
-            if (prices['close'].iloc[i] > camarilla_h3_aligned[i] and 
-                ema_bullish_1d_aligned[i] and 
+        if position == 0:  # Flat - look for new entries
+            # Long when Alligator bullish AND Bull Power positive AND volume spike
+            if (alligator_bullish_1d_aligned[i] and 
+                bull_power_1d_aligned[i] > 0 and 
                 vol_spike_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND 1d bearish trend AND volume spike
-            elif (prices['close'].iloc[i] < camarilla_l3_aligned[i] and 
-                  ema_bearish_1d_aligned[i] and 
+            # Short when Alligator bearish AND Bear Power negative AND volume spike
+            elif (alligator_bearish_1d_aligned[i] and 
+                  bear_power_1d_aligned[i] < 0 and 
                   vol_spike_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot point (mean reversion)
-            # Exit when price returns to Camarilla pivot point
-            exit_long = position == 1 and prices['close'].iloc[i] <= camarilla_pivot_aligned[i]
-            exit_short = position == -1 and prices['close'].iloc[i] >= camarilla_pivot_aligned[i]
+        else:  # Have position - look for exit
+            # Exit when Alligator reverses OR Elder power crosses zero
+            exit_long = (position == 1 and 
+                       (not alligator_bullish_1d_aligned[i] or bull_power_1d_aligned[i] <= 0))
+            exit_short = (position == -1 and 
+                         (not alligator_bearish_1d_aligned[i] or bear_power_1d_aligned[i] >= 0))
             
             if exit_long or exit_short:
                 position = 0
