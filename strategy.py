@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 12h trend filter and volume confirmation
-# - Primary: 6h timeframe for balanced trade frequency and reduced fee drag
-# - HTF: 12h for trend direction (EMA50) and 1d for volume confirmation
-# - Long: 6h Bull Power > 0 AND 12h EMA50 uptrend (close > EMA50) AND 1d volume > 1.5x 20-period MA
-# - Short: 6h Bear Power < 0 AND 12h EMA50 downtrend (close < EMA50) AND 1d volume > 1.5x 20-period MA
-# - Exit: Opposite Elder Ray signal (Bull Power <= 0 for long exit, Bear Power >= 0 for short exit)
-# - Position sizing: 0.25 (discrete level)
-# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
-# - Works in bull/bear: Elder Ray captures bull/bear power, 12h EMA50 filters counter-trend trades, volume confirms conviction
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime and volume confirmation
+# - Primary: 4h timeframe for optimal trade frequency (19-50/year target)
+# - HTF: 1d for ATR volatility regime (avoid low-vol chop) and volume spike filter
+# - Long: Price breaks above 20-period Donchian high + 1d ATR > 50th percentile + volume > 1.5x 20-period MA
+# - Short: Price breaks below 20-period Donchian low + 1d ATR > 50th percentile + volume > 1.5x 20-period MA
+# - Exit: ATR-based trailing stop (3*ATR from extreme) or Donchian opposite break
+# - Position sizing: 0.25 (discrete level to minimize fee churn)
+# - Target: 75-200 total trades over 4 years (19-50/year) - within 4h sweet spot
+# - Works in bull/bear: Donchian captures breakouts in trending markets, regime filter avoids whipsaws in ranging markets
 
-name = "6h_12h_1d_elderray_volume_v2"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_atr_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +23,16 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLCV
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
-    
-    # Pre-compute 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -46,18 +40,29 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 6h EMA13 for Elder Ray (standard period)
-    close_6h_series = pd.Series(close_6h)
-    ema13_6h = close_6h_series.ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    high_roll_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_roll_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 6h Bull Power and Bear Power
-    bull_power_6h = high_6h - ema13_6h
-    bear_power_6h = low_6h - ema13_6h
+    # Calculate 4h ATR(14) for trailing stop
+    tr1 = pd.Series(high_4h).shift(1) - pd.Series(low_4h).shift(1)
+    tr2 = abs(pd.Series(high_4h) - pd.Series(close_4h).shift(1))
+    tr3 = abs(pd.Series(low_4h) - pd.Series(close_4h).shift(1))
+    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_4h = tr_4h.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 1d ATR(14) for volatility regime filter
+    tr1_1d = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2_1d = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3_1d = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 1d ATR percentile rank (using 30-day lookback)
+    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     # Calculate 1d volume moving average (20-period) for volume confirmation
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -65,44 +70,63 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    long_high = 0.0  # Track highest high since long entry
+    short_low = 0.0  # Track lowest low since short entry
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(high_roll_20[i]) or np.isnan(low_roll_20[i]) or 
+            np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i]) or
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend condition: 12h EMA50 direction
-        uptrend = close_12h[i] > ema50_12h_aligned[i]
-        downtrend = close_12h[i] < ema50_12h_aligned[i]
+        # Regime conditions
+        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
         
         # Volume confirmation: current 1d volume > 1.5x 20-period MA
         volume_spike = volume_1d[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Bull Power > 0 (bulls in control) + uptrend + volume spike
-            if (bull_power_6h[i] > 0 and uptrend and volume_spike):
+            # Long entry: Price breaks above 20-period Donchian high + vol regime + volume spike
+            if (close_4h[i] > high_roll_20[i] and vol_regime and volume_spike):
                 position = 1
+                long_high = high_4h[i]  # Initialize trailing stop high
                 signals[i] = 0.25
-            # Short entry: Bear Power < 0 (bears in control) + downtrend + volume spike
-            elif (bear_power_6h[i] < 0 and downtrend and volume_spike):
+            # Short entry: Price breaks below 20-period Donchian low + vol regime + volume spike
+            elif (close_4h[i] < low_roll_20[i] and vol_regime and volume_spike):
                 position = -1
+                short_low = low_4h[i]  # Initialize trailing stop low
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Opposite Elder Ray signal (loss of bull/bear power)
+            # Update trailing extremes
             if position == 1:  # Long position
-                exit_condition = bull_power_6h[i] <= 0  # Bulls losing control
+                long_high = max(long_high, high_4h[i])
+                # Exit conditions:
+                # 1. ATR trailing stop: price drops 3*ATR from highest high
+                # 2. Donchian opposite break: price breaks below 20-period low
+                exit_condition = (
+                    close_4h[i] < long_high - 3.0 * atr_4h[i] or  # ATR trailing stop
+                    close_4h[i] < low_roll_20[i]                  # Donchian opposite break
+                )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                exit_condition = bear_power_6h[i] >= 0  # Bears losing control
+                short_low = min(short_low, low_4h[i])
+                # Exit conditions:
+                # 1. ATR trailing stop: price rises 3*ATR from lowest low
+                # 2. Donchian opposite break: price breaks above 20-period high
+                exit_condition = (
+                    close_4h[i] > short_low + 3.0 * atr_4h[i] or  # ATR trailing stop
+                    close_4h[i] > high_roll_20[i]                 # Donchian opposite break
+                )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
