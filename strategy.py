@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + ADX regime filter
-# - Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# - Long when Bull Power > 0 AND Bear Power increasing (less negative) AND ADX > 25 (trending)
-# - Short when Bear Power < 0 AND Bull Power decreasing (less positive) AND ADX > 25 (trending)
-# - Exit when Elder Power signals reverse OR ADX < 20 (range)
+# Hypothesis: 12h Williams Alligator with 1w/1d regime filter and volume confirmation
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND price > Lips AND 1w close > 1w open (bullish weekly) AND volume > 1.5x 20-period average
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND price < Lips AND 1w close < 1w open (bearish weekly) AND volume > 1.5x 20-period average
+# - Exit when Alligator alignment breaks (Lips crosses Teeth or Jaw) OR price crosses back below/above Lips
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Elder Ray measures bull/bear strength relative to trend (EMA13)
-# - ADX filter ensures we only trade in trending markets where Elder Ray works best
-# - Works in both bull (strong Bull Power) and bear (strong Bear Power) markets
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Alligator identifies trending vs ranging markets; only trade in strong trends
+# - Weekly regime filter ensures alignment with higher timeframe momentum
+# - Volume confirmation reduces false signals
 
-name = "6h_1d_elder_ray_adx_v1"
-timeframe = "6h"
+name = "12h_1w_1d_alligator_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,74 +24,66 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1w) < 13 or len(df_1d) < 13:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Pre-compute EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Median price for Alligator (typical price)
+    median_price = (high + low + close) / 3.0
     
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13 (negative when bearish)
-    
-    # Pre-compute ADX (14) for regime filter on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range and Directional Movement
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/14)
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[1:period])  # First value
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
+    # Williams Alligator SMAs (using SMA, not EMA, as per original)
+    def sma(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.mean(arr[i - window + 1:i + 1])
         return result
     
-    atr_1d = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    # Jaw: 13-period SMA, smoothed by 8 bars
+    jaw_raw = sma(median_price, 13)
+    jaw = sma(jaw_raw, 8) if len(jaw_raw) >= 8 else np.full_like(jaw_raw, np.nan)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (atr_1d + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr_1d + 1e-10)
+    # Teeth: 8-period SMA, smoothed by 5 bars
+    teeth_raw = sma(median_price, 8)
+    teeth = sma(teeth_raw, 5) if len(teeth_raw) >= 5 else np.full_like(teeth_raw, np.nan)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = np.zeros_like(dx)
-    adx[13] = np.mean(dx[1:14])  # First ADX value
-    for i in range(14, len(dx)):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    # Lips: 5-period SMA, smoothed by 3 bars
+    lips_raw = sma(median_price, 5)
+    lips = sma(lips_raw, 3) if len(lips_raw) >= 3 else np.full_like(lips_raw, np.nan)
     
-    # Align HTF indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Pre-compute 12h volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Pre-compute 1w bullish/bearish regime (close > open = bullish)
+    weekly_bullish = df_1w['close'].values > df_1w['open'].values
+    weekly_bearish = df_1w['close'].values < df_1w['open'].values
+    
+    # Pre-compute 1d bullish/bearish regime (close > open = bullish)
+    daily_bullish = df_1d['close'].values > df_1d['open'].values
+    daily_bearish = df_1d['close'].values < df_1d['open'].values
+    
+    # Align HTF indicators to 12h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(weekly_bullish_aligned[i]) or 
+            np.isnan(weekly_bearish_aligned[i]) or np.isnan(daily_bullish_aligned[i]) or 
+            np.isnan(daily_bearish_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -101,26 +93,41 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND Bear Power increasing (less negative) AND ADX > 25
-            if (bull_power[i] > 0 and 
-                bear_power[i] > bear_power[i-1] and  # Bear Power increasing (less negative)
-                adx_aligned[i] > 25):
+            # Long conditions: bullish alignment AND price > Lips AND weekly bullish AND daily bullish AND volume spike
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and  # Bullish alignment
+                close[i] > lips[i] and 
+                weekly_bullish_aligned[i] and 
+                daily_bullish_aligned[i] and 
+                volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power < 0 AND Bull Power decreasing (less positive) AND ADX > 25
-            elif (bear_power[i] < 0 and 
-                  bull_power[i] < bull_power[i-1] and  # Bull Power decreasing (less positive)
-                  adx_aligned[i] > 25):
+            # Short conditions: bearish alignment AND price < Lips AND weekly bearish AND daily bearish AND volume spike
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and  # Bearish alignment
+                  close[i] < lips[i] and 
+                  weekly_bearish_aligned[i] and 
+                  daily_bearish_aligned[i] and 
+                  volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Elder Power signals reverse OR ADX < 20 (range)
-            exit_long = (position == 1 and 
-                        (bull_power[i] <= 0 or bear_power[i] >= bear_power[i-1] or adx_aligned[i] < 20))
-            exit_short = (position == -1 and 
-                         (bear_power[i] >= 0 or bull_power[i] >= bull_power[i-1] or adx_aligned[i] < 20))
+            # Exit conditions: Alligator alignment breaks OR price crosses back below/above Lips
+            exit_long = False
+            exit_short = False
+            
+            if position == 1:  # Long position
+                # Exit if alignment breaks (not bullish) OR price <= Lips
+                if not (lips[i] > teeth[i] and teeth[i] > jaw[i]):  # Alignment broken
+                    exit_long = True
+                elif close[i] <= lips[i]:  # Price back below Lips
+                    exit_long = True
+            else:  # Short position
+                # Exit if alignment breaks (not bearish) OR price >= Lips
+                if not (lips[i] < teeth[i] and teeth[i] < jaw[i]):  # Alignment broken
+                    exit_short = True
+                elif close[i] >= lips[i]:  # Price back above Lips
+                    exit_short = True
             
             if exit_long or exit_short:
                 position = 0
