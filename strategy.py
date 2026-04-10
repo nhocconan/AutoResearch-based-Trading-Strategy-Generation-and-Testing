@@ -3,61 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume confirmation
-# - Williams %R(14) < -80 (oversold) AND price > 1w EMA200 (bullish trend) AND volume > 1.5x 20-period average → long 0.25
-# - Williams %R(14) > -20 (overbought) AND price < 1w EMA200 (bearish trend) AND volume > 1.5x 20-period average → short -0.25
-# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d ATR regime filter
+# - Long when price breaks above Camarilla H3 level AND volume > 2.0x 24-period average AND 1d ATR(14) < 24-period median ATR (low volatility regime)
+# - Short when price breaks below Camarilla L3 level AND volume > 2.0x 24-period average AND 1d ATR(14) < 24-period median ATR
+# - Exit when price returns to Camarilla PIVOT level (mean reversion to equilibrium)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Williams %R identifies exhaustion points; 1w EMA200 filters for trend alignment to avoid counter-trend traps
-# - Volume confirmation ensures breakouts have participation
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Camarilla levels provide institutional support/resistance that work in both trending and ranging markets
+# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# - Volume confirmation reduces false breakouts
 
-name = "6h_1w_williamsr_meanreversion_v2"
-timeframe = "6h"
+name = "12h_1d_camarilla_atr_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC and volume
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 6h volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Pre-compute 12h volume confirmation (24-period average)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Pre-compute 6h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          ((highest_high - close) / (highest_high - lowest_low)) * -100, 
-                          -50)
+    # Pre-compute 1d ATR(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align HTF indicators to 6h timeframe
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_1d = np.zeros_like(tr)
+    atr_1d[13] = np.mean(tr[1:14])  # First ATR value
+    for i in range(14, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    
+    # ATR regime: low volatility when current ATR < median of last 24 ATR values
+    atr_median_24 = pd.Series(atr_1d).rolling(window=24, min_periods=24).median().values
+    low_vol_regime = atr_1d < atr_median_24
+    
+    # Align HTF indicators to 12h timeframe
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
+    
+    # Pre-compute 12h Camarilla levels from previous period's OHLC
+    # Camarilla levels use previous period's range
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # First bar uses current values
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    camarilla_h3 = pivot + (range_hl * 1.1 / 4)
+    camarilla_l3 = pivot - (range_hl * 1.1 / 4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -67,24 +97,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Williams %R oversold AND price above 1w EMA200 AND volume spike
-            if (williams_r[i] < -80 and 
-                close[i] > ema_200_1w_aligned[i] and 
+            # Long conditions: price breaks above Camarilla H3 AND low volatility regime AND volume spike
+            if (close[i] > camarilla_h3[i] and 
+                low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Williams %R overbought AND price below 1w EMA200 AND volume spike
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_200_1w_aligned[i] and 
+            # Short conditions: price breaks below Camarilla L3 AND low volatility regime AND volume spike
+            elif (close[i] < camarilla_l3[i] and 
+                  low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit at Williams %R = -50 (mean reversion midpoint)
-            # Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
-            exit_long = (position == 1 and williams_r[i] >= -50)
-            exit_short = (position == -1 and williams_r[i] <= -50)
+        else:  # Have position - look for exit to pivot (mean reversion)
+            # Exit when price returns to pivot level (mean reversion to equilibrium)
+            exit_long = (position == 1 and close[i] <= pivot[i])
+            exit_short = (position == -1 and close[i] >= pivot[i])
             
             if exit_long or exit_short:
                 position = 0
