@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h TRIX zero-cross with 1w trend filter and volume confirmation
-# - Long when TRIX crosses above zero in 1w uptrend (close > EMA50) with volume spike
-# - Short when TRIX crosses below zero in 1w downtrend (close < EMA50) with volume spike
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above Donchian(20) upper band in 1w uptrend (close > EMA50) with volume spike
+# - Short when price breaks below Donchian(20) lower band in 1w downtrend (close < EMA50) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
-# - Weekly trend filter reduces false signals in ranging markets
+# - Targets 20-50 trades/year (75-200 total over 4 years) to avoid fee drag
+# - Weekly trend filter reduces false breakouts in ranging markets
 # - ATR-based stoploss to limit drawdown
 
-name = "12h_1w_trix_zero_cross_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_1w_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 100:
         return np.zeros(n)
     
@@ -28,6 +28,8 @@ def generate_signals(prices):
     
     # Pre-compute 1w indicators
     close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     volume_1w = df_1w['volume'].values
     
     # 1w EMA(50) for trend filter
@@ -39,19 +41,7 @@ def generate_signals(prices):
     vol_spike_1w = volume_1w > (2.0 * avg_volume_20_1w)
     vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
     
-    # Pre-compute TRIX on 1d data (using primary timeframe 12h bars)
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago
-    close_1d = df_1d['close'].values
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
-    trix[0] = 0  # first value undefined
-    
-    # Align TRIX to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    
-    # Pre-compute ATR for stoploss (using 1d data)
+    # Pre-compute ATR for stoploss (using 1d data for finer granularity)
     high_low = df_1d['high'] - df_1d['low']
     high_close = np.abs(df_1d['high'] - df_1d['close'].shift(1))
     low_close = np.abs(df_1d['low'] - df_1d['close'].shift(1))
@@ -68,7 +58,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_spike_1w_aligned[i]) or 
-            np.isnan(trix_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
+            np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -90,20 +80,25 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # TRIX zero-cross signals with 1w trend filter and volume confirmation
-            # Long: TRIX crosses above zero in 1w uptrend with volume spike
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and
-                prices['close'].iloc[i] > ema_50_1w_aligned[i] and
-                vol_spike_1w_aligned[i]):
-                position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = 0.25
-            # Short: TRIX crosses below zero in 1w downtrend with volume spike
-            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and
-                  prices['close'].iloc[i] < ema_50_1w_aligned[i] and
-                  vol_spike_1w_aligned[i]):
-                position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = -0.25
+            # Calculate Donchian(20) on 4h data (using previous completed 4h bar)
+            if i >= 20:
+                # Use previous completed 4h bar for Donchian calculation
+                high_20 = prices['high'].iloc[i-20:i].max()
+                low_20 = prices['low'].iloc[i-20:i].min()
+                
+                # Long signal: price breaks above Donchian upper band in 1w uptrend with volume spike
+                if (prices['high'].iloc[i] > high_20 and 
+                    prices['close'].iloc[i] > ema_50_1w_aligned[i] and 
+                    vol_spike_1w_aligned[i]):
+                    position = 1
+                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                    signals[i] = 0.25
+                # Short signal: price breaks below Donchian lower band in 1w downtrend with volume spike
+                elif (prices['low'].iloc[i] < low_20 and 
+                      prices['close'].iloc[i] < ema_50_1w_aligned[i] and 
+                      vol_spike_1w_aligned[i]):
+                    position = -1
+                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                    signals[i] = -0.25
     
     return signals
