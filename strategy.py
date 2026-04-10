@@ -3,56 +3,44 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + volume confirmation + 1d ATR regime filter
-# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
-# - Long when Lips > Teeth > Jaw (bullish alignment) AND volume > 1.5x 24-period average AND 1d ATR(14) < 20-period median ATR (low volatility)
-# - Short when Lips < Teeth < Jaw (bearish alignment) AND volume > 1.5x 24-period average AND 1d ATR(14) < 20-period median ATR
-# - Exit when Alligator lines cross (Lips crosses Teeth) or ATR regime shifts to high volatility
+# Hypothesis: 4h Donchian breakout with volume spike and ATR regime filter
+# - Long when price breaks above Donchian(20) upper band AND volume > 1.5x 20-period average AND ATR(14) < 20-period median ATR (low volatility regime)
+# - Short when price breaks below Donchian(20) lower band AND volume > 1.5x 20-period average AND ATR(14) < 20-period median ATR
+# - Exit when price returns to Donchian middle band (mean reversion to equilibrium)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Alligator identifies trend initiation and continuation with built-in smoothing
-# - Volume confirmation reduces false signals during low participation periods
-# - ATR filter ensures we trade during low volatility periods when trends are more sustainable
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian channels provide clear structure that work in both trending and ranging markets
+# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# - Volume confirmation reduces false breakouts
 
-name = "12h_1d_alligator_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC and volume
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Median price for Alligator calculation
-    median_price = (high + low) / 2
-    
-    # Williams Alligator components (SMAs of median price)
-    # Jaw: 13-period SMA, 8 periods forward
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift forward 8 periods
-    
-    # Teeth: 8-period SMA, 5 periods forward
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift forward 5 periods
-    
-    # Lips: 5-period SMA, 3 periods forward
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift forward 3 periods
-    
-    # Pre-compute 12h volume confirmation (24-period average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Pre-compute 4h volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
+    
+    # Pre-compute 4h Donchian channels (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
     # Pre-compute 1d ATR(14) for regime filter
     high_1d = df_1d['high'].values
@@ -68,7 +56,7 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR(14) using Wilder's smoothing
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
     atr_1d = np.zeros_like(tr)
     atr_1d[13] = np.mean(tr[1:14])  # First ATR value
     for i in range(14, len(tr)):
@@ -78,15 +66,15 @@ def generate_signals(prices):
     atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
     low_vol_regime = atr_1d < atr_median_20
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -96,31 +84,27 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Alligator alignment conditions
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        
         if position == 0:  # Flat - look for new entries
-            # Long conditions: bullish Alligator alignment AND low volatility regime AND volume spike
-            if (bullish_alignment and 
+            # Long conditions: price breaks above Donchian upper AND low volatility regime AND volume spike
+            if (close[i] > donchian_upper[i] and 
                 low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: bearish Alligator alignment AND low volatility regime AND volume spike
-            elif (bearish_alignment and 
+            # Short conditions: price breaks below Donchian lower AND low volatility regime AND volume spike
+            elif (close[i] < donchian_lower[i] and 
                   low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit conditions: Alligator cross OR regime shift to high volatility
-            lips_teeth_cross = (position == 1 and lips[i] < teeth[i]) or (position == -1 and lips[i] > teeth[i])
-            high_vol_regime = not low_vol_regime_aligned[i]
+        else:  # Have position - look for exit to middle band (mean reversion)
+            # Exit when price returns to Donchian middle band (mean reversion to equilibrium)
+            exit_long = (position == 1 and close[i] <= donchian_middle[i])
+            exit_short = (position == -1 and close[i] >= donchian_middle[i])
             
-            if lips_teeth_cross or high_vol_regime:
+            if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
