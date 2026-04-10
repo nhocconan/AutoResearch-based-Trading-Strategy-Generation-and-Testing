@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.3x 20-period volume SMA AND chop > 61.8 (ranging market)
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.3x 20-period volume SMA AND chop > 61.8
-# - Exit: price crosses Camarilla pivot point (midline)
-# - Uses 4h for price action (Camarilla levels from prior 1d), 1d for volume confirmation, 4h for chop filter
-# - Camarilla levels provide structured support/resistance; volume confirms institutional participation; chop filter avoids strong trends where breakouts fail
-# - Target: 25-35 trades/year to minimize fee drag while capturing high-probability mean reversion in ranging markets
+# Hypothesis: 4h Donchian breakout with 1d volume spike and chop regime filter
+# - Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period volume SMA AND chop > 61.8 (ranging market)
+# - Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period volume SMA AND chop > 61.8
+# - Exit: price crosses Donchian midline (average of 20-period high/low)
+# - Uses 4h for price action (Donchian channels), 1d for volume confirmation, 4h for chop filter
+# - Donchian breakouts capture volatility expansion; volume confirms institutional participation; chop filter avoids strong trends where breakouts fail
+# - Target: 20-30 trades/year to minimize fee drag while capturing high-probability mean reversion in ranging markets
 
-name = "4h_1d_camarilla_volspike_chop_v1"
+name = "4h_1d_donchian_volspike_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,7 +29,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla levels and volume confirmation (MTF rule compliance)
+    # Load 1d data ONCE before loop for volume confirmation (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
@@ -39,21 +39,10 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 1d Camarilla levels (based on prior day's OHLC)
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), etc.
-    # We use H3/L3 for entries and pivot point (close) for exits
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
-    camarilla_pivot = close_1d  # pivot point is close in Camarilla
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Pre-compute 4h Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high_20 + lowest_low_20) / 2.0
     
     # Pre-compute 4h Chopiness Index (14-period) for regime filter
     tr1 = np.abs(high[1:] - low[:-1])
@@ -69,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(chop[i]) or 
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(chop[i]) or 
             np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -78,23 +67,23 @@ def generate_signals(prices):
         # Get current 1d volume (aligned)
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
         
-        # Volume confirmation: 1d volume > 1.3x 20-period volume SMA
-        vol_confirm = vol_1d_aligned[i] > 1.3 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
+        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
         # Chop filter: chop > 61.8 indicates ranging market (good for breakout mean reversion)
         chop_filter = chop[i] > 61.8
         
         # Only trade when both volume confirmation and chop filter are present
         if vol_confirm and chop_filter:
-            # Long: price breaks above Camarilla H3 level
-            if close[i] > camarilla_h3_aligned[i]:
+            # Long: price breaks above Donchian high
+            if close[i] > highest_high_20[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25
-            # Short: price breaks below Camarilla L3 level
-            elif close[i] < camarilla_l3_aligned[i]:
+            # Short: price breaks below Donchian low
+            elif close[i] < lowest_low_20[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
@@ -104,11 +93,11 @@ def generate_signals(prices):
                 # Maintain position
                 signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
             
-            # Exit conditions: price crosses Camarilla pivot point
-            if position == 1 and close[i] < camarilla_pivot_aligned[i]:
+            # Exit conditions: price crosses Donchian midline
+            if position == 1 and close[i] < donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close[i] > camarilla_pivot_aligned[i]:
+            elif position == -1 and close[i] > donchian_mid[i]:
                 position = 0
                 signals[i] = 0.0
         else:
