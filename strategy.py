@@ -3,103 +3,124 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-# - Camarilla levels from 1h: breakout above H3 = long, below L3 = short
-# - 4h EMA(50) > EMA(200) for long bias, < for short bias to avoid counter-trend trades
-# - Volume confirmation: current 1h volume > 1.5x 20-period average
-# - Designed for 1h timeframe: targets 15-37 trades/year to avoid fee drag
-# - Uses discrete position sizing (0.20) to minimize fee churn
-# - Works in bull/bear markets: 4h EMA filter ensures we trade with higher timeframe trend
+# Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Camarilla levels from 1d: R3/S3 for mean reversion fade, R4/S4 for breakout continuation
+# - 1w ADX(14) > 20 to ensure weekly trend alignment and avoid choppy markets
+# - Volume confirmation: current 6h volume > 2.0x 20-period average to confirm institutional interest
+# - Designed for 6h timeframe: targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Works in bull/bear markets: weekly ADX filter ensures we trade with higher timeframe trend
+# - Uses discrete position sizing (0.25) to minimize fee churn
 
-name = "1h_4h_camarilla_ema_volume_v1"
-timeframe = "1h"
+name = "6h_1w_camarilla_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Pre-compute 4h EMA(50) and EMA(200) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_4h, ema_200)
+    # Pre-compute 1w ADX(14) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pre-compute 1h Camarilla levels (based on previous bar's OHLC)
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
-    open_1h = prices['open'].values
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Camarilla levels use previous bar's OHLC
-    prev_high = np.roll(high_1h, 1)
-    prev_low = np.roll(low_1h, 1)
-    prev_close = np.roll(close_1h, 1)
-    prev_open = np.roll(open_1h, 1)
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Handle first bar
-    prev_high[0] = high_1h[0]
-    prev_low[0] = low_1h[0]
-    prev_close[0] = close_1h[0]
-    prev_open[0] = open_1h[0]
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    # Camarilla levels
-    h3 = pivot + (range_val * 1.1 / 4)
-    l3 = pivot - (range_val * 1.1 / 4)
-    h4 = pivot + (range_val * 1.1 / 2)
-    l4 = pivot - (range_val * 1.1 / 2)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Pre-compute 1h volume confirmation
-    volume_1h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1h > (1.5 * avg_volume_20)
+    # Pre-compute 1d Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla levels calculation
+    rango = high_1d - low_1d
+    camarilla_r3 = close_1d + (rango * 1.1 / 4)
+    camarilla_s3 = close_1d - (rango * 1.1 / 4)
+    camarilla_r4 = close_1d + (rango * 1.1 / 2)
+    camarilla_s4 = close_1d - (rango * 1.1 / 2)
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Pre-compute 6h volume confirmation
+    volume_6h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_6h > (2.0 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(h3[i]) or np.isnan(l3[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price re-enters Camarilla range (below H3) or trend reverses
-            if close_1h[i] < h3[i] or ema_50_aligned[i] < ema_200_aligned[i]:
+            # Exit: price closes below S3 (mean reversion failure) or breaks below S4 (stop)
+            if prices['close'].iloc[i] < camarilla_s3_aligned[i] or prices['close'].iloc[i] < camarilla_s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price re-enters Camarilla range (above L3) or trend reverses
-            if close_1h[i] > l3[i] or ema_50_aligned[i] > ema_200_aligned[i]:
+            # Exit: price closes above R3 (mean reversion failure) or breaks above R4 (stop)
+            if prices['close'].iloc[i] > camarilla_r3_aligned[i] or prices['close'].iloc[i] > camarilla_r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Flat
             # Look for Camarilla breakout with trend and volume filters
-            if vol_spike[i]:
-                # Breakout long: price closes above H3 with bullish 4h trend
-                if close_1h[i] > h3[i] and ema_50_aligned[i] > ema_200_aligned[i]:
+            if vol_spike[i] and adx_aligned[i] > 20:
+                # Breakout long: price closes above R4 (strong bullish breakout)
+                if prices['close'].iloc[i] > camarilla_r4_aligned[i]:
                     position = 1
-                    signals[i] = 0.20
-                # Breakout short: price closes below L3 with bearish 4h trend
-                elif close_1h[i] < l3[i] and ema_50_aligned[i] < ema_200_aligned[i]:
+                    entry_price = prices['close'].iloc[i]
+                    signals[i] = 0.25
+                # Breakout short: price closes below S4 (strong bearish breakout)
+                elif prices['close'].iloc[i] < camarilla_s4_aligned[i]:
                     position = -1
-                    signals[i] = -0.20
+                    entry_price = prices['close'].iloc[i]
+                    signals[i] = -0.25
     
     return signals
