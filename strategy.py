@@ -3,133 +3,132 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Supertrend + volume confirmation
-# - Primary signal: Elder Ray Bull/Bear Power divergence on 6h with 1d Supertrend filter
-# - Bull Power = High - EMA(13), Bear Power = Low - EMA(13) 
-# - Long: Bull Power rising (2-bar momentum) + Bear Power < 0 + price > EMA(13) + 1d Supertrend up
-# - Short: Bear Power falling (2-bar momentum) + Bull Power < 0 + price < EMA(13) + 1d Supertrend down
-# - Volume confirmation: 6h volume > 1.3x 20-period average
-# - Works in bull/bear: Supertrend filters counter-trend trades, Elder Ray captures momentum exhaustion
-# - Position size: 0.25 discrete level
-# - Target: 50-150 total trades over 4 years (12-37/year)
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + 1w chop regime filter
+# - Primary signal: Price breaks above/below 20-period Donchian channel on 12h
+# - Volume confirmation: 1d volume > 1.5x 20-period average volume (avoid low-participation breakouts)
+# - Regime filter: 1w Choppiness Index > 61.8 (range market) enables mean reversion at Donchian bands
+# - Works in bull/bear: In trends (CHOP < 38.2), breakouts continue; in ranges (CHOP > 61.8), fade Donchian touches
+# - Position size: 0.25 discrete level to minimize fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - ATR-based stoploss: exit when price moves against position by 2.5x ATR(20)
 
-name = "6h_1d_elderray_supertrend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_1w_donchian_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 1d Supertrend
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d volume spike filter
+    volume_1d = df_1d['volume'].values
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.5 * avg_volume_20)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
-    # ATR(10)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr_3))
-    tr_1d[0] = tr1[0]
-    atr_10 = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    # Pre-compute 1w Choppiness Index
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Supertrend parameters
-    atr_mult = 3.0
-    upperband = (high_1d + low_1d) / 2 + atr_mult * atr_10
-    lowerband = (high_1d + low_1d) / 2 - atr_mult * atr_10
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
     
-    # Initialize Supertrend
-    supertrend = np.full_like(close_1d, np.nan)
-    direction = np.full_like(close_1d, 1)  # 1=up, -1=down
+    # ATR(14) and sum of true ranges
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    for i in range(1, len(close_1d)):
-        if np.isnan(supertrend[i-1]):
-            supertrend[i] = lowerband[i]
-            direction[i] = 1
-            continue
-            
-        if close_1d[i] > supertrend[i-1]:
-            direction[i] = 1
-        elif close_1d[i] < supertrend[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            
-        if direction[i] == 1:
-            supertrend[i] = max(lowerband[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upperband[i], supertrend[i-1])
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
     
-    supertrend_dir = align_htf_to_ltf(prices, df_1d, direction)
+    # Choppiness Index: 100 * log10(tr_sum_14 / (hh_14 - ll_14)) / log10(14)
+    chop_raw = np.where((hh_14 - ll_14) > 0,
+                        100 * np.log10(tr_sum_14 / (hh_14 - ll_14)) / np.log10(14),
+                        50)  # neutral when no range
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_raw, additional_delay_bars=0)
     
-    # Pre-compute 6h Elder Ray components
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
+    # Pre-compute 12h Donchian Channel (20)
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    # EMA(13) for Elder Ray
-    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Bull Power = High - EMA(13)
-    bull_power = high_6h - ema_13
-    # Bear Power = Low - EMA(13)
-    bear_power = low_6h - ema_13
-    
-    # Bull/Bear Power momentum (2-bar change)
-    bull_power_mom = bull_power - np.roll(bull_power, 2)
-    bear_power_mom = bear_power - np.roll(bear_power, 2)
-    bull_power_mom[:2] = 0
-    bear_power_mom[:2] = 0
-    
-    # Volume confirmation
-    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_6h > (1.3 * avg_volume_20)
+    # Pre-compute 12h ATR(20) for stoploss
+    tr_12h1 = high_12h - low_12h
+    tr_12h2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr_12h3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
+    tr_12h[0] = tr_12h1[0]
+    atr_20 = pd.Series(tr_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(bull_power_mom[i]) or np.isnan(bear_power_mom[i]) or
-            np.isnan(supertrend_dir[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(atr_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Bear Power turns positive OR Supertrend flips down
-            if bear_power[i] >= 0 or supertrend_dir[i] == -1:
+            # Exit: Donchian mean reversion OR stoploss hit
+            if close_12h[i] < donchian_mid[i] or close_12h[i] < entry_price - 2.5 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Bull Power turns positive OR Supertrend flips up
-            if bull_power[i] >= 0 or supertrend_dir[i] == 1:
+            # Exit: Donchian mean reversion OR stoploss hit
+            if close_12h[i] > donchian_mid[i] or close_12h[i] > entry_price + 2.5 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Elder Ray divergence with volume and Supertrend confirmation
-            # Long: Bull Power rising momentum + Bear Power negative + price > EMA + Supertrend up
-            if (bull_power_mom[i] > 0 and bear_power[i] < 0 and 
-                close_6h[i] > ema_13[i] and supertrend_dir[i] == 1 and volume_spike[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short: Bear Power falling momentum + Bull Power negative + price < EMA + Supertrend down
-            elif (bear_power_mom[i] < 0 and bull_power[i] < 0 and 
-                  close_6h[i] < ema_13[i] and supertrend_dir[i] == -1 and volume_spike[i]):
-                position = -1
-                signals[i] = -0.25
+            # Look for Donchian breakouts with volume spike and chop regime filter
+            # In ranging markets (CHOP > 61.8): fade Donchian touches (mean reversion)
+            # In trending markets (CHOP < 38.2): breakout continuation
+            if volume_spike_aligned[i]:
+                if chop_aligned[i] > 61.8:  # ranging market - mean reversion
+                    # Long: price touches lower Donchian band
+                    if close_12h[i] <= donchian_low[i] * 1.001:  # small buffer for noise
+                        position = 1
+                        entry_price = close_12h[i]
+                        signals[i] = 0.25
+                    # Short: price touches upper Donchian band
+                    elif close_12h[i] >= donchian_high[i] * 0.999:
+                        position = -1
+                        entry_price = close_12h[i]
+                        signals[i] = -0.25
+                elif chop_aligned[i] < 38.2:  # trending market - breakout continuation
+                    # Long: price breaks above upper Donchian band
+                    if close_12h[i] > donchian_high[i]:
+                        position = 1
+                        entry_price = close_12h[i]
+                        signals[i] = 0.25
+                    # Short: price breaks below lower Donchian band
+                    elif close_12h[i] < donchian_low[i]:
+                        position = -1
+                        entry_price = close_12h[i]
+                        signals[i] = -0.25
     
     return signals
