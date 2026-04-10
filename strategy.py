@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR stoploss
-# - Long when price breaks above Donchian upper channel (20-period high) AND 1d volume > 1.3x 20-bar avg
-# - Short when price breaks below Donchian lower channel (20-period low) AND 1d volume > 1.3x 20-bar avg
-# - Exit when price touches Donchian midpoint (mean reversion) OR ATR-based stoploss hit
+# Hypothesis: 6h Elder Ray Power + 1d ADX regime filter
+# - Bull Power = High - EMA13(1d), Bear Power = EMA13(1d) - Low
+# - Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (strong trend)
+# - Short when Bear Power > 0 AND Bull Power < 0 AND 1d ADX > 25 (strong trend)
+# - Exit when power values converge (|Bull Power| < 0.1 * ATR1d AND |Bear Power| < 0.1 * ATR1d)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe
-# - Donchian channels provide clear structure; volume confirms breakout validity
-# - ATR stoploss manages risk in volatile markets
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Elder Ray measures bull/bear strength relative to 1d EMA13; ADX filters for trending regimes only
+# - Works in both bull and bear markets by only taking trades in strong trend directions
 
-name = "4h_1d_donchian_breakout_volume_atr_v1"
-timeframe = "4h"
+name = "6h_1d_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,43 +24,59 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels (20-period) from primary timeframe data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Pre-compute 1d EMA13 for Elder Ray
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Donchian upper channel (20-period high)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Donchian lower channel (20-period low)
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Donchian midpoint (average of upper and lower)
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Pre-compute Elder Ray components: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = ema13_1d - low_1d
     
-    # Pre-compute ATR (14-period) for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align 1d Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Pre-compute 1d volume confirmation: > 1.3x 20-period average
-    volume_1d = df_1d['volume'].values
-    volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.3 * volume_20_avg)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Pre-compute 1d ATR for exit threshold
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align length
+    atr1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr1d_aligned = align_htf_to_ltf(prices, df_1d, atr1d)
+    
+    # Pre-compute 1d ADX for regime filter
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr_abs = np.abs(tr)
+    plus_di14 = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / \
+                pd.Series(tr_abs).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_di14 = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / \
+                 pd.Series(tr_abs).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0  # track entry price for ATR stoploss
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(atr1d_aligned[i]) or np.isnan(adx_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -69,46 +86,27 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian upper AND 1d volume spike
-            if (prices['close'].iloc[i] > donchian_upper[i] and 
-                vol_spike_1d_aligned[i]):
+        if position == 0:  # Flat - look for new entries
+            # Long when Bull Power > 0 AND Bear Power < 0 AND ADX > 25 (strong uptrend)
+            if (bull_power_aligned[i] > 0 and 
+                bear_power_aligned[i] < 0 and 
+                adx_aligned[i] > 25):
                 position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = 0.25
-            # Short when price breaks below Donchian lower AND 1d volume spike
-            elif (prices['close'].iloc[i] < donchian_lower[i] and 
-                  vol_spike_1d_aligned[i]):
+            # Short when Bear Power > 0 AND Bull Power < 0 AND ADX > 25 (strong downtrend)
+            elif (bear_power_aligned[i] > 0 and 
+                  bull_power_aligned[i] < 0 and 
+                  adx_aligned[i] > 25):
                 position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit conditions
-            # Exit conditions: price touches Donchian midpoint OR ATR stoploss hit
-            exit_signal = False
-            stop_price = 0.0
-            
-            if position == 1:  # Long position
-                # Exit to midpoint (mean reversion)
-                if prices['low'].iloc[i] <= donchian_mid[i]:
-                    exit_signal = True
-                # ATR stoploss: 2 * ATR below entry
-                elif entry_price > 0 and prices['low'].iloc[i] <= entry_price - 2.0 * atr[i]:
-                    exit_signal = True
-                    stop_price = entry_price - 2.0 * atr[i]
-            elif position == -1:  # Short position
-                # Exit to midpoint (mean reversion)
-                if prices['high'].iloc[i] >= donchian_mid[i]:
-                    exit_signal = True
-                # ATR stoploss: 2 * ATR above entry
-                elif entry_price > 0 and prices['high'].iloc[i] >= entry_price + 2.0 * atr[i]:
-                    exit_signal = True
-                    stop_price = entry_price + 2.0 * atr[i]
-            
-            if exit_signal:
+        else:  # Have position - look for exit when power converges
+            # Exit when both powers are near zero (|power| < 0.1 * ATR1d)
+            power_threshold = 0.1 * atr1d_aligned[i]
+            if (np.abs(bull_power_aligned[i]) < power_threshold and 
+                np.abs(bear_power_aligned[i]) < power_threshold):
                 position = 0
-                entry_price = 0.0
                 signals[i] = 0.0
             else:
                 if position == 1:
