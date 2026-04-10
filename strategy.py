@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ATR regime filter
-# - Primary: 4h timeframe (proven Donchian+volume edge)
-# - HTF: 1d for volume confirmation and ATR percentile regime
-# - Long: Price breaks above Donchian(20) high + 1d volume > 2.0x 20-period MA + 1d ATR > 40th percentile
-# - Short: Price breaks below Donchian(20) low + 1d volume > 2.0x 20-period MA + 1d ATR > 40th percentile
-# - Exit: Price crosses Donchian(20) midpoint or ATR < 30th percentile (low vol)
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ATR regime filter
+# - Primary: 12h timeframe for lower trade frequency (target: 50-150 trades over 4 years)
+# - HTF: 1d for volume spike (>2x 20-period MA) and ATR (>50th percentile) as regime filter
+# - Long: Price breaks above Donchian upper channel (20-period high) + volume confirmation + ATR regime
+# - Short: Price breaks below Donchian lower channel (20-period low) + volume confirmation + ATR regime
+# - Exit: Price crosses Donchian middle (10-period average of upper/lower) or ATR < 30th percentile
 # - Position sizing: 0.25 (discrete level)
-# - Works in bull/bear: Donchian captures breakouts; volume/ATR filters avoid false signals
+# - Works in bull/bear: Donchian captures breakouts; volume/ATR filters avoid false signals in low-volatility chop
 
-name = "4h_1d_donchian_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,12 +26,12 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLCV
-    open_4h = prices['open'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # Pre-compute 12h OHLCV
+    open_12h = prices['open'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    volume_12h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -39,10 +39,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Donchian Channel (20-period)
-    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    midpoint_20 = (highest_20 + lowest_20) / 2.0
+    # Calculate 12h Donchian channels (20-period)
+    # Upper channel: 20-period high
+    # Lower channel: 20-period low
+    # Middle channel: average of upper and lower
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    middle_12h = (upper_12h + lower_12h) / 2.0
     
     # Calculate 1d ATR(14) for volatility regime filter
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
@@ -61,7 +64,7 @@ def generate_signals(prices):
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # Get aligned 1d volume (for volume spike detection)
+    # Align 1d volume to 12h timeframe
     volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
@@ -69,38 +72,39 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(midpoint_20[i]) or np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
+            np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i]) or
+            np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime conditions
-        # 1d volatility regime: ATR > 40th percentile (avoid extreme low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 40
+        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
         
         # Volume confirmation: current 1d volume > 2.0x 20-period MA
         volume_spike = volume_1d_aligned[i] > 2.0 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above Donchian high + vol regime + volume spike
-            if (close_4h[i] > highest_20[i] and vol_regime and volume_spike):
+            # Long entry: Price breaks above upper Donchian channel + vol regime + volume spike
+            if (close_12h[i] > upper_12h[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low + vol regime + volume spike
-            elif (close_4h[i] < lowest_20[i] and vol_regime and volume_spike):
+            # Short entry: Price breaks below lower Donchian channel + vol regime + volume spike
+            elif (close_12h[i] < lower_12h[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price crosses Donchian midpoint (trend weakening/reversal)
+            # 1. Price crosses Donchian middle channel (trend weakening)
             # 2. ATR falls below 30th percentile (low volatility regime)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_4h[i] < midpoint_20[i] or  # Price crossed below midpoint
+                    close_12h[i] < middle_12h[i] or  # Price crossed below middle
                     atr_percentile_aligned[i] < 30   # Low volatility regime
                 )
                 if exit_condition:
@@ -110,7 +114,7 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_4h[i] > midpoint_20[i] or  # Price crossed above midpoint
+                    close_12h[i] > middle_12h[i] or  # Price crossed above middle
                     atr_percentile_aligned[i] < 30   # Low volatility regime
                 )
                 if exit_condition:
