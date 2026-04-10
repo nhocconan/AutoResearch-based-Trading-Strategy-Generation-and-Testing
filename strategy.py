@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter (ADX > 25) and volume confirmation
-# - Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# - Long when Bull Power > 0 AND volume > 1.5x 20-period MA AND ADX(1d) > 25 (trending market)
-# - Short when Bear Power > 0 AND volume confirmation AND ADX(1d) > 25
-# - ATR(14) trailing stop (2.0x) on 6h timeframe
+# Hypothesis: 6h Williams %R with 1w trend filter and volume confirmation
+# - Williams %R(14) from 1d: oversold < -80 for long, overbought > -20 for short
+# - 1w EMA(21) trend filter: only long when price > EMA21, short when price < EMA21
+# - Volume confirmation: current 1d volume > 1.3x 20-period MA
+# - ATR(14) trailing stop (2.5x) on 6h timeframe
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within HARD MAX: 300 total
-# - Elder Ray works well in 6h timeframe with regime filter, effective in both bull and bear markets by measuring bull/bear strength relative to EMA
+# - Williams %R works well in ranging markets which appear in both bull and bear phases
+# - Weekly trend filter prevents counter-trend trades in strong moves
+# - Target: 15-25 trades/year (60-100 total over 4 years) to stay within HARD MAX: 300 total
 
-name = "6h_1d_elderray_volume_adx_v1"
+name = "6h_1w_williamsr_volume_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,59 +24,31 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLC for EMA and ADX
+    # Pre-compute 1d Williams %R(14)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(13) for Elder Ray
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate Elder Ray components
-    bull_power_1d = high_1d - ema_13_1d  # Bull Power = High - EMA(13)
-    bear_power_1d = ema_13_1d - low_1d   # Bear Power = EMA(13) - Low
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Align Elder Ray to 6h timeframe (completed 1d bar only)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Pre-compute 1w EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Pre-compute 1d ADX(14) for regime filter
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    
-    # +DM and -DM
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = np.nan
-    down_move[0] = np.nan
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    tr_period = 14
-    atr_1d = pd.Series(tr).rolling(window=tr_period, min_periods=tr_period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=tr_period, min_periods=tr_period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=tr_period, min_periods=tr_period).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / atr_1d
-    minus_di = 100 * minus_dm_smooth / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1d = pd.Series(dx).rolling(window=tr_period, min_periods=tr_period).mean().values
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align 1w EMA to 6h timeframe
+    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     # Pre-compute 1d volume and its 20-day moving average for volume confirmation
     volume_1d = df_1d['volume'].values
@@ -102,11 +75,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # for trailing stop
     lowest_since_entry = 0.0   # for trailing stop
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(atr_6h[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_21_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_6h[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -115,27 +87,32 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
+        # Get current 1d close for trend filter (use raw close, aligned)
+        close_1d_current = close_1d
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_current)
+        
         # Get current 1d volume for filter (use raw volume, aligned)
         volume_1d_current = volume_1d
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-day average
+        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_aligned[i]
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending_market = adx_aligned[i] > 25.0
+        # Trend filter: price > weekly EMA21 for long, price < weekly EMA21 for short
+        weekly_uptrend = close_1d_aligned[i] > ema_21_aligned[i]
+        weekly_downtrend = close_1d_aligned[i] < ema_21_aligned[i]
         
         close_price = close_6h[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND volume confirmation AND trending market
-            if bull_power_aligned[i] > 0 and volume_confirm and trending_market:
+            # Long conditions: Williams %R oversold (< -80) AND volume confirmation AND weekly uptrend
+            if williams_r_aligned[i] < -80.0 and volume_confirm and weekly_uptrend:
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: Bear Power > 0 AND volume confirmation AND trending market
-            elif bear_power_aligned[i] > 0 and volume_confirm and trending_market:
+            # Short conditions: Williams %R overbought (> -20) AND volume confirmation AND weekly downtrend
+            elif williams_r_aligned[i] > -20.0 and volume_confirm and weekly_downtrend:
                 position = -1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 lowest_since_entry = prices['low'].iloc[i]
@@ -146,13 +123,13 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # ATR trailing stop: exit when price drops 2.0*ATR from highest point
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.0 * atr_6h[i]
+                # ATR trailing stop: exit when price drops 2.5*ATR from highest point
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr_6h[i]
                 exit_condition = trailing_stop
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # ATR trailing stop: exit when price rises 2.0*ATR from lowest point
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr_6h[i]
+                # ATR trailing stop: exit when price rises 2.5*ATR from lowest point
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr_6h[i]
                 exit_condition = trailing_stop
             
             if exit_condition:
