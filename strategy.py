@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla Pivot Breakout with 4h volume and ATR regime filter
-# - Primary: 1h timeframe for better entry timing
-# - HTF: 4h for volatility (ATR percentile) and volume confirmation
-# - Long: Price breaks above H3 Camarilla pivot + 4h ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Short: Price breaks below L3 Camarilla pivot + 4h ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4
-# - Position sizing: 0.20 (discrete level)
-# - Session filter: 08-20 UTC to reduce noise trades
-# - Target: 60-150 total trades over 4 years (15-37/year) - within 1h sweet spot
-# - Works in bull/bear: Camarilla pivots capture mean reversion in ranging markets (2025) and breakouts in trending markets
+# Hypothesis: 6h Elder Ray + 1d Williams Fractal Regime Filter
+# - Primary: 6h timeframe for lower trade frequency (target: 12-37/year)
+# - HTF: 1d for Elder Ray (bull/bear power) and Williams Fractals for regime
+# - Long: 6h Elder Bull Power > 0 AND price > 6h EMA(20) AND 1d bullish fractal confirmed (with 2-bar delay)
+# - Short: 6h Elder Bear Power < 0 AND price < 6h EMA(20) AND 1d bearish fractal confirmed (with 2-bar delay)
+# - Exit: Elder Power crosses zero OR price reverts to 6h EMA(20)
+# - Position sizing: 0.25 (discrete level)
+# - Works in bull/bear: Elder Ray shows underlying strength/weakness; fractals filter false breaks
+# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
 
-name = "1h_4h_camarilla_pivot_v1"
-timeframe = "1h"
+name = "6h_1d_elderray_fractal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,116 +23,96 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1h OHLCV
-    open_1h = prices['open'].values
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
-    volume_1h = prices['volume'].values
+    # Pre-compute 6h OHLCV
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Pre-compute 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Pre-compute 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1h Camarilla Pivot Points (based on previous 4h)
-    # Align 4h OHLC to 1h bars (using previous 4h bar's OHLC)
-    high_4h_aligned = align_htf_to_ltf(prices, df_4h, high_4h)
-    low_4h_aligned = align_htf_to_ltf(prices, df_4h, low_4h)
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+    # Calculate 6h EMA(20) for trend filter
+    close_6h_s = pd.Series(close_6h)
+    ema_20_6h = close_6h_s.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Calculate Camarilla levels for each 1h bar (using previous 4h OHLC)
-    rng = high_4h_aligned - low_4h_aligned
-    h3 = close_4h_aligned + 1.25 * rng  # Long entry: break above H3
-    l3 = close_4h_aligned - 1.25 * rng  # Short entry: break below L3
-    h4 = close_4h_aligned + 1.5 * rng   # Long exit: break above H4 (take profit)
-    l4 = close_4h_aligned - 1.5 * rng   # Short exit: break below L4 (take profit)
-    pivot = (high_4h_aligned + low_4h_aligned + close_4h_aligned) / 3.0  # Mean reversion exit
+    # Calculate 6h Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    ema_13_6h = close_6h_s.ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power_6h = high_6h - ema_13_6h
+    bear_power_6h = low_6h - ema_13_6h
     
-    # Calculate 4h ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_4h).shift(1) - pd.Series(low_4h).shift(1)
-    tr2 = abs(pd.Series(high_4h) - pd.Series(close_4h).shift(1))
-    tr3 = abs(pd.Series(low_4h) - pd.Series(close_4h).shift(1))
-    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h = tr_4h.rolling(window=14, min_periods=14).mean().values
+    # Calculate 1d Williams Fractals
+    # Bearish fractal: high[n-2] < high[n] AND high[n-1] < high[n] AND high[n+1] < high[n] AND high[n+2] < high[n]
+    # Bullish fractal: low[n-2] > low[n] AND low[n-1] > low[n] AND low[n+1] > low[n] AND low[n+2] > low[n]
+    n_1d = len(high_1d)
+    bearish_fractal_1d = np.full(n_1d, np.nan)
+    bullish_fractal_1d = np.full(n_1d, np.nan)
     
-    # Calculate 4h ATR percentile rank (using 30-bar lookback)
-    atr_percentile = pd.Series(atr_4h).rolling(window=30, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_4h, atr_percentile)
+    for i in range(2, n_1d - 2):
+        if (high_1d[i-2] < high_1d[i] and high_1d[i-1] < high_1d[i] and 
+            high_1d[i+1] < high_1d[i] and high_1d[i+2] < high_1d[i]):
+            bearish_fractal_1d[i] = high_1d[i]
+        if (low_1d[i-2] > low_1d[i] and low_1d[i-1] > low_1d[i] and 
+            low_1d[i+1] > low_1d[i] and low_1d[i+2] > low_1d[i]):
+            bullish_fractal_1d[i] = low_1d[i]
     
-    # Calculate 4h volume moving average (20-period) for volume confirmation
-    volume_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20_4h)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Williams fractals need 2 extra 1d bars after the center bar for confirmation
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal_1d, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal_1d, additional_delay_bars=2)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
+    for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_4h_aligned[i])):
+        if (np.isnan(ema_20_6h[i]) or np.isnan(bull_power_6h[i]) or 
+            np.isnan(bear_power_6h[i]) or np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Regime conditions
-        # 4h volatility regime: ATR > 40th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 40
-        
-        # Volume confirmation: current 4h volume > 1.3x 20-period MA
-        volume_spike = volume_4h[i // 4] > 1.3 * volume_ma_20_4h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above H3 resistance + vol regime + volume spike
-            if (close_1h[i] > h3[i] and vol_regime and volume_spike):
+            # Long entry: Bull Power > 0 AND price > EMA(20) AND bullish fractal confirmed
+            if (bull_power_6h[i] > 0 and close_6h[i] > ema_20_6h[i] and not np.isnan(bullish_fractal_aligned[i])):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: Price breaks below L3 support + vol regime + volume spike
-            elif (close_1h[i] < l3[i] and vol_regime and volume_spike):
+                signals[i] = 0.25
+            # Short entry: Bear Power < 0 AND price < EMA(20) AND bearish fractal confirmed
+            elif (bear_power_6h[i] < 0 and close_6h[i] < ema_20_6h[i] and not np.isnan(bearish_fractal_aligned[i])):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price reverts to Pivot Point (mean reversion)
-            # 2. Price breaks opposite H4/L4 level (take profit)
+            # 1. Elder Power crosses zero (loss of underlying strength/weakness)
+            # 2. Price reverts to 6h EMA(20) (mean reversion)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_1h[i] < pivot[i] or  # Reverted to pivot
-                    close_1h[i] > h4[i]        # Break above H4 (take profit)
+                    bull_power_6h[i] <= 0 or  # Bull power crossed zero
+                    close_6h[i] < ema_20_6h[i]  # Price reverted below EMA(20)
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_1h[i] > pivot[i] or  # Reverted to pivot
-                    close_1h[i] < l4[i]        # Break below L4 (take profit)
+                    bear_power_6h[i] >= 0 or  # Bear power crossed zero
+                    close_6h[i] > ema_20_6h[i]  # Price reverted above EMA(20)
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
