@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above 20-day high in 1w uptrend (close > EMA50) with volume spike (>1.5x 20-day avg volume)
-# - Short when price breaks below 20-day low in 1w downtrend (close < EMA50) with volume spike
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter
+# - Bull Power = High - EMA13, Bear Power = EMA13 - Low (using 1d EMA13)
+# - Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (strong trend)
+# - Short when Bull Power < 0 AND Bear Power > 0 AND 1d ADX > 25 (strong trend)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets 7-25 trades/year (30-100 total over 4 years) to avoid fee drag
-# - Weekly trend filter reduces false breakouts in ranging markets
-# - ATR-based stoploss to limit drawdown
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - ADX regime filter ensures we only trade in strong trending markets, reducing whipsaws
+# - Elder Ray captures the power of bulls/bears relative to the 13-period EMA
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,50 +22,69 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w indicators
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA(13) for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 1w volume confirmation: > 1.5x 20-period average
-    avg_volume_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (1.5 * avg_volume_20_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
+    # 1d ADX(14) for regime filter
+    # True Range
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close[0] = np.nan  # First value has no previous close
+    low_close[0] = np.nan
+    tr = np.nanmax(np.column_stack([high_low, high_close, low_close]), axis=1)
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute ATR for stoploss (using 1d data)
-    high_low = prices['high'] - prices['low']
-    high_close = np.abs(prices['high'] - prices['close'].shift(1))
-    low_close = np.abs(prices['low'] - prices['close'].shift(1))
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_ranges = np.nanmax(ranges.values, axis=1)
-    atr_14 = pd.Series(true_ranges).rolling(window=14, min_periods=14).mean().values
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=np.nan)
+    down_move = -np.diff(low_1d, prepend=np.nan)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM and ATR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(atr_14_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_smooth
+    minus_di = 100 * minus_dm_smooth / atr_smooth
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_14_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Elder Ray components
+    bull_power_1d = high_1d - ema_13_1d
+    bear_power_1d = ema_13_1d - low_1d
+    
+    # Align HTF indicators to LTF
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
-    atr_stop_multiplier = 2.5
     
-    # Pre-compute Donchian channels (20-period)
-    donchian_high = prices['high'].rolling(window=20, min_periods=20).max().values
-    donchian_low = prices['low'].rolling(window=20, min_periods=20).min().values
-    
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_spike_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_14_1d_aligned[i]) or 
+            np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # ATR-based stoploss
-            if prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14[i]:
+            # Exit when trend weakens or power shifts
+            if adx_14_1d_aligned[i] < 20 or bull_power_1d_aligned[i] <= 0 or bear_power_1d_aligned[i] >= 0:
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
@@ -72,25 +92,25 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # ATR-based stoploss
-            if prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14[i]:
+            # Exit when trend weakens or power shifts
+            if adx_14_1d_aligned[i] < 20 or bull_power_1d_aligned[i] >= 0 or bear_power_1d_aligned[i] <= 0:
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long signal: price breaks above 20-day high in 1w uptrend with volume spike
-            if (prices['high'].iloc[i] > donchian_high[i] and 
-                prices['close'].iloc[i] > ema_50_1w_aligned[i] and 
-                vol_spike_1w_aligned[i]):
+            # Enter long when bulls are in control and trend is strong
+            if (bull_power_1d_aligned[i] > 0 and 
+                bear_power_1d_aligned[i] < 0 and 
+                adx_14_1d_aligned[i] > 25):
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = 0.25
-            # Short signal: price breaks below 20-day low in 1w downtrend with volume spike
-            elif (prices['low'].iloc[i] < donchian_low[i] and 
-                  prices['close'].iloc[i] < ema_50_1w_aligned[i] and 
-                  vol_spike_1w_aligned[i]):
+            # Enter short when bears are in control and trend is strong
+            elif (bull_power_1d_aligned[i] < 0 and 
+                  bear_power_1d_aligned[i] > 0 and 
+                  adx_14_1d_aligned[i] > 25):
                 position = -1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = -0.25
