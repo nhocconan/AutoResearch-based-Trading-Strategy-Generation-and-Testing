@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ADX regime filter
-# - Primary: 12h price breaking above R4 or below S4 Camarilla levels from 1d
-# - HTF: 1d volume confirmation (current volume > 1.5x 20-period MA) + ADX > 25 for trend strength
+# Hypothesis: 4h Camarilla pivot breakout with 12h volume confirmation and ADX regime filter
+# - Primary: 4h price breaking above R4 or below S4 Camarilla levels from 1d
+# - HTF: 12h volume confirmation (current volume > 1.5x 20-period MA) + ADX > 25 for trend strength
 # - Long: Breakout above R4 + volume confirmation + ADX > 25
 # - Short: Breakout below S4 + volume confirmation + ADX > 25
 # - Exit: Price returns to R3/S3 levels
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
 # - Works in bull/bear: Camarilla pivots act as support/resistance, volume confirms momentum, ADX filters ranging markets
-# - Target: 50-150 trades over 4 years (12-37/year) to stay within fee drag limits
+# - Target: 75-150 trades over 4 years (19-37/year) to stay within fee drag limits
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,8 +27,8 @@ def generate_signals(prices):
     if len(df_1d) < 30:  # Need enough data for Camarilla and ADX
         return np.zeros(n)
     
-    # Pre-compute 12h data
-    close_12h = prices['close'].values
+    # Pre-compute 4h data
+    close_4h = prices['close'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -80,7 +80,7 @@ def generate_signals(prices):
     # Calculate 1d volume moving average (20-period) for volume confirmation
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF indicators to 12h timeframe
+    # Align all HTF indicators to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -99,7 +99,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume (aligned to 12h)
+        # Get current 1d volume (aligned to 4h)
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
         # Volume confirmation: current 1d volume > 1.5x 20-period MA
@@ -109,12 +109,12 @@ def generate_signals(prices):
         trend_confirm = adx_aligned[i] > 25.0
         
         # Camarilla breakout conditions
-        breakout_long = close_12h[i] > r4_aligned[i]
-        breakout_short = close_12h[i] < s4_aligned[i]
+        breakout_long = close_4h[i] > r4_aligned[i]
+        breakout_short = close_4h[i] < s4_aligned[i]
         
         # Exit conditions: Price returns to R3/S3 levels
-        exit_long = close_12h[i] < r3_aligned[i]
-        exit_short = close_12h[i] > s3_aligned[i]
+        exit_long = close_4h[i] < r3_aligned[i]
+        exit_short = close_4h[i] > s3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long entry: Breakout above R4 + volume confirmation + trend confirmation
