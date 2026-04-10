@@ -3,22 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h ADX Trend Filter with 4h/1d Confluence for BTC/ETH
-# - Primary: 1h timeframe for entry timing with strict ADX(14) > 25 trend filter
-# - HTF: 4h for trend direction (EMA20 cross), 1d for volatility regime (ATR > 30th percentile)
-# - Long: ADX>25 + DI+ > DI- + price > EMA20(1h) + 4h EMA50 uptrend + 1d ATR > 30th percentile
-# - Short: ADX>25 + DI- > DI+ + price < EMA20(1h) + 4h EMA50 downtrend + 1d ATR > 30th percentile
-# - Exit: ADX < 20 (trend weakening) or opposite DI crossover
-# - Position sizing: 0.20 (discrete level to minimize fee churn)
-# - Session filter: 08-20 UTC to avoid low-liquidity Asian session
-# - Target: 60-120 total trades over 4 years (15-30/year) - within 1h sweet spot
-# - ADX filters out ranging markets (common in 2025 BTC/ETH bear/range)
-# - 4h EMA50 ensures intermediate-term trend alignment
-# - 1d ATR percentile filter avoids low-volatility whipsaws
-# - Only trade strong trending conditions to minimize false signals and fee drag
+# Hypothesis: 6h Williams %R Mean Reversion with 1w Trend Filter and Volume Confirmation
+# - Primary: 6h timeframe for lower frequency trading to reduce fee drag
+# - HTF: 1w for major trend direction (price > SMA50), 1d for oversold/overbought extremes
+# - Long: 6h Williams %R < -80 (oversold) + price > 1w SMA50 (bullish major trend) + 1d volume > 1.5x 20-period MA
+# - Short: 6h Williams %R > -20 (overbought) + price < 1w SMA50 (bearish major trend) + 1d volume > 1.5x 20-period MA
+# - Exit: Williams %R crosses above -50 (for long) or below -50 (for short) - mean reversion to midpoint
+# - Position sizing: 0.25 (discrete level to balance return and drawdown)
+# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
+# - Williams %R is effective at catching reversals in extended moves
+# - 1w SMA50 filter ensures we trade with the major trend, reducing counter-trend losses
+# - Volume confirmation increases reliability of reversal signals
 
-name = "1h_4h_1d_adx_trend_v1"
-timeframe = "1h"
+name = "6h_1w_1d_williamsr_meanrev_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,152 +25,83 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 60 or len(df_1d) < 30:
+    if len(df_1w) < 60 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1h OHLCV
-    open_1h = prices['open'].values
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
-    volume_1h = prices['volume'].values
+    # Pre-compute 6h OHLCV
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Pre-compute 4h data
-    close_4h = df_4h['close'].values
+    # Pre-compute 1w data
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1h EMA(20) for trend filter
-    ema_20_1h = pd.Series(close_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 6h Williams %R(14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_6h = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low_6h = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r_6h = (highest_high_6h - close_6h) / (highest_high_6h - lowest_low_6h + 1e-10) * -100
     
-    # Calculate 1h ADX(14) for trend strength
-    # True Range
-    tr1 = pd.Series(high_1h).shift(1) - pd.Series(low_1h).shift(1)
-    tr2 = abs(pd.Series(high_1h) - pd.Series(close_1h).shift(1))
-    tr3 = abs(pd.Series(low_1h) - pd.Series(close_1h).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1h = tr.rolling(window=14, min_periods=14).mean().values
+    # Calculate 1w SMA(50) for major trend filter
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Directional Movement
-    up_move = pd.Series(high_1h) - pd.Series(high_1h).shift(1)
-    down_move = pd.Series(low_1h).shift(1) - pd.Series(low_1h)
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    plus_di_1h = 100 * plus_dm_smooth / atr_1h
-    minus_di_1h = 100 * minus_dm_smooth / atr_1h
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di_1h - minus_di_1h) / (plus_di_1h + minus_di_1h)
-    adx_1h = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate 4h EMA(50) for trend direction
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1_1d = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2_1d = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3_1d = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d ATR percentile rank (using 50-day lookback)
-    atr_percentile = pd.Series(atr_1d).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
-    
-    # Session filter: 08-20 UTC (avoid low-liquidity Asian session)
-    hours = prices.index.hour  # Already datetime64[ms], .hour works
+    # Calculate 1d volume moving average (20-period) for volume confirmation
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(adx_1h[i]) or np.isnan(plus_di_1h[i]) or np.isnan(minus_di_1h[i]) or 
-            np.isnan(ema_20_1h[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(atr_percentile_aligned[i])):
+        if (np.isnan(williams_r_6h[i]) or 
+            np.isnan(sma_50_1w_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
-        # Regime conditions
-        # 1h trend strength: ADX > 25
-        strong_trend = adx_1h[i] > 25
-        
-        # 1h trend direction: DI+ > DI- for long, DI- > DI+ for short
-        bullish_di = plus_di_1h[i] > minus_di_1h[i]
-        bearish_di = minus_di_1h[i] > plus_di_1h[i]
-        
-        # 1h price vs EMA20: price above/below EMA for confirmation
-        price_above_ema = close_1h[i] > ema_20_1h[i]
-        price_below_ema = close_1h[i] < ema_20_1h[i]
-        
-        # 4h trend: price above/below EMA50
-        uptrend_4h = close_1h[i] > ema_50_4h_aligned[i]
-        downtrend_4h = close_1h[i] < ema_50_4h_aligned[i]
-        
-        # 1d volatility regime: ATR > 30th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 30
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Strong trend + bullish DI + price above EMA20 + 4h uptrend + vol regime
-            if (strong_trend and bullish_di and price_above_ema and uptrend_4h and vol_regime):
+            # Long entry: Williams %R < -80 (oversold) + price > 1w SMA50 (bullish trend) + volume spike
+            if (williams_r_6h[i] < -80 and 
+                close_6h[i] > sma_50_1w_aligned[i] and 
+                volume_1d[i] > 1.5 * volume_ma_20_1d_aligned[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: Strong trend + bearish DI + price below EMA20 + 4h downtrend + vol regime
-            elif (strong_trend and bearish_di and price_below_ema and downtrend_4h and vol_regime):
+                signals[i] = 0.25
+            # Short entry: Williams %R > -20 (overbought) + price < 1w SMA50 (bearish trend) + volume spike
+            elif (williams_r_6h[i] > -20 and 
+                  close_6h[i] < sma_50_1w_aligned[i] and 
+                  volume_1d[i] > 1.5 * volume_ma_20_1d_aligned[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions:
-            # 1. ADX < 20 (trend weakening)
-            # 2. Opposite DI crossover (trend reversal)
-            # 3. Price crosses EMA20 in opposite direction
-            
+            # Exit: Williams %R crosses above -50 (for long) or below -50 (for short)
+            # This represents mean reversion to the midpoint of the range
             if position == 1:  # Long position
-                exit_condition = (
-                    adx_1h[i] < 20 or              # Trend weakening
-                    minus_di_1h[i] > plus_di_1h[i] or  # DI crossover bearish
-                    close_1h[i] < ema_20_1h[i]     # Price below EMA20
-                )
-                if exit_condition:
+                if williams_r_6h[i] > -50:  # Crossed above -50, exiting oversold territory
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
-                exit_condition = (
-                    adx_1h[i] < 20 or              # Trend weakening
-                    plus_di_1h[i] > minus_di_1h[i] or  # DI crossover bullish
-                    close_1h[i] > ema_20_1h[i]     # Price above EMA20
-                )
-                if exit_condition:
+                if williams_r_6h[i] < -50:  # Crossed below -50, exiting overbought territory
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
