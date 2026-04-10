@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d ATR regime filter + volume confirmation
-# - Long when price breaks above 20-period Donchian high AND 1d ATR(14) < 20-period median ATR (low volatility) AND volume > 2.0x 20-period average
-# - Short when price breaks below 20-period Donchian low AND 1d ATR(14) < 20-period median ATR AND volume > 2.0x 20-period average
-# - Exit when price returns to 20-period Donchian midpoint (mean reversion)
+# Hypothesis: 4h Camarilla pivot breakout + 1d ATR regime filter + volume confirmation
+# - Long when price breaks above Camarilla H3 level AND 1d ATR(14) < 20-period median ATR (low volatility regime) AND volume > 1.8x 20-period average
+# - Short when price breaks below Camarilla L3 level AND 1d ATR(14) < 20-period median ATR AND volume > 1.8x 20-period average
+# - Exit when price returns to Camarilla PIVOT level (mean reversion to equilibrium)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Donchian channels provide clear structure that works in both trending and ranging markets
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Camarilla levels provide institutional support/resistance that work in both trending and ranging markets
 # - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
 # - Volume confirmation reduces false breakouts
 
-name = "12h_1d_donchian_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,20 +27,15 @@ def generate_signals(prices):
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC and volume
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Pre-compute 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    volume_spike = volume > (1.8 * vol_ma)
     
     # Pre-compute 1d ATR(14) for regime filter
     high_1d = df_1d['high'].values
@@ -63,10 +58,30 @@ def generate_signals(prices):
         atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
     # ATR regime: low volatility when current ATR < median of last 20 ATR values
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
     atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
     low_vol_regime = atr_1d < atr_median_20
     
-    # Align HTF indicators to 12h timeframe
+    # Pre-compute 4h Camarilla levels from previous period's OHLC
+    # Camarilla levels use previous period's range
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # First bar uses current values
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    camarilla_h3 = pivot + (range_hl * 1.1 / 4)
+    camarilla_l3 = pivot - (range_hl * 1.1 / 4)
+    camarilla_h4 = pivot + (range_hl * 1.1 / 2)
+    camarilla_l4 = pivot - (range_hl * 1.1 / 2)
+    
+    # Align HTF indicators to 4h timeframe
     low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
@@ -74,9 +89,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(low_vol_regime_aligned[i])):
+        if (np.isnan(pivot[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -86,24 +100,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Donchian high AND low volatility regime AND volume spike
-            if (close[i] > donchian_high[i] and 
+            # Long conditions: price breaks above Camarilla H3 AND low volatility regime AND volume spike
+            if (close[i] > camarilla_h3[i] and 
                 low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND low volatility regime AND volume spike
-            elif (close[i] < donchian_low[i] and 
+            # Short conditions: price breaks below Camarilla L3 AND low volatility regime AND volume spike
+            elif (close[i] < camarilla_l3[i] and 
                   low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to midpoint (mean reversion)
-            # Exit when price returns to Donchian midpoint (mean reversion to equilibrium)
-            exit_long = (position == 1 and close[i] <= donchian_mid[i])
-            exit_short = (position == -1 and close[i] >= donchian_mid[i])
+        else:  # Have position - look for exit to pivot (mean reversion)
+            # Exit when price returns to pivot level (mean reversion to equilibrium)
+            exit_long = (position == 1 and close[i] <= pivot[i])
+            exit_short = (position == -1 and close[i] >= pivot[i])
             
             if exit_long or exit_short:
                 position = 0
