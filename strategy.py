@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume and ATR regime filter
-# - Primary: 1d timeframe for lower frequency and reduced fee drag
-# - HTF: 1w for volatility (ATR percentile) and volume confirmation
-# - Long: Price breaks above 20-day Donchian high + 1w ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Short: Price breaks below 20-day Donchian low + 1w ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Exit: Price reverts to 20-day Donchian midpoint (mean reversion) or breaks opposite Donchian level
+# Hypothesis: 6h ADX + Williams Alligator Combination
+# - Primary: 6h timeframe for balanced trade frequency and reduced fee drag
+# - HTF: 12h for trend direction (ADX > 25) and 1d for Alligator alignment
+# - Long: 12h ADX > 25 + price > 6h Alligator (teeth) + 6h close > 1d Alligator jaws
+# - Short: 12h ADX > 25 + price < 6h Alligator (teeth) + 6h close < 1d Alligator jaws
+# - Exit: ADX < 20 (trend weakening) or price crosses 8-period EMA on 6h
 # - Position sizing: 0.25 (discrete level)
-# - Target: 30-100 total trades over 4 years (7-25/year) - within 1d sweet spot
-# - Works in bull/bear: Donchian breakouts capture trends, mean reversion exit works in ranging markets
+# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
+# - Works in bull/bear: ADX filters ranging markets, Alligator catches trends in both directions
 
-name = "1d_1w_donchian_volume_atr_v1"
-timeframe = "1d"
+name = "6h_12h_1d_adx_alligator_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,84 +23,110 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLCV
-    open_1d = prices['open'].values
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
-    volume_1d = prices['volume'].values
+    # Pre-compute 6h OHLCV
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Pre-compute 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 12h data for ADX
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Donchian Channel (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Pre-compute 1d data for Alligator
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_1w).shift(1) - pd.Series(low_1w).shift(1)
-    tr2 = abs(pd.Series(high_1w) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w) - pd.Series(close_1w).shift(1))
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1w = tr_1w.rolling(window=14, min_periods=14).mean().values
+    # Calculate 12h ADX(14)
+    # True Range
+    tr1 = pd.Series(high_12h).shift(1) - pd.Series(low_12h).shift(1)
+    tr2 = abs(pd.Series(high_12h) - pd.Series(close_12h).shift(1))
+    tr3 = abs(pd.Series(low_12h) - pd.Series(close_12h).shift(1))
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Calculate 1w ATR percentile rank (using 30-week lookback)
-    atr_percentile = pd.Series(atr_1w).rolling(window=30, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1w, atr_percentile)
+    # Directional Movement
+    up_move = pd.Series(high_12h) - pd.Series(high_12h).shift(1)
+    down_move = pd.Series(low_12h).shift(1) - pd.Series(low_12h)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate 1w volume moving average (20-period) for volume confirmation
-    volume_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
+    # Smoothed values
+    tr_14 = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Calculate 6h Alligator (Jaw=13, Teeth=8, Lips=5 SMAs of median price)
+    median_6h = (high_6h + low_6h) / 2.0
+    jaw_6h = pd.Series(median_6h).rolling(window=13, min_periods=13).mean().values
+    teeth_6h = pd.Series(median_6h).rolling(window=8, min_periods=8).mean().values
+    lips_6h = pd.Series(median_6h).rolling(window=5, min_periods=5).mean().values
+    
+    # Calculate 1d Alligator
+    median_1d = (high_1d + low_1d) / 2.0
+    jaw_1d = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().values
+    teeth_1d = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().values
+    lips_1d = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().values
+    
+    # Align HTF indicators to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    
+    # Calculate 6h 8-period EMA for exit signal
+    ema_8_6h = pd.Series(close_6h).ewm(span=8, adjust=False, min_periods=8).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or 
-            np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1w_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or
+            np.isnan(jaw_1d_aligned[i]) or np.isnan(ema_8_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Regime conditions
-        # 1w volatility regime: ATR > 40th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 40
-        
-        # Volume confirmation: current 1w volume > 1.3x 20-period MA
-        volume_spike = volume_1w[i // 5] > 1.3 * volume_ma_20_1w_aligned[i] if i >= 5 else False
+        # Entry conditions (require strong trend)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price breaks above Donchian high + vol regime + volume spike
-            if (close_1d[i] > donchian_high[i] and vol_regime and volume_spike):
+            # Long entry: Strong trend + price above 6h teeth + close above 1d jaw
+            if (strong_trend and 
+                close_6h[i] > teeth_6h[i] and 
+                close_6h[i] > jaw_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below Donchian low + vol regime + volume spike
-            elif (close_1d[i] < donchian_low[i] and vol_regime and volume_spike):
+            # Short entry: Strong trend + price below 6h teeth + close below 1d jaw
+            elif (strong_trend and 
+                  close_6h[i] < teeth_6h[i] and 
+                  close_6h[i] < jaw_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price reverts to Donchian midpoint (mean reversion)
-            # 2. Price breaks opposite Donchian level (take profit)
+            # 1. Trend weakening (ADX < 20)
+            # 2. Price crosses 8-period EMA (mean reversion signal)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_1d[i] < donchian_mid[i] or  # Reverted to midpoint
-                    close_1d[i] > donchian_high[i]    # Break above high (take profit)
+                    adx_aligned[i] < 20 or  # Trend weakening
+                    close_6h[i] < ema_8_6h[i]  # Price below 8 EMA
                 )
                 if exit_condition:
                     position = 0
@@ -109,8 +135,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_1d[i] > donchian_mid[i] or  # Reverted to midpoint
-                    close_1d[i] < donchian_low[i]     # Break below low (take profit)
+                    adx_aligned[i] < 20 or  # Trend weakening
+                    close_6h[i] > ema_8_6h[i]  # Price above 8 EMA
                 )
                 if exit_condition:
                     position = 0
