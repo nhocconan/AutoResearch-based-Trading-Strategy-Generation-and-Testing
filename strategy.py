@@ -3,17 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w EMA200 trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level AND 1w EMA200 rising AND volume > 1.8x 20-bar avg
-# - Short when price breaks below Camarilla L3 level AND 1w EMA200 falling AND volume > 1.8x 20-bar avg
-# - Exit when price returns to Camarilla pivot point (mean reversion to equilibrium)
-# - Uses 1w EMA200 for trend filter to avoid counter-trend trades in bear markets
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
+# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.5x 20-period average AND chop < 61.8 (trending)
+# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.5x 20-period average AND chop < 61.8 (trending)
+# - Exit when price returns to Camarilla PIVOT point (mean reversion to equilibrium)
+# - Uses 1d volume confirmation to ensure institutional participation
+# - Uses chop regime filter to avoid whipsaws in ranging markets
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-80 trades/year on 1d timeframe (80-320 total over 4 years)
-# - Camarilla pivots identify key intraday support/resistance; trend filter improves win rate
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Camarilla pivots work well in both bull and bear markets by identifying key reversal levels
+# - Volume confirmation filters out false breakouts
+# - Chop regime filter ensures we only trade in trending conditions where breakouts are more reliable
 
-name = "1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,36 +25,66 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w EMA(200) for trend filter
-    close_1w_arr = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w_arr).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Pre-compute Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute volume confirmation: > 1.8x 20-period average
-    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
+    # Camarilla calculations
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    camarilla_h3 = pivot + (range_1d * 1.1 / 4)
+    camarilla_l3 = pivot - (range_1d * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * volume_20_avg)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # Pre-compute chop regime filter on 12h data (trending when chop < 61.8)
+    # Chop = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
+    high_14 = prices['high'].rolling(window=14, min_periods=14).max().values
+    low_14 = prices['low'].rolling(window=14, min_periods=14).min().values
+    
+    # True Range
+    tr1 = prices['high'] - prices['low']
+    tr2 = abs(prices['high'] - prices['close'].shift(1))
+    tr3 = abs(prices['low'] - prices['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    highest_high = high_14
+    lowest_low = low_14
+    
+    # Avoid division by zero
+    price_range = highest_high - lowest_low
+    chop_raw = np.zeros_like(price_range)
+    mask = (price_range > 0) & (atr_14 > 0) & (sum_atr_14 > 0)
+    chop_raw[mask] = 100 * np.log10(sum_atr_14[mask] / price_range[mask]) / np.log10(14)
+    chop = chop_raw
+    
+    # Chop regime: trending when chop < 61.8
+    chop_regime = chop < 61.8
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
-        # Need at least 2 days of data to compute Camarilla pivots (yesterday's OHLC)
-        if i < 1:
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC for Camarilla calculation
-        prev_high = prices['high'].iloc[i-1]
-        prev_low = prices['low'].iloc[i-1]
-        prev_close = prices['close'].iloc[i-1]
-        
         # Skip if any required data is invalid
-        if (np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(chop_regime[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -61,39 +94,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Calculate Camarilla pivot levels for today based on yesterday's OHLC
-        # Camarilla formulas:
-        # Pivot = (prev_high + prev_low + prev_close) / 3
-        # H3 = pivot + (prev_high - prev_low) * 1.1 / 4
-        # L3 = pivot - (prev_high - prev_low) * 1.1 / 4
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        range_hl = prev_high - prev_low
-        H3 = pivot + (range_hl * 1.1 / 4.0)
-        L3 = pivot - (range_hl * 1.1 / 4.0)
-        
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Camarilla H3 AND 1w uptrend with volume spike
-            if (prices['close'].iloc[i] > H3 and 
-                prices['close'].iloc[i] > ema200_1w_aligned[i] and  # price above 1w EMA200
-                vol_spike.iloc[i]):
+            # Long when price breaks above Camarilla H3 AND volume spike AND trending regime
+            if (prices['close'].iloc[i] > camarilla_h3_aligned[i] and 
+                vol_spike_1d_aligned[i] and 
+                chop_regime[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below Camarilla L3 AND 1w downtrend with volume spike
-            elif (prices['close'].iloc[i] < L3 and 
-                  prices['close'].iloc[i] < ema200_1w_aligned[i] and  # price below 1w EMA200
-                  vol_spike.iloc[i]):
+            # Short when price breaks below Camarilla L3 AND volume spike AND trending regime
+            elif (prices['close'].iloc[i] < camarilla_l3_aligned[i] and 
+                  vol_spike_1d_aligned[i] and 
+                  chop_regime[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to Camarilla pivot point
-            # Exit when price returns to Camarilla pivot point
+        else:  # Have position - look for exit to Camarilla PIVOT (mean reversion)
+            # Exit when price returns to Camarilla PIVOT point
             exit_signal = False
             if position == 1:  # Long position
-                if prices['close'].iloc[i] <= pivot:
+                if prices['close'].iloc[i] <= pivot_aligned[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if prices['close'].iloc[i] >= pivot:
+                if prices['close'].iloc[i] >= pivot_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
