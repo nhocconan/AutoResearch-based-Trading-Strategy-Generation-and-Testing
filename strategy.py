@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + VWAP + volume confirmation
-# - Elder Ray: Bull Power = Close - EMA13(High), Bear Power = EMA13(Low) - Close
-# - Long when Bull Power > 0 AND price > VWAP AND volume > 1.5x 20-period average
-# - Short when Bear Power > 0 AND price < VWAP AND volume > 1.5x 20-period average
-# - Exit when Elder Ray power reverses sign OR price crosses VWAP in opposite direction
-# - VWAP acts as dynamic support/resistance, Elder Ray measures trend strength
-# - Volume confirmation ensures breakouts have conviction
-# - Targets 12-25 trades/year (50-100 total over 4 years) to avoid fee drag
-# - Works in both bull and bear markets by measuring institutional buying/selling pressure
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
+# - Long when price breaks above Donchian(20) high with volume > 1.3x average AND daily close > daily EMA50
+# - Short when price breaks below Donchian(20) low with volume > 1.3x average AND daily close < daily EMA50
+# - Exit when price retreats to Donchian(10) midpoint or volume drops below average
+# - Daily trend filter ensures alignment with major trend across market cycles
+# - Volume confirmation prevents false breakouts
+# - Targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Donchian breakouts work in both trending and ranging markets when filtered by trend and volume
 
-name = "6h_elder_ray_vwap_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,61 +21,71 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Pre-compute 13-period EMA of high and low for Elder Ray
-    ema13_high = pd.Series(prices['high']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_low = pd.Series(prices['low']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Elder Ray components
-    bull_power = prices['close'].values - ema13_high  # Buy power
-    bear_power = ema13_low - prices['close'].values   # Sell power
+    # Pre-compute 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Pre-compute VWAP (typical price * volume) cumulative
-    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
-    vwap_numerator = (typical_price * prices['volume']).cumsum()
-    vwap_denominator = prices['volume'].cumsum()
-    vwap = (vwap_numerator / vwap_denominator).values
-    
-    # Volume confirmation: > 1.5x 20-period average
+    # Pre-compute volume confirmation: > 1.3x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.3 * volume_20_avg)
+    
+    # Pre-compute volume filter: < average volume for exit
+    vol_normal = prices['volume'] < volume_20_avg
+    
+    # Pre-compute Donchian channels (20-period)
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute Donchian channels (10-period) for exit
+    high_10 = prices['high'].rolling(window=10, min_periods=10).max().values
+    low_10 = prices['low'].rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (high_10 + low_10) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vwap[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(high_10[i]) or np.isnan(low_10[i]) or np.isnan(volume_20_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long entry: Bull Power positive AND price above VWAP AND volume spike
-            if (bull_power[i] > 0 and 
-                prices['close'].iloc[i] > vwap[i] and 
-                vol_spike.iloc[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long breakout: price > Donchian(20) high with volume spike AND daily uptrend
+            if (prices['high'].iloc[i] > high_20[i] and 
+                vol_spike.iloc[i] and 
+                prices['close'].iloc[i] > ema50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Bear Power positive AND price below VWAP AND volume spike
-            elif (bear_power[i] > 0 and 
-                  prices['close'].iloc[i] < vwap[i] and 
-                  vol_spike.iloc[i]):
+            # Short breakdown: price < Donchian(20) low with volume spike AND daily downtrend
+            elif (prices['low'].iloc[i] < low_20[i] and 
+                  vol_spike.iloc[i] and 
+                  prices['close'].iloc[i] < ema50_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
+            else:
+                signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Elder Ray power reverses (loss of momentum)
-            # 2. Price crosses VWAP in opposite direction (trend change)
+            # 1. Price retreats to Donchian(10) midpoint (loss of momentum)
+            # 2. Volume drops below average (loss of conviction)
             if position == 1:  # Long position
-                if (bull_power[i] <= 0 or 
-                    prices['close'].iloc[i] < vwap[i]):
+                if (prices['close'].iloc[i] < donchian_mid_10[i] or 
+                    vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25  # Hold long
             elif position == -1:  # Short position
-                if (bear_power[i] <= 0 or 
-                    prices['close'].iloc[i] > vwap[i]):
+                if (prices['close'].iloc[i] > donchian_mid_10[i] or 
+                    vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
