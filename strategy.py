@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume confirmation and trend filter
-# - Primary signal: Bollinger Band width at 20-period low + price breaks above/below bands
-# - Volume filter: 1d volume > 1.3x 30-period average volume (institutional participation)
-# - Trend filter: Price > 1d EMA50 for longs, Price < 1d EMA50 for shorts (avoid counter-trend)
+# Hypothesis: 12h Camarilla pivot long/short with 1d volume confirmation and chop regime filter
+# - Primary signal: Price touches Camarilla H3 (short) or L3 (long) levels from 1d
+# - Volume filter: 1d volume > 1.3x 20-period average volume (institutional participation)
+# - Regime filter: 1d Choppiness Index > 61.8 (range-bound market for mean reversion)
 # - Position size: 0.25 discrete level to minimize fee churn
-# - Stoploss: Opposite Bollinger Band (long exits at lower band, short exits at upper band)
-# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
-# - Works in bull/bear: Squeeze breakouts capture volatility expansion; filters avoid false signals
+# - Stoploss: 2.0x ATR(14) on 12h
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - Works in bull/bear: Mean reversion in range markets; filters avoid trending false signals
 
-name = "6h_1d_bb_squeeze_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,66 +28,102 @@ def generate_signals(prices):
     
     # Pre-compute 1d volume spike filter
     volume_1d = df_1d['volume'].values
-    avg_volume_30 = pd.Series(volume_1d).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume_1d > (1.3 * avg_volume_30)
+    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (1.3 * avg_volume_20)
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Pre-compute 1d EMA50 for trend filter
+    # Pre-compute 1d Choppiness Index (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Pre-compute 6h Bollinger Bands (20, 2.0)
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
+    # True Range
+    tr_1 = high_1d - low_1d
+    tr_2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr_3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr_1, np.maximum(tr_2, tr_3))
+    tr[0] = tr_1[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    sma_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_6h).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + (2.0 * std_20)
-    bb_lower = sma_20 - (2.0 * std_20)
-    bb_width = (bb_upper - bb_lower) / sma_20  # Normalized width
+    # Choppiness Index = 100 * log10(sum(ATR14) / (max(high)-min(low))) / log10(14)
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_14 = max_high_14 - min_low_14
+    chop = np.zeros_like(close_1d)
+    mask = range_14 > 0
+    chop[mask] = 100 * np.log10(sum_atr_14[mask] / range_14[mask]) / np.log10(14)
+    chop_filter = chop > 61.8  # Range-bound market
+    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter)
     
-    # Bollinger Band squeeze: width at 20-period low
-    bb_width_min = pd.Series(bb_width).rolling(window=20, min_periods=20).min().values
-    bb_squeeze = bb_width <= bb_width_min
+    # Pre-compute 1d Camarilla pivot levels (based on previous day)
+    # H3 = Close + 1.1*(High-Low)*1.1/4
+    # L3 = Close - 1.1*(High-Low)*1.1/4
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Pre-compute 12h ATR(14) for stoploss
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    
+    tr_12h1 = high_12h - low_12h
+    tr_12h2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr_12h3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
+    tr_12h[0] = tr_12h1[0]
+    atr_14_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
-            np.isnan(vol_spike_aligned[i]) or np.isnan(ema_50_aligned[i]) or
-            np.isnan(bb_squeeze[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(vol_spike_aligned[i]) or np.isnan(chop_filter_aligned[i]) or
+            np.isnan(atr_14_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below Bollinger middle band (mean reversion)
-            if close_6h[i] < sma_20[i]:
+            # Exit: Price reaches L3 (mean reversion target) OR stoploss hit
+            if close_12h[i] <= camarilla_l3_aligned[i] or close_12h[i] < entry_price - 2.0 * atr_14_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above Bollinger middle band (mean reversion)
-            if close_6h[i] > sma_20[i]:
+            # Exit: Price reaches H3 (mean reversion target) OR stoploss hit
+            if close_12h[i] >= camarilla_h3_aligned[i] or close_12h[i] > entry_price + 2.0 * atr_14_12h[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Bollinger Band squeeze breakouts with volume and trend filters
-            if bb_squeeze[i] and vol_spike_aligned[i]:
-                # Long: price breaks above upper band AND above 1d EMA50 (uptrend)
-                if close_6h[i] > bb_upper[i] and close_6h[i] > ema_50_aligned[i]:
+            # Look for Camarilla level touches with volume and chop filters
+            if vol_spike_aligned[i] and chop_filter_aligned[i]:
+                # Long: price touches or crosses above L3
+                if close_12h[i] >= camarilla_l3_aligned[i]:
                     position = 1
+                    entry_price = close_12h[i]
                     signals[i] = 0.25
-                # Short: price breaks below lower band AND below 1d EMA50 (downtrend)
-                elif close_6h[i] < bb_lower[i] and close_6h[i] < ema_50_aligned[i]:
+                # Short: price touches or crosses below H3
+                elif close_12h[i] <= camarilla_h3_aligned[i]:
                     position = -1
+                    entry_price = close_12h[i]
                     signals[i] = -0.25
     
     return signals
