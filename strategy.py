@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot reversal with 1w trend filter and volume confirmation
-# - Primary signal: Price reverses from Camarilla H3/L3 levels on 1d
-# - Trend filter: 1w EMA(21) slope confirms higher timeframe direction
-# - Volume filter: 1d volume > 1.5x 20-period average volume (institutional participation)
-# - Position size: 0.25 discrete level to minimize fee churn
-# - Stoploss: 2.0x ATR(14) on 1d
-# - Target: 30-100 total trades over 4 years (7-25/year) per 1d strategy guidelines
-# - Works in bull/bear: Camarilla levels adapt to volatility, trend filter avoids counter-trend
+# Hypothesis: 6h Elder Ray + 12h ADX regime filter
+# - Primary signal: 6h Elder Ray (Bull Power > 0 and Bear Power < 0) indicates strong momentum
+# - Regime filter: 12h ADX > 25 ensures we only trade in trending markets (avoids chop)
+# - Volume confirmation: 6h volume > 1.5x 20-period average to ensure institutional participation
+# - Position size: 0.25 discrete level to balance return and drawdown
+# - Stoploss: 2.5x ATR(20) on 6h for volatility-adjusted risk control
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 6h strategy guidelines
+# - Works in both bull and bear markets by requiring strong directional momentum (Elder Ray) 
+#   and trending conditions (ADX), avoiding false signals in ranging markets
 
-name = "1d_1w_camarilla_volume_trend_v1"
-timeframe = "1d"
+name = "6h_12h_elderray_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,46 +23,68 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_slope = np.diff(ema_21, prepend=ema_21[0])  # positive = uptrend
-    ema_21_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_21_slope)
+    # Pre-compute 12h ADX(14) for regime filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Pre-compute 1d volume spike filter
-    volume_1d = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.5 * avg_volume_20)
+    # True Range calculation
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h[0] = tr1[0]
     
-    # Pre-compute 1d ATR(14) for stoploss
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    tr_1d1 = high_1d - low_1d
-    tr_1d2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr_1d3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr_1d1, np.maximum(tr_1d2, tr_1d3))
-    tr_1d[0] = tr_1d1[0]
-    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Smoothed values
+    tr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute 1d Camarilla levels (based on previous day)
-    # H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2
-    # Using previous day's OHLC to avoid look-ahead
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first bar uses current high
-    prev_low[0] = low_1d[0]    # first bar uses current low
-    prev_close[0] = close_1d[0] # first bar uses current close
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    camarilla_range = prev_high - prev_low
-    h3 = prev_close + 1.1 * camarilla_range / 2
-    l3 = prev_close - 1.1 * camarilla_range / 2
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where(np.isnan(dx), 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_filter = adx > 25  # Trending market regime
+    adx_filter_aligned = align_htf_to_ltf(prices, df_12h, adx_filter)
+    
+    # Pre-compute 6h indicators
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
+    
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_6h - ema_13
+    bear_power = low_6h - ema_13
+    
+    # Volume confirmation: 6h volume > 1.5x 20-period average
+    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume_6h > (1.5 * avg_volume_20)
+    
+    # ATR for stoploss
+    tr_6h1 = high_6h - low_6h
+    tr_6h2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr_6h3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr_6h = np.maximum(tr_6h1, np.maximum(tr_6h2, tr_6h3))
+    tr_6h[0] = tr_6h1[0]
+    atr_20 = pd.Series(tr_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -69,40 +92,40 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_21_slope_aligned[i]) or
-            np.isnan(vol_spike[i]) or
-            np.isnan(atr_14[i]) or
-            np.isnan(h3[i]) or np.isnan(l3[i])):
+        if (np.isnan(adx_filter_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(atr_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price reaches L3 (mean reversion) OR stoploss hit
-            if close_1d[i] <= l3[i] or close_1d[i] < entry_price - 2.0 * atr_14[i]:
+            # Exit: Elder Ray weakening OR stoploss hit
+            if bull_power[i] <= 0 or close_6h[i] < entry_price - 2.5 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price reaches H3 (mean reversion) OR stoploss hit
-            if close_1d[i] >= h3[i] or close_1d[i] > entry_price + 2.0 * atr_14[i]:
+            # Exit: Elder Ray weakening OR stoploss hit
+            if bear_power[i] >= 0 or close_6h[i] > entry_price + 2.5 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla reversals with volume and trend filters
-            if vol_spike[i]:
-                # Long: price rejects L3 and closes above it with uptrend
-                if close_1d[i] <= l3[i] * 1.005 and ema_21_slope_aligned[i] > 0:
+            # Look for strong Elder Ray signals with volume and trend filters
+            if adx_filter_aligned[i] and volume_filter[i]:
+                # Long: strong bullish momentum (Bull Power > 0 and Bear Power < 0)
+                if bull_power[i] > 0 and bear_power[i] < 0:
                     position = 1
-                    entry_price = close_1d[i]
+                    entry_price = close_6h[i]
                     signals[i] = 0.25
-                # Short: price rejects H3 and closes below it with downtrend
-                elif close_1d[i] >= h3[i] * 0.995 and ema_21_slope_aligned[i] < 0:
+                # Short: strong bearish momentum (Bear Power < 0 and Bull Power > 0 is impossible, 
+                # so we use Bear Power < 0 and Bull Power < 0 for confirmation)
+                elif bear_power[i] < 0 and bull_power[i] < 0:
                     position = -1
-                    entry_price = close_1d[i]
+                    entry_price = close_6h[i]
                     signals[i] = -0.25
     
     return signals
