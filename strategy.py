@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) high in 1d uptrend (close > EMA50) with volume > 1.8x 20-bar avg
-# - Short when price breaks below Donchian(20) low in 1d downtrend (close < EMA50) with volume spike
+# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level in 1d uptrend (close > EMA50) with volume > 1.8x 20-bar avg
+# - Short when price breaks below Camarilla L3 level in 1d downtrend (close < EMA50) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets ~15-25 trades/year (60-100 total over 4 years) to avoid fee drag
+# - Targets ~30 trades/year (120 total over 4 years) to avoid fee drag
 # - 1d trend filter reduces false breakouts in ranging markets
 # - ATR-based stoploss to limit drawdown
-# - Avoids overtrading by requiring confluence of trend, breakout, and volume
-# - Designed for 12h timeframe to work in both bull and bear markets via trend filtering
+# - Camarilla levels from 1d provide stronger structure than Donchian for BTC/ETH
 
-name = "12h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v26"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,6 +27,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Pre-compute 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
@@ -40,7 +41,16 @@ def generate_signals(prices):
     vol_spike_1d = volume_1d > (1.8 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute ATR for stoploss (using 12h data)
+    # Camarilla pivot levels from 1d (using previous completed 1d bar)
+    # H3 = close + 1.1*(high-low)/4, L3 = close - 1.1*(high-low)/4
+    camarilla_H3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_L3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    
+    # Pre-compute ATR for stoploss (using 4h data)
     high_low = prices['high'] - prices['low']
     high_close = np.abs(prices['high'] - prices['close'].shift(1))
     low_close = np.abs(prices['low'] - prices['close'].shift(1))
@@ -56,6 +66,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
             np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
@@ -78,28 +89,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Calculate Donchian(20) levels on 12h data (using previous completed bar)
-            if i >= 20:
-                # Use lookback of 20 completed bars (excluding current)
-                lookback_start = i - 20
-                lookback_end = i  # exclusive
-                
-                highest_high = prices['high'].iloc[lookback_start:lookback_end].max()
-                lowest_low = prices['low'].iloc[lookback_start:lookback_end].min()
-                
-                # Long signal: price breaks above Donchian high in 1d uptrend with volume spike
-                if (prices['close'].iloc[i] > highest_high and 
-                    prices['close'].iloc[i] > ema_50_1d_aligned[i] and 
-                    vol_spike_1d_aligned[i]):
-                    position = 1
-                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                    signals[i] = 0.25
-                # Short signal: price breaks below Donchian low in 1d downtrend with volume spike
-                elif (prices['close'].iloc[i] < lowest_low and 
-                      prices['close'].iloc[i] < ema_50_1d_aligned[i] and 
-                      vol_spike_1d_aligned[i]):
-                    position = -1
-                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                    signals[i] = -0.25
+            # Long signal: price breaks above Camarilla H3 in 1d uptrend with volume spike
+            if (prices['close'].iloc[i] > camarilla_H3_aligned[i] and 
+                prices['close'].iloc[i] > ema_50_1d_aligned[i] and 
+                vol_spike_1d_aligned[i]):
+                position = 1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                signals[i] = 0.25
+            # Short signal: price breaks below Camarilla L3 in 1d downtrend with volume spike
+            elif (prices['close'].iloc[i] < camarilla_L3_aligned[i] and 
+                  prices['close'].iloc[i] < ema_50_1d_aligned[i] and 
+                  vol_spike_1d_aligned[i]):
+                position = -1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                signals[i] = -0.25
     
     return signals
