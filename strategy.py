@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
-# - Williams Alligator: Jaw (13-period SMMA, 8-bar shift), Teeth (8-period SMMA, 5-bar shift), Lips (5-period SMMA, 3-bar shift)
-# - Long when Lips cross above Teeth AND Teeth above Jaw (bullish alignment) AND price > Alligator's Mouth (highest of Jaw/Teeth/Lips) AND volume > 1.5x 20-bar avg
-# - Short when Lips cross below Teeth AND Teeth below Jaw (bearish alignment) AND price < Alligator's Mouth AND volume > 1.5x 20-bar avg
-# - Exit when Lips re-cross Teeth in opposite direction (trend weakening)
-# - Uses 1d EMA50 for trend filter to avoid counter-trend trades in strong trends
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above H3 level AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
+# - Short when price breaks below L3 level AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
+# - Exit when price returns to Pivot level (mean reversion to equilibrium)
+# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-35 trades/year on 4h timeframe (80-140 total over 4 years)
-# - Williams Alligator excels in trending markets; volume confirmation filters false breakouts
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear: trend filter captures directional moves, pivot exit provides mean reversion in ranges
 
-name = "4h_1d_williams_alligator_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,60 +26,43 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA(50) for trend filter
+    # Calculate Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Camarilla levels: based on previous day's range
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # H3, L3 levels (most important for breakouts)
+    h3 = close_1d + (range_1d * 1.1 / 4)
+    l3 = close_1d - (range_1d * 1.1 / 4)
+    # Pivot level for exit
+    piv = pivot
+    
+    # Align HTF levels to LTF
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    piv_aligned = align_htf_to_ltf(prices, df_1d, piv)
+    
+    # Pre-compute 1d EMA(50) for trend filter
+    close_1d_vals = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d_vals).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Williams Alligator calculation (requires sufficient data for SMMA)
-    # SMMA (Smoothed Moving Average) calculation
-    def smma(source, length):
-        if length < 1:
-            return np.full_like(source, np.nan, dtype=float)
-        result = np.full_like(source, np.nan, dtype=float)
-        if len(source) < length:
-            return result
-        # First value is simple SMA
-        result[length-1] = np.mean(source[:length])
-        # Subsequent values: SMMA = (PREV_SMMA * (LENGTH-1) + CURRENT_VALUE) / LENGTH
-        for i in range(length, len(source)):
-            result[i] = (result[i-1] * (length-1) + source[i]) / length
-        return result
-    
-    close = prices['close'].values
-    # Alligator components: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-    
-    # Apply shifts: Jaw shifted by 8 bars, Teeth by 5 bars, Lips by 3 bars
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Invalidate the shifted values that now contain rolled data from wrong positions
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-    
-    # Alligator's Mouth: highest/lowest of the three lines
-    # For long: we need price > highest of the three (mouth open upward)
-    # For short: we need price < lowest of the three (mouth open downward)
-    jaw_teeth_lips = np.column_stack([jaw_shifted, teeth_shifted, lips_shifted])
-    alligator_high = np.nanmax(jaw_teeth_lips, axis=1)
-    alligator_low = np.nanmin(jaw_teeth_lips, axis=1)
-    
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Pre-compute volume confirmation: > 2.0x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(piv_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -90,39 +72,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Bullish alignment: Lips > Teeth > Jaw AND price > Alligator's highest point (mouth open up)
-            bullish_align = (lips_shifted[i] > teeth_shifted[i] > jaw_shifted[i])
-            price_above_mouth = prices['close'].iloc[i] > alligator_high[i]
-            
-            # Bearish alignment: Lips < Teeth < Jaw AND price < Alligator's lowest point (mouth open down)
-            bearish_align = (lips_shifted[i] < teeth_shifted[i] < jaw_shifted[i])
-            price_below_mouth = prices['close'].iloc[i] < alligator_low[i]
-            
-            if bullish_align and price_above_mouth and vol_spike.iloc[i]:
-                # Additional 1d trend filter: price above 1d EMA50 for long
-                if prices['close'].iloc[i] > ema50_1d_aligned[i]:
-                    position = 1
-                    signals[i] = 0.25
-                else:
-                    signals[i] = 0.0
-            elif bearish_align and price_below_mouth and vol_spike.iloc[i]:
-                # Additional 1d trend filter: price below 1d EMA50 for short
-                if prices['close'].iloc[i] < ema50_1d_aligned[i]:
-                    position = -1
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above H3 AND 1d uptrend with volume spike
+            if (prices['close'].iloc[i] > h3_aligned[i] and 
+                prices['close'].iloc[i] > ema50_1d_aligned[i] and  # price above 1d EMA50
+                vol_spike.iloc[i]):
+                position = 1
+                signals[i] = 0.25
+            # Short when price breaks below L3 AND 1d downtrend with volume spike
+            elif (prices['close'].iloc[i] < l3_aligned[i] and 
+                  prices['close'].iloc[i] < ema50_1d_aligned[i] and  # price below 1d EMA50
+                  vol_spike.iloc[i]):
+                position = -1
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit when Lips re-cross Teeth
-            # Exit when Lips cross Teeth in opposite direction (trend weakening)
+        else:  # Have position - look for exit to pivot (mean reversion)
+            # Exit when price returns to pivot level
             exit_signal = False
-            if position == 1:  # Long position - exit if Lips cross below Teeth
-                if lips_shifted[i] < teeth_shifted[i]:
+            if position == 1:  # Long position
+                if prices['close'].iloc[i] <= piv_aligned[i]:
                     exit_signal = True
-            elif position == -1:  # Short position - exit if Lips cross above Teeth
-                if lips_shifted[i] > teeth_shifted[i]:
+            elif position == -1:  # Short position
+                if prices['close'].iloc[i] >= piv_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
