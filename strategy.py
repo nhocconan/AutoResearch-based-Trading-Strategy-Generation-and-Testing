@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d volume spike and 1w ADX trend filter
-# - Long when Williams %R(14) crosses above -80 (oversold bounce) + volume > 2.0x 20-period 1d volume SMA + ADX(14) > 25 (trending market)
-# - Short when Williams %R(14) crosses below -20 (overbought rejection) + volume > 2.0x 20-period 1d volume SMA + ADX(14) > 25 (trending market)
-# - Exit: Williams %R crosses -50 (mean reversion to midpoint)
+# Hypothesis: 4h Donchian breakout with 1d volume spike and 1w ADX trend filter
+# - Long when price breaks above Donchian(20) high + volume > 1.5x 20-period 1d volume SMA + ADX(14) > 20
+# - Short when price breaks below Donchian(20) low + volume > 1.5x 20-period 1d volume SMA + ADX(14) > 20
+# - Exit: price crosses Donchian(10) midpoint (mean reversion)
 # - Position sizing: 0.25 discrete level
-# - Targets ~20-30 trades/year on 4h timeframe. Williams %R captures momentum reversals,
-#   volume confirmation validates conviction, ADX filter ensures we trade with trend strength.
-#   Works in bull/bear: oversold bounces in bear markets, overbought rejections in bull markets,
-#   ADX filter avoids choppy markets where Williams %R gives false signals.
+# - Targets ~20-30 trades/year on 4h timeframe. Donchian captures breakouts,
+#   volume confirmation validates conviction, ADX filter ensures we trade with sufficient trend strength.
+#   Works in bull/bear: breakouts in both directions, ADX filter avoids choppy markets.
 
-name = "4h_1d_1w_williamsr_volume_adx_v1"
+name = "4h_1d_1w_donchian_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,11 +36,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Williams %R(14) from 4h data
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate Donchian channels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate Donchian channels (10-period) for exit
+    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (highest_high_10 + lowest_low_10) / 2.0
     
     # Calculate 1d volume SMA for confirmation (20-period)
     volume_1d = df_1d['volume'].values
@@ -89,32 +91,32 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_14[i]) or np.isnan(lowest_low_14[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or 
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(donchian_mid_10[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or 
             np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume for confirmation (aligned to 4h)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        vol_confirm = vol_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: ADX > 25 indicates trending market
-        trend_filter = adx_aligned[i] > 25
+        # Trend filter: ADX > 20 indicates sufficient trend strength
+        trend_filter = adx_aligned[i] > 20
         
-        # Williams %R entry conditions
-        # Long: Williams %R crosses above -80 (oversold bounce) + volume confirmation + trending market
-        # Short: Williams %R crosses below -20 (overbought rejection) + volume confirmation + trending market
-        long_entry = (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+        # Donchian breakout entry conditions
+        # Long: price breaks above Donchian(20) high + volume confirmation + trend filter
+        # Short: price breaks below Donchian(20) low + volume confirmation + trend filter
+        long_entry = (close[i] > highest_high_20[i] and 
                      vol_confirm and 
                      trend_filter)
-        short_entry = (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+        short_entry = (close[i] < lowest_low_20[i] and 
                       vol_confirm and 
                       trend_filter)
         
-        # Exit conditions: Williams %R crosses -50 (mean reversion)
-        exit_long = williams_r[i] < -50 and williams_r[i-1] >= -50
-        exit_short = williams_r[i] > -50 and williams_r[i-1] <= -50
+        # Exit conditions: price crosses Donchian(10) midpoint (mean reversion)
+        exit_long = close[i] < donchian_mid_10[i]
+        exit_short = close[i] > donchian_mid_10[i]
         
         if position == 0:  # Flat - look for entry
             if long_entry:
