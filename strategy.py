@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d ATR volatility filter and chop regime filter
+# Hypothesis: 4h Donchian breakout with 1d ATR volatility filter and chop regime filter
 # - Long: price breaks above Donchian upper (20-period) + 1d ATR(14) > 1.5x 20-period MA + chop > 61.8 (range)
 # - Short: price breaks below Donchian lower (20-period) + 1d ATR(14) > 1.5x 20-period MA + chop > 61.8 (range)
 # - Exit: close-based reversal - exit long when price < Donchian lower, exit short when price > Donchian upper
