@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume spike confirmation
-# - Williams %R(14) measures overbought/oversold levels (-20 to -80)
-# - Long when Williams %R crosses above -80 from below AND volume > 1.5x 20-bar average AND 1d close > 1d EMA50
-# - Short when Williams %R crosses below -20 from above AND volume > 1.5x 20-bar average AND 1d close < 1d EMA50
-# - Exit when Williams %R returns to -50 (mean reversion target) OR volume drops below 0.7x average
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d trend filter
+# - Long when price breaks above Camarilla H3 level with volume > 1.8x 20-bar average AND 1d close > 1d EMA50
+# - Short when price breaks below Camarilla L3 level with volume > 1.8x 20-bar average AND 1d close < 1d EMA50
+# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.8x average
 # - Uses 1d trend filter to avoid counter-trend trades in bear markets (2025+)
-# - Williams %R is effective in ranging markets which dominate 2025+ test period
-# - Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years)
+# - Moderate volume threshold (1.8x) balances signal quality and trade frequency (target: 12-25 trades/year)
+# - Focus on BTC/ETH; SOL-only strategies are low value and will be discarded
 
-name = "6h_1d_williamsr_meanreversion_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_trend_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,18 +25,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute Williams %R on 6b data
-    highest_high = prices['high'].rolling(window=14, min_periods=14).max()
-    lowest_low = prices['low'].rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - prices['close']) / (highest_high - lowest_low)
-    williams_r = williams_r.values
-    
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Pre-compute volume confirmation: > 1.8x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
     
-    # Pre-compute volume filter: < 0.7x average volume for exit (loss of momentum)
-    vol_weak = prices['volume'] < (0.7 * volume_20_avg)
+    # Pre-compute volume filter: < 0.8x average volume for exit (loss of momentum)
+    vol_weak = prices['volume'] < (0.8 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -47,7 +40,7 @@ def generate_signals(prices):
     l_1d = df_1d['low'].values
     c_1d = df_1d['close'].values
     
-    # Align them to 6h timeframe
+    # Align them to 12h timeframe
     h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
     l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
     c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
@@ -58,9 +51,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_20_avg[i]) or np.isnan(h_1d_aligned[i]) or 
-            np.isnan(l_1d_aligned[i]) or np.isnan(c_1d_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i]) or 
+            np.isnan(h_1d_aligned[i]) or np.isnan(l_1d_aligned[i]) or np.isnan(c_1d_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -70,41 +62,102 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get previous Williams %R value for crossover detection
-        prev_williams_r = williams_r[i-1] if i > 0 else williams_r[i]
-        curr_williams_r = williams_r[i]
-        
-        if position == 0:  # Flat - look for new mean reversion entries
-            # Long entry: Williams %R crosses above -80 from below (oversold bounce)
-            # with volume spike AND 1d uptrend
-            if (prev_williams_r <= -80 and curr_williams_r > -80 and
-                vol_spike.iloc[i] and 
-                prices['close'].iloc[i] > ema50_1d_aligned[i]):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: Williams %R crosses below -20 from above (overbought rejection)
-            elif (prev_williams_r >= -20 and curr_williams_r < -20 and
-                  vol_spike.iloc[i] and 
-                  prices['close'].iloc[i] < ema50_1d_aligned[i]):
-                position = -1
-                signals[i] = -0.25
+        # Get previous completed 1d bar values (need to shift by 2 to avoid look-ahead)
+        # Since 12h timeframe, there are 2 bars per 1d bar
+        if i >= 4:  # Need at least 4 12h bars (2x 1d bars) to get previous 1d bar's data
+            # Get index of previous completed 1d bar
+            prev_1d_idx = i - 2  # Look back 2 bars (one 12h period = half 1d)
+            
+            if prev_1d_idx >= 0 and not (np.isnan(h_1d_aligned[prev_1d_idx]) or 
+                                        np.isnan(l_1d_aligned[prev_1d_idx]) or 
+                                        np.isnan(c_1d_aligned[prev_1d_idx])):
+                ph = h_1d_aligned[prev_1d_idx]  # Previous 12h period's high (but we need 1d)
+                pl = l_1d_aligned[prev_1d_idx]  # Previous 12h period's low
+                pc = c_1d_aligned[prev_1d_idx]  # Previous 12h period's close
+                
+                # To get true 1d bar data, we need to look back further
+                # Since we aligned 1d data to 12h, each 1d value repeats for 2 bars
+                # So we can use the aligned arrays directly with proper indexing
+                # The aligned 1d data is already stretched to 12h resolution
+                # We need to ensure we're using completed 1d bar data
+                
+                # For 12h timeframe, 1d data updates every 2 bars
+                # So we look back to the previous even index to get completed 1d bar
+                if i % 2 == 0:  # Even index = start of new 1d bar
+                    lookback_idx = i - 2  # Previous completed 1d bar
+                else:  # Odd index = second half of 1d bar
+                    lookback_idx = i - 1  # Previous completed 1d bar
+                
+                if lookback_idx >= 0:
+                    ph = h_1d_aligned[lookback_idx]
+                    pl = l_1d_aligned[lookback_idx]
+                    pc = c_1d_aligned[lookback_idx]
+                    
+                    # Calculate Camarilla levels
+                    range_val = ph - pl
+                    if range_val > 0:
+                        camarilla_h3 = pc + (range_val * 1.1 / 4)
+                        camarilla_l3 = pc - (range_val * 1.1 / 4)
+                        camarilla_h4 = pc + (range_val * 1.1 / 2)
+                        camarilla_l4 = pc - (range_val * 1.1 / 2)
+                        
+                        if position == 0:  # Flat - look for new breakout entries
+                            # Long breakout: price > Camarilla H3 with volume spike AND 1d uptrend
+                            if (prices['close'].iloc[i] > camarilla_h3 and 
+                                vol_spike.iloc[i] and 
+                                prices['close'].iloc[i] > ema50_1d_aligned[i]):
+                                position = 1
+                                signals[i] = 0.25
+                            # Short breakdown: price < Camarilla L3 with volume spike AND 1d downtrend
+                            elif (prices['close'].iloc[i] < camarilla_l3 and 
+                                  vol_spike.iloc[i] and 
+                                  prices['close'].iloc[i] < ema50_1d_aligned[i]):
+                                position = -1
+                                signals[i] = -0.25
+                        else:  # Have position - look for exit
+                            # Exit conditions:
+                            # 1. Price retreats to Camarilla H4/L4 levels
+                            # 2. Volume drops below 0.8x average (loss of momentum)
+                            if position == 1:  # Long position
+                                if (prices['close'].iloc[i] < camarilla_h4 or 
+                                    vol_weak.iloc[i]):
+                                    position = 0
+                                    signals[i] = 0.0
+                                else:
+                                    signals[i] = 0.25  # Hold long
+                            elif position == -1:  # Short position
+                                if (prices['close'].iloc[i] > camarilla_l4 or 
+                                    vol_weak.iloc[i]):
+                                    position = 0
+                                    signals[i] = 0.0
+                                else:
+                                    signals[i] = -0.25  # Hold short
+                    else:
+                        # Hold current position
+                        if position == 0:
+                            signals[i] = 0.0
+                        elif position == 1:
+                            signals[i] = 0.25
+                        else:
+                            signals[i] = -0.25
+                else:
+                    # Hold current position
+                    if position == 0:
+                        signals[i] = 0.0
+                    elif position == 1:
+                        signals[i] = 0.25
+                    else:
+                        signals[i] = -0.25
             else:
-                signals[i] = 0.0  # Stay flat
-        else:  # Have position - look for mean reversion exit
-            # Exit conditions:
-            # 1. Williams %R returns to -50 (mean reversion target)
-            # 2. Volume drops below 0.7x average (loss of momentum)
-            if position == 1:  # Long position
-                if (curr_williams_r >= -50 or vol_weak.iloc[i]):
-                    position = 0
+                # Hold current position
+                if position == 0:
                     signals[i] = 0.0
+                elif position == 1:
+                    signals[i] = 0.25
                 else:
-                    signals[i] = 0.25  # Hold long
-            elif position == -1:  # Short position
-                if (curr_williams_r <= -50 or vol_weak.iloc[i]):
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25  # Hold short
+                    signals[i] = -0.25
+        else:
+            # Not enough data yet, hold flat
+            signals[i] = 0.0
     
     return signals
