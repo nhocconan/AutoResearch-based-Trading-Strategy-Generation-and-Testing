@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend direction with 1d volume spike and chop regime filter
-# - Entry: Long when KAMA direction is up + 1d volume > 2.0x 20-period average + CHOP < 50 (trending)
-#          Short when KAMA direction is down + 1d volume > 2.0x 20-period average + CHOP < 50 (trending)
-# - Exit: ATR(21) trailing stop (2.0x) on 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ATR(21) trailing stop
+# - Entry Long: Close > Donchian High(20) + 1d volume > 2.0x 20-period average
+# - Entry Short: Close < Donchian Low(20) + 1d volume > 2.0x 20-period average
+# - Exit: ATR(21) trailing stop (2.5x) on 4h timeframe
 # - Position sizing: 0.25 (discrete levels to minimize fee churn)
-# - Uses 1d for volume and chop confirmation to avoid lower timeframe noise
-# - KAMA adapts to market noise, volume confirms participation, chop filter ensures trending markets
-# - Target: 12-30 trades/year (48-120 total over 4 years) to stay within HARD MAX: 200 total
+# - Uses 1d volume for confirmation to avoid lower timeframe noise
+# - Donchian channels provide clear structure, volume confirms breakout strength,
+#   ATR trailing stop manages risk in volatile markets
+# - Target: 15-40 trades/year (60-160 total over 4 years) to stay within HARD MAX: 400 total
 
-name = "12h_1d_kama_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_trailing_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,78 +27,39 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    # Pre-compute 4h OHLC
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Pre-compute 1d OHLC for KAMA calculation
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d volume for confirmation
     volume_1d = df_1d['volume'].values
     
-    # Calculate Kaufman Adaptive Moving Average (KAMA)
-    def kama(data, period=10, fast=2, slow=30):
-        if len(data) < period:
-            return np.full_like(data, np.nan)
-        result = np.full_like(data, np.nan)
-        change = np.abs(np.diff(data, period))
-        volatility = np.sum(np.abs(np.diff(data)), axis=0) if len(data) > 1 else 0
-        # Handle first period
-        er = np.zeros_like(data)
-        er[period:] = change[period-1:] / (volatility[period-1:] + 1e-10)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # Initialize first value
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] + sc[i] * (data[i] - result[i-1])
-        return result
+    # Calculate Donchian channels on 4h
+    # Donchian High(20): highest high over past 20 periods
+    # Donchian Low(20): lowest low over past 20 periods
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate KAMA on 1d close
-    kama_1d = kama(close_1d, period=10, fast=2, slow=30)
-    # Determine KAMA direction (1=up, -1=down, 0=flat)
-    kama_dir_1d = np.where(kama_1d > np.roll(kama_1d, 1), 1, 
-                          np.where(kama_1d < np.roll(kama_1d, 1), -1, 0))
-    # Handle first value
-    kama_dir_1d[0] = 0
-    
-    # Align KAMA direction to 12h timeframe
-    kama_dir_aligned = align_htf_to_ltf(prices, df_1d, kama_dir_1d.astype(float))
-    
-    # Pre-compute 1d volume and its 20-period moving average for confirmation
+    # Calculate 1d volume spike confirmation
+    # 20-period average volume
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    volume_spike_threshold = volume_ma_20_1d * 2.0  # Volume > 2x average
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_threshold)
     
-    # Pre-compute 1d choppiness index (CHOP) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # Align Donchian channels to 4h timeframe (already on 4h, but using helper for consistency)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    # Pre-compute 4h ATR(21) for trailing stop
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum.reduce([tr1, tr2, tr3])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_denominator = max_high_14 - min_low_14
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)  # avoid div by zero
-    chop_raw = 100 * np.log10(sum_atr_14 / chop_denominator) / np.log10(14)
-    chop_1d = np.where(np.isnan(chop_raw), 50.0, chop_raw)  # fill NaN with neutral value
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Pre-compute 12h ATR(21) for trailing stop
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1_12h[0] = np.nan
-    tr2_12h[0] = np.nan
-    tr3_12h[0] = np.nan
-    tr_12h = np.maximum.reduce([tr1_12h, tr2_12h, tr3_12h])
-    atr_12h = pd.Series(tr_12h).rolling(window=21, min_periods=21).mean().values
+    atr_4h = pd.Series(tr).rolling(window=21, min_periods=21).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -106,8 +68,8 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(kama_dir_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(atr_12h[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(atr_4h[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -116,24 +78,23 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 12h close
-        close_price = close_12h[i]
+        # Get current 4h close
+        close_price = close_4h[i]
         
-        # Get current 1d volume for confirmation (need to align raw volume)
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirmation = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
-        
-        # Chop filter: only trade in trending markets (CHOP < 50)
-        chop_filter = chop_aligned[i] < 50.0
+        # Volume spike confirmation: current 1d volume > 2x 20-period average
+        # Need to get current 1d volume aligned to 4h
+        volume_1d_current = df_1d['volume'].values
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
+        volume_confirmation = volume_1d_aligned[i] > volume_spike_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: KAMA up + volume confirmation + chop filter
-            if kama_dir_aligned[i] == 1 and volume_confirmation and chop_filter:
+            # Long entry: close > Donchian High + volume confirmation
+            if close_price > donchian_high_aligned[i] and volume_confirmation:
                 position = 1
                 highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short entry: KAMA down + volume confirmation + chop filter
-            elif kama_dir_aligned[i] == -1 and volume_confirmation and chop_filter:
+            # Short entry: close < Donchian Low + volume confirmation
+            elif close_price < donchian_low_aligned[i] and volume_confirmation:
                 position = -1
                 lowest_since_entry = prices['low'].iloc[i]
                 signals[i] = -0.25
@@ -143,13 +104,13 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # ATR trailing stop: exit when price drops 2.0*ATR from highest point
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.0 * atr_12h[i]
+                # ATR trailing stop: exit when price drops 2.5*ATR from highest point
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr_4h[i]
                 exit_condition = trailing_stop
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # ATR trailing stop: exit when price rises 2.0*ATR from lowest point
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr_12h[i]
+                # ATR trailing stop: exit when price rises 2.5*ATR from lowest point
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr_4h[i]
                 exit_condition = trailing_stop
             
             if exit_condition:
