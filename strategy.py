@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d trend filter
-# - Long when price breaks above Donchian upper band (20-period high) with volume > 1.5x 20-bar average AND 1d close > 1d EMA50
-# - Short when price breaks below Donchian lower band (20-period low) with volume > 1.5x 20-bar average AND 1d close < 1d EMA50
-# - Exit when price retreats to the opposite Donchian band (middle band) OR volume drops below 0.7x average
-# - Uses 1d trend filter to avoid counter-trend trades in bear markets (2025+)
-# - Volume thresholds adjusted to reduce trade frequency (target: 20-40 trades/year)
-# - Focus on BTC/ETH; proven pattern from DB top performers
+# Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation
+# - Long when price breaks above 20-bar Donchian HIGH with volume > 2.0x 20-bar avg AND 1d close > 1d EMA50
+# - Short when price breaks below 20-bar Donchian LOW with volume > 2.0x 20-bar avg AND 1d close < 1d EMA50
+# - Exit when price retreats to midpoint of Donchian channel OR volume drops below 0.6x average
+# - Uses 1d EMA50 trend filter to avoid counter-trend trades in bear markets (2025+)
+# - High volume threshold (2.0x) and strict exit (0.6x) target 15-25 trades/year
+# - Focus on BTC/ETH; SOL-only strategies are low value and will be discarded
 
-name = "4h_1d_donchian_breakout_volume_trend_v3"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +25,34 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Pre-compute volume confirmation: > 2.0x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
     
-    # Pre-compute volume filter: < 0.7x average volume for exit (loss of momentum)
-    vol_weak = prices['volume'] < (0.7 * volume_20_avg)
+    # Pre-compute volume filter: < 0.6x average volume for exit (loss of momentum)
+    vol_weak = prices['volume'] < (0.6 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute aligned 1d data properly
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Pre-compute 12h Donchian channel (20-period)
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2.0
     
-    # Align them to 4h timeframe
-    h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
-    l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
+    # Pre-compute aligned 1d data
+    c_1d = df_1d['close'].values
     c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
     
     # Pre-compute 1d EMA(50) for trend filter
     ema50_1d = pd.Series(c_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Pre-compute Donchian channels (20-period)
-    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
-    mid_20 = (high_20 + low_20) / 2.0
-    
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(mid_20[i]) or np.isnan(volume_20_avg[i]) or 
-            np.isnan(h_1d_aligned[i]) or np.isnan(l_1d_aligned[i]) or np.isnan(c_1d_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i]) or 
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(c_1d_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -69,14 +63,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long breakout: price > Donchian upper band with volume spike AND 1d uptrend
-            if (prices['high'].iloc[i] > high_20[i] and 
+            # Long breakout: price > Donchian HIGH with volume spike AND 1d uptrend
+            if (prices['close'].iloc[i] > high_20[i] and 
                 vol_spike.iloc[i] and 
                 prices['close'].iloc[i] > ema50_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short breakdown: price < Donchian lower band with volume spike AND 1d downtrend
-            elif (prices['low'].iloc[i] < low_20[i] and 
+            # Short breakdown: price < Donchian LOW with volume spike AND 1d downtrend
+            elif (prices['close'].iloc[i] < low_20[i] and 
                   vol_spike.iloc[i] and 
                   prices['close'].iloc[i] < ema50_1d_aligned[i]):
                 position = -1
@@ -85,17 +79,17 @@ def generate_signals(prices):
                 signals[i] = 0.0  # Stay flat
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price retreats to the opposite Donchian band (middle band)
-            # 2. Volume drops below 0.7x average (loss of momentum)
+            # 1. Price retreats to Donchian midpoint
+            # 2. Volume drops below 0.6x average (loss of momentum)
             if position == 1:  # Long position
-                if (prices['close'].iloc[i] < mid_20[i] or 
+                if (prices['close'].iloc[i] < donchian_mid[i] or 
                     vol_weak.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25  # Hold long
             elif position == -1:  # Short position
-                if (prices['close'].iloc[i] > mid_20[i] or 
+                if (prices['close'].iloc[i] > donchian_mid[i] or 
                     vol_weak.iloc[i]):
                     position = 0
                     signals[i] = 0.0
