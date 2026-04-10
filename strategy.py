@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Elder-Ray Bull/Bear Power with 1d volume spike and chop regime filter
-# - Long when Bull Power > 0 + Bear Power < 0 + 1d volume > 2.0x 20-period volume SMA + Chop(14) > 61.8 (range regime)
-# - Short when Bull Power < 0 + Bear Power > 0 + 1d volume > 2.0x 20-period volume SMA + Chop(14) > 61.8
-# - Exit: Bull Power and Bear Power converge (both near zero) indicating weakening momentum
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and chop regime filter
+# - Long when Williams %R < -80 (oversold) + 1d volume > 1.5x 20-period volume SMA + Chop(14) > 61.8 (range regime)
+# - Short when Williams %R > -20 (overbought) + 1d volume > 1.5x 20-period volume SMA + Chop(14) > 61.8
+# - Exit: Williams %R crosses back above -50 (for long) or below -50 (for short)
 # - Position sizing: 0.25 discrete level
-# - Elder-Ray measures bull/bear strength relative to EMA(13); works in ranging markets where mean reversion occurs
-# - Volume confirms institutional participation, chop filter avoids strong trends
+# - Williams %R identifies overextended moves in ranging markets where mean reversion occurs
+# - Volume confirms participation, chop filter avoids strong trends
 # - 4h timeframe targets 19-50 trades/year with strict entry conditions to minimize fee drag
 
-name = "4h_1d_elderray_volume_chop_v1"
+name = "4h_1d_williamsr_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -53,13 +53,13 @@ def generate_signals(prices):
                     100 * np.log10(sum_tr / hl_range) / np.log10(14), 
                     50)  # default to neutral when invalid
     
-    # Calculate 4h EMA(13) for Elder-Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder-Ray Bull Power and Bear Power
-    bull_power = high - ema13  # Bull Power = High - EMA
-    bear_power = low - ema13   # Bear Power = Low - EMA
+    # Calculate 4h Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                          ((highest_high - close) / (highest_high - lowest_low)) * -100, 
+                          -50)  # default to neutral when range is zero
     
     # Calculate 1d OHLC for volume confirmation
     volume_1d = df_1d['volume'].values
@@ -70,34 +70,33 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(chop[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume for volume spike confirmation
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (volume spike)
-        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period SMA (volume spike)
+        vol_confirm = vol_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
         # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion)
         ranging_market = chop[i] > 61.8
         
-        # Elder-Ray signals
-        bull_strong = bull_power[i] > 0      # Bull Power positive = bulls in control
-        bear_strong = bear_power[i] < 0      # Bear Power negative = bears in control
-        bull_weak = bull_power[i] < 0        # Bull Power negative = bulls weak
-        bear_weak = bear_power[i] > 0        # Bear Power positive = bears weak
-        momentum_converging = (abs(bull_power[i]) < 0.1 * close[i]) and (abs(bear_power[i]) < 0.1 * close[i])  # Both near zero
+        # Williams %R signals
+        oversold = williams_r[i] < -80      # Oversold condition
+        overbought = williams_r[i] > -20    # Overbought condition
+        exit_long = williams_r[i] > -50     # Exit long when crosses above -50
+        exit_short = williams_r[i] < -50    # Exit short when crosses below -50
         
-        # Entry conditions: Elder-Ray divergence with volume and regime confirmation
-        long_entry = bull_strong and bear_strong and vol_confirm and ranging_market
-        short_entry = bull_weak and bear_weak and vol_confirm and ranging_market
+        # Entry conditions: Williams %R extreme with volume and regime confirmation
+        long_entry = oversold and vol_confirm and ranging_market
+        short_entry = overbought and vol_confirm and ranging_market
         
-        # Exit conditions: momentum converging (both powers near zero)
-        long_exit = momentum_converging
-        short_exit = momentum_converging
+        # Exit conditions: Williams %R crosses back through -50
+        long_exit = exit_long
+        short_exit = exit_short
         
         if position == 0:  # Flat - look for entry
             if long_entry:
