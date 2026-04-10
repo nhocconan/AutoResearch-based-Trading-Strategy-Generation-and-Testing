@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + ATR(14) trend filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR(14) regime filter
 # - Primary: 4h price breaks above/below 20-period Donchian channel for trend capture
-# - HTF: 1d volume > 1.5x 20-period MA for conviction (avoids low-volume breakouts)
-# - Trend filter: 4h ATR(14) > 20-period SMA of ATR(14) to ensure volatile/trending market
-# - Long: Close > Upper Donchian(20) + volume confirmation + ATR trending
-# - Short: Close < Lower Donchian(20) + volume confirmation + ATR trending
+# - HTF: 1d volume > 1.3x 20-period MA for confirmation (avoids low-volume breakouts)
+# - Regime filter: 4h ATR(14) > 1.5x ATR(50) to ensure trending market (avoids chop)
+# - Long: Close > Upper Donchian(20) + volume confirmation + ATR trending regime
+# - Short: Close < Lower Donchian(20) + volume confirmation + ATR trending regime
 # - Exit: Close crosses back inside Donchian channel OR ATR regime shifts to ranging
-# - Position sizing: 0.30 (discrete level, balances return/drawdown)
+# - Position sizing: 0.25 (discrete level, balances return/drawdown, reduces fee churn)
 # - Works in bull/bear: Donchian adapts to volatility, volume filters false breakouts, ATR regime avoids chop
-# - Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe
+# - Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
 
-name = "4h_1d_donchian_volume_atr_v1"
+name = "4h_1d_donchian_volume_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 60:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -45,8 +45,9 @@ def generate_signals(prices):
             upper_donchian[i] = np.max(high_4h[i-19:i+1])
             lower_donchian[i] = np.min(low_4h[i-19:i+1])
     
-    # Calculate 4h ATR(14)
+    # Calculate 4h ATR(14) and ATR(50) for regime filter
     atr_14 = np.full(len(close_4h), np.nan)
+    atr_50 = np.full(len(close_4h), np.nan)
     tr = np.full(len(close_4h), np.nan)
     
     # True Range
@@ -66,11 +67,13 @@ def generate_signals(prices):
             else:
                 atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Calculate 4h SMA of ATR(14) (20-period) for trend filter
-    atr_sma_20 = np.full(len(atr_14), np.nan)
-    for i in range(19, len(atr_14)):
-        if not np.isnan(atr_14[i-19:i+1]).any():
-            atr_sma_20[i] = np.mean(atr_14[i-19:i+1])
+    # ATR(50) using Wilder's smoothing
+    for i in range(50, len(tr)):
+        if not np.isnan(tr[i-49:i+1]).any():
+            if i == 50:
+                atr_50[i] = np.mean(tr[1:51])  # First ATR is simple average
+            else:
+                atr_50[i] = (atr_50[i-1] * 49 + tr[i]) / 50
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = np.full(len(volume_1d), np.nan)
@@ -82,36 +85,36 @@ def generate_signals(prices):
     upper_donchian_aligned = align_htf_to_ltf(prices, prices, upper_donchian)
     lower_donchian_aligned = align_htf_to_ltf(prices, prices, lower_donchian)
     atr_14_aligned = align_htf_to_ltf(prices, prices, atr_14)
-    atr_sma_20_aligned = align_htf_to_ltf(prices, prices, atr_sma_20)
+    atr_50_aligned = align_htf_to_ltf(prices, prices, atr_50)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup period for Donchian
+    for i in range(50, n):  # Start after warmup period for ATR(50)
         # Skip if any required data is invalid
         if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_sma_20_aligned[i]) or 
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
             np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        # Volume confirmation: current 1d volume > 1.3x 20-period MA
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
         
-        # ATR trend filter: ATR(14) > SMA of ATR(14) indicates trending market
-        atr_trending = atr_14_aligned[i] > atr_sma_20_aligned[i]
+        # ATR regime filter: ATR(14) > 1.5x ATR(50) indicates trending market
+        atr_trending = atr_14_aligned[i] > 1.5 * atr_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long entry: Close > Upper Donchian + volume confirmation + ATR trending
             if close_4h[i] > upper_donchian_aligned[i] and volume_confirm and atr_trending:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             # Short entry: Close < Lower Donchian + volume confirmation + ATR trending
             elif close_4h[i] < lower_donchian_aligned[i] and volume_confirm and atr_trending:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
@@ -121,12 +124,12 @@ def generate_signals(prices):
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
                 if close_4h[i] > lower_donchian_aligned[i] or not atr_trending:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
