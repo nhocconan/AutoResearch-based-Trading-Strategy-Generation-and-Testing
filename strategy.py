@@ -3,31 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h/1d regime filter
-# - Primary: 1h price breaks Camarilla H3/L3 levels from prior 4h bar (intraday momentum)
-# - HTF regime: 4h close > 1d EMA(50) for bull bias, < for bear bias (multi-TF alignment)
-# - Volume filter: 1h volume > 1.5x 20-period MA to confirm participation
-# - Session filter: 08-20 UTC to focus on liquid London/NY overlap
-# - Long: price > H3 + bull regime + volume spike + session
-# - Short: price < L3 + bear regime + volume spike + session
-# - Exit: price returns to Camarilla Pivot level (mean reversion) or regime flips
-# - Position sizing: 0.20 (discrete level to minimize fee churn)
-# - Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe
-# - Works in bull/bear: Camarilla levels adapt to volatility, regime filter avoids counter-trend, volume confirms
+# Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume confirmation
+# - Primary: 6h Williams %R(14) < -80 for long, > -20 for short (extreme oversold/overbought)
+# - HTF trend: 1w EMA(21) slope determines market regime (rising = long bias, falling = short bias)
+# - HTF volume: 1w volume > 1.5x 20-period MA for institutional participation
+# - Session filter: 08-20 UTC to avoid low-liquidity hours
+# - Long: Williams %R < -80 + rising 1w EMA slope + volume spike + session
+# - Short: Williams %R > -20 + falling 1w EMA slope + volume spike + session
+# - Exit: Williams %R crosses -50 (mean reversion complete) or EMA slope reverses
+# - Position sizing: 0.25 (discrete level to minimize fee churn)
+# - Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe
+# - Works in bull/bear: Williams %R captures mean reversion in ranges, EMA slope filters trend strength, volume confirms participation
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "6h_1w_williamsr_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -37,15 +36,31 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    close_4h = df_4h['close'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 1h volume MA(20)
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Calculate 1d EMA(50) for regime filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA(21) and its slope
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate EMA slope (rate of change over 3 periods)
+    ema_slope = np.zeros_like(ema_1w_aligned)
+    for i in range(3, len(ema_1w_aligned)):
+        if not np.isnan(ema_1w_aligned[i]) and not np.isnan(ema_1w_aligned[i-3]):
+            ema_slope[i] = (ema_1w_aligned[i] - ema_1w_aligned[i-3]) / 3
+        else:
+            ema_slope[i] = np.nan
+    
+    # Calculate 1w volume MA(20)
+    volume_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -56,62 +71,39 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(volume_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]) or not in_session[i]):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(ema_slope[i]) or
+            np.isnan(volume_ma_20_1w_aligned[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Get prior completed 4h bar for Camarilla calculation
-        idx_4h = i // 16  # 16x 1h bars per 4h
-        if idx_4h < 1:
-            signals[i] = 0.0
-            continue
-            
-        # Prior completed 4h bar OHLC (use index -1 for completed bar)
-        h_4h = df_4h['high'].iloc[idx_4h - 1]
-        l_4h = df_4h['low'].iloc[idx_4h - 1]
-        c_4h = df_4h['close'].iloc[idx_4h - 1]
-        
-        # Calculate Camarilla levels for prior 4h bar
-        range_4h = h_4h - l_4h
-        if range_4h <= 0:
-            signals[i] = 0.0
-            continue
-            
-        camarilla_pivot = (h_4h + l_4h + c_4h) / 3
-        camarilla_h3 = camarilla_pivot + (range_4h * 1.1 / 4)
-        camarilla_l3 = camarilla_pivot - (range_4h * 1.1 / 4)
-        
-        # Volume confirmation: current 1h volume > 1.5x 20-period MA
-        volume_confirm = volume[i] > 1.5 * volume_ma_20[i]
-        
-        # Regime filter: 4h close vs 1d EMA(50)
-        bull_regime = close_4h[idx_4h - 1] > ema_50_1d_aligned[i]  # use aligned 1d EMA at current 1h
-        bear_regime = close_4h[idx_4h - 1] < ema_50_1d_aligned[i]
+        # Volume confirmation: current 1w volume > 1.5x 20-period MA
+        volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
+        volume_confirm = volume_1w_aligned[i] > 1.5 * volume_ma_20_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price > H3 + bull regime + volume spike + session
-            if (close[i] > camarilla_h3 and bull_regime and volume_confirm):
+            # Long entry: Williams %R < -80 + rising 1w EMA slope + volume spike + session
+            if (williams_r[i] < -80 and ema_slope[i] > 0 and volume_confirm):
                 position = 1
-                signals[i] = 0.20
-            # Short entry: price < L3 + bear regime + volume spike + session
-            elif (close[i] < camarilla_l3 and bear_regime and volume_confirm):
+                signals[i] = 0.25
+            # Short entry: Williams %R > -20 + falling 1w EMA slope + volume spike + session
+            elif (williams_r[i] > -20 and ema_slope[i] < 0 and volume_confirm):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: price returns to Camarilla Pivot or regime flips
+            # Exit: Williams %R crosses -50 (mean reversion complete) or EMA slope reverses
             if position == 1:  # Long position
-                if close[i] < camarilla_pivot or not bull_regime:
+                if williams_r[i] > -50 or ema_slope[i] < 0:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] > camarilla_pivot or not bear_regime:
+                if williams_r[i] < -50 or ema_slope[i] > 0:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
