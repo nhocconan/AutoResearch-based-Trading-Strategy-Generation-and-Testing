@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level AND 4h close > 4h open (bullish 4h candle) AND volume > 1.5x 20-period volume SMA
-# - Short when price breaks below Camarilla L3 level AND 4h close < 4h open (bearish 4h candle) AND volume > 1.5x 20-period volume SMA
-# - Exit: price reverts to Camarilla Pivot point (PP) or opposite breakout with volume confirmation
-# - Uses 4h for signal direction (trend bias) and 1h for precise entry timing
+# Hypothesis: 6h Elder Ray + 1d regime filter
+# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
+# - Long when Bull Power > 0 AND Bear Power increasing (less negative) AND 1d close > 1d EMA50 (bullish regime)
+# - Short when Bear Power < 0 AND Bull Power decreasing (less positive) AND 1d close < 1d EMA50 (bearish regime)
+# - Exit when power signals reverse or regime changes
+# - Uses 1d for regime (trend bias) and 6h for precise entry timing
 # - Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# - Position sizing: 0.20 discrete level to control drawdown
-# - Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
+# - Position sizing: 0.25 discrete level to control drawdown
+# - Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 
-name = "1h_4h_camarilla_pivot_volume_v1"
-timeframe = "1h"
+name = "6h_1d_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,36 +32,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 4h data ONCE before loop (MTF rule compliance)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Load 1d data ONCE before loop (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Calculate 4h candle direction (bullish/bearish) for trend filter
-    close_4h = df_4h['close'].values
-    open_4h = df_4h['open'].values
-    # Bullish 4h candle: close > open
-    bullish_4h = close_4h > open_4h
-    bearish_4h = close_4h < open_4h
-    # Align to 1h timeframe with proper delay (completed 4h bar only)
-    bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_4h)
-    bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, bearish_4h)
+    # Calculate 1d EMA50 for regime filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    bullish_regime = close_1d > ema50_1d
+    bearish_regime = close_1d < ema50_1d
+    # Align to 6h timeframe with proper delay (completed 1d bar only)
+    bullish_regime_aligned = align_htf_to_ltf(prices, df_1d, bullish_regime)
+    bearish_regime_aligned = align_htf_to_ltf(prices, df_1d, bearish_regime)
+    
+    # Calculate 6h Elder Ray components
+    # Bull Power = High - EMA13(close)
+    # Bear Power = EMA13(close) - Low
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
+    
+    # Calculate power momentum (change from previous bar)
+    bull_power_momentum = bull_power - np.roll(bull_power, 1)
+    bear_power_momentum = bear_power - np.roll(bear_power, 1)
+    # First bar momentum is zero
+    bull_power_momentum[0] = 0
+    bear_power_momentum[0] = 0
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate 1h Camarilla pivot levels (based on previous bar)
-    # PP = (H + L + C) / 3
-    # H3 = PP + (H - L) * 1.1 / 2
-    # L3 = PP - (H - L) * 1.1 / 2
-    pp = (np.roll(high, 1) + np.roll(low, 1) + np.roll(close, 1)) / 3.0
-    rng = np.roll(high, 1) - np.roll(low, 1)
-    h3 = pp + rng * 1.1 / 2.0
-    l3 = pp - rng * 1.1 / 2.0
-    
-    # Calculate 20-period volume SMA for confirmation
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(1, n):  # Start from 1 to have previous bar data
         # Skip if not in trading session
@@ -69,47 +71,42 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or np.isnan(pp[i]) or
-            np.isnan(volume_sma_20[i]) or
-            np.isnan(bullish_4h_aligned[i]) or np.isnan(bearish_4h_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(bull_power_momentum[i]) or np.isnan(bear_power_momentum[i]) or
+            np.isnan(bullish_regime_aligned[i]) or np.isnan(bearish_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1h volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
-        
-        # Camarilla breakout signals
-        breakout_up = close[i] > h3[i]  # Break above H3
-        breakout_down = close[i] < l3[i]  # Break below L3
-        
         if position == 0:  # Flat - look for entry
-            # Long: price breaks above H3 AND 4h bullish AND volume confirmation
-            if breakout_up and bullish_4h_aligned[i] and vol_confirm:
+            # Long: Bull Power > 0 AND Bear Power increasing (less negative) AND bullish regime
+            if bull_power[i] > 0 and bear_power_momentum[i] > 0 and bullish_regime_aligned[i]:
                 position = 1
-                signals[i] = 0.20
-            # Short: price breaks below L3 AND 4h bearish AND volume confirmation
-            elif breakout_down and bearish_4h_aligned[i] and vol_confirm:
+                signals[i] = 0.25
+            # Short: Bear Power < 0 AND Bull Power decreasing (less positive) AND bearish regime
+            elif bear_power[i] > 0 and bull_power_momentum[i] < 0 and bearish_regime_aligned[i]:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit on reversion to Pivot point OR opposite breakout with volume
-            exit_condition = (close[i] < pp[i]) or \
-                           (breakout_down and vol_confirm)
+            # Exit when Bull Power <= 0 OR Bear Power decreasing OR regime turns bearish
+            exit_condition = (bull_power[i] <= 0) or \
+                           (bear_power_momentum[i] < 0) or \
+                           (not bullish_regime_aligned[i])
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            # Exit on reversion to Pivot point OR opposite breakout with volume
-            exit_condition = (close[i] > pp[i]) or \
-                           (breakout_up and vol_confirm)
+            # Exit when Bear Power <= 0 OR Bull Power increasing OR regime turns bullish
+            exit_condition = (bear_power[i] <= 0) or \
+                           (bull_power_momentum[i] > 0) or \
+                           (bullish_regime_aligned[i])
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
