@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) + 1d ADX trend filter + volume confirmation
-# - Long when Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (trending up) AND volume > 1.5x 20-period average
-# - Short when Bear Power < 0 AND Bull Power > 0 AND 1d ADX > 25 (trending down) AND volume > 1.5x 20-period average
-# - Exit when either power crosses zero OR ADX < 20 (trend weakens)
+# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + chop regime filter
+# - Long when price touches Camarilla L3 support AND volume > 1.5x 20-period average AND 1d chop > 61.8 (range)
+# - Short when price touches Camarilla H3 resistance AND volume > 1.5x 20-period average AND 1d chop > 61.8 (range)
+# - Exit when price crosses Camarilla H4/L4 levels or chop regime changes
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Elder Ray measures bull/bear strength relative to EMA13
-# - ADX filter ensures we only trade in strong trends
-# - Volume confirmation adds conviction to moves
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Camarilla pivots identify key intraday support/resistance levels
+# - Volume confirmation ensures breakouts have conviction
+# - Chop filter ensures we only trade in ranging conditions where mean reversion works
 
-name = "6h_1d_elder_ray_adx_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,28 +24,42 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Pre-compute 6h Elder Ray Index (Bull Power/Bear Power)
+    # Pre-compute 12h price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
-    
-    # Pre-compute 6h volume confirmation
+    # Pre-compute 12h volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 1d ADX (14)
+    # Pre-compute 1d Camarilla pivot levels
+    # Camarilla levels based on previous day's OHLC
+    # H4 = close + 1.1*(high - low)
+    # H3 = close + 1.1*(high - low)/2
+    # L3 = close - 1.1*(high - low)/2
+    # L4 = close - 1.1*(high - low)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low)
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low)
+    
+    # Align HTF Camarilla levels to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Pre-compute 1d chop regime (choppiness index)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -57,40 +71,34 @@ def generate_signals(prices):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr = np.concatenate([[np.nan], tr])  # first element is NaN
     
-    # ATR(14) for ADX calculation
+    # ATR(14)
     atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Directional Movement
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Sum of TR over 14 periods
+    tr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
     
-    # Smoothed DM and ATR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(atr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Max(high) - Min(low) over 14 periods
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_max_min = max_high - min_low
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / np.where(atr_smooth == 0, 1, atr_smooth)
-    minus_di = 100 * minus_dm_smooth / np.where(atr_smooth == 0, 1, atr_smooth)
+    # Chop = 100 * log10(tr_sum / range_max_min) / log10(14)
+    chop = 100 * np.log10(tr_sum / range_max_min) / np.log10(14)
+    chop = np.concatenate([np.full(13, np.nan), chop[13:]])  # align indices
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Chop regime: > 61.8 = ranging (good for mean reversion at extremes)
+    chop_range = chop > 61.8
     
-    # Align HTF indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align HTF chop regime to 12h timeframe
+    chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop_range_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -100,28 +108,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND Bear Power < 0 AND ADX > 25 AND volume spike
-            if (bull_power[i] > 0 and 
-                bear_power[i] < 0 and 
-                adx_aligned[i] > 25 and 
-                volume_spike[i]):
+            # Long conditions: price touches Camarilla L3 support AND volume spike AND chop range
+            if (low[i] <= camarilla_l3_aligned[i] and 
+                volume_spike[i] and 
+                chop_range_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power < 0 AND Bull Power > 0 AND ADX > 25 AND volume spike
-            elif (bear_power[i] < 0 and 
-                  bull_power[i] > 0 and 
-                  adx_aligned[i] > 25 and 
-                  volume_spike[i]):
+            # Short conditions: price touches Camarilla H3 resistance AND volume spike AND chop range
+            elif (high[i] >= camarilla_h3_aligned[i] and 
+                  volume_spike[i] and 
+                  chop_range_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Power crosses zero OR ADX < 20 (trend weakens)
+            # Exit conditions: price crosses H4/L4 levels or chop regime changes to trending
             exit_long = (position == 1 and 
-                        (bull_power[i] <= 0 or bear_power[i] >= 0 or adx_aligned[i] < 20))
+                        (high[i] >= camarilla_h4_aligned[i] or 
+                         not chop_range_aligned[i]))
             exit_short = (position == -1 and 
-                         (bear_power[i] >= 0 or bull_power[i] <= 0 or adx_aligned[i] < 20))
+                         (low[i] <= camarilla_l4_aligned[i] or 
+                          not chop_range_aligned[i]))
             
             if exit_long or exit_short:
                 position = 0
