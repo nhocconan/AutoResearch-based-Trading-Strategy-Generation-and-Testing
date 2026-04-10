@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and ATR regime filter
-# - Donchian(20) breakout on 4h captures strong momentum moves
-# - 1d volume spike filter (volume > 2.0x 20-day average) confirms institutional participation
-# - ATR regime filter: only trade when ATR(14) < ATR(50) (low volatility environment) to avoid chop
+# Hypothesis: 6h Camarilla pivot breakout with 1d EMA50 trend filter and volume confirmation
+# - Camarilla pivot levels from 1d: calculates H3/L3 levels from previous day's range
+# - Breakout above H3 or below L3 with volume confirmation and 1d trend alignment
+# - EMA50 trend filter ensures we trade with higher timeframe trend (more responsive than EMA200 for 6h)
+# - Volume confirmation: current volume > 1.5x 20-period average to avoid false breakouts
+# - Exit: opposite Camarilla level touch (H3 for longs, L3 for shorts)
 # - Position size: 0.25 (25% of capital) for balanced risk/return
-# - Exit: opposite Donchian breakout or volatility expansion (ATR(14) > 1.5x ATR(50))
-# - Works in both bull/bear: Donchian breakouts capture trends, volume filter reduces false signals,
-#   ATR regime filter avoids whipsaws in ranging markets
-# - Target: 20-40 trades/year on 4h (80-160 total over 4 years) to minimize fee drag
+# - Target: 12-25 trades/year on 6h (50-100 total over 4 years) to minimize fee drag
+# - Works in both bull/bear: EMA50 trend filter adapts to regime, volume confirmation reduces whipsaws
 
-name = "4h_1d_donchian_volume_atr_v1"
-timeframe = "4h"
+name = "6h_1d_camarilla_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,57 +27,39 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d volume spike filter
-    volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (2.0 * vol_ma_20_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    # Pre-compute 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Pre-compute 1d ATR regime filter
+    # Pre-compute 1d Camarilla pivot levels (H3, L3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First bar
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate pivot point and ranges
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_hl = high_1d - low_1d
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_regime = atr_14 < atr_50  # Low volatility regime
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime)
+    # Camarilla levels: H3 = close + range * 1.1/4, L3 = close - range * 1.1/4
+    h3 = close_1d + range_hl * 1.1 / 4.0
+    l3 = close_1d - range_hl * 1.1 / 4.0
     
-    # Pre-compute 4h Donchian channels
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
+    # Align HTF levels to LTF
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Pre-compute 4h ATR for volatility expansion exit
-    tr_4h1 = high_4h - low_4h
-    tr_4h2 = np.abs(high_4h - np.roll(close_4h, 1)) if 'close_4h' in locals() else np.abs(high_4h - np.roll(prices['close'].values, 1))
-    tr_4h3 = np.abs(low_4h - np.roll(prices['close'].values, 1))
-    tr_4h1[0] = high_4h[0] - low_4h[0]
-    tr_4h2[0] = 0
-    tr_4h3[0] = 0
-    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
-    atr_14_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
-    atr_50_4h = pd.Series(tr_4h).rolling(window=50, min_periods=50).mean().values
-    vol_expansion = atr_14_4h > (1.5 * atr_50_4h)
+    # Pre-compute 6h volume average (20-period)
+    volume = prices['volume'].values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike_aligned[i]) or np.isnan(atr_regime_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(trend_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -86,28 +68,34 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current close for breakout detection
-        close_price = prices['close'].iloc[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Breakout conditions
-        bullish_breakout = close_price > donchian_high[i]
-        bearish_breakout = close_price < donchian_low[i]
+        # Get current 1d close for trend filter (aligned)
+        close_1d_current = df_1d['close'].values
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_current)
+        
+        # 1d trend filter: price > EMA50 = bullish, price < EMA50 = bearish
+        bullish_trend = not np.isnan(close_1d_aligned[i]) and not np.isnan(trend_aligned[i]) and \
+                        close_1d_aligned[i] > trend_aligned[i]
+        bearish_trend = not np.isnan(close_1d_aligned[i]) and not np.isnan(trend_aligned[i]) and \
+                        close_1d_aligned[i] < trend_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: bullish breakout AND volume spike AND low volatility regime
-            if bullish_breakout and volume_spike_aligned[i] and atr_regime_aligned[i]:
+            # Long conditions: price > H3 AND bullish trend AND volume confirmation
+            if prices['close'].iloc[i] > h3_aligned[i] and bullish_trend and volume_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: bearish breakout AND volume spike AND low volatility regime
-            elif bearish_breakout and volume_spike_aligned[i] and atr_regime_aligned[i]:
+            # Short conditions: price < L3 AND bearish trend AND volume confirmation
+            elif prices['close'].iloc[i] < l3_aligned[i] and bearish_trend and volume_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: opposite breakout OR volatility expansion
-            exit_long = bearish_breakout or vol_expansion[i]
-            exit_short = bullish_breakout or vol_expansion[i]
+            # Exit conditions: price touches opposite Camarilla level
+            exit_long = prices['close'].iloc[i] < l3_aligned[i]   # Price breaks below L3 (exit long)
+            exit_short = prices['close'].iloc[i] > h3_aligned[i]  # Price breaks above H3 (exit short)
             
             exit_condition = (position == 1 and exit_long) or (position == -1 and exit_short)
             
