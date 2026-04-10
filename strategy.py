@@ -44,7 +44,6 @@ def generate_signals(prices):
     pp_1d = (high_1d + low_1d + close_1d) / 3.0
     # Range = High - Low
     range_1d = high_1d - low_1d
-    # Resistance levels: R4 = Close + Range * 1.5/2, R3 = Close + Range * 1.25/2, etc.
     # Standard Camarilla: H3 = Close + Range * 1.1/4, L3 = Close - Range * 1.1/4
     h3_1d = close_1d + (range_1d * 1.1 / 4)
     l3_1d = close_1d - (range_1d * 1.1 / 4)
