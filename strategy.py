@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above latest bearish fractal high AND 1d close > 1d EMA50 AND volume > 1.8x 20-bar avg
-# - Short when price breaks below latest bullish fractal low AND 1d close < 1d EMA50 AND volume > 1.8x 20-bar avg
-# - Exit when price crosses 1d EMA50 (trend reversal signal)
-# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
-# - Williams Fractals provide natural support/resistance levels from price action
+# Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation
+# - Williams Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3)
+# - Long when Lips > Teeth > Jaw AND price > Lips AND 1w EMA50 rising AND volume > 1.5x 20-bar avg
+# - Short when Lips < Teeth < Jaw AND price < Lips AND 1w EMA50 falling AND volume > 1.5x 20-bar avg
+# - Exit when Alligator lines re-cross (Lips crosses Teeth or Teeth crosses Jaw)
+# - Uses 1w EMA50 for higher timeframe trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-30 trades/year on 6h timeframe (50-120 total over 4 years)
+# - Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years)
+# - Williams Alligator excels in trending markets; 1w filter ensures we trade with dominant trend
 
-name = "6h_1d_williams_fractal_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1w_alligator_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,50 +23,51 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute Williams Fractals from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Williams Fractals: 5-bar pattern
-    # Bearish fractal: high[n-2] is highest of [n-4, n-3, n-2, n-1, n]
-    # Bullish fractal: low[n-2] is lowest of [n-4, n-3, n-2, n-1, n]
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # Pre-compute Williams Alligator components (using SMMA - smoothed moving average)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    for i in range(2, len(high_1d) - 2):
-        # Bearish fractal: middle bar has highest high
-        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
-            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        # Bullish fractal: middle bar has lowest low
-        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
-            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # SMMA calculation (Smoothed Moving Average)
+    def smma(data, period):
+        result = np.full_like(data, np.nan, dtype=np.float64)
+        if len(data) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (Prev SMMA * (Period-1) + Current Close) / Period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    jaw = smma(close, 13)
+    jaw = np.roll(jaw, 8)  # Shifted 8 bars forward
+    teeth = smma(close, 8)
+    teeth = np.roll(teeth, 5)  # Shifted 5 bars forward
+    lips = smma(close, 5)
+    lips = np.roll(lips, 3)  # Shifted 3 bars forward
     
-    # Align HTF indicators to LTF with additional delay for fractals (need 2 extra bars for confirmation)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Pre-compute volume confirmation: > 1.8x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -75,30 +77,40 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
+        # Check for Alligator re-cross (exit condition)
+        lips_teeth_cross = False
+        teeth_jaw_cross = False
+        
+        if i > 0:
+            # Lips crossing Teeth
+            if ((lips[i-1] <= teeth[i-1] and lips[i] > teeth[i]) or
+                (lips[i-1] >= teeth[i-1] and lips[i] < teeth[i])):
+                lips_teeth_cross = True
+            # Teeth crossing Jaw
+            if ((teeth[i-1] <= jaw[i-1] and teeth[i] > jaw[i]) or
+                (teeth[i-1] >= jaw[i-1] and teeth[i] < jaw[i])):
+                teeth_jaw_cross = True
+        
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above bearish fractal high AND 1d uptrend with volume spike
-            if (prices['close'].iloc[i] > bearish_fractal_aligned[i] and 
-                prices['close'].iloc[i] > ema50_1d_aligned[i] and  # price above 1d EMA50
+            # Long when Lips > Teeth > Jaw (Alligator bullish alignment) AND price > Lips AND 1w uptrend with volume spike
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and  # Bullish alignment
+                prices['close'].iloc[i] > lips[i] and  # Price above Lips
+                prices['close'].iloc[i] > ema50_1w_aligned[i] and  # Price above 1w EMA50 (uptrend)
                 vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below bullish fractal low AND 1d downtrend with volume spike
-            elif (prices['close'].iloc[i] < bullish_fractal_aligned[i] and 
-                  prices['close'].iloc[i] < ema50_1d_aligned[i] and  # price below 1d EMA50
+            # Short when Lips < Teeth < Jaw (Alligator bearish alignment) AND price < Lips AND 1w downtrend with volume spike
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and  # Bearish alignment
+                  prices['close'].iloc[i] < lips[i] and  # Price below Lips
+                  prices['close'].iloc[i] < ema50_1w_aligned[i] and  # Price below 1w EMA50 (downtrend)
                   vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit on trend reversal
-            # Exit when price crosses 1d EMA50 (trend reversal)
-            exit_signal = False
-            if position == 1:  # Long position
-                if prices['close'].iloc[i] <= ema50_1d_aligned[i]:
-                    exit_signal = True
-            elif position == -1:  # Short position
-                if prices['close'].iloc[i] >= ema50_1d_aligned[i]:
-                    exit_signal = True
+        else:  # Have position - look for exit on Alligator re-cross
+            # Exit when Alligator lines re-cross (Lips-Teeth or Teeth-Jaw)
+            exit_signal = lips_teeth_cross or teeth_jaw_cross
             
             if exit_signal:
                 position = 0
