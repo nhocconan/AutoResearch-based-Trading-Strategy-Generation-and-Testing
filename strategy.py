@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Elder Ray Bull/Bear Power + 1d ADX regime filter + volume confirmation
-# - Bull Power = High - EMA(13); Bear Power = EMA(13) - Low
-# - Long when Bull Power > 0 AND Bear Power < 0 (both bullish) AND volume > 1.5x 20-period average AND 1d ADX < 25 (ranging)
-# - Short when Bear Power > 0 AND Bull Power < 0 (both bearish) AND volume > 1.5x 20-period average AND 1d ADX < 25 (ranging)
-# - Exit when either power crosses zero OR volume drops
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA trend filter + volume confirmation
+# - Long when price breaks above Donchian(20) high AND price > 1w EMA(50) AND volume > 1.5x 20-day average
+# - Short when price breaks below Donchian(20) low AND price < 1w EMA(50) AND volume > 1.5x 20-day average
+# - Exit when price crosses Donchian(10) midpoint (mean reversion) OR opposite breakout occurs
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Elder Ray measures bull/bear strength relative to EMA
-# - Volume confirmation ensures conviction
-# - ADX < 25 filter ensures we trade in ranging/low trend conditions where Elder Ray works best
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Donchian breakouts capture strong trends in both bull and bear markets
+# - 1w EMA filter ensures we trade with the higher timeframe trend
+# - Volume confirmation ensures breakouts have conviction and reduces false signals
 
-name = "4h_1d_elder_ray_volume_adx_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,81 +23,42 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h Elder Ray components
+    # Pre-compute 1d Donchian channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA(13) for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Donchian(20) for breakout signals
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bull Power = High - EMA(13)
-    bull_power = high - ema13
+    # Donchian(10) for exit signals (midpoint)
+    highest_high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    donchian_mid_10 = (highest_high_10 + lowest_low_10) / 2
     
-    # Bear Power = EMA(13) - Low
-    bear_power = ema13 - low
-    
-    # Pre-compute 4h volume confirmation
+    # Pre-compute 1d volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 1d ADX (14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - np.roll(close_1d, 1)[1:])
-    tr3 = np.abs(low_1d[1:] - np.roll(close_1d, 1)[1:])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # first element is NaN
-    
-    # ATR(14)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed DM and ATR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_smooth = pd.Series(atr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / atr_smooth
-    minus_di = 100 * minus_dm_smooth / atr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # ADX regime: < 25 = ranging/low trend (good for Elder Ray mean reversion)
-    adx_regime = adx < 25
-    
-    # Align HTF indicators to 4h timeframe
-    adx_regime_aligned = align_htf_to_ltf(prices, df_1d, adx_regime)
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_regime_aligned[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
+            np.isnan(highest_high_10[i]) or np.isnan(lowest_low_10[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -108,28 +68,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND Bear Power < 0 (both bullish) AND volume spike AND ADX < 25
-            if (bull_power[i] > 0 and 
-                bear_power[i] < 0 and 
-                volume_spike[i] and 
-                adx_regime_aligned[i]):
+            # Long conditions: Donchian(20) breakout AND price > 1w EMA(50) AND volume spike
+            if (close[i] > highest_high_20[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power > 0 AND Bull Power < 0 (both bearish) AND volume spike AND ADX < 25
-            elif (bear_power[i] > 0 and 
-                  bull_power[i] < 0 and 
-                  volume_spike[i] and 
-                  adx_regime_aligned[i]):
+            # Short conditions: Donchian(20) breakdown AND price < 1w EMA(50) AND volume spike
+            elif (close[i] < lowest_low_20[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when either power crosses zero OR volume drops below average
+            # Exit conditions: price crosses Donchian(10) midpoint OR opposite breakout with volume
             exit_long = (position == 1 and 
-                        (bull_power[i] <= 0 or bear_power[i] >= 0 or not volume_spike[i]))
+                        (close[i] < donchian_mid_10[i] or
+                         (close[i] < lowest_low_20[i] and volume_spike[i])))
             exit_short = (position == -1 and 
-                         (bear_power[i] <= 0 or bull_power[i] >= 0 or not volume_spike[i]))
+                         (close[i] > donchian_mid_10[i] or
+                          (close[i] > highest_high_20[i] and volume_spike[i])))
             
             if exit_long or exit_short:
                 position = 0
