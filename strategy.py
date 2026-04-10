@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1w ATR filter and 1d volume confirmation
-# - Long when price breaks above 12h Donchian(20) upper band AND 1w ATR(14) > 12h ATR(14) (volatile regime) AND 1d volume > 1.2x 20-period average
-# - Short when price breaks below 12h Donchian(20) lower band AND 1w ATR(14) > 12h ATR(14) AND 1d volume > 1.2x 20-period average
-# - Exit when price retracs to 12h Donchian(20) midpoint
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and 1w EMA trend filter
+# - Long when Williams %R(14) < -80 (oversold) AND 1d volume > 1.5x 20-period average AND 1w close > 1w EMA20 (uptrend)
+# - Short when Williams %R(14) > -20 (overbought) AND 1d volume > 1.5x 20-period average AND 1w close < 1w EMA20 (downtrend)
+# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Donchian breakout captures momentum in volatile regimes
-# - 1w ATR > 12h ATR ensures higher timeframe volatility confirmation
-# - Volume spike confirms institutional participation
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Williams %R identifies exhaustion points in ranging markets
+# - Volume spike confirms participation
+# - Weekly EMA filter ensures alignment with higher timeframe trend
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "12h_1d_1w_donchian_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_1w_williamsr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,44 +28,20 @@ def generate_signals(prices):
     if len(df_1d) < 30 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 12h Donchian channels (20-period)
+    # Pre-compute 4h Williams %R(14)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_mid = (donchian_upper + donchian_lower) / 2
-    
-    # Pre-compute 12h ATR(14)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = np.full_like(close, np.nan, dtype=float)
-    for i in range(14, n):
-        if i == 14:
-            atr_12h[i] = np.nanmean(tr[1:i+1])
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full_like(close, np.nan, dtype=float)
+    for i in range(13, n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
         else:
-            atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
-    
-    # Pre-compute 1w ATR(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    tr1_1w = high_1w[1:] - low_1w[1:]
-    tr2_1w = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3_1w = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.nan], np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))])
-    atr_1w = np.full_like(close_1w, np.nan, dtype=float)
-    for i in range(14, len(close_1w)):
-        if i == 14:
-            atr_1w[i] = np.nanmean(tr_1w[1:i+1])
-        else:
-            atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
+            williams_r[i] = -50  # neutral when range is zero
     
     # Pre-compute 1d volume average (20-period)
     volume_1d = df_1d['volume'].values
@@ -73,18 +49,27 @@ def generate_signals(prices):
     for i in range(19, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Align HTF indicators to 12h timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Pre-compute 1w EMA20
+    close_1w = df_1w['close'].values
+    ema_20_1w = np.full_like(close_1w, np.nan, dtype=float)
+    if len(close_1w) >= 20:
+        ema_20_1w[19] = np.mean(close_1w[:20])  # SMA seed
+        multiplier = 2 / (20 + 1)
+        for i in range(20, len(close_1w)):
+            ema_20_1w[i] = (close_1w[i] * multiplier) + (ema_20_1w[i-1] * (1 - multiplier))
+    
+    # Align HTF indicators to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, prices, williams_r)  # same timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(atr_12h[i]) or np.isnan(atr_1w_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -93,27 +78,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (1.2x average)
-        vol_spike = prices['volume'].iloc[i] > 1.2 * vol_ma_1d_aligned[i]
-        
-        # Volatility regime: 1w ATR > 12h ATR
-        vol_regime = atr_1w_aligned[i] > atr_12h[i]
+        # Volume spike condition (1.5x average)
+        vol_series = prices['volume'].values
+        vol_ma_4h = np.full_like(vol_series, np.nan, dtype=float)
+        for j in range(19, i+1):
+            vol_ma_4h[j] = np.mean(vol_series[j-19:j+1])
+        vol_spike = not np.isnan(vol_ma_4h[i]) and vol_series[i] > 1.5 * vol_ma_4h[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: break above upper band AND volume spike AND volatile regime
-            if (close[i] > donchian_upper[i] and vol_spike and vol_regime):
+            # Long conditions: oversold AND volume spike AND 1w uptrend
+            if (williams_r_aligned[i] < -80 and vol_spike and close[i] > ema_20_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: break below lower band AND volume spike AND volatile regime
-            elif (close[i] < donchian_lower[i] and vol_spike and vol_regime):
+            # Short conditions: overbought AND volume spike AND 1w downtrend
+            elif (williams_r_aligned[i] > -20 and vol_spike and close[i] < ema_20_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price retracs to midpoint
-            exit_long = (position == 1 and close[i] <= donchian_mid[i])
-            exit_short = (position == -1 and close[i] >= donchian_mid[i])
+            # Exit conditions: Williams %R crosses -50 (mean reversion completion)
+            exit_long = (position == 1 and williams_r_aligned[i] > -50)
+            exit_short = (position == -1 and williams_r_aligned[i] < -50)
             
             if exit_long or exit_short:
                 position = 0
