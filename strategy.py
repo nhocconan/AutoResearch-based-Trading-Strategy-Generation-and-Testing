@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and ATR volatility filter
-# - Entry: Long when price breaks above Donchian upper (20, 1d) + 1d volume > 2.0x 20-period average + ATR(14, 4h) > ATR(50, 4h) * 0.3
-#          Short when price breaks below Donchian lower (20, 1d) + same volume and volatility filters
-# - Exit: Close-based reversal - exit long when price < Donchian lower (1d), exit short when price > Donchian upper (1d)
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR volatility filter
+# - Entry: Long when price breaks above Camarilla H3 (1d) + 1d volume > 1.5x 20-period average + ATR(14, 4h) > 0.25 * ATR(50, 4h)
+#          Short when price breaks below Camarilla L3 (1d) + same volume and volatility filters
+# - Exit: Close-based reversal - exit long when price < Camarilla L3 (1d), exit short when price > Camarilla H3 (1d)
 # - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
 # - Position sizing: 0.25 (discrete level)
-# - Donchian channels from 1d provide robust support/resistance that works in ranging and trending markets
+# - Camarilla levels from 1d provide intraday support/resistance that works in ranging and trending markets
 # - Volume confirmation ensures participation, volatility filter avoids low-volatility false breakouts
 # - Target: 75-200 total trades over 4 years (19-50/year) to stay within HARD MAX: 400 total
 
-name = "4h_1d_donchian_vol_breakout_v1"
+name = "4h_1d_camarilla_vol_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,21 +32,25 @@ def generate_signals(prices):
     low_4h = prices['low'].values
     close_4h = prices['close'].values
     
-    # Pre-compute 1d data for Donchian channels and volume
+    # Pre-compute 1d data for Camarilla pivots and volume
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian channels (based on previous 20-period 1d OHLC)
-    # Upper = max(high, 20)
-    # Lower = min(low, 20)
-    donchian_upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels (based on previous 1d OHLC)
+    # Pivot = (high + low + close) / 3
+    # Range = high - low
+    # H3 = pivot + range * 1.1 / 2
+    # L3 = pivot - range * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_h3_1d = pivot_1d + range_1d * 1.1 / 2.0
+    camarilla_l3_1d = pivot_1d - range_1d * 1.1 / 2.0
     
-    # Align Donchian levels to 4h timeframe (use previous day's levels for today's trading)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_20)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_20)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels for today's trading)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -72,7 +76,7 @@ def generate_signals(prices):
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(atr_14_aligned[i]) or 
             np.isnan(atr_50_aligned[i])):
             signals[i] = 0.0
@@ -83,21 +87,21 @@ def generate_signals(prices):
         
         # Get current 1d volume for confirmation
         volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        volume_confirmation = volume_1d_current > 2.0 * volume_ma_aligned[i]
+        volume_confirmation = volume_1d_current > 1.5 * volume_ma_aligned[i]
         
-        # Volatility expansion filter: ATR(14) > 0.3 * ATR(50) indicates expanding volatility (genuine breakout)
-        volatility_filter = atr_14_aligned[i] > 0.3 * atr_50_aligned[i]
+        # Volatility expansion filter: ATR(14) > 0.25 * ATR(50) indicates expanding volatility (genuine breakout)
+        volatility_filter = atr_14_aligned[i] > 0.25 * atr_50_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper + volume confirmation + volatility filter
-            if (close_price > donchian_upper_aligned[i] and 
+            # Long entry: price breaks above Camarilla H3 + volume confirmation + volatility filter
+            if (close_price > camarilla_h3_aligned[i] and 
                 volume_confirmation and 
                 volatility_filter):
                 position = 1
                 entry_price = close_price
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian lower + volume confirmation + volatility filter
-            elif (close_price < donchian_lower_aligned[i] and 
+            # Short entry: price breaks below Camarilla L3 + volume confirmation + volatility filter
+            elif (close_price < camarilla_l3_aligned[i] and 
                   volume_confirmation and 
                   volatility_filter):
                 position = -1
@@ -109,8 +113,8 @@ def generate_signals(prices):
             # Calculate stoploss level
             if position == 1:  # Long position
                 stop_loss = entry_price - 2.0 * atr_14_aligned[i]
-                # Exit conditions: price < Donchian lower OR stoploss hit
-                if close_price < donchian_lower_aligned[i] or close_price <= stop_loss:
+                # Exit conditions: price < Camarilla L3 OR stoploss hit
+                if close_price < camarilla_l3_aligned[i] or close_price <= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
@@ -118,8 +122,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1, Short position
                 stop_loss = entry_price + 2.0 * atr_14_aligned[i]
-                # Exit conditions: price > Donchian upper OR stoploss hit
-                if close_price > donchian_upper_aligned[i] or close_price >= stop_loss:
+                # Exit conditions: price > Camarilla H3 OR stoploss hit
+                if close_price > camarilla_h3_aligned[i] or close_price >= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
