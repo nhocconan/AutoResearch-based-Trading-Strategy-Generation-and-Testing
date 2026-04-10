@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d volume spike and ADX(14) regime filter
-# - Long when Williams %R crosses above -80 (oversold) + 1d volume > 2.0x 20-period volume SMA + ADX < 25 (range/low trend)
-# - Short when Williams %R crosses below -20 (overbought) + 1d volume > 2.0x 20-period volume SMA + ADX < 25
-# - Exit: Williams %R returns to -50 level (mean reversion completion)
+# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ADX(14) regime filter
+# - Long when price breaks above 20-period Donchian upper + 1d volume > 2.0x 20-period volume SMA + ADX < 25 (range/low trend)
+# - Short when price breaks below 20-period Donchian lower + 1d volume > 2.0x 20-period volume SMA + ADX < 25
+# - Exit: price returns to 20-period Donchian midpoint (mean reversion within channel)
 # - Position sizing: 0.25 discrete level
-# - Williams %R identifies exhaustion points, volume confirms participation, ADX filter avoids strong trends where mean reversion fails
-# - Works in bull/bear: mean reversion effective in ranging markets, ADX filter prevents trading against strong momentum
+# - Donchian breakouts capture momentum, volume confirms participation, ADX filter avoids strong trends where breakouts fail
+# - Works in bull/bear: breakouts effective in trending markets, ADX filter prevents trading against strong counter-trend moves
 # - 12h timeframe targets 20-40 trades/year with strict entry conditions to minimize fee drag
 
-name = "12h_1d_williamsr_volume_adx_v1"
+name = "12h_1d_donchian_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -35,12 +35,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 12h Donchian Channel(20)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
     # Calculate 12h ADX(14) for regime filter (avoid strong trends)
     # True Range
@@ -75,8 +75,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(williams_r[i-1]) or np.isnan(adx[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -84,22 +84,20 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
         vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Regime filter: ADX < 25 indicates ranging/low trend market (favorable for mean reversion)
+        # Regime filter: ADX < 25 indicates ranging/low trend market (favorable for breakout mean reversion)
         ranging_market = adx[i] < 25
         
-        # Williams %R mean reversion signals
-        wr_now = williams_r[i]
-        wr_prev = williams_r[i-1]
-        wr_cross_above_80 = (wr_prev <= -80) and (wr_now > -80)  # Oversold bounce
-        wr_cross_below_20 = (wr_prev >= -20) and (wr_now < -20)  # Overbought rejection
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_upper[i-1]  # Price breaks above upper channel
+        breakout_down = close[i] < donchian_lower[i-1]  # Price breaks below lower channel
         
-        # Entry conditions: Williams %R mean reversion with volume and regime confirmation
-        long_entry = wr_cross_above_80 and vol_confirm and ranging_market
-        short_entry = wr_cross_below_20 and vol_confirm and ranging_market
+        # Entry conditions: Donchian breakout with volume and regime confirmation
+        long_entry = breakout_up and vol_confirm and ranging_market
+        short_entry = breakout_down and vol_confirm and ranging_market
         
-        # Exit conditions: Williams %R returns to -50 level (mean reversion completion)
-        long_exit = wr_now >= -50  # Exit long when WR crosses above -50
-        short_exit = wr_now <= -50  # Exit short when WR crosses below -50
+        # Exit conditions: price returns to Donchian midpoint (mean reversion within channel)
+        long_exit = close[i] <= donchian_mid[i]  # Exit long when price returns to or below midpoint
+        short_exit = close[i] >= donchian_mid[i]  # Exit short when price returns to or above midpoint
         
         if position == 0:  # Flat - look for entry
             if long_entry:
