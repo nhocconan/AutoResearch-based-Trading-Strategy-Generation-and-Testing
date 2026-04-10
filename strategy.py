@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d regime filter
-# - Primary: 6h timeframe for lower trade frequency and better signal quality
-# - HTF: 1d for regime detection (Bull/Bear Power EMA trend)
-# - Long: 6h Bull Power > 0 AND 1d Bear Power EMA < 0 (bullish regime)
-# - Short: 6h Bear Power < 0 AND 1d Bull Power EMA > 0 (bearish regime)
-# - Exit: Opposite signal appears or power crosses zero
+# Hypothesis: 12h Williams Alligator with 1d volume and ATR regime filter
+# - Primary: 12h timeframe for lower trade frequency and better trend capture
+# - HTF: 1d for volatility (ATR percentile) and volume confirmation
+# - Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
+# - Long: Lips > Teeth > Jaw (bullish alignment) + 1d ATR > 50th percentile + volume > 1.5x 20-period MA
+# - Short: Lips < Teeth < Jaw (bearish alignment) + 1d ATR > 50th percentile + volume > 1.5x 20-period MA
+# - Exit: When Alligator lines intertwine (Lips crosses Teeth or Jaw) or ATR < 30th percentile
 # - Position sizing: 0.25 (discrete level)
-# - Works in bull/bear: Elder Ray captures institutional buying/selling pressure
-# - Target: 75-175 total trades over 4 years (19-44/year) - within 6h sweet spot
+# - Target: 50-150 total trades over 4 years (12-37/year) - within 12h sweet spot
+# - Works in bull/bear: Alligator catches strong trends, regime filter avoids chop, volume confirms conviction
 
-name = "6h_1d_elderray_regime_v2"
-timeframe = "6h"
+name = "12h_1d_alligator_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,83 +28,100 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute primary 6h OHLCV
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
+    # Pre-compute 12h OHLCV
+    open_12h = prices['open'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    volume_12h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Elder Ray Components
-    # Bull Power = High - EMA(close, 13)
-    # Bear Power = Low - EMA(close, 13)
-    close_6h_series = pd.Series(close_6h)
-    ema_13 = close_6h_series.ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power_6h = high_6h - ema_13
-    bear_power_6h = low_6h - ema_13
+    # Calculate Williams Alligator SMMA (Smoothed Moving Average)
+    def smma(source, period):
+        """Smoothed Moving Average - similar to Wilder's smoothing"""
+        if len(source) < period:
+            return np.full(len(source), np.nan)
+        result = np.full(len(source), np.nan)
+        # First value is simple SMA
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: (prev * (period-1) + current) / period
+        for i in range(period, len(source)):
+            result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
     
-    # Calculate 1d Elder Ray Components for regime
-    close_1d_series = pd.Series(close_1d)
-    ema_13_1d = close_1d_series.ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power_1d = high_1d - ema_13_1d
-    bear_power_1d = low_1d - ema_13_1d
+    # Calculate Alligator lines on 12h data
+    jaw = smma(close_12h, 13)  # Jaw (Blue) - 13-period SMMA
+    teeth = smma(close_12h, 8)  # Teeth (Red) - 8-period SMMA
+    lips = smma(close_12h, 5)   # Lips (Green) - 5-period SMMA
     
-    # Smooth 1d power with EMA for regime filter (more stable)
-    bull_power_ema_1d = pd.Series(bull_power_1d).ewm(span=10, min_periods=10, adjust=False).mean().values
-    bear_power_ema_1d = pd.Series(bear_power_1d).ewm(span=10, min_periods=10, adjust=False).mean().values
+    # Calculate 1d ATR(14) for volatility regime filter
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Align 1d regime to 6h bars (wait for completed 1d bar)
-    bull_power_ema_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_ema_1d)
-    bear_power_ema_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_ema_1d)
+    # Calculate 1d ATR percentile rank (using 30-bar lookback)
+    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    
+    # Calculate 1d volume moving average (20-period) for volume confirmation
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(bull_power_ema_1d_aligned[i]) or 
-            np.isnan(bear_power_ema_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Regime conditions
+        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
+        
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        volume_spike = volume_1d[i // 1] > 1.5 * volume_ma_20_1d_aligned[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Long entry: 6h Bull Power positive AND 1d Bear Power EMA negative (bullish regime)
-            if (bull_power_6h[i] > 0 and bear_power_ema_1d_aligned[i] < 0):
+            # Long entry: Bullish Alligator alignment + vol regime + volume spike
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: 6h Bear Power negative AND 1d Bull Power EMA positive (bearish regime)
-            elif (bear_power_6h[i] < 0 and bull_power_ema_1d_aligned[i] > 0):
+            # Short entry: Bearish Alligator alignment + vol regime + volume spike
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when power signals reverse or cross zero
-            if position == 1:  # Long position
-                exit_condition = (
-                    bull_power_6h[i] <= 0 or  # Bull power turns negative
-                    bear_power_6h[i] >= 0     # Bear power turns positive
-                )
-                if exit_condition:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1 (Short position)
-                exit_condition = (
-                    bear_power_6h[i] >= 0 or  # Bear power turns positive
-                    bull_power_6h[i] <= 0     # Bull power turns negative
-                )
-                if exit_condition:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit conditions:
+            # 1. Alligator lines intertwine (Lips crosses Teeth or Jaw) - trend weakening
+            # 2. Volatility drops below 30th percentile (choppy market)
+            
+            lips_cross_teeth = (lips[i] > teeth[i] and lips[i-1] <= teeth[i-1]) or \
+                              (lips[i] < teeth[i] and lips[i-1] >= teeth[i-1])
+            lips_cross_jaw = (lips[i] > jaw[i] and lips[i-1] <= jaw[i-1]) or \
+                            (lips[i] < jaw[i] and lips[i-1] >= jaw[i-1])
+            alligator_intertwined = lips_cross_teeth or lips_cross_jaw
+            
+            low_volatility = atr_percentile_aligned[i] < 30
+            
+            if alligator_intertwined or low_volatility:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
