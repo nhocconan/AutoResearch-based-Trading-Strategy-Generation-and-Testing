@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# - Bull power = (high - EMA13), Bear power = (low - EMA13) on 6h
-# - Long when bull power > 0 AND rising AND 1d ADX > 25 (strong trend)
-# - Short when bear power < 0 AND falling AND 1d ADX > 25 (strong trend)
-# - Exit when power crosses zero or ADX < 20 (weak trend)
-# - Uses 1d ADX to ensure we only trade strong trends, avoiding whipsaws in ranging markets
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and 1d trend filter (close > EMA50)
+# - Long when price breaks above 4h Camarilla R3 level AND 1d volume > 1.5x 20-period volume SMA AND 1d close > 1d EMA50
+# - Short when price breaks below 4h Camarilla S3 level AND 1d volume > 1.5x 20-period volume SMA AND 1d close < 1d EMA50
+# - Exit: price retreats to Camarilla pivot point (PP) or volume drops below 1.2x SMA
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 12-35 trades/year on 6h timeframe (50-140 over 4 years) to stay within fee limits
+# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Uses Camarilla levels from 1d timeframe for structure, 4h for execution timing
 
-name = "6h_1d_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,102 +29,83 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 6h EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # Bull power = high - EMA
-    bear_power = low - ema_13   # Bear power = low - EMA
-    
-    # Calculate 1d ADX for regime filter
+    # Calculate 1d Camarilla pivot levels
+    # Camarilla formula: PP = (H + L + C) / 3
+    # R3 = PP + (H - L) * 1.1/4
+    # S3 = PP - (H - L) * 1.1/4
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = camarilla_pp + camarilla_range * 1.1 / 4.0
+    camarilla_s3 = camarilla_pp - camarilla_range * 1.1 / 4.0
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align 1d Camarilla levels to 4h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(values[:period])
-        # Subsequent values
-        for i in range(period, len(values)):
-            result[i] = result[i-1] - (result[i-1] / period) + values[i]
-        return result
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    period = 14
-    atr = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    # Calculate 1d volume SMA for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    # Calculate 4h volume SMA for confirmation
+    volume_sma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, period)
-    
-    # Align HTF indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    for i in range(40, n):  # Start after warmup for indicators
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_13[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or
+            np.isnan(volume_sma_20_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Elder Ray signals
-        bull_rising = bull_power[i] > bull_power[i-1]  # Bull power rising
-        bear_falling = bear_power[i] < bear_power[i-1]  # Bear power falling
+        # Volume confirmation: 4h volume > 1.2x 20-period volume SMA AND 1d volume > 1.5x 20-period volume SMA
+        vol_confirm_4h = volume[i] > 1.2 * volume_sma_20_4h[i]
+        vol_confirm_1d = volume_1d[i // 16] > 1.5 * volume_sma_20_1d_aligned[i] if i // 16 < len(volume_1d) else False
+        vol_confirm = vol_confirm_4h and vol_confirm_1d
         
-        # Regime filter: strong trend (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20  # Exit when trend weakens
+        # Trend filter: 1d close vs 1d EMA50
+        trend_bullish = close_1d[i // 16] > ema_50_1d_aligned[i] if i // 16 < len(close_1d) else False
+        trend_bearish = close_1d[i // 16] < ema_50_1d_aligned[i] if i // 16 < len(close_1d) else False
+        
+        # Camarilla breakout signals
+        breakout_up = close[i] > camarilla_r3_aligned[i-1]  # Break above previous R3
+        breakout_down = close[i] < camarilla_s3_aligned[i-1]  # Break below previous S3
+        
+        # Exit conditions: price retreats to pivot point or loss of volume confirmation
+        exit_long = close[i] < camarilla_pp_aligned[i] or not vol_confirm
+        exit_short = close[i] > camarilla_pp_aligned[i] or not vol_confirm
         
         if position == 0:  # Flat - look for entry
-            # Long: bull power positive AND rising AND strong trend
-            if bull_power[i] > 0 and bull_rising and strong_trend:
+            if breakout_up and trend_bullish and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short: bear power negative AND falling AND strong trend
-            elif bear_power[i] < 0 and bear_falling and strong_trend:
+            elif breakout_down and trend_bearish and vol_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit: bull power crosses zero OR trend weakens
-            if bull_power[i] <= 0 or weak_trend:
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            # Exit: bear power crosses zero OR trend weakens
-            if bear_power[i] >= 0 or weak_trend:
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
