@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 12h volume spike and ADX(14) regime filter
-# - Long when Williams %R(14) < -80 (oversold) + 12h volume > 1.5x 20-period volume SMA + ADX < 25 (low volatility regime)
-# - Short when Williams %R(14) > -20 (overbought) + 12h volume > 1.5x 20-period volume SMA + ADX < 25
-# - Exit: Williams %R returns to -50 (mean reversion to midpoint)
-# - Position sizing: 0.25 discrete level
-# - Williams %R identifies overextended moves, volume confirms participation, ADX filter avoids choppy/strong trends where mean reversion fails
-# - Works in bull/bear: mean reversion effective in ranging markets, ADX filter prevents trading during strong directional moves
+# Hypothesis: 4h Donchian breakout with 12h volume spike and chop regime filter
+# - Long when price breaks above Donchian(20) high + 12h volume > 1.8x 20-period volume SMA + Chop(14) > 61.8 (range regime)
+# - Short when price breaks below Donchian(20) low + 12h volume > 1.8x 20-period volume SMA + Chop(14) > 61.8
+# - Exit: price returns to Donchian midpoint (mean reversion within range)
+# - Position sizing: 0.30 discrete level
+# - Donchian captures breakouts from ranges, volume confirms participation, chop filter ensures we trade in ranging markets where mean reversion works
+# - Works in bull/bear: breakouts work in all regimes, chop filter avoids strong trends where breakouts fail
 # - 4h timeframe targets 20-50 trades/year with strict entry conditions to minimize fee drag
 
-name = "4h_12h_williamsr_volume_adx_v1"
+name = "4h_12h_donchian_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,38 +35,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
-    # Calculate 4h ADX(14) for regime filter (avoid strong trends and chop)
+    # Calculate 4h Chopiness Index (14-period) for regime filter
     # True Range
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
                                 np.abs(low - np.roll(close, 1))))
     tr1[0] = high[0] - low[0]
-    # Plus Directional Movement
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    plus_dm[0] = 0
-    # Minus Directional Movement
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    minus_dm[0] = 0
-    # Smoothed values
-    atr = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    # Handle division by zero and invalid values
-    plus_di = np.where(atr == 0, 0, plus_di)
-    minus_di = np.where(atr == 0, 0, minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = np.where(np.isnan(adx) | np.isinf(adx), 0, adx)
+    # Sum of TR over period
+    sum_tr = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over period
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Chop formula: 100 * log10(sum_TR / (HH - LL)) / log10(N)
+    # Avoid division by zero and log of zero/negative
+    hl_range = hh - ll
+    chop = np.where((hl_range > 0) & (sum_tr > 0), 
+                    100 * np.log10(sum_tr / hl_range) / np.log10(14), 
+                    50)  # default to neutral when invalid
     
     # Calculate 12h volume SMA(20) for confirmation
     volume_12h = df_12h['volume'].values
@@ -75,37 +65,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(adx[i]) or np.isnan(volume_sma_20_12h_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(chop[i]) or np.isnan(volume_sma_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period SMA (volume spike)
+        # Volume confirmation: current 12h volume > 1.8x 20-period SMA (volume spike)
         vol_12h_current = align_htf_to_ltf(prices, df_12h, df_12h['volume'].values)
-        vol_confirm = vol_12h_current[i] > 1.5 * volume_sma_20_12h_aligned[i]
+        vol_confirm = vol_12h_current[i] > 1.8 * volume_sma_20_12h_aligned[i]
         
-        # Regime filter: ADX < 25 indicates low volatility/non-trending market (favorable for mean reversion)
-        low_volatility = adx[i] < 25
+        # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion breakouts)
+        ranging_market = chop[i] > 61.8
         
-        # Williams %R signals
-        oversold = williams_r[i] < -80  # Oversold condition
-        overbought = williams_r[i] > -20  # Overbought condition
-        exit_signal = abs(williams_r[i] + 50) < 5  # Return to midpoint (-50)
+        # Donchian breakout signals
+        breakout_up = close[i] > highest_high[i]  # Price breaks above upper band
+        breakout_down = close[i] < lowest_low[i]  # Price breaks below lower band
+        return_to_mid = abs(close[i] - donchian_mid[i]) < (highest_high[i] - lowest_low[i]) * 0.1  # Within 10% of midpoint
         
-        # Entry conditions: Williams %R extreme with volume and regime confirmation
-        long_entry = oversold and vol_confirm and low_volatility
-        short_entry = overbought and vol_confirm and low_volatility
+        # Entry conditions: Donchian breakout with volume and regime confirmation
+        long_entry = breakout_up and vol_confirm and ranging_market
+        short_entry = breakout_down and vol_confirm and ranging_market
         
-        # Exit conditions: Williams %R returns to midpoint (mean reversion)
-        long_exit = exit_signal  # Exit long when Williams %R returns to -50
-        short_exit = exit_signal  # Exit short when Williams %R returns to -50
+        # Exit conditions: price returns to Donchian midpoint (mean reversion)
+        long_exit = return_to_mid  # Exit long when price returns to midpoint
+        short_exit = return_to_mid  # Exit short when price returns to midpoint
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif short_entry:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -113,12 +104,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         else:  # position == -1 (Short position) - look for exit
             if short_exit:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
