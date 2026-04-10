@@ -3,128 +3,181 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ATR volatility filter + volume confirmation
-# - Primary: 4h Donchian channel breakout (20-period) for trend capture
-# - HTF: 1d ATR(14) filter to avoid breakouts in low volatility (ATR > 0.8 * 20-period MA of ATR)
-# - Volume: 4h volume > 1.2 * 20-period MA of volume for confirmation
-# - Long: Price breaks above upper Donchian + volatility filter + volume confirmation
-# - Short: Price breaks below lower Donchian + volatility filter + volume confirmation
-# - Exit: Opposite Donchian breakout or ATR drops below 0.5 * 20-period MA (volatility collapse)
+# Hypothesis: 6h Ichimoku Cloud with 1d/1w filters for BTC/ETH
+# - Primary: 6h Ichimoku system (Tenkan/Kijun cross, price vs Cloud)
+# - HTF: 1d trend filter (price above/below 1d Kumo), 1w volume confirmation
+# - Long: Tenkan > Kijun + price > 6h Cloud + price > 1d Cloud + 1w volume > 1.2x 4w MA
+# - Short: Tenkan < Kijun + price < 6h Cloud + price < 1d Cloud + 1w volume > 1.2x 4w MA
+# - Exit: Tenkan/Kijun cross reversal OR price crosses 6h Cloud
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Donchian captures trends, volatility filter avoids false breakouts in ranging markets, volume confirms conviction
-# - Target: 100-180 trades over 4 years (25-45/year) within fee drag limits for 4h timeframe
+# - Works in bull/bear: Ichimoku adapts to volatility, volume confirms conviction, multi-timeframe alignment reduces false signals
 
-name = "4h_1d_donchian_atr_volume_v1"
-timeframe = "4h"
+name = "6h_1d_1w_ichimoku_cloud_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 100:  # Need enough data for Ichimoku calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough data for indicators
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Pre-compute 4h data
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # Pre-compute 6h data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian Channel (20-period)
-    lookback = 20
-    upper_channel = np.full(n, np.nan)
-    lower_channel = np.full(n, np.nan)
+    # Pre-compute 1w data
+    volume_1w = df_1w['volume'].values
     
-    for i in range(lookback - 1, n):
-        if not np.isnan(high_4h[i-lookback+1:i+1]).any() and not np.isnan(low_4h[i-lookback+1:i+1]).any():
-            upper_channel[i] = np.max(high_4h[i-lookback+1:i+1])
-            lower_channel[i] = np.min(low_4h[i-lookback+1:i+1])
+    # Calculate 6h Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    max_high_9 = np.full(n, np.nan)
+    min_low_9 = np.full(n, np.nan)
+    for i in range(period_tenkan - 1, n):
+        if not np.isnan(high[i-period_tenkan+1:i+1]).any() and not np.isnan(low[i-period_tenkan+1:i+1]).any():
+            max_high_9[i] = np.max(high[i-period_tenkan+1:i+1])
+            min_low_9[i] = np.min(low[i-period_tenkan+1:i+1])
+    tenkan = (max_high_9 + min_low_9) / 2
     
-    # Calculate 4h volume moving average (20-period)
-    volume_ma_20_4h = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        if not np.isnan(volume_4h[i-lookback+1:i+1]).any():
-            volume_ma_20_4h[i] = np.mean(volume_4h[i-lookback+1:i+1])
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    max_high_26 = np.full(n, np.nan)
+    min_low_26 = np.full(n, np.nan)
+    for i in range(period_kijun - 1, n):
+        if not np.isnan(high[i-period_kijun+1:i+1]).any() and not np.isnan(low[i-period_kijun+1:i+1]).any():
+            max_high_26[i] = np.max(high[i-period_kijun+1:i+1])
+            min_low_26[i] = np.min(low[i-period_kijun+1:i+1])
+    kijun = (max_high_26 + min_low_26) / 2
     
-    # Calculate 1d ATR(14) for volatility filter
-    atr_lookback = 14
-    tr1 = np.maximum(np.maximum(high_1d - low_1d,
-                               np.abs(np.roll(high_1d, 1) - low_1d)),
-                    np.abs(np.roll(low_1d, 1) - high_1d))
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 plotted 26 periods ahead
+    senkou_a = (tenkan + kijun) / 2
     
-    atr_1d = np.full(len(tr1), np.nan)
-    for i in range(atr_lookback, len(tr1)):
-        if not np.isnan(tr1[i-atr_lookback:i]).any():
-            atr_1d[i] = np.mean(tr1[i-atr_lookback:i])
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 plotted 26 periods ahead
+    period_senkou_b = 52
+    max_high_52 = np.full(n, np.nan)
+    min_low_52 = np.full(n, np.nan)
+    for i in range(period_senkou_b - 1, n):
+        if not np.isnan(high[i-period_senkou_b+1:i+1]).any() and not np.isnan(low[i-period_senkou_b+1:i+1]).any():
+            max_high_52[i] = np.max(high[i-period_senkou_b+1:i+1])
+            min_low_52[i] = np.min(low[i-period_senkou_b+1:i+1])
+    senkou_b = (max_high_52 + min_low_52) / 2
     
-    # Calculate 1d ATR moving average (20-period) for volatility regime
-    atr_ma_20_1d = np.full(len(atr_1d), np.nan)
-    for i in range(19, len(atr_1d)):  # 20-period MA
-        if not np.isnan(atr_1d[i-19:i+1]).any():
-            atr_ma_20_1d[i] = np.mean(atr_1d[i-19:i+1])
+    # Calculate 6h Cloud (Kumo): between Senkou Span A and B
+    # For plotting, these are shifted forward 26 periods, so we use current values
+    # We'll consider price above/below current cloud boundaries
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
     
-    # Align all HTF indicators to 4h timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+    # Calculate 1d Ichimoku Cloud for trend filter
+    period_tenkan_1d = 9
+    period_kijun_1d = 26
+    period_senkou_b_1d = 52
+    
+    max_high_9_1d = np.full(len(high_1d), np.nan)
+    min_low_9_1d = np.full(len(low_1d), np.nan)
+    for i in range(period_tenkan_1d - 1, len(high_1d)):
+        if not np.isnan(high_1d[i-period_tenkan_1d+1:i+1]).any() and not np.isnan(low_1d[i-period_tenkan_1d+1:i+1]).any():
+            max_high_9_1d[i] = np.max(high_1d[i-period_tenkan_1d+1:i+1])
+            min_low_9_1d[i] = np.min(low_1d[i-period_tenkan_1d+1:i+1])
+    tenkan_1d = (max_high_9_1d + min_low_9_1d) / 2
+    
+    max_high_26_1d = np.full(len(high_1d), np.nan)
+    min_low_26_1d = np.full(len(low_1d), np.nan)
+    for i in range(period_kijun_1d - 1, len(high_1d)):
+        if not np.isnan(high_1d[i-period_kijun_1d+1:i+1]).any() and not np.isnan(low_1d[i-period_kijun_1d+1:i+1]).any():
+            max_high_26_1d[i] = np.max(high_1d[i-period_kijun_1d+1:i+1])
+            min_low_26_1d[i] = np.min(low_1d[i-period_kijun_1d+1:i+1])
+    kijun_1d = (max_high_26_1d + min_low_26_1d) / 2
+    
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
+    
+    max_high_52_1d = np.full(len(high_1d), np.nan)
+    min_low_52_1d = np.full(len(low_1d), np.nan)
+    for i in range(period_senkou_b_1d - 1, len(high_1d)):
+        if not np.isnan(high_1d[i-period_senkou_b_1d+1:i+1]).any() and not np.isnan(low_1d[i-period_senkou_b_1d+1:i+1]).any():
+            max_high_52_1d[i] = np.max(high_1d[i-period_senkou_b_1d+1:i+1])
+            min_low_52_1d[i] = np.min(low_1d[i-period_senkou_b_1d+1:i+1])
+    senkou_b_1d = (max_high_52_1d + min_low_52_1d) / 2
+    
+    cloud_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    cloud_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
+    
+    # Calculate 1w volume moving average (4-period) for volume confirmation
+    volume_ma_4_1w = np.full(len(volume_1w), np.nan)
+    for i in range(3, len(volume_1w)):
+        if not np.isnan(volume_1w[i-3:i+1]).any():
+            volume_ma_4_1w[i] = np.mean(volume_1w[i-3:i+1])
+    
+    # Align all HTF indicators to 6h timeframe
+    cloud_top_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_top_1d)
+    cloud_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom_1d)
+    volume_ma_4_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_4_1w)
+    volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):  # Start after warmup period
+    # Start after all indicators are calculated (need 52 periods for Senkou B)
+    start_idx = max(period_tenkan, period_kijun, period_senkou_b) + 26  # +26 for cloud lookahead
+    
+    for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
-            np.isnan(volume_ma_20_4h[i]) or
-            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_20_1d_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(cloud_top_1d_aligned[i]) or np.isnan(cloud_bottom_1d_aligned[i]) or
+            np.isnan(volume_ma_4_1w_aligned[i]) or np.isnan(volume_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR > 0.8 * 20-period MA of ATR (avoid low volatility breakouts)
-        volatility_filter = atr_1d_aligned[i] > 0.8 * atr_ma_20_1d_aligned[i]
+        # Ichimoku signals
+        tenkan_above_kijun = tenkan[i] > kijun[i]
+        tenkan_below_kijun = tenkan[i] < kijun[i]
+        price_above_6h_cloud = close[i] > cloud_top[i]
+        price_below_6h_cloud = close[i] < cloud_bottom[i]
         
-        # Volume confirmation: current volume > 1.2 * 20-period MA of volume
-        volume_confirm = volume_4h[i] > 1.2 * volume_ma_20_4h[i]
+        # 1d trend filter: price relative to 1d cloud
+        price_above_1d_cloud = close[i] > cloud_top_1d_aligned[i]
+        price_below_1d_cloud = close[i] < cloud_bottom_1d_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close_4h[i] > upper_channel[i-1]  # Break above previous upper channel
-        breakout_down = close_4h[i] < lower_channel[i-1]  # Break below previous lower channel
-        
-        # Exit conditions: opposite breakout OR volatility collapse (ATR < 0.5 * MA)
-        exit_long = breakout_down or (atr_1d_aligned[i] < 0.5 * atr_ma_20_1d_aligned[i])
-        exit_short = breakout_up or (atr_1d_aligned[i] < 0.5 * atr_ma_20_1d_aligned[i])
+        # Volume confirmation: current 1w volume > 1.2x 4-period MA
+        volume_confirm = volume_1w_aligned[i] > 1.2 * volume_ma_4_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: bullish breakout + volatility filter + volume confirmation
-            if breakout_up and volatility_filter and volume_confirm:
+            # Long entry: Tenkan > Kijun + price > 6h Cloud + price > 1d Cloud + volume confirmation
+            if (tenkan_above_kijun and price_above_6h_cloud and 
+                price_above_1d_cloud and volume_confirm):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish breakout + volatility filter + volume confirmation
-            elif breakout_down and volatility_filter and volume_confirm:
+            # Short entry: Tenkan < Kijun + price < 6h Cloud + price < 1d Cloud + volume confirmation
+            elif (tenkan_below_kijun and price_below_6h_cloud and 
+                  price_below_1d_cloud and volume_confirm):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: opposite breakout or volatility collapse
+            # Exit: Tenkan/Kijun cross reversal OR price crosses 6h Cloud
             if position == 1:  # Long position
-                if exit_long:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
+                exit_condition = (tenkan_below_kijun or price_below_6h_cloud)
             else:  # position == -1 (Short position)
-                if exit_short:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+                exit_condition = (tenkan_above_kijun or price_above_6h_cloud)
+            
+            if exit_condition:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
