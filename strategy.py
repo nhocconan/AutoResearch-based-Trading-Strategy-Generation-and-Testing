@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 12h trend filter and volume confirmation
-# - Long when Williams %R(14) crosses above -80 (oversold) + price > 12h EMA(50) + volume > 1.5x 20-period 4h volume SMA
-# - Short when Williams %R(14) crosses below -20 (overbought) + price < 12h EMA(50) + volume > 1.5x 20-period 4h volume SMA
-# - Exit: Williams %R crosses above -50 for longs or below -50 for shorts (mean reversion to midpoint)
-# - Position sizing: 0.25 discrete level
-# - Williams %R identifies overextended moves ripe for mean reversion
-# - 12h EMA filter ensures we trade in direction of higher timeframe trend
-# - Volume confirmation avoids low-participation false signals
-# - Works in bull/bear: mean reversion occurs in all regimes, trend filter improves win rate
+# Hypothesis: 1h RSI(2) mean reversion with 4h trend filter and 1d volume spike
+# - Long when RSI(2) < 10 (extreme oversold) + price > 4h EMA(50) (uptrend) + 1d volume > 1.5x 20-period volume SMA
+# - Short when RSI(2) > 90 (extreme overbought) + price < 4h EMA(50) (downtrend) + 1d volume > 1.5x 20-period volume SMA
+# - Exit: RSI(2) crosses back to neutral (40 for long exit, 60 for short exit)
+# - Position sizing: 0.20 discrete level
+# - Works in bull/bear: mean reversion occurs in all regimes, volume filter ensures institutional participation
+# - 4h EMA(50) provides trend context to avoid counter-trend trades in strong moves
 
-name = "4h_12h_williamsr_volume_trend_v1"
-timeframe = "4h"
+name = "1h_4h_1d_rsi2_meanrev_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +21,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -36,57 +35,64 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Williams %R on primary timeframe (4h) - 14 period
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    lookback_wr = 14
-    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0, 
-                          (highest_high - close) / (highest_high - lowest_low) * -100, 
-                          -50.0)
+    # Calculate RSI(2) on 1h
+    rsi_period = 2
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # Calculate 4h volume SMA for confirmation (20-period)
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h EMA(50) for trend filter
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 12h EMA for trend filter (50-period)
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d volume SMA(20) for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Get current 1d volume for confirmation (aligned to 1h)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_confirm = vol_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Williams %R signals
-        wr_current = williams_r[i]
-        wr_prev = williams_r[i-1]
+        # Trend filter: price relative to 4h EMA(50)
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
         
-        # Long: Williams %R crosses above -80 (oversold) + price > 12h EMA + volume confirmation
-        long_entry = (wr_prev <= -80 and wr_current > -80 and 
-                     close[i] > ema_50_12h_aligned[i] and 
-                     vol_confirm)
+        # RSI(2) extreme levels
+        rsi_oversold = rsi[i] < 10
+        rsi_overbought = rsi[i] > 90
         
-        # Short: Williams %R crosses below -20 (overbought) + price < 12h EMA + volume confirmation
-        short_entry = (wr_prev >= -20 and wr_current < -20 and 
-                      close[i] < ema_50_12h_aligned[i] and 
-                      vol_confirm)
+        # RSI(2) exit levels
+        rsi_long_exit = rsi[i] > 40
+        rsi_short_exit = rsi[i] < 60
         
-        # Exit: Williams %R crosses above -50 for longs or below -50 for shorts
-        exit_long = wr_prev < -50 and wr_current >= -50
-        exit_short = wr_prev > -50 and wr_current <= -50
+        # Entry conditions
+        long_entry = rsi_oversold and uptrend and vol_confirm
+        short_entry = rsi_overbought and downtrend and vol_confirm
+        
+        # Exit conditions
+        exit_long = rsi_long_exit
+        exit_short = rsi_short_exit
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif short_entry:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -94,12 +100,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         else:  # position == -1 (Short position) - look for exit
             if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
