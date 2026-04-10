@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and 1w ADX trend filter
-# - Long when price breaks above Donchian upper channel (20-period) with volume > 1.3x 20-period EMA and 1w ADX > 20
-# - Short when price breaks below Donchian lower channel (20-period) with volume > 1.3x 20-period EMA and 1w ADX > 20
-# - Exit: ATR trailing stop (1.5x ATR) or Donchian channel reversion (opposite side)
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and 1w chop regime filter
+# - Long when Williams %R(14) < -80 (oversold) + volume > 1.5x 20-period EMA + CHOP(14) > 61.8 (ranging market)
+# - Short when Williams %R(14) > -20 (overbought) + volume > 1.5x 20-period EMA + CHOP(14) > 61.8 (ranging market)
+# - Exit: Williams %R crosses above -50 (for long) or below -50 (for short)
 # - Position sizing: 0.25 discrete level
-# - Targets ~20-30 trades/year on 4h timeframe. Donchian channels provide clear structure,
-#   volume confirmation validates breakout strength, ADX filter avoids choppy markets.
-#   Works in bull/bear: breakouts work in both regimes, ADX filter avoids false signals in ranging markets.
+# - Targets ~20-30 trades/year on 4h timeframe. Williams %R captures extreme reversals,
+#   volume confirmation validates reversal strength, chop filter ensures mean-reversion environment.
+#   Works in bull/bear: mean reversion works in ranging markets, chop filter avoids trending markets.
 
-name = "4h_1d_1w_donchian_volume_adx_v1"
+name = "4h_1d_1w_williamsr_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,29 +35,20 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Calculate Donchian channels (20-period) from previous 1d
-    # Based on previous day's high, low, close
-    prev_high_1d = df_1d['high'].shift(1).values  # Previous day's high
-    prev_low_1d = df_1d['low'].shift(1).values    # Previous day's low
-    prev_close_1d = df_1d['close'].shift(1).values # Previous day's close
-    
-    # Donchian channels: upper = max(high, prev_close), lower = min(low, prev_close)
-    donchian_upper = np.maximum(prev_high_1d, prev_close_1d)
-    donchian_lower = np.minimum(prev_low_1d, prev_close_1d)
-    
-    # Align Donchian levels to 4h timeframe (using previous day's levels)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
+    # Calculate Williams %R(14) from 1d
+    highest_high_1d = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    close_1d = df_1d['close'].values
+    williams_r = -100 * (highest_high_1d - close_1d) / np.where((highest_high_1d - lowest_low_1d) == 0, 1e-10, (highest_high_1d - lowest_low_1d))
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
     # Calculate 1d volume EMA for confirmation (20-period)
     volume_1d = df_1d['volume'].values
     volume_ema_20_1d = pd.Series(volume_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ema_20_1d)
     
-    # Calculate 1w ADX(14) for trend filter
+    # Calculate 1w Choppiness Index(14) for regime filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -70,98 +61,69 @@ def generate_signals(prices):
     tr3[0] = 0
     tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
     
-    # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(span=14, min_periods=14, adjust=False).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / np.where(tr_14 == 0, 1e-10, tr_14)
-    di_minus = 100 * dm_minus_14 / np.where(tr_14 == 0, 1e-10, tr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1e-10, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Calculate ATR(14) for trailing stop on 4h
-    tr1_4h = high - low
-    tr2_4h = np.abs(high - np.roll(close, 1))
-    tr3_4h = np.abs(low - np.roll(close, 1))
-    tr2_4h[0] = 0
-    tr3_4h[0] = 0
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    atr_4h = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Choppiness Index: CI = 100 * log10(tr_sum_14 / (hh_14 - ll_14)) / log10(14)
+    # Avoid division by zero
+    hh_ll_diff = hh_14 - ll_14
+    choppiness = 100 * np.log10(tr_sum_14 / np.where(hh_ll_diff == 0, 1e-10, hh_ll_diff)) / np.log10(14)
+    choppiness_aligned = align_htf_to_ltf(prices, df_1w, choppiness)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(volume_ema_20_1d_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(atr_4h[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ema_20_1d_aligned[i]) or 
+            np.isnan(choppiness_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume for confirmation (aligned to 4h)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 1.3 * volume_ema_20_1d_aligned[i]
+        vol_confirm = vol_1d_current[i] > 1.5 * volume_ema_20_1d_aligned[i]
         
-        # Trend filter: 1w ADX > 20 indicates trending market
-        trend_filter = adx_aligned[i] > 20
+        # Regime filter: CHOP > 61.8 indicates ranging market (mean revert)
+        regime_filter = choppiness_aligned[i] > 61.8
         
-        # Donchian breakout entry conditions
-        # Long: price breaks above Donchian upper channel
-        # Short: price breaks below Donchian lower channel
-        long_entry = (close[i] > donchian_upper_aligned[i] and 
+        # Williams %R entry conditions
+        # Long: oversold (%R < -80) + volume confirmation + ranging market
+        # Short: overbought (%R > -20) + volume confirmation + ranging market
+        long_entry = (williams_r_aligned[i] < -80 and 
                      vol_confirm and 
-                     trend_filter)
-        short_entry = (close[i] < donchian_lower_aligned[i] and 
+                     regime_filter)
+        short_entry = (williams_r_aligned[i] > -20 and 
                       vol_confirm and 
-                      trend_filter)
+                      regime_filter)
+        
+        # Williams %R exit conditions
+        # Exit long when %R crosses above -50
+        # Exit short when %R crosses below -50
+        exit_long = williams_r_aligned[i] > -50
+        exit_short = williams_r_aligned[i] < -50
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
                 signals[i] = 0.25
-                highest_since_entry = close[i]
-                lowest_since_entry = close[i]
             elif short_entry:
                 position = -1
                 signals[i] = -0.25
-                highest_since_entry = close[i]
-                lowest_since_entry = close[i]
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Update highest/lowest since entry
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, close[i])
-                lowest_since_entry = min(lowest_since_entry, close[i])
-                # ATR trailing stop: exit if price drops 1.5*ATR from high
-                # or Donchian lower channel reversion (mean reversion)
-                if (close[i] < highest_since_entry - 1.5 * atr_4h[i] or  # trailing stop
-                    close[i] < donchian_lower_aligned[i]):         # Donchian lower reversion
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1 (Short position)
-                highest_since_entry = max(highest_since_entry, close[i])
-                lowest_since_entry = min(lowest_since_entry, close[i])
-                # ATR trailing stop: exit if price rises 1.5*ATR from low
-                # or Donchian upper channel reversion (mean reversion)
-                if (close[i] > lowest_since_entry + 1.5 * atr_4h[i] or  # trailing stop
-                    close[i] > donchian_upper_aligned[i]):         # Donchian upper reversion
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+        elif position == 1:  # Long position - look for exit
+            if exit_long:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+        else:  # position == -1 (Short position) - look for exit
+            if exit_short:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
     
     return signals
