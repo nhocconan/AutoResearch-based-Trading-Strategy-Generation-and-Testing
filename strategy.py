@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d volume filter
-# - Primary: 6h price breaking above/below Ichimoku Cloud (Senkou Span A/B) from 1d
-# - HTF: 1d volume confirmation (current volume > 1.3x 20-period MA) to avoid false breakouts
-# - Long: 6h close > Senkou Span A AND Senkou Span B + volume confirmation
-# - Short: 6h close < Senkou Span A AND Senkou Span B + volume confirmation
-# - Exit: Price returns to Cloud midpoint (Senkou Span A/B average)
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and ADX regime filter
+# - Primary: 6h price breaking above R4 or below S4 Camarilla levels from 1d
+# - HTF: 1d volume confirmation (current volume > 1.5x 20-period MA) + ADX > 25 for trend strength
+# - Long: Breakout above R4 + volume confirmation + ADX > 25
+# - Short: Breakout below S4 + volume confirmation + ADX > 25
+# - Exit: Price returns to R3/S3 levels or opposite Camarilla level
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Ichimoku Cloud acts as dynamic support/resistance, volume confirms momentum
-# - Target: 60-120 trades over 4 years (15-30/year) to stay within fee drag limits
+# - Works in bull/bear: Camarilla pivots act as support/resistance, volume confirms momentum, ADX filters ranging markets
+# - Target: 80-160 trades over 4 years (20-40/year) to stay within fee drag limits
 
-name = "6h_1d_ichimoku_breakout_v1"
+name = "6h_1d_camarilla_breakout_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,7 +24,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need 52 periods for Ichimoku (26*2)
+    if len(df_1d) < 30:  # Need enough data for Camarilla and ADX
         return np.zeros(n)
     
     # Pre-compute 6h data
@@ -36,79 +36,99 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Ichimoku Cloud components (1d)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2.0
+    # Calculate Camarilla pivot levels (1d) using previous day's data
+    # Camarilla uses previous day's high, low, close
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2.0
+    # First day will have NaN due to roll, that's expected
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0)
+    # Camarilla levels
+    r4 = pivot + (range_hl * 1.5 / 2)
+    r3 = pivot + (range_hl * 1.25 / 2)
+    s3 = pivot - (range_hl * 1.25 / 2)
+    s4 = pivot - (range_hl * 1.5 / 2)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2.0
+    # Calculate ADX (1d) for trend strength
+    # True Range
+    tr1 = np.abs(np.roll(high_1d, 1) - np.roll(low_1d, 1))
+    tr2 = np.abs(np.roll(high_1d, 1) - np.roll(close_1d, 1))
+    tr3 = np.abs(np.roll(low_1d, 1) - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Cloud midpoint (for exit): (Senkou Span A + Senkou Span B) / 2
-    cloud_midpoint = (senkou_span_a + senkou_span_b) / 2.0
+    # Directional Movement
+    up_move = np.roll(high_1d, 1) - high_1d
+    down_move = low_1d - np.roll(low_1d, 1)
     
-    # Align Ichimoku components to 6h timeframe
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    cloud_midpoint_aligned = align_htf_to_ltf(prices, df_1d, cloud_midpoint)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = pd.Series(tr).ewm(alpha=alpha, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=alpha, adjust=False).mean().values
     
     # Calculate 1d volume moving average (20-period) for volume confirmation
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF indicators to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Ichimoku warmup period
+    for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(cloud_midpoint_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume (aligned to 6h)
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
-        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
-        # Ichimoku breakout conditions
-        # Cloud top is the higher of Senkou Span A and B
-        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        # Cloud bottom is the lower of Senkou Span A and B
-        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        # ADX trend filter: ADX > 25 indicates strong trend
+        trend_confirm = adx_aligned[i] > 25.0
         
-        breakout_long = close_6h[i] > cloud_top
-        breakout_short = close_6h[i] < cloud_bottom
+        # Camarilla breakout conditions
+        breakout_long = close_6h[i] > r4_aligned[i]
+        breakout_short = close_6h[i] < s4_aligned[i]
         
-        # Exit condition: Price returns to cloud midpoint
-        exit_long = close_6h[i] < cloud_midpoint_aligned[i]
-        exit_short = close_6h[i] > cloud_midpoint_aligned[i]
+        # Exit conditions: Price returns to R3/S3 levels
+        exit_long = close_6h[i] < r3_aligned[i]
+        exit_short = close_6h[i] > s3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Breakout above cloud + volume confirmation
-            if breakout_long and volume_confirm:
+            # Long entry: Breakout above R4 + volume confirmation + trend confirmation
+            if breakout_long and volume_confirm and trend_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Breakout below cloud + volume confirmation
-            elif breakout_short and volume_confirm:
+            # Short entry: Breakout below S4 + volume confirmation + trend confirmation
+            elif breakout_short and volume_confirm and trend_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Price returns to cloud midpoint
+            # Exit: Price returns to R3/S3 levels
             if position == 1:  # Long position
                 if exit_long:
                     position = 0
