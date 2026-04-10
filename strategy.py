@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation
-# - Williams Fractals from 6h: bullish fractal breakout = long, bearish fractal breakout = short
+# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Camarilla levels from 1d: L3, H3, L4, H4 as key support/resistance
+# - Breakout above H4 with volume = long, breakdown below L4 with volume = short
 # - 1d ADX(14) > 25 to ensure trending market and avoid chop
-# - Volume confirmation: current 6h volume > 2.0x 20-period average
+# - Volume confirmation: current 4h volume > 1.8x 20-period average
 # - ATR-based trailing stop: exit long when price < highest_high - 2.5*ATR, exit short when price > lowest_low + 2.5*ATR
-# - Designed for 6h timeframe: targets 12-37 trades/year to avoid fee drag
-# - Williams Fractals provide high-probability reversal/continuation signals
+# - Designed for 4h timeframe: targets 20-50 trades/year to avoid fee drag
 # - Works in bull/bear markets: ADX filter ensures we trade with higher timeframe trend
 # - Uses discrete position sizing (0.25) to minimize fee churn
 
-name = "6h_1d_williams_fractal_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -61,37 +61,48 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 6h Williams Fractals
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 1d Camarilla levels
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
+    high_1d_prev[0] = high_1d[0]
+    low_1d_prev[0] = low_1d[0]
+    close_1d_prev[0] = close_1d[0]
     
-    # Williams Fractals: 5-bar pattern
-    # Bullish fractal: low[i-2] > low[i] and low[i-1] > low[i] and low[i+1] > low[i] and low[i+2] > low[i]
-    # Bearish fractal: high[i-2] < high[i] and high[i-1] < high[i] and high[i+1] < high[i] and high[i+2] < high[i]
-    bullish_fractal = np.zeros(n, dtype=bool)
-    bearish_fractal = np.zeros(n, dtype=bool)
+    camarilla_range = high_1d_prev - low_1d_prev
+    camarilla_H4 = close_1d_prev + camarilla_range * 1.1 / 2
+    camarilla_L4 = close_1d_prev - camarilla_range * 1.1 / 2
+    camarilla_H3 = close_1d_prev + camarilla_range * 1.1 / 4
+    camarilla_L3 = close_1d_prev - camarilla_range * 1.1 / 4
     
-    for i in range(2, n-2):
-        if (low_6h[i-2] > low_6h[i] and low_6h[i-1] > low_6h[i] and 
-            low_6h[i+1] > low_6h[i] and low_6h[i+2] > low_6h[i]):
-            bullish_fractal[i] = True
-        if (high_6h[i-2] < high_6h[i] and high_6h[i-1] < high_6h[i] and 
-            high_6h[i+1] < high_6h[i] and high_6h[i+2] < high_6h[i]):
-            bearish_fractal[i] = True
+    # Align Camarilla levels to 4h
+    H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
     
-    # Pre-compute 6h volume confirmation
-    volume_6h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_6h > (2.0 * avg_volume_20)
+    # Pre-compute 4h Donchian channels (20-period) for breakout confirmation
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Pre-compute 6h ATR(14) for trailing stop
-    tr1_6h = high_6h - low_6h
-    tr2_6h = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3_6h = np.abs(low_6h - np.roll(close_6h, 1))
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    tr_6h[0] = tr1_6h[0]
-    atr_14 = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Donchian upper band: highest high over past 20 periods
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower band: lowest low over past 20 periods
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 4h volume confirmation
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (1.8 * avg_volume_20)
+    
+    # Pre-compute 4h ATR(14) for trailing stop
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_14 = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -101,16 +112,18 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(vol_spike[i]) or
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Update highest high for trailing stop
-            if close_6h[i] > highest_high:
-                highest_high = close_6h[i]
-            # Exit: trailing stop hit
-            if close_6h[i] < highest_high - 2.5 * atr_14[i]:
+            if close_4h[i] > highest_high:
+                highest_high = close_4h[i]
+            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
+            if close_4h[i] < highest_high - 2.5 * atr_14[i] or close_4h[i] < highest_20[i]:
                 position = 0
                 highest_high = 0.0
                 signals[i] = 0.0
@@ -119,29 +132,29 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Update lowest low for trailing stop
-            if close_6h[i] < lowest_low:
-                lowest_low = close_6h[i]
-            # Exit: trailing stop hit
-            if close_6h[i] > lowest_low + 2.5 * atr_14[i]:
+            if close_4h[i] < lowest_low:
+                lowest_low = close_4h[i]
+            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
+            if close_4h[i] > lowest_low + 2.5 * atr_14[i] or close_4h[i] > lowest_20[i]:
                 position = 0
                 lowest_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Williams Fractal breakout with trend and volume filters
+            # Look for Camarilla breakout with trend and volume filters
             if vol_spike[i] and adx_aligned[i] > 25:
-                # Breakout long: bullish fractal formed and price breaks above it
-                if bullish_fractal[i] and close_6h[i] > high_6h[i]:
+                # Breakout long: price closes above H4 and above Donchian upper band
+                if close_4h[i] > H4_aligned[i] and close_4h[i] > highest_20[i]:
                     position = 1
-                    entry_price = close_6h[i]
-                    highest_high = close_6h[i]
+                    entry_price = close_4h[i]
+                    highest_high = close_4h[i]
                     signals[i] = 0.25
-                # Breakout short: bearish fractal formed and price breaks below it
-                elif bearish_fractal[i] and close_6h[i] < low_6h[i]:
+                # Breakout short: price closes below L4 and below Donchian lower band
+                elif close_4h[i] < L4_aligned[i] and close_4h[i] < lowest_20[i]:
                     position = -1
-                    entry_price = close_6h[i]
-                    lowest_low = close_6h[i]
+                    entry_price = close_4h[i]
+                    lowest_low = close_4h[i]
                     signals[i] = -0.25
     
     return signals
