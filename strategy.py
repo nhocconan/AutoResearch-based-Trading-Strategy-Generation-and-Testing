@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with daily volume confirmation and ATR regime filter
-# - Long when price breaks above Camarilla H3 level AND daily volume > 1.5x 20-day volume SMA AND ATR(14) > ATR(50)
-# - Short when price breaks below Camarilla L3 level AND daily volume > 1.5x 20-day volume SMA AND ATR(14) > ATR(50)
-# - Exit: price returns to Camarilla H4/L4 levels or opposite breakout with volume confirmation
-# - Position sizing: 0.25 discrete level
+# Hypothesis: 4h Camarilla pivot breakout with 1d ATR regime filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level AND 1d ATR(14) > 1d ATR(50) (expanding daily volatility)
+# - Short when price breaks below Camarilla L3 level AND 1d ATR(14) > 1d ATR(50)
+# - Volume confirmation: 4h volume > 1.5x 20-period 4h volume SMA
+# - Exit: price returns to Camarilla Pivot Point (PP) or opposite breakout with volume
+# - Uses 1d ATR for regime filter to avoid whipsaw in ranging markets
 # - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Combines Camarilla pivot structure (proven ETH edge) with volatility filter to reduce whipsaw in ranging markets
+# - Position sizing: 0.25 discrete level
 
 name = "4h_1d_camarilla_atr_volume_v1"
 timeframe = "4h"
@@ -29,51 +30,62 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate ATR(14) and ATR(50) for volatility regime filter (4h)
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # Calculate 20-period volume SMA for confirmation (4h)
+    # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Load daily HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla pivot levels from daily data
-    # Camarilla: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4, etc.
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    daily_range = daily_high - daily_low
-    camarilla_h4 = daily_close + 1.1 * daily_range * 1.1 / 2
-    camarilla_h3 = daily_close + 1.1 * daily_range * 1.1 / 4
-    camarilla_l3 = daily_close - 1.1 * daily_range * 1.1 / 4
-    camarilla_l4 = daily_close - 1.1 * daily_range * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe (wait for daily bar to close)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Track entry extreme for exit logic
+    # Track entry price for stoploss (optional, using signal=0 for exit)
     entry_price = np.full(n, np.nan)
     
-    for i in range(20, n):  # Start after 20-bar warmup for volume SMA
+    # Load 1d HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d ATR(14) and ATR(50) for volatility regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_50_1d = pd.Series(tr_1d).rolling(window=50, min_periods=50).mean().values
+    
+    # Align 1d ATR to 4h timeframe (completed 1d bar only)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_50_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
+    
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # Camarilla: PP = (H+L+C)/3, Range = H-L
+    # H4 = PP + Range * 1.1/2, L4 = PP - Range * 1.1/2
+    # H3 = PP + Range * 1.1/4, L3 = PP - Range * 1.1/4
+    # H2 = PP + Range * 1.1/6, L2 = PP - Range * 1.1/6
+    # H1 = PP + Range * 1.1/12, L1 = PP - Range * 1.1/12
+    
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    camarilla_pp = typical_price_1d
+    camarilla_h3 = camarilla_pp + (range_1d * 1.1 / 4)
+    camarilla_l3 = camarilla_pp - (range_1d * 1.1 / 4)
+    camarilla_h4 = camarilla_pp + (range_1d * 1.1 / 2)
+    camarilla_l4 = camarilla_pp - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
+        if (np.isnan(atr_14_1d_aligned[i]) or np.isnan(atr_50_1d_aligned[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(camarilla_h3_aligned[i]) or
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_pp_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR(14) > ATR(50) (expanding volatility regime)
-        vol_regime = atr_14[i] > atr_50[i]
+        # Volatility filter: 1d ATR(14) > 1d ATR(50) (expanding daily volatility regime)
+        vol_regime = atr_14_1d_aligned[i] > atr_50_1d_aligned[i]
         
         # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
@@ -94,8 +106,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit on return to H4 level or opposite breakout with volume confirmation
-            exit_condition = (close[i] < camarilla_h4_aligned[i]) or \
+            # Exit on return to Camarilla PP or opposite breakout with volume
+            exit_condition = (close[i] < camarilla_pp_aligned[i]) or \
                            (breakout_down and vol_confirm)
             if exit_condition:
                 position = 0
@@ -104,8 +116,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            # Exit on return to L4 level or opposite breakout with volume confirmation
-            exit_condition = (close[i] > camarilla_l4_aligned[i]) or \
+            # Exit on return to Camarilla PP or opposite breakout with volume
+            exit_condition = (close[i] > camarilla_pp_aligned[i]) or \
                            (breakout_up and vol_confirm)
             if exit_condition:
                 position = 0
