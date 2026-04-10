@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA filter and ATR-based volatility regime
-# - Elder Ray Bull Power = High - EMA(13), Bear Power = Low - EMA(13) on 6h
-# - Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d EMA(50) > EMA(200) AND ATR(14) < ATR(50) (low vol regime)
-# - Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d EMA(50) < EMA(200) AND ATR(14) < ATR(50)
-# - Exit when power reverses or ATR regime shifts to high volatility
-# - 1d EMA filter ensures alignment with higher timeframe trend
-# - ATR regime filter avoids whipsaws in high volatility periods
-# - Target: 12-37 trades/year on 6h (50-150 total over 4 years) to avoid fee drag
+# Hypothesis: 12h Williams Alligator with 1d volume confirmation and ATR-based trailing stop
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs smoothed
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND price > Lips AND 1d volume > 1.5x 20-period average
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND price < Lips AND 1d volume > 1.5x 20-period average
+# - Exit via ATR trailing stop: 3 * ATR(14) from extreme price
+# - Target: 12-37 trades/year on 12h (50-150 total over 4 years) to avoid fee drag
+# - Williams Alligator catches trends early with smoothed SMAs, reducing whipsaw
+# - 1d volume filter ensures participation from higher timeframe
+# - ATR trailing stop manages risk without look-ahead
 
-name = "6h_1d_elderray_power_atr_regime_v1"
-timeframe = "6h"
+name = "12h_1d_williams_alligator_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,61 +24,70 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA(50) and EMA(200)
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Pre-compute 1d volume and its 20-period average for volume spike
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = np.full_like(vol_1d, np.nan, dtype=float)
+    for i in range(19, len(vol_1d)):
+        vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
+    vol_spike_1d = np.full_like(vol_1d, False, dtype=bool)
+    for i in range(20, len(vol_1d)):
+        if not np.isnan(vol_ma_20[i]):
+            vol_spike_1d[i] = vol_1d[i] > 1.5 * vol_ma_20[i]
     
-    # Pre-compute 6h indicators
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    vol_6h = prices['volume'].values
+    # Align 1d volume spike to 12h timeframe
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # Elder Ray: EMA(13) on 6h
-    ema_13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_6h - ema_13_6h  # Bull Power = High - EMA
-    bear_power = low_6h - ema_13_6h   # Bear Power = Low - EMA
+    # Pre-compute ATR(14) for 12h trailing stop
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # ATR(14) and ATR(50) for volatility regime
-    tr1 = np.abs(high_6h[1:] - low_6h[1:])
-    tr2 = np.abs(high_6h[1:] - close_6h[:-1])
-    tr3 = np.abs(low_6h[1:] - close_6h[:-1])
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
-    atr_14 = np.full_like(tr, np.nan, dtype=float)
-    atr_50 = np.full_like(tr, np.nan, dtype=float)
-    
+    atr = np.full_like(tr, np.nan, dtype=float)
     if len(tr) >= 14:
-        atr_14[13] = np.nanmean(tr[1:14])
+        atr[13] = np.nanmean(tr[1:14])
         for i in range(14, len(tr)):
-            if not np.isnan(tr[i]) and not np.isnan(atr_14[i-1]):
-                atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    if len(tr) >= 50:
-        atr_50[49] = np.nanmean(tr[1:50])
-        for i in range(50, len(tr)):
-            if not np.isnan(tr[i]) and not np.isnan(atr_50[i-1]):
-                atr_50[i] = (atr_50[i-1] * 49 + tr[i]) / 50
+    # Pre-compute Williams Alligator on 12h close
+    # Jaw: 13-period SMMA smoothed by 8 periods
+    # Teeth: 8-period SMMA smoothed by 5 periods
+    # Lips: 5-period SMMA smoothed by 3 periods
+    def smma(arr, period):
+        """Smoothed Moving Average (Wilder's smoothing)"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) >= period:
+            result[period-1] = np.nanmean(arr[1:period+1])  # Simple average of first period values
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Align HTF indicators to 6h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    jaw_raw = smma(close, 13)
+    teeth_raw = smma(close, 8)
+    lips_raw = smma(close, 5)
+    
+    jaw = smma(jaw_raw, 8)
+    teeth = smma(teeth_raw, 5)
+    lips = smma(lips_raw, 3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    prev_bull_power = 0
-    prev_bear_power = 0
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup for Alligator
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_spike_1d_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -86,52 +96,59 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volatility regime: low volatility (ATR14 < ATR50)
-        low_vol_regime = atr_14[i] < atr_50[i]
+        close_now = close[i]
+        high_now = high[i]
+        low_now = low[i]
+        jaw_now = jaw[i]
+        teeth_now = teeth[i]
+        lips_now = lips[i]
+        atr_now = atr[i]
+        vol_spike = vol_spike_1d_aligned[i] > 0.5  # Convert back to boolean
         
-        # Power momentum: rising bull power (less negative) or falling bear power (less positive)
-        bull_power_rising = bull_power[i] > bull_power[i-1]
-        bear_power_falling = bear_power[i] < bear_power[i-1]
-        
-        close_now = close_6h[i]
-        ema_50_now = ema_50_aligned[i]
-        ema_200_now = ema_200_aligned[i]
-        bull_power_now = bull_power[i]
-        bear_power_now = bear_power[i]
+        # Williams Alligator alignment conditions
+        bullish_alignment = lips_now > teeth_now and teeth_now > jaw_now
+        bearish_alignment = lips_now < teeth_now and teeth_now < jaw_now
+        price_above_lips = close_now > lips_now
+        price_below_lips = close_now < lips_now
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND rising AND 1d uptrend AND low volatility
-            if (bull_power_now > 0 and bull_power_rising and 
-                ema_50_now > ema_200_now and low_vol_regime):
+            # Long conditions: bullish alignment AND price above lips AND 1d volume spike
+            if (bullish_alignment and price_above_lips and vol_spike):
                 position = 1
+                entry_price = close_now
+                highest_since_entry = close_now
+                lowest_since_entry = close_now
                 signals[i] = 0.25
-            # Short conditions: Bear Power < 0 AND falling AND 1d downtrend AND low volatility
-            elif (bear_power_now < 0 and bear_power_falling and 
-                  ema_50_now < ema_200_now and low_vol_regime):
+            # Short conditions: bearish alignment AND price below lips AND 1d volume spike
+            elif (bearish_alignment and price_below_lips and vol_spike):
                 position = -1
+                entry_price = close_now
+                highest_since_entry = close_now
+                lowest_since_entry = close_now
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit conditions: power reverses or volatility regime shifts to high
-            exit_long = (position == 1 and 
-                        (bull_power_now <= 0 or not bull_power_rising or 
-                         ema_50_now <= ema_200_now or not low_vol_regime))
-            exit_short = (position == -1 and 
-                         (bear_power_now >= 0 or not bear_power_falling or 
-                          ema_50_now >= ema_200_now or not low_vol_regime))
-            
-            if exit_long or exit_short:
-                position = 0
-                signals[i] = 0.0
-            else:
-                if position == 1:
+        else:  # Have position - update extremes and check trailing stop
+            # Update highest/lowest since entry
+            if position == 1:
+                highest_since_entry = max(highest_since_entry, high_now)
+                lowest_since_entry = low_now  # Reset low for long (we trail from high)
+                
+                # ATR trailing stop: exit if price drops 3*ATR from highest since entry
+                if close_now < highest_since_entry - 3.0 * atr_now:
+                    position = 0
+                    signals[i] = 0.0
+                else:
                     signals[i] = 0.25
+            else:  # position == -1
+                lowest_since_entry = min(lowest_since_entry, low_now)
+                highest_since_entry = high_now  # Reset high for short (we trail from low)
+                
+                # ATR trailing stop: exit if price rises 3*ATR from lowest since entry
+                if close_now > lowest_since_entry + 3.0 * atr_now:
+                    position = 0
+                    signals[i] = 0.0
                 else:
                     signals[i] = -0.25
-        
-        # Store current power for next iteration
-        prev_bull_power = bull_power_now
-        prev_bear_power = bear_power_now
     
     return signals
