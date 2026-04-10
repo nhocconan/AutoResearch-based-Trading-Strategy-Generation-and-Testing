@@ -3,26 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR stoploss
-# - Long when price breaks above H3 level AND 1d volume > 1.5x 20-period volume SMA
-# - Short when price breaks below L3 level AND 1d volume > 1.5x 20-period volume SMA
-# - Exit: ATR-based trailing stop (2.5x ATR from extreme) or Camarilla midpoint reversion
-# - Uses Camarilla pivots from daily timeframe for structure, volume for confirmation, ATR for risk
-# - Position sizing: 0.25 discrete level to limit drawdown in bear markets
-# - Target: 12-30 trades/year on 12h timeframe to stay within fee drag limits
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and ATR-based stoploss
+# - Long when price breaks above 20-period Donchian high AND 12h volume > 1.5x 20-period volume SMA
+# - Short when price breaks below 20-period Donchian low AND 12h volume > 1.5x 20-period volume SMA
+# - Exit: ATR-based trailing stop (3x ATR from extreme) or Donchian midpoint reversion
+# - Position sizing: 0.30 discrete level to balance return and drawdown
+# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Uses Donchian channels for structure, volume for confirmation, ATR for risk management
 
-name = "12h_1d_camarilla_volume_atr_v1"
-timeframe = "12h"
+name = "4h_donchian_volume_atr_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,6 +34,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Calculate 20-period Donchian channels
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
     # Calculate ATR(14) for stoploss
     atr_period = 14
     tr1 = high[1:] - low[1:]
@@ -42,62 +48,33 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate 1d volume SMA for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Calculate 12h volume SMA for confirmation
+    volume_12h = df_12h['volume'].values
+    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
     
     # Track extreme prices for trailing stop
     long_extreme = np.full(n, np.nan)
     short_extreme = np.full(n, np.nan)
     
-    for i in range(30, n):
+    for i in range(donchian_period, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]) or
+            np.isnan(atr[i]) or np.isnan(volume_sma_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels from previous 1d bar (need 2 prior 1d bars for H3/L3)
-        # Get the index of the completed 1d bar for current 12h bar
-        idx_1d_completed = (i // 2) - 1  # Each 1d bar = 2 12h bars, -1 for completed bar
-        
-        if idx_1d_completed < 1:
-            signals[i] = 0.0
-            continue
-            
-        # Get high, low, close from completed 1d bar (2 bars back)
-        idx_1d_prev = idx_1d_completed - 1
-        if idx_1d_prev < 0 or idx_1d_prev >= len(df_1d):
-            signals[i] = 0.0
-            continue
-            
-        h1 = df_1d['high'].iloc[idx_1d_prev]
-        l1 = df_1d['low'].iloc[idx_1d_prev]
-        c1 = df_1d['close'].iloc[idx_1d_prev]
-        
-        # Calculate Camarilla levels
-        rang = h1 - l1
-        if rang <= 0:
-            signals[i] = 0.0
-            continue
-            
-        # Camarilla levels
-        h3 = c1 + (rang * 1.1 / 4)
-        l3 = c1 - (rang * 1.1 / 4)
-        h4 = c1 + (rang * 1.1 / 2)
-        l4 = c1 - (rang * 1.1 / 2)
-        cam_mid = (h3 + l3) / 2.0
-        
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        idx_1d_vol = idx_1d_completed
-        if idx_1d_vol < 0 or idx_1d_vol >= len(volume_1d):
-            vol_confirm = False
+        # Volume confirmation: 12h volume > 1.5x 20-period volume SMA
+        # Get 12h volume for current 4h bar (each 12h bar = 48 4h bars)
+        idx_12h = i // 48
+        if idx_12h < len(volume_12h):
+            vol_confirm = volume_12h[idx_12h] > 1.5 * volume_sma_20_12h_aligned[i]
         else:
-            vol_confirm = volume_1d[idx_1d_vol] > 1.5 * volume_sma_20_1d_aligned[i]
+            vol_confirm = False
         
-        # Camarilla breakout signals
-        breakout_up = close[i] > h3  # Break above H3
-        breakout_down = close[i] < l3  # Break below L3
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
+        breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
         
         # Update extremes for trailing stop
         if position == 1:  # Long position
@@ -119,21 +96,21 @@ def generate_signals(prices):
         stop_short = False
         
         if position == 1 and not np.isnan(long_extreme[i]):
-            stop_long = close[i] < long_extreme[i] - 2.5 * atr[i]
+            stop_long = close[i] < long_extreme[i] - 3.0 * atr[i]
         elif position == -1 and not np.isnan(short_extreme[i]):
-            stop_short = close[i] > short_extreme[i] + 2.5 * atr[i]
+            stop_short = close[i] > short_extreme[i] + 3.0 * atr[i]
         
-        # Camarilla midpoint reversion exit
-        exit_long = close[i] < cam_mid
-        exit_short = close[i] > cam_mid
+        # Donchian midpoint reversion exit
+        exit_long = close[i] < donchian_mid[i]
+        exit_short = close[i] > donchian_mid[i]
         
         if position == 0:  # Flat - look for entry
             if breakout_up and vol_confirm:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif breakout_down and vol_confirm:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -142,13 +119,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 long_extreme[i] = np.nan  # Reset extreme
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         else:  # position == -1 (Short position) - look for exit
             if stop_short or exit_short:
                 position = 0
                 signals[i] = 0.0
                 short_extreme[i] = np.nan  # Reset extreme
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
