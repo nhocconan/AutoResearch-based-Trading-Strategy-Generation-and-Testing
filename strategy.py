@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 12h trend filter
-# - Long when price breaks above Camarilla H3 level with volume > 2.0x 20-bar average AND 12h close > 12h EMA50
-# - Short when price breaks below Camarilla L3 level with volume > 2.0x 20-bar average AND 12h close < 12h EMA50
-# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.7x average (strong momentum loss)
-# - Uses 12h trend filter to avoid counter-trend trades (works in both bull and bear)
-# - Higher volume threshold (2.0x) reduces trades to target 20-40/year, minimizing fee drag
-# - Focus on BTC/ETH; discrete position sizing (0.25) reduces churn
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level with volume > 1.5x 20-bar average AND 4h close > 4h EMA50
+# - Short when price breaks below Camarilla L3 level with volume > 1.5x 20-bar average AND 4h close < 4h EMA50
+# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.7x average
+# - Session filter: only trade 08:00-20:00 UTC to avoid low-liquidity hours
+# - Uses 4h trend filter to avoid counter-trend trades
+# - Moderate volume threshold (1.5x) targets 15-35 trades/year
+# - Focus on BTC/ETH; avoids SOL-only bias
 
-name = "4h_12h_camarilla_breakout_volume_trend_v5"
-timeframe = "4h"
+name = "1h_4h_camarilla_breakout_volume_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,57 +22,74 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Pre-compute volume confirmation: > 2.0x 20-period average (tighter to reduce trades)
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
-    # Pre-compute volume filter: < 0.7x average volume for exit (strong momentum loss)
+    # Pre-compute volume filter: < 0.7x average volume for exit (loss of momentum)
     vol_weak = prices['volume'] < (0.7 * volume_20_avg)
+    
+    # Pre-compute session filter (08:00-20:00 UTC)
+    # open_time is already datetime64[ns], access via index
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute aligned 12h data
-    h_12h = df_12h['high'].values
-    l_12h = df_12h['low'].values
-    c_12h = df_12h['close'].values
+    # Pre-compute aligned 4h data properly
+    h_4h = df_4h['high'].values
+    l_4h = df_4h['low'].values
+    c_4h = df_4h['close'].values
     
-    h_12h_aligned = align_htf_to_ltf(prices, df_12h, h_12h)
-    l_12h_aligned = align_htf_to_ltf(prices, df_12h, l_12h)
-    c_12h_aligned = align_htf_to_ltf(prices, df_12h, c_12h)
+    # Align them to 1h timeframe
+    h_4h_aligned = align_htf_to_ltf(prices, df_4h, h_4h)
+    l_4h_aligned = align_htf_to_ltf(prices, df_4h, l_4h)
+    c_4h_aligned = align_htf_to_ltf(prices, df_4h, c_4h)
     
-    # Pre-compute 12h EMA(50) for trend filter
-    ema50_12h = pd.Series(c_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Pre-compute 4h EMA(50) for trend filter
+    ema50_4h = pd.Series(c_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     for i in range(20, n):
+        # Skip if outside trading session
+        if not in_session.iloc[i]:
+            # Hold current position or flat outside session
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.20
+            else:
+                signals[i] = -0.20
+            continue
+        
         # Skip if any required data is invalid
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_20_avg[i]) or 
-            np.isnan(h_12h_aligned[i]) or np.isnan(l_12h_aligned[i]) or np.isnan(c_12h_aligned[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_20_avg[i]) or 
+            np.isnan(h_4h_aligned[i]) or np.isnan(l_4h_aligned[i]) or np.isnan(c_4h_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
             continue
         
-        # Get previous completed 12h bar values
-        # Since aligned data stretches each 12h value to 4h bars (3x), we look back 3 bars for previous 12h
-        if i >= 3:
-            lookback_idx = i - 3  # Previous completed 12h bar
+        # Get previous completed 4h bar values
+        # Since 1h timeframe, there are 4 bars per 4h bar
+        if i >= 4:  # Need at least 4 1h bars to get previous 4h bar's data
+            # Get index of previous completed 4h bar
+            # Look back to the previous multiple of 4 to get completed 4h bar
+            lookback_idx = i - ((i % 4) + 4) if i % 4 != 0 else i - 4
             
-            if lookback_idx >= 0 and not (np.isnan(h_12h_aligned[lookback_idx]) or 
-                                         np.isnan(l_12h_aligned[lookback_idx]) or 
-                                         np.isnan(c_12h_aligned[lookback_idx])):
-                ph = h_12h_aligned[lookback_idx]  # Previous 12h high
-                pl = l_12h_aligned[lookback_idx]  # Previous 12h low
-                pc = c_12h_aligned[lookback_idx]  # Previous 12h close
+            if lookback_idx >= 0:
+                ph = h_4h_aligned[lookback_idx]  # Previous completed 4h bar high
+                pl = l_4h_aligned[lookback_idx]  # Previous completed 4h bar low
+                pc = c_4h_aligned[lookback_idx]  # Previous completed 4h bar close
                 
                 # Calculate Camarilla levels
                 range_val = ph - pl
@@ -82,52 +100,52 @@ def generate_signals(prices):
                     camarilla_l4 = pc - (range_val * 1.1 / 2)
                     
                     if position == 0:  # Flat - look for new breakout entries
-                        # Long breakout: price > Camarilla H3 with volume spike AND 12h uptrend
+                        # Long breakout: price > Camarilla H3 with volume spike AND 4h uptrend
                         if (prices['close'].iloc[i] > camarilla_h3 and 
                             vol_spike.iloc[i] and 
-                            prices['close'].iloc[i] > ema50_12h_aligned[i]):
+                            prices['close'].iloc[i] > ema50_4h_aligned[i]):
                             position = 1
-                            signals[i] = 0.25
-                        # Short breakdown: price < Camarilla L3 with volume spike AND 12h downtrend
+                            signals[i] = 0.20
+                        # Short breakdown: price < Camarilla L3 with volume spike AND 4h downtrend
                         elif (prices['close'].iloc[i] < camarilla_l3 and 
                               vol_spike.iloc[i] and 
-                              prices['close'].iloc[i] < ema50_12h_aligned[i]):
+                              prices['close'].iloc[i] < ema50_4h_aligned[i]):
                             position = -1
-                            signals[i] = -0.25
+                            signals[i] = -0.20
                     else:  # Have position - look for exit
                         # Exit conditions:
                         # 1. Price retreats to Camarilla H4/L4 levels
-                        # 2. Volume drops below 0.7x average (strong momentum loss)
+                        # 2. Volume drops below 0.7x average (loss of momentum)
                         if position == 1:  # Long position
                             if (prices['close'].iloc[i] < camarilla_h4 or 
                                 vol_weak.iloc[i]):
                                 position = 0
                                 signals[i] = 0.0
                             else:
-                                signals[i] = 0.25  # Hold long
+                                signals[i] = 0.20  # Hold long
                         elif position == -1:  # Short position
                             if (prices['close'].iloc[i] > camarilla_l4 or 
                                 vol_weak.iloc[i]):
                                 position = 0
                                 signals[i] = 0.0
                             else:
-                                signals[i] = -0.25  # Hold short
+                                signals[i] = -0.20  # Hold short
                 else:
                     # Hold current position
                     if position == 0:
                         signals[i] = 0.0
                     elif position == 1:
-                        signals[i] = 0.25
+                        signals[i] = 0.20
                     else:
-                        signals[i] = -0.25
+                        signals[i] = -0.20
             else:
                 # Hold current position
                 if position == 0:
                     signals[i] = 0.0
                 elif position == 1:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
         else:
             # Not enough data yet, hold flat
             signals[i] = 0.0
