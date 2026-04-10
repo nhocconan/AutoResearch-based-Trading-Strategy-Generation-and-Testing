@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + volume spike + ATR stoploss
-# - 4h Donchian channel: upper=20-period high, lower=20-period low
-# - Volume confirmation: current volume > 1.8x 20-period average
-# - Long: price breaks above Donchian upper AND volume spike
-# - Short: price breaks below Donchian lower AND volume spike
-# - Exit: ATR-based trailing stop (3*ATR from extreme) OR opposite Donchian break
-# - Target: 20-50 trades/year on 4h (80-200 total over 4 years) to avoid fee drag
-# - Works in bull/bear: breakouts capture trends, volume filters false signals, ATR stops manage risk
+# Hypothesis: 6h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - 1d Camarilla pivot levels (R3, R4, S3, S4) on 6h chart
+# - Long: price breaks above R4 with 1w bullish trend (price > 1w EMA200) and volume > 1.5x 20-period average
+# - Short: price breaks below S4 with 1w bearish trend (price < 1w EMA200) and volume > 1.5x 20-period average
+# - Exit: price retreats to R3 (for longs) or S3 (for shorts) OR volume drops below average
+# - Target: 12-30 trades/year on 6h (50-120 total over 4 years) to avoid fee drag
+# - Camarilla pivots work well in ranging markets; breakouts at R4/S4 with trend/volume filter capture strong moves
 
-name = "4h_donchian_volume_atr_stop_v1"
-timeframe = "4h"
+name = "6h_1w_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,37 +20,47 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Pre-compute indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Pre-compute 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3 = pivot + range_1d * 1.1 / 2.0
+    r4 = pivot + range_1d * 1.1
+    s3 = pivot - range_1d * 1.1 / 2.0
+    s4 = pivot - range_1d * 1.1
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Pre-compute 1w EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Pre-compute 6h volume average (20-period)
     volume = prices['volume'].values
-    
-    # Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume MA(20) for spike detection
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR(14) for stoploss calculation
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr2[0] = tr1[0]  # First bar: no previous close
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    long_stop = 0.0   # Trailing stop for longs
-    short_stop = 0.0  # Trailing stop for shorts
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(200, n):  # Start after warmup for 1w EMA200
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(trend_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -60,51 +69,46 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition: current volume > 1.8x 20-period average
-        volume_spike = volume[i] > 1.8 * vol_ma_20[i]
+        # Volume spike condition: current volume > 1.5x 20-period average
+        volume_spike = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > highest_high[i-1]  # Break above previous period's high
-        breakout_down = close[i] < lowest_low[i-1]   # Break below previous period's low
+        # Price levels
+        close_price = prices['close'].values[i]
+        
+        # Breakout conditions
+        breakout_long = close_price > r4_aligned[i]
+        breakout_short = close_price < s4_aligned[i]
+        
+        # 1w trend filter: price > EMA200 = bullish, price < EMA200 = bearish
+        bullish_trend = close_price > trend_aligned[i]
+        bearish_trend = close_price < trend_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long: Donchian breakout up + volume spike
-            if breakout_up and volume_spike:
+            # Long conditions: break above R4 AND bullish trend AND volume spike
+            if breakout_long and bullish_trend and volume_spike:
                 position = 1
-                long_stop = close[i] - 3.0 * atr[i]  # Initial stop
                 signals[i] = 0.25
-            # Short: Donchian breakout down + volume spike
-            elif breakout_down and volume_spike:
+            # Short conditions: break below S4 AND bearish trend AND volume spike
+            elif breakout_short and bearish_trend and volume_spike:
                 position = -1
-                short_stop = close[i] + 3.0 * atr[i]  # Initial stop
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        elif position == 1:  # Long position - manage exit
-            # Update trailing stop: move up as price makes new highs
-            long_stop = max(long_stop, close[i] - 3.0 * atr[i])
+        else:  # Have position - look for exit
+            # Exit conditions: price retreats to R3/S3 OR volume drops below average
+            vol_exhaustion = volume[i] < vol_ma_20[i]
+            exit_long = close_price < r3_aligned[i]
+            exit_short = close_price > s3_aligned[i]
+            exit_condition = (position == 1 and (exit_long or vol_exhaustion)) or \
+                            (position == -1 and (exit_short or vol_exhaustion))
             
-            # Exit conditions: stop hit OR Donchian breakout down
-            stop_hit = close[i] <= long_stop
-            breakout_exit = close[i] < lowest_low[i-1]  # Opposite Donchian break
-            
-            if stop_hit or breakout_exit:
+            if exit_condition:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
-        elif position == -1:  # Short position - manage exit
-            # Update trailing stop: move down as price makes new lows
-            short_stop = min(short_stop, close[i] + 3.0 * atr[i])
-            
-            # Exit conditions: stop hit OR Donchian breakout up
-            stop_hit = close[i] >= short_stop
-            breakout_exit = close[i] > highest_high[i-1]  # Opposite Donchian break
-            
-            if stop_hit or breakout_exit:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = -0.25
+                if position == 1:
+                    signals[i] = 0.25
+                else:
+                    signals[i] = -0.25
     
     return signals
