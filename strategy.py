@@ -3,119 +3,124 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-# - Long when price breaks above H3 pivot level AND 4h EMA(21) > EMA(50) AND volume > 1.5x 20-bar avg
-# - Short when price breaks below L3 pivot level AND 4h EMA(21) < EMA(50) AND volume > 1.5x 20-bar avg
-# - Exit when price retests the pivot point (PP) level
-# - Uses discrete position sizing (0.20) to minimize fee churn
-# - Camarilla pivots provide precise intraday support/resistance levels
-# - 4h EMA filter ensures alignment with higher timeframe trend
-# - Volume confirmation avoids low-liquidity false signals
-# - Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
-# - Works in both bull and bear markets: breakouts work in trends, mean reversion in ranges
+# Hypothesis: 6h Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
+# - Long when BB width < 20th percentile (squeeze) AND price breaks above upper band 
+#   AND 1w EMA(50) > EMA(200) (bullish trend) AND 6h volume > 2.0x 20-bar avg
+# - Short when BB width < 20th percentile (squeeze) AND price breaks below lower band
+#   AND 1w EMA(50) < EMA(200) (bearish trend) AND 6h volume > 2.0x 20-bar avg
+# - Exit when price returns to middle band (mean reversion to equilibrium)
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Bollinger squeeze captures low volatility pre-breakout; 1w EMA filter ensures alignment with long-term trend
+# - Volume confirmation avoids low-liquidity false breakouts
+# - Works in both bull and bear markets: breakouts in expansion phases, mean reversion in ranges
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "1h_4h_camarilla_breakout_volume_trend_v1"
-timeframe = "1h"
+name = "6h_1w_bb_squeeze_breakout_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h EMA trend filter: EMA(21) vs EMA(50)
-    close_4h = df_4h['close'].values
-    ema_21 = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_50 = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_bullish = ema_21 > ema_50
-    ema_bearish = ema_21 < ema_50
+    # Pre-compute 1w EMA trend filter: EMA(50) vs EMA(200)
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_200 = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_bullish = ema_50 > ema_200
+    ema_bearish = ema_50 < ema_200
     
-    # Align 4h EMA trend to 1h timeframe
-    ema_bullish_aligned = align_htf_to_ltf(prices, df_4h, ema_bullish)
-    ema_bearish_aligned = align_htf_to_ltf(prices, df_4h, ema_bearish)
+    # Align 1w EMA trend to 6h timeframe
+    ema_bullish_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish)
+    ema_bearish_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish)
     
-    # Pre-compute daily Camarilla pivot levels (using previous day's OHLC)
-    # We need to get daily data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Pre-compute Bollinger Bands (20, 2.0) on 6h data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Middle band = SMA(20)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla pivot points
-    pp = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    h3 = pp + (range_1d * 1.1 / 4)
-    l3 = pp - (range_1d * 1.1 / 4)
-    h4 = pp + (range_1d * 1.1 / 2)
-    l4 = pp - (range_1d * 1.1 / 2)
+    # Standard deviation
+    std_dev = pd.Series(close).rolling(window=20, min_periods=20).std().values
     
-    # Align daily Camarilla levels to 1h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Upper and lower bands
+    upper_band = sma_20 + (2.0 * std_dev)
+    lower_band = sma_20 - (2.0 * std_dev)
     
-    # Pre-compute 1h volume confirmation: > 1.5x 20-period average
+    # Bollinger Band Width = (Upper - Lower) / Middle
+    bb_width = (upper_band - lower_band) / sma_20
+    # Handle division by zero (when sma_20 == 0)
+    bb_width = np.where(sma_20 == 0, 0, bb_width)
+    
+    # BB width percentile (20-period lookback for squeeze detection)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values
+    
+    # Squeeze condition: BB width < 20th percentile
+    squeeze = bb_width_percentile < 0.20
+    
+    # Breakout conditions
+    breakout_up = close > upper_band
+    breakout_down = close < lower_band
+    
+    # Pre-compute 6h volume confirmation: > 2.0x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * volume_20_avg)
-    
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_spike = volume > (2.0 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
-        # Skip if any required data is invalid or outside session
+    for i in range(50, n):  # Start after warmup
+        # Skip if any required data is invalid
         if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pp_aligned[i]) or
-            np.isnan(vol_spike[i]) or not in_session[i]):
+            np.isnan(squeeze[i]) or np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 4h bullish trend AND volume spike
-            if (prices['close'].iloc[i] > h3_aligned[i] and 
+        if position == 0:  # Flat - look for new squeeze breakout entries
+            # Long when squeeze AND breakout up AND 1w bullish trend AND volume spike
+            if (squeeze[i] and 
+                breakout_up[i] and 
                 ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short when price breaks below L3 AND 4h bearish trend AND volume spike
-            elif (prices['close'].iloc[i] < l3_aligned[i] and 
+                signals[i] = 0.25
+            # Short when squeeze AND breakout down AND 1w bearish trend AND volume spike
+            elif (squeeze[i] and 
+                  breakout_down[i] and 
                   ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit when price retests pivot point
-            # Exit when price returns to pivot point (PP) level
-            exit_long = position == 1 and prices['close'].iloc[i] <= pp_aligned[i]
-            exit_short = position == -1 and prices['close'].iloc[i] >= pp_aligned[i]
+        else:  # Have position - look for exit to middle band (mean reversion)
+            # Exit when price returns to middle band (SMA20)
+            exit_signal = (position == 1 and close[i] <= sma_20[i]) or \
+                          (position == -1 and close[i] >= sma_20[i])
             
-            if exit_long or exit_short:
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
                 if position == 1:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
