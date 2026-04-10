@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and 1w trend filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.5x 20-period average AND 1w close > 1w EMA50 (uptrend)
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.5x 20-period average AND 1w close < 1w EMA50 (downtrend)
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike and 1w EMA50 trend filter
+# - Long when price breaks above H3 AND 1d volume > 1.5x 20-period average AND 1w close > 1w EMA50
+# - Short when price breaks below L3 AND 1d volume > 1.5x 20-period average AND 1w close < 1w EMA50
 # - Exit when price returns to Camarilla pivot point (mean reversion)
-# - Uses discrete position sizing 0.25 for optimal risk/return
-# - Camarilla levels provide institutional support/resistance
-# - Volume confirmation validates breakout strength
-# - Weekly EMA filter ensures alignment with higher timeframe trend
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Discrete position sizing 0.25 to minimize fee churn
+# - Target: 19-50 trades/year on 4h (75-200 total over 4 years)
+# - Works in bull/bear: volume confirms breakout strength, weekly EMA filters counter-trend noise
 
 name = "4h_1d_1w_camarilla_breakout_v1"
 timeframe = "4h"
@@ -28,12 +26,12 @@ def generate_signals(prices):
     if len(df_1d) < 30 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 4h Camarilla pivot levels from previous day
+    # Pre-compute 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point and support/resistance levels
+    # Pivot point and range
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
