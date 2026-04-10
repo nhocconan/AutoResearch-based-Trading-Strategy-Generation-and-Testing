@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator trend + 1d volume spike + chop regime filter
-# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
-# - Trend up: Lips > Teeth > Jaw; Trend down: Lips < Teeth < Jaw
-# - Enter long in Alligator uptrend + volume spike + chop < 61.8 (trending regime)
-# - Enter short in Alligator downtrend + volume spike + chop < 61.8
-# - Exit when Alligator reverses (Lips crosses Teeth) or chop > 61.8 (range regime)
-# - Uses discrete position sizing (0.25) to balance return and fee drag
-# - Alligator catches sustained trends; volume confirms institutional participation
-# - Chop filter avoids whipsaws in ranging markets (critical for 2025 bear/range)
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and ATR-based volatility filter
+# - Long when price breaks above Donchian(20) high AND 12h EMA(21) > EMA(50) AND ATR(14) < 1.5 * ATR(50) (low volatility regime)
+# - Short when price breaks below Donchian(20) low AND 12h EMA(21) < EMA(50) AND ATR(14) < 1.5 * ATR(50)
+# - Exit when price crosses the Donchian(20) midline (10-period average of high/low)
+# - Uses discrete position sizing (0.25) to balance return and drawdown
+# - Donchian breakouts capture momentum; 12h EMA filter ensures alignment with higher timeframe trend
+# - ATR volatility filter avoids high-volatility choppy markets where breakouts fail
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Works in both bull and bear markets: trend filter prevents counter-trend trades, volatility filter adapts to regime
 
-name = "12h_1d_alligator_volume_chop_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_ema_atr_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,58 +23,52 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Pre-compute Williams Alligator on 12h data
-    median_price = (prices['high'].values + prices['low'].values) / 2.0
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3)
+    # Pre-compute 12h EMA trend filter: EMA(21) vs EMA(50)
+    close_12h = df_12h['close'].values
+    ema_21_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_bullish_12h = ema_21_12h > ema_50_12h
+    ema_bearish_12h = ema_21_12h < ema_50_12h
     
-    # Alligator trends: Lips > Teeth > Jaw (up), Lips < Teeth < Jaw (down)
-    alligator_up = (lips > teeth) & (teeth > jaw)
-    alligator_down = (lips < teeth) & (teeth < jaw)
+    # Pre-compute ATR volatility filter: ATR(14) < 1.5 * ATR(50) (low volatility regime)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    # Pre-compute 1d volume confirmation: > 1.8x 20-period average
-    volume_1d = df_1d['volume'].values
-    volume_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.8 * volume_20_avg_1d)
+    # True Range calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # First bar
+    tr2[0] = np.abs(high[0] - close[0])  # First bar
+    tr3[0] = np.abs(low[0] - close[0])  # First bar
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align HTF indicators to 12h timeframe
-    alligator_up_aligned = align_htf_to_ltf(prices, df_1d, alligator_up.values if hasattr(alligator_up, 'values') else alligator_up)
-    alligator_down_aligned = align_htf_to_ltf(prices, df_1d, alligator_down.values if hasattr(alligator_down, 'values') else alligator_down)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_50 = pd.Series(tr).ewm(span=50, min_periods=50, adjust=False).mean().values
+    low_volatility = atr_14 < (1.5 * atr_50)
     
-    # Pre-compute Choppiness Index on 12h data (regime filter)
-    atr_period = 14
-    high_low = prices['high'].values - prices['low'].values
-    high_close = np.abs(prices['high'].values - np.roll(prices['close'].values, 1))
-    low_close = np.abs(prices['low'].values - np.roll(prices['close'].values, 1))
-    high_close[0] = high_low[0]
-    low_close[0] = high_low[0]
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    # Pre-compute Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    hh = pd.Series(prices['high'].values).rolling(window=atr_period, min_periods=atr_period).max().values
-    ll = pd.Series(prices['low'].values).rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    # Avoid division by zero
-    sum_atr = pd.Series(atr).rolling(window=atr_period, min_periods=atr_period).sum().values
-    range_hl = hh - ll
-    chop = np.where(range_hl != 0, 100 * np.log10(sum_atr / range_hl) / np.log10(atr_period), 50)
-    
-    # Chop regime: < 61.8 = trending (good for Alligator), > 61.8 = ranging (avoid)
-    chop_trending = chop < 61.8
+    # Align HTF indicators to 4h timeframe
+    ema_bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_bullish_12h)
+    ema_bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_bearish_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(alligator_up_aligned[i]) or np.isnan(alligator_down_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_trending[i])):
+        if (np.isnan(ema_bullish_12h_aligned[i]) or np.isnan(ema_bearish_12h_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(donchian_mid[i]) or np.isnan(low_volatility[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -85,28 +78,27 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new Alligator entries
-            # Long when Alligator uptrend + volume spike + chop trending
-            if (alligator_up_aligned[i] and 
-                vol_spike_1d_aligned[i] and 
-                chop_trending[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above Donchian high AND 12h bullish trend AND low volatility
+            if (close[i] > donchian_high[i] and 
+                ema_bullish_12h_aligned[i] and 
+                low_volatility[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when Alligator downtrend + volume spike + chop trending
-            elif (alligator_down_aligned[i] and 
-                  vol_spike_1d_aligned[i] and 
-                  chop_trending[i]):
+            # Short when price breaks below Donchian low AND 12h bearish trend AND low volatility
+            elif (close[i] < donchian_low[i] and 
+                  ema_bearish_12h_aligned[i] and 
+                  low_volatility[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit conditions
-            # Exit when Alligator reverses OR chop enters ranging regime
-            alligator_reverse = (position == 1 and not alligator_up_aligned[i]) or \
-                               (position == -1 and not alligator_down_aligned[i])
-            chop_range = not chop_trending[i]
+        else:  # Have position - look for exit at Donchian midline
+            # Exit when price crosses the Donchian midline
+            exit_signal = (position == 1 and close[i] < donchian_mid[i]) or \
+                          (position == -1 and close[i] > donchian_mid[i])
             
-            if alligator_reverse or chop_range:
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
