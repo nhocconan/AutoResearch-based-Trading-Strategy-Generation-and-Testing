@@ -3,95 +3,68 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX trend filter
-# - Long when price breaks above Donchian upper band (20) AND 1d volume > 1.3x 20-bar avg AND 1w ADX > 25 (trending)
-# - Short when price breaks below Donchian lower band (20) AND 1d volume > 1.3x 20-bar avg AND 1w ADX > 25 (trending)
-# - Exit when price touches Donchian middle band (20) or ATR-based stoploss (2*ATR against position)
+# Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation and 1w trend filter
+# - Long when price breaks above Camarilla R4 (1d) AND 1w volume > 1.5x 10-bar avg AND 1w close > 1w open (bullish weekly candle)
+# - Short when price breaks below Camarilla S4 (1d) AND 1w volume > 1.5x 10-bar avg AND 1w close < 1w open (bearish weekly candle)
+# - Exit when price returns to Camarilla PP (pivot point) from 1d
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Donchian provides clear structure, volume confirms breakout strength, ADX filter avoids choppy markets
-# - Works in both bull (breakouts continue) and bear (breakdowns continue) markets when ADX confirms trend
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Camarilla levels provide precise support/resistance; weekly volume confirms institutional participation
+# - Weekly trend filter ensures alignment with higher timeframe momentum, reducing counter-trend whipsaws
 
-name = "4h_1d_1w_donchian_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 20:
+    if len(df_1d) < 10 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels from 4h data (20-period)
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Pre-compute Camarilla pivot levels from 1d data (using previous day's OHLC)
+    # Camarilla formulas: PP = (H+L+C)/3, R4 = C + ((H-L)*1.1/2), S4 = C - ((H-L)*1.1/2)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Donchian upper/lower/middle bands (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2.0)
+    camarilla_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2.0)
     
-    # Pre-compute ATR for stoploss (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align 1d Camarilla levels to 1d timeframe (same timeframe, no shift needed but using helper for consistency)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Pre-compute 1d volume confirmation: > 1.3x 20-period average
-    volume_1d = df_1d['volume'].values
-    volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.3 * volume_20_avg)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Pre-compute 1w volume confirmation: > 1.5x 10-period average
+    volume_1w = df_1w['volume'].values
+    volume_10_avg = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
+    vol_spike_1w = volume_1w > (1.5 * volume_10_avg)
+    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
     
-    # Pre-compute 1w ADX trend filter (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Pre-compute 1w trend filter: bullish if close > open, bearish if close < open
+    open_1w = df_1w['open'].values
     close_1w = df_1w['close'].values
-    
-    # Calculate True Range for ADX
-    tr1_w = high_1w[1:] - low_1w[1:]
-    tr2_w = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3_w = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_w = np.concatenate([[np.max([high_1w[0] - low_1w[0], np.abs(high_1w[0] - close_1w[0]), np.abs(low_1w[0] - close_1w[0])])], np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))])
-    
-    # Calculate Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR and DM
-    tr_w_smooth = pd.Series(tr_w).rolling(window=14, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate DI+ and DI-
-    di_plus = np.where(tr_w_smooth > 0, 100 * dm_plus_smooth / tr_w_smooth, 0)
-    di_minus = np.where(tr_w_smooth > 0, 100 * dm_minus_smooth / tr_w_smooth, 0)
-    
-    # Calculate DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align 1d volume spike and 1w ADX to 4h timeframe
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    weekly_bullish = close_1w > open_1w
+    weekly_bearish = close_1w < open_1w
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_spike_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_spike_1w_aligned[i]) or
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -102,38 +75,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian upper band AND volume spike AND ADX > 25 (trending)
-            if (prices['high'].iloc[i] > donchian_upper[i] and 
-                vol_spike_1d_aligned[i] and 
-                adx_aligned[i] > 25):
+            # Long when price breaks above Camarilla R4 AND 1w volume spike AND weekly bullish
+            if (prices['high'].iloc[i] > camarilla_r4_aligned[i] and 
+                vol_spike_1w_aligned[i] and 
+                weekly_bullish_aligned[i]):
                 position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = 0.25
-            # Short when price breaks below Donchian lower band AND volume spike AND ADX > 25 (trending)
-            elif (prices['low'].iloc[i] < donchian_lower[i] and 
-                  vol_spike_1d_aligned[i] and 
-                  adx_aligned[i] > 25):
+            # Short when price breaks below Camarilla S4 AND 1w volume spike AND weekly bearish
+            elif (prices['low'].iloc[i] < camarilla_s4_aligned[i] and 
+                  vol_spike_1w_aligned[i] and 
+                  weekly_bearish_aligned[i]):
                 position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit conditions
-            # Exit conditions: return to middle band OR ATR stoploss hit
+        else:  # Have position - look for exit to Camarilla PP (mean reversion to equilibrium)
+            # Exit when price returns to Camarilla pivot point
             exit_signal = False
             if position == 1:  # Long position
-                # Exit to middle band (mean reversion)
-                if prices['low'].iloc[i] <= donchian_middle[i]:
-                    exit_signal = True
-                # ATR stoploss (2*ATR against position)
-                elif prices['low'].iloc[i] < entry_price - 2.0 * atr[i]:
+                if prices['low'].iloc[i] <= camarilla_pp_aligned[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                # Exit to middle band (mean reversion)
-                if prices['high'].iloc[i] >= donchian_middle[i]:
-                    exit_signal = True
-                # ATR stoploss (2*ATR against position)
-                elif prices['high'].iloc[i] > entry_price + 2.0 * atr[i]:
+                if prices['high'].iloc[i] >= camarilla_pp_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
