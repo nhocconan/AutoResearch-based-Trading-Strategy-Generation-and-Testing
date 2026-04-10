@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion + 1d volume spike + chop regime filter
-# - Williams %R(14) on 1d timeframe identifies overbought/oversold conditions
-# - Long when Williams %R < -80 (oversold) AND 1d volume > 2.0x 20-period average AND chop > 61.8 (ranging market)
-# - Short when Williams %R > -20 (overbought) AND 1d volume > 2.0x 20-period average AND chop > 61.8 (ranging market)
-# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA trend filter + volume confirmation
+# - Long when price breaks above Donchian(20) high AND 1d HMA(21) is rising AND volume > 1.5x 20-period average
+# - Short when price breaks below Donchian(20) low AND 1d HMA(21) is falling AND volume > 1.5x 20-period average
+# - Exit when price crosses Donchian(20) midline OR opposite breakout occurs
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Williams %R is effective in ranging/bear markets (2025-2026 test period)
-# - Volume confirmation reduces false signals
-# - Chop filter ensures we only trade in ranging conditions where mean reversion works
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian breakouts capture strong momentum moves
+# - 1d HMA filter ensures we trade with the higher timeframe trend
+# - Volume confirmation reduces false breakouts
 
-name = "12h_1d_williamsr_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,60 +24,77 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Pre-compute 12h price data
-    close = prices['close'].values
+    # Pre-compute 4h Donchian channels (20)
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Pre-compute 1d Williams %R(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Donchian high/low (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Pre-compute 4h volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Pre-compute 1d HMA(21) for trend filter
     close_1d = df_1d['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    def wma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, n + 1)
+        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate WMA for n/2 and n
+    n_val = 21
+    half_n = n_val // 2
+    sqrt_n = int(np.sqrt(n_val))
     
-    # Pre-compute 1d volume confirmation
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
+    wma_half = wma(close_1d, half_n)
+    wma_full = wma(close_1d, n_val)
     
-    # Pre-compute 12h chop regime filter (Choppiness Index)
-    def true_range(h, l, pc):
-        return np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc)))
+    # Handle array lengths
+    wma_half_padded = np.full_like(close_1d, np.nan)
+    wma_full_padded = np.full_like(close_1d, np.nan)
     
-    # Calculate True Range for 12h
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = true_range(high, low, prev_close)
+    if len(wma_half) > 0:
+        wma_half_padded[half_n-1:half_n-1+len(wma_half)] = wma_half
+    if len(wma_full) > 0:
+        wma_full_padded[n_val-1:n_val-1+len(wma_full)] = wma_full
     
-    # Calculate Chop = 100 * log10(sum(TR, period) / (ATR * period)) / log10(period)
-    atr_period = 14
-    chop_period = 14
-    sum_tr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).sum().values
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    chop = 100 * np.log10(sum_tr / (atr * chop_period)) / np.log10(chop_period)
-    chop = np.where(atr == 0, 50, chop)  # avoid division by zero
-    chop = np.where(sum_tr == 0, 50, chop)
+    # 2*WMA(n/2) - WMA(n)
+    diff = 2 * wma_half_padded - wma_full_padded
+    # WMA(sqrt(n)) of the diff
+    wma_diff = wma(diff, sqrt_n)
+    wma_diff_padded = np.full_like(close_1d, np.nan)
+    if len(wma_diff) > 0:
+        wma_diff_padded[sqrt_n-1:sqrt_n-1+len(wma_diff)] = wma_diff
     
-    # Align HTF indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    hma_1d = wma_diff_padded
+    
+    # HMA slope (rising/falling)
+    hma_slope = np.diff(hma_1d, prepend=np.nan)
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
+    
+    # Align HTF indicators to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising)
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(volume_spike_1d_aligned[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(hma_rising_aligned[i]) or 
+            np.isnan(hma_falling_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -88,24 +104,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Williams %R < -80 (oversold) AND volume spike AND chop > 61.8 (ranging)
-            if (williams_r_aligned[i] < -80 and 
-                volume_spike_1d_aligned[i] and 
-                chop[i] > 61.8):
+            # Long conditions: price breaks above Donchian high AND 1d HMA rising AND volume spike
+            if (close[i] > donch_high[i] and 
+                hma_rising_aligned[i] and 
+                volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Williams %R > -20 (overbought) AND volume spike AND chop > 61.8 (ranging)
-            elif (williams_r_aligned[i] > -20 and 
-                  volume_spike_1d_aligned[i] and 
-                  chop[i] > 61.8):
+            # Short conditions: price breaks below Donchian low AND 1d HMA falling AND volume spike
+            elif (close[i] < donch_low[i] and 
+                  hma_falling_aligned[i] and 
+                  volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
-            exit_long = (position == 1 and williams_r_aligned[i] > -50)
-            exit_short = (position == -1 and williams_r_aligned[i] < -50)
+            # Exit conditions: price crosses Donchian midline OR opposite breakout occurs
+            exit_long = (position == 1 and 
+                        (close[i] < donch_mid[i] or close[i] < donch_low[i]))
+            exit_short = (position == -1 and 
+                         (close[i] > donch_mid[i] or close[i] > donch_high[i]))
             
             if exit_long or exit_short:
                 position = 0
