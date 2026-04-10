@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) high with volume > 1.5x 20-bar avg AND 1d close > 1d EMA50
-# - Short when price breaks below Donchian(20) low with volume > 1.5x 20-bar avg AND 1d close < 1d EMA50
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high with volume > 1.3x 20-bar avg AND 1d close > 1d EMA50
+# - Short when price breaks below Donchian(20) low with volume > 1.3x 20-bar avg AND 1d close < 1d EMA50
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
+# - Targets ~30 trades/year (120 total over 4 years) to avoid fee drag
 # - 1d trend filter ensures we only trade with the higher timeframe trend
 # - Volume confirmation ensures institutional participation in breakouts
 
-name = "12h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,13 +32,13 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 12h Donchian channels
+    # Pre-compute 4h Donchian channels
     highest_high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
     lowest_low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
     
-    # 12h volume confirmation: > 1.5x 20-period average
+    # 4h volume confirmation: > 1.3x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.3 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
