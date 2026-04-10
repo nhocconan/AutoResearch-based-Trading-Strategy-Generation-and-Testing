@@ -3,118 +3,172 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d volume spike + 1w trend filter
-# - Primary: 6h Williams %R(14) for mean reversion signals (<20 oversold, >80 overbought)
-# - HTF: 1d volume confirmation (current volume > 2.0x 20-period MA) for conviction
-# - HTF: 1w EMA(21) trend filter (only long when price > EMA, only short when price < EMA)
-# - Session: Only trade during 08-20 UTC to avoid low-liquidity hours
-# - Long: Williams %R < 20 + volume confirmation + price > weekly EMA + session active
-# - Short: Williams %R > 80 + volume confirmation + price < weekly EMA + session active
-# - Exit: Williams %R crosses back above 50 (for long) or below 50 (for short) OR session ends
+# Hypothesis: 12h Williams Alligator + 1d volume confirmation + chop regime filter
+# - Primary: 12h Williams Alligator (Jaw=TEETH=13, Teeth=TEETH=8, Lips=TEETH=5) for trend direction
+# - HTF: 1d volume spike (current volume > 2.0x 50-period MA) for conviction
+# - Regime: 1d Choppiness Index (CHOP) > 61.8 = ranging market (fade Alligator signals)
+# - Entry: Alligator aligned (Lips > Teeth > Jaw for long, Lips < Teeth < Jaw for short) + volume confirmation + CHOP < 61.8 (trending)
+# - Exit: Alligator misalignment OR CHOP > 61.8 (regime shift to ranging)
 # - Position sizing: 0.25 (discrete level to balance return and drawdown)
-# - Works in bull/bear: Williams %R captures reversals, volume confirms breakouts, weekly EMA filters counter-trend trades
-# - Target: 50-120 total trades over 4 years (12-30/year) for 6h timeframe
+# - Works in bull/bear: Alligator adapts to volatility, volume confirms strength, chop filter avoids whipsaws in ranges
+# - Target: 80-120 total trades over 4 years (20-30/year) for 12h timeframe
 
-name = "6h_1d_1w_williamsr_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 50:  # Need enough data for Alligator and chop calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 25 or len(df_1w) < 5:  # Need enough data for indicators
+    if len(df_1d) < 50:  # Need enough data for indicators
         return np.zeros(n)
     
-    # Pre-compute 6h data
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
+    # Pre-compute 12h data
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
     
-    # Pre-compute 1d data for volume confirmation
+    # Pre-compute 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Pre-compute 1w data for trend filter
-    close_1w = df_1w['close'].values
+    # Calculate 12h Williams Alligator
+    # Jaw: 13-period SMMA of median price, shifted 8 bars
+    # Teeth: 8-period SMMA of median price, shifted 5 bars
+    # Lips: 5-period SMMA of median price, shifted 3 bars
+    median_price_12h = (high_12h + low_12h) / 2.0
     
-    # Calculate 6h Williams %R(14) - using min_periods
-    highest_high_14 = np.full(len(high_6h), np.nan)
-    lowest_low_14 = np.full(len(low_6h), np.nan)
-    williams_r = np.full(len(close_6h), np.nan)
+    def smma(source, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(source, np.nan)
+        if len(source) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(source[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(source)):
+            if not np.isnan(result[i-1]) and not np.isnan(source[i]):
+                result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
     
-    for i in range(13, len(high_6h)):  # Start from index 13 for 14-period lookback
-        if not (np.isnan(high_6h[i-13:i+1]).any() or np.isnan(low_6h[i-13:i+1]).any()):
-            highest_high_14[i] = np.max(high_6h[i-13:i+1])
-            lowest_low_14[i] = np.min(low_6h[i-13:i+1])
-            if highest_high_14[i] != lowest_low_14[i]:
-                williams_r[i] = (highest_high_14[i] - close_6h[i]) / (highest_high_14[i] - lowest_low_14[i]) * -100
+    jaw_12h = smma(median_price_12h, 13)
+    teeth_12h = smma(median_price_12h, 8)
+    lips_12h = smma(median_price_12h, 5)
     
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = np.full(len(volume_1d), np.nan)
-    for i in range(19, len(volume_1d)):
-        if not np.isnan(volume_1d[i-19:i+1]).any():
-            volume_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
+    # Shift as per Alligator definition
+    jaw_12h_shifted = np.roll(jaw_12h, 8)
+    teeth_12h_shifted = np.roll(teeth_12h, 5)
+    lips_12h_shifted = np.roll(lips_12h, 3)
     
-    # Calculate 1w EMA(21) for trend filter
-    if len(close_1w) >= 21:
-        close_1w_series = pd.Series(close_1w)
-        ema_21_1w = close_1w_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    else:
-        ema_21_1w = np.full(len(close_1w), np.nan)
+    # Set NaN for shifted values that rolled from beginning
+    jaw_12h_shifted[:8] = np.nan
+    teeth_12h_shifted[:5] = np.nan
+    lips_12h_shifted[:3] = np.nan
     
-    # Align all HTF indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)  # Williams %R is already 6h, but we use 1d for alignment reference
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 1d volume moving average (50-period) for volume confirmation
+    volume_ma_50_1d = np.full(len(volume_1d), np.nan)
+    for i in range(49, len(volume_1d)):
+        if not np.isnan(volume_1d[i-49:i+1]).any():
+            volume_ma_50_1d[i] = np.mean(volume_1d[i-49:i+1])
     
-    # Align 1d volume for direct comparison
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Calculate 1d Choppiness Index (CHOP)
+    # CHOP = 100 * log10(TR_sum / (ATR * n)) / log10(n)
+    # Where TR_sum = sum of True Range over n periods
+    # ATR = average True Range over n periods
+    # n = 14 (default)
+    chop_period = 14
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_active = (hours >= 8) & (hours <= 20)
+    # Calculate True Range
+    tr_1d = np.full(len(high_1d), np.nan)
+    tr_1d[0] = high_1d[0] - low_1d[0]  # First bar TR = high - low
+    for i in range(1, len(high_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i-1])):
+            tr_1d[i] = max(
+                high_1d[i] - low_1d[i],
+                abs(high_1d[i] - close_1d[i-1]),
+                abs(low_1d[i] - close_1d[i-1])
+            )
+    
+    # Calculate ATR (smoothed TR)
+    atr_1d = np.full(len(tr_1d), np.nan)
+    if len(tr_1d) >= chop_period:
+        # First ATR is average of first chop_period TR values
+        atr_1d[chop_period-1] = np.mean(tr_1d[:chop_period])
+        # Subsequent ATR values using Wilder's smoothing
+        for i in range(chop_period, len(tr_1d)):
+            if not np.isnan(atr_1d[i-1]) and not np.isnan(tr_1d[i]):
+                atr_1d[i] = (atr_1d[i-1] * (chop_period-1) + tr_1d[i]) / chop_period
+    
+    # Calculate CHOP
+    chop_1d = np.full(len(high_1d), np.nan)
+    for i in range(chop_period-1, len(high_1d)):
+        if not np.isnan(atr_1d[i]) and atr_1d[i] > 0:
+            # Sum of TR over last chop_period periods
+            tr_sum = np.sum(tr_1d[i-chop_period+1:i+1])
+            # CHOP formula
+            chop_1d[i] = 100 * np.log10(tr_sum / (atr_1d[i] * chop_period)) / np.log10(chop_period)
+    
+    # Align all HTF indicators to 12h timeframe
+    jaw_12h_aligned = align_htf_to_ltf(prices, df_1d, jaw_12h_shifted)
+    teeth_12h_aligned = align_htf_to_ltf(prices, df_1d, teeth_12h_shifted)
+    lips_12h_aligned = align_htf_to_ltf(prices, df_1d, lips_12h_shifted)
+    volume_ma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_50_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(1, n):  # Start from second bar to avoid index issues
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
+            np.isnan(lips_12h_aligned[i]) or np.isnan(volume_ma_50_1d_aligned[i]) or
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period MA
-        volume_confirm = volume_1d_aligned[i] > 2.0 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 50-period MA
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_confirm = volume_1d_aligned[i] > 2.0 * volume_ma_50_1d_aligned[i]
         
-        # Session filter: only trade during 08-20 UTC
-        in_session = session_active[i]
+        # Regime filter: CHOP < 61.8 = trending market (good for Alligator)
+        trending_regime = chop_1d_aligned[i] < 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < 20 (oversold) + volume confirmation + price > weekly EMA + session active
-            if williams_r_aligned[i] < 20 and volume_confirm and close_6h[i] > ema_21_1w_aligned[i] and in_session:
+            # Alligator aligned for long: Lips > Teeth > Jaw
+            long_align = (lips_12h_aligned[i] > teeth_12h_aligned[i] > jaw_12h_aligned[i])
+            # Alligator aligned for short: Lips < Teeth < Jaw
+            short_align = (lips_12h_aligned[i] < teeth_12h_aligned[i] < jaw_12h_aligned[i])
+            
+            # Long entry: Alligator long align + volume confirmation + trending regime
+            if long_align and volume_confirm and trending_regime:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R > 80 (overbought) + volume confirmation + price < weekly EMA + session active
-            elif williams_r_aligned[i] > 80 and volume_confirm and close_6h[i] < ema_21_1w_aligned[i] and in_session:
+            # Short entry: Alligator short align + volume confirmation + trending regime
+            elif short_align and volume_confirm and trending_regime:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Williams %R crosses back above 50 (for long) or below 50 (for short) OR session ends
+            # Exit: Alligator misalignment OR regime shift to ranging (CHOP > 61.8)
+            long_align = (lips_12h_aligned[i] > teeth_12h_aligned[i] > jaw_12h_aligned[i])
+            short_align = (lips_12h_aligned[i] < teeth_12h_aligned[i] < jaw_12h_aligned[i])
+            trending_regime = chop_1d_aligned[i] < 61.8
+            
             if position == 1:  # Long position
-                if williams_r_aligned[i] > 50 or not in_session:
+                if not long_align or not trending_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if williams_r_aligned[i] < 50 or not in_session:
+                if not short_align or not trending_regime:
                     position = 0
                     signals[i] = 0.0
                 else:
