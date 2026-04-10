@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power + 12h Trend Filter
-# - Primary: 6h timeframe for balance of signal frequency and fee drag
-# - HTF: 12h for trend direction (EMA50 slope) to avoid counter-trend trades
-# - Long: 6h Bull Power > 0 AND 6h Bear Power < 0 AND 12h EMA50 rising
-# - Short: 6h Bear Power < 0 AND 6h Bull Power < 0 AND 12h EMA50 falling
-# - Exit: Opposite Elder Ray signal or 12h EMA50 flattening (slope near zero)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike + ATR regime filter + ATR trailing stop
+# - Primary: 4h timeframe for optimal balance of signal frequency and fee drag
+# - HTF: 1d for volume confirmation (spike vs 20-period MA) and volatility regime (ATR percentile)
+# - Long: Price breaks above 20-period Donchian high + 1d ATR > 30th percentile + 1d volume > 1.5x 20-period MA
+# - Short: Price breaks below 20-period Donchian low + 1d ATR > 30th percentile + 1d volume > 1.5x 20-period MA
+# - Exit: ATR-based trailing stop (3x ATR from extreme) OR Donchian breakout in opposite direction
 # - Position sizing: 0.25 (discrete level)
-# - Target: 80-180 total trades over 4 years (20-45/year) - within 6h sweet spot
-# - Works in bull/bear: Elder Ray captures momentum shifts; 12h EMA filter avoids whipsaws in ranging markets
+# - Target: 75-200 total trades over 4 years (19-50/year) - within 4h sweet spot
+# - Works in bull/bear: Donchian breakouts capture trends, volume/ATR filters avoid false breakouts in chop
 
-name = "6h_12h_elderray_trend_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_atr_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,82 +23,92 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLCV
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
-    # Pre-compute 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Elder Ray Power (13-period EMA)
-    close_6h_series = pd.Series(close_6h)
-    ema13_6h = close_6h_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 4h Donchian Channels (20-period)
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    bull_power_6h = high_6h - ema13_6h  # Bull Power = High - EMA13
-    bear_power_6h = low_6h - ema13_6h   # Bear Power = Low - EMA13
+    # Calculate 1d ATR(14) for volatility regime filter
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d ATR percentile rank (using 30-day lookback)
+    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Calculate 12h EMA50 slope (5-period change) for trend direction
-    ema50_slope = np.zeros_like(ema50_12h)
-    ema50_slope[5:] = ema50_12h[5:] - ema50_12h[:-5]  # 5-bar slope
+    # Calculate 1d volume moving average (20-period) for volume confirmation
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align HTF data to 6h timeframe
-    bull_power_6h_aligned = align_htf_to_ltf(prices, df_12h, bull_power_6h)
-    bear_power_6h_aligned = align_htf_to_ltf(prices, df_12h, bear_power_6h)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    ema50_slope_aligned = align_htf_to_ltf(prices, df_12h, ema50_slope)
+    # Align HTF indicators to 4h timeframe
+    highest_20_aligned = align_htf_to_ltf(prices, df_1d, highest_20, additional_delay_bars=0)  # Donchian uses completed 4h bar
+    lowest_20_aligned = align_htf_to_ltf(prices, df_1d, lowest_20, additional_delay_bars=0)
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    long_stop = 0.0   # ATR trailing stop for long positions
+    short_stop = 0.0  # ATR trailing stop for short positions
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_6h_aligned[i]) or np.isnan(bear_power_6h_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_slope_aligned[i])):
+        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
+            np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter conditions
-        # Rising trend: EMA50 slope > 0.001 * price (avoid noise)
-        rising_trend = ema50_slope_aligned[i] > 0.001 * close_6h[i]
-        # Falling trend: EMA50 slope < -0.001 * price
-        falling_trend = ema50_slope_aligned[i] < -0.001 * close_6h[i]
-        # Flat trend: |slope| <= 0.001 * price
-        flat_trend = np.abs(ema50_slope_aligned[i]) <= 0.001 * close_6h[i]
+        # Regime conditions
+        # 1d volatility regime: ATR > 30th percentile (avoid extremely low-vol environments)
+        vol_regime = atr_percentile_aligned[i] > 30
+        
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        volume_spike = volume_1d[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Bull Power positive AND Bear Power negative AND rising 12h trend
-            if (bull_power_6h_aligned[i] > 0 and bear_power_6h_aligned[i] < 0 and rising_trend):
+            # Long entry: Price breaks above Donchian high + vol regime + volume spike
+            if (close_4h[i] > highest_20_aligned[i] and vol_regime and volume_spike):
                 position = 1
+                long_stop = close_4h[i] - 3.0 * atr_1d[i]  # Initial stop: 3x ATR below entry
                 signals[i] = 0.25
-            # Short entry: Bear Power negative AND Bull Power negative AND falling 12h trend
-            elif (bear_power_6h_aligned[i] < 0 and bull_power_6h_aligned[i] < 0 and falling_trend):
+            # Short entry: Price breaks below Donchian low + vol regime + volume spike
+            elif (close_4h[i] < lowest_20_aligned[i] and vol_regime and volume_spike):
                 position = -1
+                short_stop = close_4h[i] + 3.0 * atr_1d[i]  # Initial stop: 3x ATR above entry
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions:
-            # 1. Opposite Elder Ray signal (momentum exhaustion)
-            # 2. 12h trend flattens (loses directional momentum)
-            
+            # Update trailing stop
             if position == 1:  # Long position
+                # Trail stop up: only move stop higher, never lower
+                long_stop = max(long_stop, close_4h[i] - 3.0 * atr_1d[i])
+                # Exit conditions:
+                # 1. Price hits trailing stop
+                # 2. Price breaks below Donchian low (contrarian breakout)
                 exit_condition = (
-                    bull_power_6h_aligned[i] <= 0 or  # Bull Power exhausted
-                    bear_power_6h_aligned[i] >= 0 or  # Bear Power turned positive
-                    flat_trend                        # 12h trend flattened
+                    close_4h[i] <= long_stop or
+                    close_4h[i] < lowest_20_aligned[i]
                 )
                 if exit_condition:
                     position = 0
@@ -106,10 +116,14 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
+                # Trail stop down: only move stop lower, never higher
+                short_stop = min(short_stop, close_4h[i] + 3.0 * atr_1d[i])
+                # Exit conditions:
+                # 1. Price hits trailing stop
+                # 2. Price breaks above Donchian high (contrarian breakout)
                 exit_condition = (
-                    bear_power_6h_aligned[i] >= 0 or  # Bear Power exhausted
-                    bull_power_6h_aligned[i] >= 0 or  # Bull Power turned positive
-                    flat_trend                        # 12h trend flattened
+                    close_4h[i] >= short_stop or
+                    close_4h[i] > highest_20_aligned[i]
                 )
                 if exit_condition:
                     position = 0
