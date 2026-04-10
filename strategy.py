@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop filter
-# - Long when price breaks above Camarilla H3 (1d) with 12h volume > 1.5x 20-period average and CHOP(14) < 38.2 (trending)
-# - Short when price breaks below Camarilla L3 (1d) with same filters
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation
+# - Donchian(20) from 4h: breakout above upper band = long, below lower band = short
+# - 1d EMA200 to filter trades in direction of higher timeframe trend (works in bull/bear)
+# - Volume confirmation: current 4h volume > 2.0x 20-period average (strict to reduce trades)
+# - ATR-based trailing stop: exit when price moves against position by 2.5*ATR
+# - Designed for 4h timeframe: targets 20-50 trades/year to avoid fee drag
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Designed for 12h timeframe: targets 12-37 trades/year to avoid fee drag
-# - Works in bull/bear markets: CHOP filter ensures we trade only in trending conditions, avoiding whipsaws in ranging markets
-# - Camarilla levels from 1d provide strong intraday support/resistance levels
+# - EMA200 on 1d provides strong trend filter that works across market regimes
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_ema200_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,97 +23,87 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla levels (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Camarilla pivot levels for each day
-    # H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d)
+    # Pre-compute 4h Donchian channels (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Align Camarilla levels to 12h timeframe (completed 1d bar only)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Donchian upper band: highest high over past 20 periods
+    highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    # Donchian lower band: lowest low over past 20 periods
+    lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 12h volume confirmation
-    volume_12h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > (1.5 * avg_volume_20)
+    # Pre-compute 4h volume confirmation
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (2.0 * avg_volume_20)  # Strict threshold to reduce trades
     
-    # Pre-compute 12h Choppiness Index (CHOP) for regime filter
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # ATM (Average True Range) over 14 periods
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Maximum and minimum close over 14 periods
-    max_close_14 = pd.Series(close_12h).rolling(window=14, min_periods=14).max().values
-    min_close_14 = pd.Series(close_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: CHOP = 100 * log10(sum(atr_14) / (max_close_14 - min_close_14)) / log10(14)
-    # Avoid division by zero
-    range_14 = max_close_14 - min_close_14
-    range_14 = np.where(range_14 == 0, 1e-10, range_14)
-    
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    
-    chop = 100 * np.log10(sum_atr_14 / range_14) / np.log10(14)
-    chop[np.isnan(chop)] = 50  # Set neutral value when undefined
-    
-    # Trending market: CHOP < 38.2
-    trending_market = chop < 38.2
+    # Pre-compute 4h ATR(14) for trailing stop
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_14 = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    highest_high = 0.0  # for trailing stop
+    lowest_low = 0.0    # for trailing stop
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(trending_market[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price re-enters below Camarilla H3 (failed breakout)
-            if close_12h[i] < camarilla_h3_aligned[i]:
+            # Update highest high for trailing stop
+            if close_4h[i] > highest_high:
+                highest_high = close_4h[i]
+            # Exit: trailing stop hit
+            if close_4h[i] < highest_high - 2.5 * atr_14[i]:
                 position = 0
+                highest_high = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price re-enters above Camarilla L3 (failed breakout)
-            if close_12h[i] > camarilla_l3_aligned[i]:
+            # Update lowest low for trailing stop
+            if close_4h[i] < lowest_low:
+                lowest_low = close_4h[i]
+            # Exit: trailing stop hit
+            if close_4h[i] > lowest_low + 2.5 * atr_14[i]:
                 position = 0
+                lowest_low = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla breakout with volume and trend filters
-            if vol_spike[i] and trending_market[i]:
-                # Breakout long: price closes above Camarilla H3
-                if close_12h[i] > camarilla_h3_aligned[i]:
+            # Look for Donchian breakout with trend and volume filters
+            if vol_spike[i]:
+                # Breakout long: price closes above upper Donchian band AND above 1d EMA200
+                if close_4h[i] > highest_20[i] and close_4h[i] > ema_200_aligned[i]:
                     position = 1
+                    entry_price = close_4h[i]
+                    highest_high = close_4h[i]
                     signals[i] = 0.25
-                # Breakout short: price closes below Camarilla L3
-                elif close_12h[i] < camarilla_l3_aligned[i]:
+                # Breakout short: price closes below lower Donchian band AND below 1d EMA200
+                elif close_4h[i] < lowest_20[i] and close_4h[i] < ema_200_aligned[i]:
                     position = -1
+                    entry_price = close_4h[i]
+                    lowest_low = close_4h[i]
                     signals[i] = -0.25
     
     return signals
