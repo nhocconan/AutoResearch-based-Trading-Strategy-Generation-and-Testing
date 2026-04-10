@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) upper band AND 1w HMA(21) is rising AND volume > 1.5x 20-bar avg
-# - Short when price breaks below Donchian(20) lower band AND 1w HMA(21) is falling AND volume > 1.5x 20-bar avg
-# - Exit when price crosses opposite Donchian band or volume drops below average
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above H3 (Camarilla resistance) AND 1d EMA(50) > EMA(200) (bullish trend) AND 12h volume > 2.0x 20-bar avg
+# - Short when price breaks below L3 (Camarilla support) AND 1d EMA(50) < EMA(200) (bearish trend) AND 12h volume > 2.0x 20-bar avg
+# - Exit when price returns to Camarilla pivot point (mean reversion to equilibrium)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Donchian captures structural breaks; 1w HMA ensures alignment with weekly trend
+# - Camarilla pivots identify key intraday support/resistance levels; 1d EMA filter ensures alignment with daily trend
 # - Volume confirmation avoids low-liquidity false signals
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets: breakout in trends, mean reversion in ranges
 
-name = "1d_donchian_breakout_hma_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,50 +23,63 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w HMA(21) trend: rising/falling
-    close_1w = df_1w['close'].values
-    half_length = 21 // 2
-    sqrt_length = int(np.sqrt(21))
+    # Pre-compute 1d EMA trend filter: EMA(50) vs EMA(200)
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_bullish = ema_50 > ema_200
+    ema_bearish = ema_50 < ema_200
     
-    # Hull Moving Average calculation
-    wma_half = pd.Series(close_1w).ewm(span=half_length, adjust=False).mean().values
-    wma_full = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma = pd.Series(raw_hma).ewm(span=sqrt_length, adjust=False).mean().values
+    # Align 1d EMA trend to 12h timeframe
+    ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
+    ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
     
-    # HMA trend: rising if current > previous, falling if current < previous
-    hma_rising = hma > np.concatenate([[hma[0]], hma[:-1]])
-    hma_falling = hma < np.concatenate([[hma[0]], hma[:-1]])
+    # Pre-compute 12h Camarilla pivot levels (based on previous 12h bar)
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    # Align 1w HMA trend to 1d timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising)
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling)
+    # Calculate pivot point (PP) and Camarilla levels using previous bar's OHLC
+    # We use rolling window of 2 to get previous bar's values, then shift by 1 to avoid look-ahead
+    prev_high = pd.Series(high_12h).shift(1).values
+    prev_low = pd.Series(low_12h).shift(1).values
+    prev_close = pd.Series(close_12h).shift(1).values
     
-    # Pre-compute Donchian(20) channels
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Pivot point
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    # Camarilla levels
+    range_hl = prev_high - prev_low
+    h3 = pp + (range_hl * 1.1 / 4.0)  # Resistance level 3
+    l3 = pp - (range_hl * 1.1 / 4.0)  # Support level 3
+    h4 = pp + (range_hl * 1.1 / 2.0)  # Resistance level 4 (stronger breakout)
+    l4 = pp - (range_hl * 1.1 / 2.0)  # Support level 4 (stronger breakout)
     
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Breakout conditions: price breaks above H3 or below L3 (using current bar's close)
+    breakout_long = close_12h > h3
+    breakout_short = close_12h < l3
     
-    # Pre-compute volume confirmation: > 1.5x 20-period average
+    # Exit condition: price returns to pivot point (mean reversion)
+    exit_long = close_12h < pp  # Exit long when price falls below pivot
+    exit_short = close_12h > pp  # Exit short when price rises above pivot
+    
+    # Pre-compute 12h volume confirmation: > 2.0x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * volume_20_avg)
+    vol_spike = volume > (2.0 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup
-        # Skip if any required data is invalid
-        if (np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_spike[i])):
+    for i in range(50, n):  # Start after warmup
+        # Skip if any required data is invalid (NaN from rolling/shift)
+        if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
+            np.isnan(breakout_long[i]) or np.isnan(breakout_short[i]) or
+            np.isnan(exit_long[i]) or np.isnan(exit_short[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(pp[i]) or np.isnan(h3[i]) or np.isnan(l3[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -76,32 +90,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian upper AND 1w HMA rising AND volume spike
-            if (close[i] > highest_high[i] and 
-                hma_rising_aligned[i] and 
+            # Long when price breaks above H3 AND 1d bullish trend AND volume spike
+            if (breakout_long[i] and 
+                ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below Donchian lower AND 1w HMA falling AND volume spike
-            elif (close[i] < lowest_low[i] and 
-                  hma_falling_aligned[i] and 
+            # Short when price breaks below L3 AND 1d bearish trend AND volume spike
+            elif (breakout_short[i] and 
+                  ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit when price crosses opposite Donchian band
-            exit_long = position == 1 and close[i] < lowest_low[i]
-            exit_short = position == -1 and close[i] > highest_high[i]
-            
-            if exit_long or exit_short:
-                position = 0
-                signals[i] = 0.0
-            else:
-                if position == 1:
-                    signals[i] = 0.25
+        else:  # Have position - look for exit to pivot point (mean reversion)
+            # Exit when price returns to pivot point
+            if position == 1:  # Long position
+                if exit_long[i]:  # Price fell below pivot
+                    position = 0
+                    signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = 0.25  # Stay long
+            else:  # Short position
+                if exit_short[i]:  # Price rose above pivot
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -0.25  # Stay short
     
     return signals
