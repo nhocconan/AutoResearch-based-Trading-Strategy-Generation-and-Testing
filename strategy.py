@@ -3,97 +3,123 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R mean reversion with 1w trend filter and volume confirmation
-# - Long when Williams %R(14) < -80 (oversold) AND price > 50-period EMA on 1w (uptrend)
-# - Short when Williams %R(14) > -20 (overbought) AND price < 50-period EMA on 1w (downtrend)
-# - Volume confirmation: 1d volume > 1.3x 20-period volume SMA
-# - Exit: Williams %R crosses above -50 (long) or below -50 (short)
-# - Position sizing: 0.25 discrete level to balance return and drawdown
-# - Target: 15-30 trades/year on 1d timeframe to stay within fee drag limits
-# - Williams %R identifies extremes in bear market rallies and bull market pullbacks
-# - Weekly EMA filter ensures we trade with the higher timeframe trend
-# - Volume confirmation reduces false signals
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter
+# - Bull Power = EMA(13, high) - EMA(13, close)
+# - Bear Power = EMA(13, close) - EMA(13, low)
+# - Long when Bull Power > 0 AND ADX(1d) > 25 (strong trend) AND Bull Power rising
+# - Short when Bear Power > 0 AND ADX(1d) > 25 AND Bear Power rising
+# - Exit when power fails or ADX < 20 (weak trend)
+# - Uses Elder Ray to measure bull/bear strength relative to EMA, ADX to filter ranging markets
+# - Target: 12-30 trades/year on 6h timeframe to stay within fee drag limits
 
-name = "1d_williamsr_trend_volume_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Williams %R(14) - momentum oscillator
-    williams_period = 14
-    highest_high = pd.Series(high).rolling(window=williams_period, min_periods=williams_period).max().values
-    lowest_low = pd.Series(low).rolling(window=williams_period, min_periods=williams_period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate EMA(13) for Elder Ray
+    ema13_high = pd.Series(high).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_low = pd.Series(low).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_close = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 1w 50-period EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Bull Power = EMA(high) - EMA(close)
+    bull_power = ema13_high - ema13_close
+    # Bear Power = EMA(close) - EMA(low)
+    bear_power = ema13_close - ema13_low
     
-    # Calculate 1d volume SMA for confirmation
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d ADX for regime filter
+    # True Range
+    tr1 = df_1d['high'][1:] - df_1d['low'][1:]
+    tr2 = np.abs(df_1d['high'][1:] - df_1d['close'][:-1])
+    tr3 = np.abs(df_1d['low'][1:] - df_1d['close'][:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    for i in range(williams_period, n):
+    # Directional Movement
+    dm_plus = np.where((df_1d['high'][1:] - df_1d['high'][:-1]) > (df_1d['low'][:-1] - df_1d['low'][1:]),
+                       np.maximum(df_1d['high'][1:] - df_1d['high'][:-1], 0), 0)
+    dm_minus = np.where((df_1d['low'][:-1] - df_1d['low'][1:]) > (df_1d['high'][1:] - df_1d['high'][:-1]),
+                        np.maximum(df_1d['low'][:-1] - df_1d['low'][1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr_1d
+    di_minus = 100 * dm_minus_smooth / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF data to LTF
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Track power trends for confirmation
+    bull_power_prev = np.roll(bull_power_aligned, 1)
+    bear_power_prev = np.roll(bear_power_aligned, 1)
+    adx_prev = np.roll(adx_1d_aligned, 1)
+    bull_power_prev[0] = np.nan
+    bear_power_prev[0] = np.nan
+    adx_prev[0] = np.nan
+    
+    for i in range(14, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or np.isnan(bull_power_prev[i]) or
+            np.isnan(bear_power_prev[i]) or np.isnan(adx_prev[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.3x 20-period volume SMA
-        vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
+        # Regime: ADX > 25 = trending market
+        is_trending = adx_1d_aligned[i] > 25
+        is_ranging = adx_1d_aligned[i] < 20
         
-        # Williams %R conditions
-        wr = williams_r[i]
-        wr_prev = williams_r[i-1] if i > 0 else -50
-        
-        # Trend filter from 1w EMA
-        price_above_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_ema = close[i] < ema_50_1w_aligned[i]
-        
-        # Exit conditions: Williams %R crosses -50 level
-        exit_long = wr > -50 and wr_prev <= -50
-        exit_short = wr < -50 and wr_prev >= -50
+        # Elder Ray signals with trend confirmation
+        bull_strong = bull_power_aligned[i] > 0 and bull_power_aligned[i] > bull_power_prev[i]
+        bear_strong = bear_power_aligned[i] > 0 and bear_power_aligned[i] > bear_power_prev[i]
         
         if position == 0:  # Flat - look for entry
-            # Long: oversold + uptrend + volume confirmation
-            if wr < -80 and price_above_ema and vol_confirm:
+            if bull_strong and is_trending:
                 position = 1
                 signals[i] = 0.25
-            # Short: overbought + downtrend + volume confirmation
-            elif wr > -20 and price_below_ema and vol_confirm:
+            elif bear_strong and is_trending:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            if exit_long:
+            # Exit when bull power fails or trend weakens
+            if not bull_strong or is_ranging:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            if exit_short:
+            # Exit when bear power fails or trend weakens
+            if not bear_strong or is_ranging:
                 position = 0
                 signals[i] = 0.0
             else:
