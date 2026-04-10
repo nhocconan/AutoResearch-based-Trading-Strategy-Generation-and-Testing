@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d trend filter
-# - Long when price breaks above Donchian upper band (20-period high) AND 12h volume > 1.5x 20-period average AND 1d close > 1d EMA(50)
-# - Short when price breaks below Donchian lower band (20-period low) AND 12h volume > 1.5x 20-period average AND 1d close < 1d EMA(50)
-# - Exit when price crosses Donchian middle band (20-period average of high/low)
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d EMA(50) trend filter
+# - Long when price breaks above Donchian upper band AND 12h volume > 1.5x 20-period average AND 1d close > 1d EMA(50)
+# - Short when price breaks below Donchian lower band AND 12h volume > 1.5x 20-period average AND 1d close < 1d EMA(50)
+# - Exit when price crosses Donchian middle band
 # - Uses discrete position sizing 0.25 to limit fee churn
 # - Donchian channels provide adaptive structure; volume confirms breakout validity
 # - Daily EMA filter ensures we trade with the intermediate timeframe trend
