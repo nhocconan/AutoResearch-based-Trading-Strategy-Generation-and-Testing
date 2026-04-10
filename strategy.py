@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
-# - Long when price breaks above H3 level with 4h uptrend (EMA21 > EMA50) during 08-20 UTC
-# - Short when price breaks below L3 level with 4h downtrend (EMA21 < EMA50) during 08-20 UTC
-# - Uses Camarilla levels from previous 4h bar to avoid look-ahead
-# - Position size 0.20 to limit drawdown
-# - Session filter reduces noise and overtrading
-# - Designed for 15-30 trades/year to avoid fee drag
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1w trend filter and ATR volatility regime
+# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
+# - Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) in 1w uptrend (close > EMA34) with ATR(14) > ATR(50) (expanding volatility)
+# - Short when Bear Power > 0 AND Bull Power < 0 (bearish momentum) in 1w downtrend (close < EMA34) with ATR(14) > ATR(50)
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
+# - 1w trend filter ensures alignment with major market structure
+# - ATR regime filter avoids choppy markets where Elder Ray gives false signals
+# - Works in both bull and bear markets by following 1w trend
 
-name = "1h_4h_camarilla_breakout_session_v1"
-timeframe = "1h"
+name = "6h_1w_elderray_atrregime_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,70 +23,78 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h indicators
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Pre-compute 1w indicators
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 4h EMA(21) and EMA(50) for trend filter
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1w EMA(34) for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Previous 4h bar Camarilla levels (H3, L3)
-    # H3 = close + 1.1*(high - low)/2
-    # L3 = close - 1.1*(high - low)/2
-    camarilla_h3_4h = close_4h + (1.1 * (high_4h - low_4h) / 2)
-    camarilla_l3_4h = close_4h - (1.1 * (high_4h - low_4h) / 2)
-    camarilla_h3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3_4h)
-    camarilla_l3_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3_4h)
+    # Pre-compute 6h indicators
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 6h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
+    
+    # 6h ATR(14) and ATR(50) for volatility regime
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    # Volatility regime: expanding (ATR14 > ATR50)
+    vol_expanding = atr_14 > atr_50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(camarilla_h3_4h_aligned[i]) or np.isnan(camarilla_l3_4h_aligned[i]) or
-            not in_session[i]):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long signal: price breaks above H3 with 4h uptrend
-            if (prices['close'].iloc[i] > camarilla_h3_4h_aligned[i] and 
-                ema_21_4h_aligned[i] > ema_50_4h_aligned[i]):
+            # Long signal: Bullish momentum in 1w uptrend with expanding volatility
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                close[i] > ema_34_1w_aligned[i] and vol_expanding[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short signal: price breaks below L3 with 4h downtrend
-            elif (prices['close'].iloc[i] < camarilla_l3_4h_aligned[i] and 
-                  ema_21_4h_aligned[i] < ema_50_4h_aligned[i]):
+                signals[i] = 0.25
+            # Short signal: Bearish momentum in 1w downtrend with expanding volatility
+            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
+                  close[i] < ema_34_1w_aligned[i] and vol_expanding[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:  # Have position - look for exit
-            # Exit when price returns to opposite Camarilla level or trend reverses
-            if position == 1:  # Long position
-                if (prices['close'].iloc[i] < camarilla_l3_4h_aligned[i] or 
-                    ema_21_4h_aligned[i] < ema_50_4h_aligned[i]):
+            # Exit when momentum diverges or volatility contracts
+            if position == 1:  # Long
+                if (bull_power[i] <= 0 or bear_power[i] >= 0 or not vol_expanding[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.20
-            else:  # Short position
-                if (prices['close'].iloc[i] > camarilla_h3_4h_aligned[i] or 
-                    ema_21_4h_aligned[i] > ema_50_4h_aligned[i]):
+                    signals[i] = 0.25
+            else:  # Short
+                if (bear_power[i] <= 0 or bull_power[i] >= 0 or not vol_expanding[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
