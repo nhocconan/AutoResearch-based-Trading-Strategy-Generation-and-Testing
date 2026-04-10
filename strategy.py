@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
-# - Uses 4h Supertrend for trend direction (HTF signal direction)
-# - Uses 1h Camarilla pivot levels for entry timing (LTF precision)
-# - Long when 4h Supertrend = uptrend AND price breaks above H3 resistance AND session 08-20 UTC
-# - Short when 4h Supertrend = downtrend AND price breaks below L3 support AND session 08-20 UTC
-# - Exit when price crosses opposite pivot level (H3 for shorts, L3 for longs)
-# - Discrete position sizing 0.20 to limit fee churn
-# - Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
-# - Camarilla pivots work well in ranging markets; Supertrend filters for directional bias
-# - Session filter avoids low-volume Asian session noise
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA trend filter and volume confirmation
+# - Long when Williams %R(14) < -80 (oversold) AND price > 1d EMA(50) AND volume > 1.3x 20-period average volume
+# - Short when Williams %R(14) > -20 (overbought) AND price < 1d EMA(50) AND volume > 1.3x 20-period average volume
+# - Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
+# - Uses discrete position sizing 0.25 to limit fee churn
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Williams %R identifies overextended moves ready for mean reversion
+# - 1d EMA(50) ensures we trade with the higher timeframe trend
+# - Volume confirmation reduces false signals
 
-name = "1h_4h_camarilla_supertrend_session_v1"
-timeframe = "1h"
+name = "6h_1d_williamsr_meanreversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,126 +23,88 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1h OHLC and volume
+    # Pre-compute 6h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC) - compute once before loop
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Pre-compute 6h Williams %R (14-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.max(arr[i - window + 1:i + 1])
+        return result
     
-    # Pre-compute 4h Supertrend (ATR=10, mult=3) for trend direction
-    hl2_4h = (df_4h['high'] + df_4h['low']) / 2
-    atr_4h = pd.Series(0.0, index=df_4h.index)
-    tr_4h = pd.Series(0.0, index=df_4h.index)
-    tr_4h.iloc[0] = df_4h['high'].iloc[0] - df_4h['low'].iloc[0]
-    for i in range(1, len(df_4h)):
-        tr_4h.iloc[i] = max(
-            df_4h['high'].iloc[i] - df_4h['low'].iloc[i],
-            abs(df_4h['high'].iloc[i] - df_4h['close'].iloc[i-1]),
-            abs(df_4h['low'].iloc[i] - df_4h['close'].iloc[i-1])
-        )
-    atr_4h = tr_4h.ewm(alpha=1/10, adjust=False, min_periods=10).mean()
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.min(arr[i - window + 1:i + 1])
+        return result
     
-    upper_band_4h = hl2_4h + 3 * atr_4h
-    lower_band_4h = hl2_4h - 3 * atr_4h
+    highest_high = rolling_max(high, 14)
+    lowest_low = rolling_min(low, 14)
+    williams_r = np.where((highest_high - lowest_low) != 0, 
+                          -100 * (highest_high - close) / (highest_high - lowest_low), 
+                          -50)
     
-    supertrend_4h = np.zeros(len(df_4h), dtype=float)
-    direction_4h = np.ones(len(df_4h), dtype=int)  # 1=uptrend, -1=downtrend
+    # Pre-compute 6h volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.3 * vol_ma)
     
-    for i in range(1, len(df_4h)):
-        if close_4h := df_4h['close'].iloc[i] > upper_band_4h.iloc[i-1]:
-            direction_4h[i] = 1
-        elif close_4h < lower_band_4h.iloc[i-1]:
-            direction_4h[i] = -1
-        else:
-            direction_4h[i] = direction_4h[i-1]
-            if direction_4h[i] == 1 and hl2_4h.iloc[i] < upper_band_4h.iloc[i-1]:
-                upper_band_4h.iloc[i] = hl2_4h.iloc[i]
-            if direction_4h[i] == -1 and hl2_4h.iloc[i] > lower_band_4h.iloc[i-1]:
-                lower_band_4h.iloc[i] = hl2_4h.iloc[i]
-        
-        if direction_4h[i] == 1:
-            supertrend_4h[i] = lower_band_4h.iloc[i]
-        else:
-            supertrend_4h[i] = upper_band_4h.iloc[i]
+    # Pre-compute 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 4h Supertrend direction to 1h timeframe
-    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h.values)
-    
-    # Pre-compute 1h Camarilla pivot levels (using previous day's OHLC)
-    # For intraday, we use rolling 24-period (24h = 1 day in 1h timeframe)
-    lookback = 24
-    if len(prices) < lookback:
-        return np.zeros(n)
-    
-    # Calculate rolling max/min/close for previous 24 periods
-    high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-    close_prev = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
-    
-    # Camarilla pivot calculations
-    range_val = high_max - low_min
-    camarilla_h3 = close_prev + (range_val * 1.1 / 4)
-    camarilla_l3 = close_prev - (range_val * 1.1 / 4)
-    camarilla_h4 = close_prev + (range_val * 1.1 / 2)
-    camarilla_l4 = close_prev - (range_val * 1.1 / 2)
+    # Align HTF indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
-            np.isnan(direction_4h_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
-            continue
-        
-        # Check session filter
-        if not session_filter[i]:
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.20
-            else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: 4h uptrend AND price breaks above H3 resistance
-            if (direction_4h_aligned[i] == 1 and 
-                close[i] > camarilla_h3[i]):
+            # Long conditions: Williams %R oversold AND price above 1d EMA AND volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_spike[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short conditions: 4h downtrend AND price breaks below L3 support
-            elif (direction_4h_aligned[i] == -1 and 
-                  close[i] < camarilla_l3[i]):
+                signals[i] = 0.25
+            # Short conditions: Williams %R overbought AND price below 1d EMA AND volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_spike[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses opposite pivot level
-            exit_long = (position == 1 and close[i] < camarilla_l3[i])
-            exit_short = (position == -1 and close[i] > camarilla_h3[i])
+            # Exit conditions: Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
+            exit_long = (position == 1 and williams_r[i] > -50)
+            exit_short = (position == -1 and williams_r[i] < -50)
             
             if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 if position == 1:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
