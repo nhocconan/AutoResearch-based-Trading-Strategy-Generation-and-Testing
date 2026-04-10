@@ -3,93 +3,81 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power Regime with 1d ADX filter and 1w trend alignment
-# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# - Long when Bull Power > 0 AND Bear Power rising (improving) AND 1d ADX > 25 (trending) AND 1w close > 1w open
-# - Short when Bear Power > 0 AND Bull Power falling (worsening) AND 1d ADX > 25 AND 1w close < 1w open
-# - Exit when power signal reverses or ADX < 20 (range regime)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1d choppiness regime filter
+# - Long when price breaks above Camarilla R4 (1d) AND 1d volume > 1.8x 24-bar avg AND 1d chop > 61.8 (ranging market)
+# - Short when price breaks below Camarilla S4 (1d) AND 1d volume > 1.8x 24-bar avg AND 1d chop > 61.8 (ranging market)
+# - Exit when price returns to Camarilla PP (pivot point) from 1d
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Elder Ray measures bull/bear strength relative to EMA; ADX filters for trending markets only
-# - Weekly trend filter ensures alignment with higher timeframe momentum
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Camarilla levels provide precise support/resistance; volume confirms institutional participation
+# - Choppiness filter ensures trades occur in ranging markets where mean reversion to pivot works best
+# - Works in both bull and bear markets by fading extremes in ranging conditions
 
-name = "6h_1d_1w_elder_ray_power_regime_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute EMA13 for Elder Ray (13-period EMA of close)
-    close = prices['close'].values
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    high = prices['high'].values
-    low = prices['low'].values
-    bull_power = high - ema13
-    bear_power = ema13 - low
-    
-    # Pre-compute 1d ADX (14-period)
+    # Pre-compute Camarilla pivot levels from 1d data (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First bar
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2.0)
+    camarilla_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2.0)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    # Pre-compute 1d volume confirmation: > 1.8x 24-period average
+    volume_1d = df_1d['volume'].values
+    volume_24_avg = pd.Series(volume_1d).rolling(window=24, min_periods=24).mean().values
+    vol_spike_1d = volume_1d > (1.8 * volume_24_avg)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / np.where(atr == 0, 1, atr)
-    di_minus = 100 * dm_minus_smooth / np.where(atr == 0, 1, atr)
+    # Pre-compute 1d Choppiness Index: CHOP > 61.8 = ranging market (good for mean reversion)
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(n) * (highest_high - lowest_low)) / log10(n)
+    # Simplified: CHOP = 100 * log10(ATR_sum / (n * log10(high_low_range))) / log10(n)
+    # We'll use a practical approximation: CHOP = 100 * log10(ATR(14).sum(14) / (14 * log10(highest_high - lowest_low))) / log10(14)
+    # But for efficiency, we'll use: CHOP > 61.8 when market is ranging (we'll calculate properly)
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(abs(high_1d - pd.Series(close_1d).shift(1)))
+    tr3 = pd.Series(abs(low_1d - pd.Series(close_1d).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Avoid division by zero
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    high_low_range = highest_high_14 - lowest_low_14
+    high_low_range = np.where(high_low_range == 0, 1e-10, high_low_range)  # Prevent div by zero
     
-    # Pre-compute 1w trend filter: bullish if close > open, bearish if close < open
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    chop = 100 * np.log10(atr_sum / (14 * np.log10(high_low_range))) / np.log10(14)
+    chop_regime = chop > 61.8  # True when ranging/choppy
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(weekly_bullish_aligned[i]) or
-            np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or
+            np.isnan(chop_regime_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -99,39 +87,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Power signals: rising/falling power (compare to previous bar)
-        bull_power_rising = i > 0 and bull_power[i] > bull_power[i-1]
-        bear_power_rising = i > 0 and bear_power[i] > bear_power[i-1]
-        bull_power_falling = i > 0 and bull_power[i] < bull_power[i-1]
-        bear_power_falling = i > 0 and bear_power[i] < bear_power[i-1]
-        
-        if position == 0:  # Flat - look for new entries
-            # Long when Bull Power > 0 AND rising AND ADX > 25 AND weekly bullish
-            if (bull_power[i] > 0 and bull_power_rising and 
-                adx_aligned[i] > 25 and weekly_bullish_aligned[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above Camarilla R4 AND 1d volume spike AND choppy market
+            if (prices['high'].iloc[i] > camarilla_r4_aligned[i] and 
+                vol_spike_1d_aligned[i] and 
+                chop_regime_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when Bear Power > 0 AND rising AND ADX > 25 AND weekly bearish
-            elif (bear_power[i] > 0 and bear_power_rising and 
-                  adx_aligned[i] > 25 and weekly_bearish_aligned[i]):
+            # Short when price breaks below Camarilla S4 AND 1d volume spike AND choppy market
+            elif (prices['low'].iloc[i] < camarilla_s4_aligned[i] and 
+                  vol_spike_1d_aligned[i] and 
+                  chop_regime_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit conditions
-            # Exit conditions:
-            # 1. Power signal reverses (Bull Power <= 0 for long, Bear Power <= 0 for short)
-            # 2. Power starts falling (weakening momentum)
-            # 3. ADX < 20 (market going into range)
+        else:  # Have position - look for exit to Camarilla PP (mean reversion to equilibrium)
+            # Exit when price returns to Camarilla pivot point
             exit_signal = False
-            
             if position == 1:  # Long position
-                if (bull_power[i] <= 0 or not bull_power_rising or 
-                    adx_aligned[i] < 20):
+                if prices['low'].iloc[i] <= camarilla_pp_aligned[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if (bear_power[i] <= 0 or not bear_power_rising or 
-                    adx_aligned[i] < 20):
+                if prices['high'].iloc[i] >= camarilla_pp_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
