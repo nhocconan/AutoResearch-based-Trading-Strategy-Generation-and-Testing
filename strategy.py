@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1w trend filter and 1d volume confirmation
-# - Entry: Long when price > Kumo cloud + Tenkan > Kijun (bullish TK cross) + 1w price > Kumo (long-term uptrend) + 1d volume > 1.5x 20-period average
-#          Short when price < Kumo cloud + Tenkan < Kijun (bearish TK cross) + 1w price < Kumo (long-term downtrend) + 1d volume > 1.5x 20-period average
-# - Exit: Close-based reversal - exit long when price < Kumo cloud, exit short when price > Kumo cloud
+# Hypothesis: 12h KAMA trend + 1d RSI extremes + 1d volume spike filter
+# - Entry: Long when 12h KAMA is rising AND 1d RSI < 30 (oversold) AND 1d volume > 1.5x 20-period average
+#          Short when 12h KAMA is falling AND 1d RSI > 70 (overbought) AND 1d volume > 1.5x 20-period average
+# - Exit: Close-based reversal - exit long when 12h KAMA starts falling, exit short when 12h KAMA starts rising
 # - Position sizing: 0.25 (discrete levels to minimize fee churn)
-# - Uses Ichimoku components from 6h data for entry signals, weekly Ichimoku for trend filter, daily volume for confirmation
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 300 total
-# - Ichimoku provides robust trend/filter signals that work in both bull and bear markets via cloud positioning
-# - Volume confirmation ensures genuine participation, reducing false signals
-# - Weekly trend filter aligns with major market regime, avoiding counter-trend trades
+# - Uses 12h KAMA for adaptive trend following, daily RSI for mean reversion extremes,
+#   and daily volume spike to confirm genuine participation
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 200 total
+# - KAMA adapts to market noise, reducing whipsaw in choppy markets
+# - RSI extremes work well in both bull and bear markets for mean reversion
+# - Volume filter ensures breakouts/mean reversions have participation
 
-name = "6h_1w_1d_ichimoku_volume_v1"
-timeframe = "6h"
+name = "12h_1d_kama_rsi_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,139 +25,109 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h data
+    close_12h = prices['close'].values
     
-    # Pre-compute 1w data for Ichimoku
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Pre-compute 1d data for volume
+    # Pre-compute 1d data
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high_6h = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
-    period9_low_6h = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
-    tenkan_6h = (period9_high_6h + period9_low_6h) / 2
+    # Calculate 12h KAMA (adaptive moving average)
+    # Efficiency Ratio (ER) over 10 periods
+    change_12h = np.abs(np.diff(close_12h, n=10))
+    volatility_12h = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)[:len(change_12h)]
+    # Pad arrays to match length
+    change_12h = np.concatenate([np.full(10, np.nan), change_12h])
+    volatility_12h = np.concatenate([np.full(9, np.nan), volatility_12h, np.array([np.nan])])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high_6h = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
-    period26_low_6h = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
-    kijun_6h = (period26_high_6h + period26_low_6h) / 2
+    er_12h = np.where(volatility_12h != 0, change_12h / volatility_12h, 0)
+    # Smoothing constants: fastest SC=2/(2+1)=0.667, slowest SC=2/(30+1)=0.0645
+    sc_12h = (er_12h * (0.667 - 0.0645) + 0.0645) ** 2
+    # Initialize KAMA
+    kama_12h = np.full_like(close_12h, np.nan)
+    kama_12h[9] = close_12h[9]  # Start after 10 periods
+    for i in range(10, len(close_12h)):
+        if not np.isnan(sc_12h[i]):
+            kama_12h[i] = kama_12h[i-1] + sc_12h[i] * (close_12h[i] - kama_12h[i-1])
+        else:
+            kama_12h[i] = kama_12h[i-1]
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a_6h = (tenkan_6h + kijun_6h) / 2
+    # Calculate 1d RSI (14-period)
+    delta_1d = np.diff(close_1d)
+    delta_1d = np.concatenate([np.array([np.nan]), delta_1d])
+    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
+    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high_6h = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
-    period52_low_6h = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
-    senkou_b_6h = (period52_high_6h + period52_low_6h) / 2
-    
-    # Kumo cloud boundaries
-    senkou_top_6h = np.maximum(senkou_a_6h, senkou_b_6h)
-    senkou_bottom_6h = np.minimum(senkou_a_6h, senkou_b_6h)
-    
-    # Calculate 1w Ichimoku for trend filter
-    period9_high_1w = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
-    period9_low_1w = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
-    tenkan_1w = (period9_high_1w + period9_low_1w) / 2
-    
-    period26_high_1w = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    period26_low_1w = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun_1w = (period26_high_1w + period26_low_1w) / 2
-    
-    senkou_a_1w = (tenkan_1w + kijun_1w) / 2
-    
-    period52_high_1w = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    period52_low_1w = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_b_1w = (period52_high_1w + period52_low_1w) / 2
-    
-    senkou_top_1w = np.maximum(senkou_a_1w, senkou_b_1w)
-    senkou_bottom_1w = np.minimum(senkou_a_1w, senkou_b_1w)
+    avg_gain_1d = pd.Series(gain_1d).rolling(window=14, min_periods=14).mean().values
+    avg_loss_1d = pd.Series(loss_1d).rolling(window=14, min_periods=14).mean().values
+    rs_1d = np.where(avg_loss_1d != 0, avg_gain_1d / avg_loss_1d, 0)
+    rsi_1d = 100 - (100 / (1 + rs_1d))
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all HTF data to 6h timeframe
-    tenkan_6h_aligned = align_htf_to_ltf(prices, prices, tenkan_6h)  # 6h data, no alignment needed
-    kijun_6h_aligned = align_htf_to_ltf(prices, prices, kijun_6h)
-    senkou_top_6h_aligned = align_htf_to_ltf(prices, prices, senkou_top_6h)
-    senkou_bottom_6h_aligned = align_htf_to_ltf(prices, prices, senkou_bottom_6h)
-    
-    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w)
-    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w)
-    senkou_top_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_top_1w)
-    senkou_bottom_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_bottom_1w)
-    
+    # Align all HTF data to 12h timeframe
+    kama_12h_aligned = align_htf_to_ltf(prices, df_1d, kama_12h)  # Wait for 1d bar to close
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after warmup period (max Ichimoku period)
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_6h_aligned[i]) or np.isnan(kijun_6h_aligned[i]) or 
-            np.isnan(senkou_top_6h_aligned[i]) or np.isnan(senkou_bottom_6h_aligned[i]) or
-            np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or
-            np.isnan(senkou_top_1w_aligned[i]) or np.isnan(senkou_bottom_1w_aligned[i]) or
+        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current prices
-        close_price = close_6h[i]
+        # Get current 12h close and KAMA
+        close_price = close_12h[i]
+        kama_value = kama_12h_aligned[i]
         
-        # 6h Ichimoku conditions
-        price_above_kumo = close_price > senkou_top_6h_aligned[i]
-        price_below_kumo = close_price < senkou_bottom_6h_aligned[i]
-        tk_bullish = tenkan_6h_aligned[i] > kijun_6h_aligned[i]
-        tk_bearish = tenkan_6h_aligned[i] < kijun_6h_aligned[i]
+        # Determine KAMA direction (rising/falling)
+        if i > 50:
+            kama_prev = kama_12h_aligned[i-1]
+            kama_rising = kama_value > kama_prev
+            kama_falling = kama_value < kama_prev
+        else:
+            kama_rising = False
+            kama_falling = False
         
-        # 1w Ichimoku trend filter
-        weekly_bullish = close_1w[-1] > senkou_top_1w_aligned[i] if len(close_1w) > 0 else False  # Simplified: use current week's close vs cloud
-        weekly_bearish = close_1w[-1] < senkou_bottom_1w_aligned[i] if len(close_1w) > 0 else False
-        
-        # Volume confirmation
+        # Volume confirmation: > 1.5x 20-period average
         volume_confirmation = volume_1d_aligned[i] > 1.5 * volume_ma_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price > Kumo + TK bullish + weekly bullish + volume confirmation
-            if (price_above_kumo and tk_bullish and 
-                # Use simplified weekly trend: price above weekly Kumo
-                close_6h[i] > senkou_top_1w_aligned[i] and 
+            # Long entry: KAMA rising AND RSI oversold (<30) AND volume confirmation
+            if (kama_rising and 
+                rsi_1d_aligned[i] < 30 and 
                 volume_confirmation):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price < Kumo + TK bearish + weekly bearish + volume confirmation
-            elif (price_below_kumo and tk_bearish and 
-                  # Use simplified weekly trend: price below weekly Kumo
-                  close_6h[i] < senkou_bottom_1w_aligned[i] and 
+            # Short entry: KAMA falling AND RSI overbought (>70) AND volume confirmation
+            elif (kama_falling and 
+                  rsi_1d_aligned[i] > 70 and 
                   volume_confirmation):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit long when price < Kumo cloud
-            # Exit short when price > Kumo cloud
+            # Exit long when KAMA starts falling
+            # Exit short when KAMA starts rising
             if position == 1:
-                if close_price < senkou_top_6h_aligned[i]:  # Exit when price falls below cloud top
+                if kama_falling:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close_price > senkou_bottom_6h_aligned[i]:  # Exit when price rises above cloud bottom
+                if kama_rising:
                     position = 0
                     signals[i] = 0.0
                 else:
