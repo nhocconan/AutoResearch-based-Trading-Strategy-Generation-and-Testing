@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d volume spike filter
-# - Williams %R(14) identifies overbought/oversold conditions on 4h
-# - Extreme readings (%R < -80 for long, %R > -20 for short) signal mean reversion opportunities
-# - 1d volume spike (>2.0x 20-day average volume) confirms institutional participation
-# - ATR(14) trailing stop (2.0x) adapts to volatility and manages risk
+# Hypothesis: 4h KAMA trend with 1d ATR regime filter and volume spike
+# - KAMA adapts to market efficiency, reducing whipsaw in ranging markets
+# - 1d ATR ratio (current/20-day average) > 1.5 identifies high-volatility regimes
+# - 1d volume spike (>1.8x 20-day average) confirms institutional participation
 # - Discrete position sizing (0.25) minimizes fee churn
-# - Target: 25-40 trades/year (100-160 total over 4 years) to avoid fee drag
-# - Works in both bull and bear markets by fading extremes during volatility spikes
+# - Target: 30-50 trades/year (120-200 total over 4 years) to balance edge and fees
+# - Works in bull markets via trend following, in bear markets via volatility filters that reduce false signals
 
-name = "4h_1d_williamsr_volume_v1"
+name = "4h_1d_kama_atr_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,43 +25,52 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d volume and its moving average
-    volume_1d = df_1d['volume'].values
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Pre-compute 1d ATR and its moving average
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute 4h Williams %R (14-period)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    diff = highest_high - lowest_low
-    williams_r = np.where(diff != 0, -100 * (highest_high - close_4h) / diff, -50)
-    
-    # Pre-compute 4h ATR for trailing stop (14-period)
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum.reduce([tr1, tr2, tr3])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_20_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Pre-compute 1d volume and its moving average
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    volume_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    
+    # Pre-compute 4h KAMA (adaptive moving average)
+    close_4h = prices['close'].values
+    direction = np.abs(np.diff(close_4h, 10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close_4h, 1)), axis=1)  # 10-period sum of abs changes
+    er = np.where(volatility > 0, direction / volatility, 0)
+    # Pad ER array to match length
+    er = np.concatenate([np.full(9, np.nan), er])
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # smoothing constant
+    kama = np.full_like(close_4h, np.nan)
+    kama[9] = close_4h[9]  # seed
+    for i in range(10, len(close_4h)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0  # for trailing stop
-    lowest_since_entry = 0.0   # for trailing stop
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(williams_r[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(kama[i]) or np.isnan(atr_aligned[i]) or 
+            np.isnan(atr_ma_aligned[i]) or np.isnan(volume_aligned[i]) or 
             np.isnan(volume_ma_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -72,49 +80,34 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 1d volume for filter (use raw volume, not ATR-normalized)
-        volume_1d_current = volume_1d
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
+        # Regime filter: 1d ATR ratio > 1.5 (high volatility regime)
+        atr_ratio = atr_aligned[i] / atr_ma_aligned[i]
+        high_vol_regime = atr_ratio > 1.5
         
-        # Volume confirmation: current 1d volume > 2.0x 20-day average
-        volume_confirm = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
+        # Volume confirmation: current 1d volume > 1.8x 20-day average
+        volume_confirm = volume_aligned[i] > 1.8 * volume_ma_aligned[i]
         
         close_price = close_4h[i]
-        williams_r_current = williams_r[i]
+        kama_value = kama[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Williams %R oversold (< -80) AND volume confirmation
-            if williams_r_current < -80.0 and volume_confirm:
+            # Long conditions: price > KAMA AND high volatility regime AND volume confirmation
+            if close_price > kama_value and high_vol_regime and volume_confirm:
                 position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: Williams %R overbought (> -20) AND volume confirmation
-            elif williams_r_current > -20.0 and volume_confirm:
+            # Short conditions: price < KAMA AND high volatility regime AND volume confirmation
+            elif close_price < kama_value and high_vol_regime and volume_confirm:
                 position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                lowest_since_entry = prices['low'].iloc[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit or trailing stop
-            # Update highest/lowest since entry for trailing stop
-            if position == 1:
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # ATR trailing stop: exit when price drops 2.0*ATR from highest point
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.0 * atr[i]
-                exit_condition = trailing_stop
-            else:  # position == -1
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # ATR trailing stop: exit when price rises 2.0*ATR from lowest point
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr[i]
-                exit_condition = trailing_stop
-            
-            if exit_condition:
+        else:  # Have position - look for exit
+            # Exit when price crosses KAMA in opposite direction
+            if position == 1 and close_price < kama_value:
                 position = 0
-                entry_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
+                signals[i] = 0.0
+            elif position == -1 and close_price > kama_value:
+                position = 0
                 signals[i] = 0.0
             else:
                 if position == 1:
