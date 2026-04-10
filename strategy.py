@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band squeeze breakout with 1d volume confirmation and chop regime filter
-# - Long when price closes above upper BB(20,2) + Bollinger Band Width < 0.05 (squeeze) + 1d volume > 1.3x 20-period volume SMA + Chop(14) > 50
-# - Short when price closes below lower BB(20,2) + Bollinger Band Width < 0.05 (squeeze) + 1d volume > 1.3x 20-period volume SMA + Chop(14) > 50
+# Hypothesis: 4h Bollinger Band breakout with 1d volume confirmation and chop regime filter
+# - Long when price closes above upper BB(20,2) + Bollinger Band Width < 0.06 (squeeze) + 1d volume > 1.4x 20-period volume SMA + Chop(14) > 55
+# - Short when price closes below lower BB(20,2) + Bollinger Band Width < 0.06 (squeeze) + 1d volume > 1.4x 20-period volume SMA + Chop(14) > 55
 # - Exit: price crosses back through middle BB(20) line
 # - Position sizing: 0.25 discrete level
 # - Bollinger Band squeeze identifies low volatility periods primed for breakout
 # - Volume confirms breakout validity, chop filter avoids weak trends
 # - 4h timeframe targets 20-50 trades/year with strict entry conditions to minimize fee drag
 
-name = "4h_1d_bb_squeeze_volume_chop_v1"
+name = "4h_1d_bb_squeeze_volume_chop_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -84,14 +84,14 @@ def generate_signals(prices):
         # Get current 1d volume for volume spike confirmation
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period SMA (volume spike)
-        vol_confirm = vol_1d_current[i] > 1.3 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.4x 20-period SMA (volume spike)
+        vol_confirm = vol_1d_current[i] > 1.4 * volume_sma_20_1d_aligned[i]
         
-        # Squeeze condition: Bollinger Band Width < 0.05 indicates low volatility
-        squeeze_condition = bb_width[i] < 0.05
+        # Squeeze condition: Bollinger Band Width < 0.06 indicates low volatility
+        squeeze_condition = bb_width[i] < 0.06
         
-        # Regime filter: Chop > 50 indicates ranging/transition market (favorable for breakout)
-        favorable_regime = chop[i] > 50
+        # Regime filter: Chop > 55 indicates ranging/transition market (favorable for breakout)
+        favorable_regime = chop[i] > 55
         
         # Bollinger Band signals
         long_entry = (close[i] > upper_bb[i]) and squeeze_condition and vol_confirm and favorable_regime
