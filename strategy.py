@@ -3,68 +3,68 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation and 1w trend filter
-# - Long when price breaks above Camarilla R4 (1d) AND 1w volume > 1.5x 10-bar avg AND 1w close > 1w open (bullish weekly candle)
-# - Short when price breaks below Camarilla S4 (1d) AND 1w volume > 1.5x 10-bar avg AND 1w close < 1w open (bearish weekly candle)
-# - Exit when price returns to Camarilla PP (pivot point) from 1d
+# Hypothesis: 6h Elder Ray Power with 1d regime filter and volume confirmation
+# - Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# - Long when Bull Power > 0 AND Bear Power < 0 (strong bullish momentum) AND 1d volume > 1.3x 20-bar avg AND 1d close > 1d open (bullish daily)
+# - Short when Bear Power > 0 AND Bull Power < 0 (strong bearish momentum) AND 1d volume > 1.3x 20-bar avg AND 1d close < 1d open (bearish daily)
+# - Exit when power values converge (|Bull Power| < 0.1 * ATR AND |Bear Power| < 0.1 * ATR) indicating weakening momentum
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Camarilla levels provide precise support/resistance; weekly volume confirms institutional participation
-# - Weekly trend filter ensures alignment with higher timeframe momentum, reducing counter-trend whipsaws
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Elder Ray measures bull/bear power relative to EMA; regime filter ensures alignment with daily trend
+# - Volume confirmation adds institutional participation validation
 
-name = "1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_regime_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 10 or len(df_1w) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute Camarilla pivot levels from 1d data (using previous day's OHLC)
-    # Camarilla formulas: PP = (H+L+C)/3, R4 = C + ((H-L)*1.1/2), S4 = C - ((H-L)*1.1/2)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 13-period EMA for Elder Ray (using 6h close prices)
+    close = prices['close'].values
+    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    
+    # Pre-compute Elder Ray Power components
+    high = prices['high'].values
+    low = prices['low'].values
+    bull_power = high - ema_13  # Bull Power = High - EMA(13)
+    bear_power = ema_13 - low   # Bear Power = EMA(13) - Low
+    
+    # Pre-compute ATR for exit condition
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Pre-compute 1d volume confirmation: > 1.3x 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.3 * volume_20_avg)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # Pre-compute 1d regime filter: bullish if close > open, bearish if close < open
     open_1d = df_1d['open'].values
-    
-    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2.0)
-    camarilla_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2.0)
-    
-    # Align 1d Camarilla levels to 1d timeframe (same timeframe, no shift needed but using helper for consistency)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Pre-compute 1w volume confirmation: > 1.5x 10-period average
-    volume_1w = df_1w['volume'].values
-    volume_10_avg = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
-    vol_spike_1w = volume_1w > (1.5 * volume_10_avg)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
-    
-    # Pre-compute 1w trend filter: bullish if close > open, bearish if close < open
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
-    weekly_bullish = close_1w > open_1w
-    weekly_bearish = close_1w < open_1w
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    close_1d = df_1d['close'].values
+    daily_bullish = close_1d > open_1d
+    daily_bearish = close_1d < open_1d
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_spike_1w_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -74,30 +74,24 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Camarilla R4 AND 1w volume spike AND weekly bullish
-            if (prices['high'].iloc[i] > camarilla_r4_aligned[i] and 
-                vol_spike_1w_aligned[i] and 
-                weekly_bullish_aligned[i]):
+        if position == 0:  # Flat - look for new entries
+            # Long when Bull Power > 0 AND Bear Power < 0 (strong bullish) AND volume spike AND daily bullish
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                vol_spike_1d_aligned[i] and 
+                daily_bullish_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below Camarilla S4 AND 1w volume spike AND weekly bearish
-            elif (prices['low'].iloc[i] < camarilla_s4_aligned[i] and 
-                  vol_spike_1w_aligned[i] and 
-                  weekly_bearish_aligned[i]):
+            # Short when Bear Power > 0 AND Bull Power < 0 (strong bearish) AND volume spike AND daily bearish
+            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
+                  vol_spike_1d_aligned[i] and 
+                  daily_bearish_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to Camarilla PP (mean reversion to equilibrium)
-            # Exit when price returns to Camarilla pivot point
-            exit_signal = False
-            if position == 1:  # Long position
-                if prices['low'].iloc[i] <= camarilla_pp_aligned[i]:
-                    exit_signal = True
-            elif position == -1:  # Short position
-                if prices['high'].iloc[i] >= camarilla_pp_aligned[i]:
-                    exit_signal = True
+        else:  # Have position - look for exit when power weakens
+            # Exit when power values converge (|Bull Power| < 0.1 * ATR AND |Bear Power| < 0.1 * ATR)
+            exit_signal = (np.abs(bull_power[i]) < 0.1 * atr[i]) and (np.abs(bear_power[i]) < 0.1 * atr[i])
             
             if exit_signal:
                 position = 0
