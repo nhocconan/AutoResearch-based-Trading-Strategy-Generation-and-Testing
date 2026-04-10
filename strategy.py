@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high on 4h in 1d uptrend (close > EMA50) with volume spike (>1.5x 20-bar avg)
-# - Short when price breaks below 20-period Donchian low on 4h in 1d downtrend (close < EMA50) with volume spike
+# Hypothesis: 12h Bollinger Band breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above BB(20,2) upper band in 1d uptrend (close > EMA50) with volume spike
+# - Short when price breaks below BB(20,2) lower band in 1d downtrend (close < EMA50) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - ATR-based stoploss (2.5x ATR) to limit drawdown
-# - Targets ~25-50 trades/year (100-200 total over 4 years) to avoid fee drag
-# - Daily trend filter reduces false breakouts in ranging markets, works in both bull and bear
+# - Bollinger Bands adapt to volatility, reducing false signals in low-vol regimes
+# - Daily trend filter reduces false breakouts in ranging markets
+# - ATR-based stoploss to limit drawdown
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_bb_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,12 +36,20 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d volume confirmation: > 1.5x 20-period average (less strict to avoid overtrading)
+    # 1d Bollinger Bands (20,2)
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper_1d = sma_20_1d + (2.0 * std_20_1d)
+    bb_lower_1d = sma_20_1d - (2.0 * std_20_1d)
+    bb_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_upper_1d)
+    bb_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_lower_1d)
+    
+    # 1d volume confirmation: > 2.0x 20-period average
     avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
+    vol_spike_1d = volume_1d > (2.0 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute ATR for stoploss (using 1d data)
+    # Pre-compute ATR for stoploss
     high_low = df_1d['high'] - df_1d['low']
     high_close = np.abs(df_1d['high'] - df_1d['close'].shift(1))
     low_close = np.abs(df_1d['low'] - df_1d['close'].shift(1))
@@ -56,7 +65,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bb_upper_1d_aligned[i]) or 
+            np.isnan(bb_lower_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
             np.isnan(atr_14_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -79,24 +89,20 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Calculate Donchian channels on 4h data (20-period)
-            if i >= 20:  # Need enough data for Donchian
-                donchian_high = np.max(prices['high'].iloc[i-20:i].values)
-                donchian_low = np.min(prices['low'].iloc[i-20:i].values)
-                
-                # Long signal: price breaks above Donchian high in 1d uptrend with volume spike
-                if (prices['high'].iloc[i] > donchian_high and 
-                    prices['close'].iloc[i] > ema_50_1d_aligned[i] and 
-                    vol_spike_1d_aligned[i]):
-                    position = 1
-                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                    signals[i] = 0.25
-                # Short signal: price breaks below Donchian low in 1d downtrend with volume spike
-                elif (prices['low'].iloc[i] < donchian_low and 
-                      prices['close'].iloc[i] < ema_50_1d_aligned[i] and 
-                      vol_spike_1d_aligned[i]):
-                    position = -1
-                    entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                    signals[i] = -0.25
+            # Bollinger Band breakout signals
+            # Long: price breaks above upper band in 1d uptrend with volume spike
+            if (prices['high'].iloc[i] > bb_upper_1d_aligned[i] and 
+                prices['close'].iloc[i] > ema_50_1d_aligned[i] and 
+                vol_spike_1d_aligned[i]):
+                position = 1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                signals[i] = 0.25
+            # Short: price breaks below lower band in 1d downtrend with volume spike
+            elif (prices['low'].iloc[i] < bb_lower_1d_aligned[i] and 
+                  prices['close'].iloc[i] < ema_50_1d_aligned[i] and 
+                  vol_spike_1d_aligned[i]):
+                position = -1
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                signals[i] = -0.25
     
     return signals
