@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams %R mean reversion with 1w trend filter and volume confirmation
-# - Long when Williams %R(14) < -80 (oversold) in 1w uptrend (close > EMA50) with volume spike
-# - Short when Williams %R(14) > -20 (overbought) in 1w downtrend (close < EMA50) with volume spike
+# Hypothesis: 12h TRIX momentum with 1d volume spike and choppiness regime filter
+# - Long when TRIX(12) crosses above zero on 12h with 1d volume spike and choppy market (CHOP > 61.8)
+# - Short when TRIX(12) crosses below zero on 12h with 1d volume spike and choppy market (CHOP > 61.8)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets 7-25 trades/year (30-100 total over 4 years) to avoid fee drag
-# - Weekly trend filter reduces false signals in ranging markets
-# - ATR-based stoploss to limit drawdown
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Volume spike and chop regime reduce false signals in trending markets
+# - Works in both bull and bear markets by capturing mean reversion in choppy conditions
 
-name = "1d_1w_williamsr_meanrev_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_trix_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,86 +21,80 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w indicators
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 1d indicators
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA(34) for TRIX calculation (typical period)
+    ema1_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema2_1d = pd.Series(ema1_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema3_1d = pd.Series(ema2_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trix_1d = 100 * (ema3_1d - np.roll(ema3_1d, 1)) / np.roll(ema3_1d, 1)
+    trix_1d[0] = 0  # First value undefined due to roll
+    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_1d)
     
-    # 1w volume confirmation: > 2.0x 20-period average
-    avg_volume_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (2.0 * avg_volume_20_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
+    # 1d volume confirmation: > 1.8x 20-period average
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.8 * avg_volume_20_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute ATR for stoploss
-    high_low = df_1w['high'] - df_1w['low']
-    high_close = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    low_close = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_ranges = np.nanmax(ranges.values, axis=1)
-    atr_14_1w = pd.Series(true_ranges).rolling(window=14, min_periods=14).mean().values
-    atr_14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_14_1w)
-    
-    # Pre-compute Williams %R on 1d data
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
-    
+    # 1d Choppiness Index (CHOP) - regime filter
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (highest_high - lowest_low))) 
+    # Simplified: CHOP > 61.8 = ranging market (good for mean reversion)
+    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.maximum(tr1, np.abs(low_1d - np.roll(close_1d, 1)))
+    tr2[0] = 0  # First TR undefined
+    atr_14 = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
     highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
     lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    chop_denom = np.log10(14) * (highest_high_14 - lowest_low_14)
+    chop_denom = np.where(chop_denom == 0, 1, chop_denom)  # Avoid division by zero
+    chop_1d = 100 * np.log10(sum_atr_14 / chop_denom)
+    chop_1d = np.where(np.isnan(chop_1d), 50, chop_1d)  # Default to middle range
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    atr_stop_multiplier = 2.5
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_spike_1w_aligned[i]) or 
-            np.isnan(atr_14_1w_aligned[i]) or np.isnan(williams_r[i])):
+        if (np.isnan(trix_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # ATR-based stoploss
-            if prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14_1w_aligned[i]:
+            # Exit when TRIX crosses below zero or volume spike ends
+            if trix_1d_aligned[i] < 0 or not vol_spike_1d_aligned[i]:
                 position = 0
-                entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # ATR-based stoploss
-            if prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14_1w_aligned[i]:
+            # Exit when TRIX crosses above zero or volume spike ends
+            if trix_1d_aligned[i] > 0 or not vol_spike_1d_aligned[i]:
                 position = 0
-                entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long signal: Williams %R oversold in 1w uptrend with volume spike
-            if (williams_r[i] < -80 and 
-                prices['close'].iloc[i] > ema_50_1w_aligned[i] and 
-                vol_spike_1w_aligned[i]):
-                position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = 0.25
-            # Short signal: Williams %R overbought in 1w downtrend with volume spike
-            elif (williams_r[i] > -20 and 
-                  prices['close'].iloc[i] < ema_50_1w_aligned[i] and 
-                  vol_spike_1w_aligned[i]):
-                position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = -0.25
+            # Only trade in choppy/range markets (CHOP > 61.8)
+            if chop_1d_aligned[i] > 61.8:
+                # Long signal: TRIX crosses above zero with volume spike
+                if trix_1d_aligned[i] > 0 and trix_1d_aligned[i-1] <= 0 and vol_spike_1d_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short signal: TRIX crosses below zero with volume spike
+                elif trix_1d_aligned[i] < 0 and trix_1d_aligned[i-1] >= 0 and vol_spike_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
