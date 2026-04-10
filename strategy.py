@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# - Donchian(20) from 1d: breakout above upper band = long, below lower band = short
-# - 1w ADX(14) > 25 to ensure higher timeframe trend and avoid chop
-# - Volume confirmation: current 1d volume > 1.8x 20-period average
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
+# - Donchian(20) from 12h: breakout above upper band = long, below lower band = short
+# - 1d ADX(14) > 25 to ensure trending market and avoid chop
+# - Volume confirmation: current 12h volume > 2.0x 20-period average
 # - ATR-based trailing stop: exit long when price < highest_high - 2.5*ATR, exit short when price > lowest_low + 2.5*ATR
-# - Designed for 1d timeframe: targets 10-30 trades/year to avoid fee drag
-# - Works in bull/bear markets: 1w ADX filter ensures we trade with higher timeframe trend
+# - Designed for 12h timeframe: targets 12-37 trades/year to avoid fee drag
+# - Works in bull/bear markets: ADX filter ensures we trade with higher timeframe trend
 # - Uses discrete position sizing (0.25) to minimize fee churn
 
-name = "1d_1w_donchian_adx_volume_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,27 +22,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1w ADX(14) for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     
     # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
@@ -58,30 +58,30 @@ def generate_signals(prices):
     # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 1d Donchian channels (20-period)
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
+    # Pre-compute 12h Donchian channels (20-period)
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
     # Donchian upper band: highest high over past 20 periods
-    highest_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
     # Donchian lower band: lowest low over past 20 periods
-    lowest_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 1d volume confirmation
-    volume_1d = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.8 * avg_volume_20)
+    # Pre-compute 12h volume confirmation
+    volume_12h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h > (2.0 * avg_volume_20)
     
-    # Pre-compute 1d ATR(14) for trailing stop
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Pre-compute 12h ATR(14) for trailing stop
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_14 = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -98,10 +98,10 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Update highest high for trailing stop
-            if close_1d[i] > highest_high:
-                highest_high = close_1d[i]
+            if close_12h[i] > highest_high:
+                highest_high = close_12h[i]
             # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
-            if close_1d[i] < highest_high - 2.5 * atr_14[i] or close_1d[i] < highest_20[i]:
+            if close_12h[i] < highest_high - 2.5 * atr_14[i] or close_12h[i] < highest_20[i]:
                 position = 0
                 highest_high = 0.0
                 signals[i] = 0.0
@@ -110,10 +110,10 @@ def generate_signals(prices):
                 
         elif position == -1:  # Short position
             # Update lowest low for trailing stop
-            if close_1d[i] < lowest_low:
-                lowest_low = close_1d[i]
+            if close_12h[i] < lowest_low:
+                lowest_low = close_12h[i]
             # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
-            if close_1d[i] > lowest_low + 2.5 * atr_14[i] or close_1d[i] > lowest_20[i]:
+            if close_12h[i] > lowest_low + 2.5 * atr_14[i] or close_12h[i] > lowest_20[i]:
                 position = 0
                 lowest_low = 0.0
                 signals[i] = 0.0
@@ -123,16 +123,16 @@ def generate_signals(prices):
             # Look for Donchian breakout with trend and volume filters
             if vol_spike[i] and adx_aligned[i] > 25:
                 # Breakout long: price closes above upper Donchian band
-                if close_1d[i] > highest_20[i]:
+                if close_12h[i] > highest_20[i]:
                     position = 1
-                    entry_price = close_1d[i]
-                    highest_high = close_1d[i]
+                    entry_price = close_12h[i]
+                    highest_high = close_12h[i]
                     signals[i] = 0.25
                 # Breakout short: price closes below lower Donchian band
-                elif close_1d[i] < lowest_20[i]:
+                elif close_12h[i] < lowest_20[i]:
                     position = -1
-                    entry_price = close_1d[i]
-                    lowest_low = close_1d[i]
+                    entry_price = close_12h[i]
+                    lowest_low = close_12h[i]
                     signals[i] = -0.25
     
     return signals
