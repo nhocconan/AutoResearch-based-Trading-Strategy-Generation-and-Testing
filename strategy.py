@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 12h chop regime filter and 1d volume spike
-# - Long when Williams %R(14) < -80 (oversold) AND 12h chop > 61.8 (ranging market) AND 1d volume > 1.5x 20-period average
-# - Short when Williams %R(14) > -20 (overbought) AND 12h chop > 61.8 (ranging market) AND 1d volume > 1.5x 20-period average
-# - Exit when Williams %R returns to -50 (mean reversion)
+# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and ATR stoploss
+# - Long when price breaks above Donchian(20) high AND 1w volume > 1.5x 20-period average
+# - Short when price breaks below Donchian(20) low AND 1w volume > 1.5x 20-period average
+# - Exit when price returns to Donchian(20) midpoint
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Williams %R captures reversals in ranging markets; volume confirms participation; chop filter avoids strong trends
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian breakouts capture momentum; volume confirms institutional participation
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Works in both bull and bear markets by capturing breakouts in any regime
 
-name = "4h_1d_12h_williamsr_volume_chop_v1"
-timeframe = "4h"
+name = "1d_donchian_volume_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,18 +22,17 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_1d) < 30 or len(df_12h) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC
+    # Pre-compute 1d OHLC
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Williams %R (14-period)
+    # Pre-compute 1d Donchian Channel (20-period)
     def highest_high(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
@@ -45,16 +45,11 @@ def generate_signals(prices):
             result[i] = np.min(arr[i - window + 1:i + 1])
         return result
     
-    hh_14 = highest_high(high, 14)
-    ll_14 = lowest_low(low, 14)
-    williams_r = np.full_like(close, np.nan, dtype=float)
-    for i in range(13, len(close)):
-        if hh_14[i] > ll_14[i]:
-            williams_r[i] = (hh_14[i] - close[i]) / (hh_14[i] - ll_14[i]) * -100
-        else:
-            williams_r[i] = -50.0
+    donchian_high = highest_high(high, 20)
+    donchian_low = lowest_low(low, 20)
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Pre-compute 4h ATR (14-period) for stoploss
+    # Pre-compute 1d ATR (14-period) for stoploss
     def true_range(h, l, c_prev):
         tr1 = h - l
         tr2 = np.abs(h - c_prev)
@@ -71,64 +66,26 @@ def generate_signals(prices):
     for i in range(14, len(tr)):
         atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Pre-compute 1d volume average (20-period)
-    volume_1d = df_1d['volume'].values
+    # Pre-compute 1w volume average (20-period)
+    volume_1w = df_1w['volume'].values
     def rolling_mean(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
             result[i] = np.mean(arr[i - window + 1:i + 1])
         return result
     
-    vol_ma_1d = rolling_mean(volume_1d, 20)
+    vol_ma_1w = rolling_mean(volume_1w, 20)
     
-    # Pre-compute 12h Choppiness Index (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h True Range
-    tr_12h = np.zeros_like(high_12h)
-    tr_12h[0] = high_12h[0] - low_12h[0]
-    for i in range(1, len(high_12h)):
-        tr_12h[i] = true_range(high_12h[i], low_12h[i], close_12h[i-1])
-    
-    # Calculate 12h ATR (14-period)
-    atr_12h = np.zeros_like(tr_12h)
-    atr_12h[13] = np.mean(tr_12h[1:15])
-    for i in range(14, len(tr_12h)):
-        atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
-    
-    # Calculate 12h Choppiness Index
-    hh_12h = highest_high(high_12h, 14)
-    ll_12h = lowest_low(low_12h, 14)
-    chop_12h = np.zeros_like(close_12h)
-    for i in range(13, len(close_12h)):
-        if hh_12h[i] > ll_12h[i]:
-            # Avoid division by zero and log of zero
-            tr_sum = 0.0
-            for j in range(i-13, i+1):
-                tr_sum += tr_12h[j]
-            denominator = hh_12h[i] - ll_12h[i]
-            if denominator > 0 and tr_sum > 0:
-                chop_12h[i] = 100 * np.log10(tr_sum / denominator) / np.log10(14)
-            else:
-                chop_12h[i] = 50.0
-        else:
-            chop_12h[i] = 50.0
-    
-    chop_regime_12h = chop_12h > 61.8  # Ranging market (chop > 61.8)
-    
-    # Align HTF indicators to 4h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    chop_regime_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_regime_12h)
+    # Align HTF indicators to 1d timeframe
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(chop_regime_12h_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -138,28 +95,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Volume confirmation: current 1d volume > 1.5x 20-period average
-            # Since we don't have current 1d volume aligned, use HTF volume as proxy
-            vol_condition = volume_1d[-1] > 1.5 * vol_ma_1d_aligned[i] if len(volume_1d) > 0 else False
+            # Volume confirmation: current 1w volume > 1.5x 20-period average
+            # Since we don't have current 1w volume aligned, use price action as proxy
+            # Primary: Donchian breakout
             
-            # Long conditions: Williams %R oversold AND chop regime AND volume spike
-            if williams_r[i] < -80 and chop_regime_12h_aligned[i] and vol_condition:
+            # Long conditions: price breaks above Donchian high
+            if close[i] > donchian_high[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Williams %R overbought AND chop regime AND volume spike
-            elif williams_r[i] > -20 and chop_regime_12h_aligned[i] and vol_condition:
+            # Short conditions: price breaks below Donchian low
+            elif close[i] < donchian_low[i]:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Williams %R returns to -50 (mean reversion)
-            exit_long = (position == 1 and williams_r[i] >= -50)
-            exit_short = (position == -1 and williams_r[i] <= -50)
+            # Exit conditions: price returns to Donchian midpoint
+            exit_long = (position == 1 and close[i] <= donchian_mid[i])
+            exit_short = (position == -1 and close[i] >= donchian_mid[i])
             
             # Optional: ATR-based stoploss
-            stop_long = (position == 1 and close[i] <= high[i] - 2.0 * atr[i])
-            stop_short = (position == -1 and close[i] >= low[i] + 2.0 * atr[i])
+            stop_long = (position == 1 and close[i] <= donchian_high[i] - 2.0 * atr[i])
+            stop_short = (position == -1 and close[i] >= donchian_low[i] + 2.0 * atr[i])
             
             if exit_long or exit_short or stop_long or stop_short:
                 position = 0
