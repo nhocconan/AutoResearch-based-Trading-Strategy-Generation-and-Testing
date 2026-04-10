@@ -3,28 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout + 12h volume confirmation + chop regime filter
+# Hypothesis: 4h Donchian breakout + 12h ATR-based volatility filter + chop regime
 # - Primary: 4h Donchian channel breakout (20-period) for directional bias
-# - HTF: 12h volume spike (current volume > 2.0x 20-period MA) + chop regime filter (CHOP < 50 = trending)
-# - Long: Price breaks above Donchian upper band + volume confirmation + chop regime (trending)
-# - Short: Price breaks below Donchian lower band + volume confirmation + chop regime (trending)
+# - HTF: 12h ATR ratio (current ATR(7) / ATR(30)) > 1.2 for volatility expansion + chop regime (CHOP < 50 = trending)
+# - Long: Price breaks above Donchian upper band + volatility expansion + chop regime (trending)
+# - Short: Price breaks below Donchian lower band + volatility expansion + chop regime (trending)
 # - Exit: Opposite Donchian breakout or chop regime shifts to ranging (CHOP > 60)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Donchian captures institutional breakouts, volume confirms conviction, chop filter avoids false signals in ranging markets
+# - Works in bull/bear: Donchian captures institutional breakouts, volatility filter confirms momentum, chop filter avoids false signals in ranging markets
 # - Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe
 
-name = "4h_12h_donchian_volume_chop_v1"
+name = "4h_12h_donchian_volatility_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:  # Need enough data for calculations
+    if n < 40:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:  # Need enough data for indicators
+    if len(df_12h) < 30:  # Need enough data for indicators
         return np.zeros(n)
     
     # Pre-compute 4h data
@@ -36,35 +36,46 @@ def generate_signals(prices):
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
     
-    # Calculate 12h volume moving average (20-period) for volume confirmation
-    volume_ma_20_12h = np.full(len(volume_12h), np.nan)
-    for i in range(19, len(volume_12h)):
-        if not np.isnan(volume_12h[i-19:i+1]).any():
-            volume_ma_20_12h[i] = np.mean(volume_12h[i-19:i+1])
+    # Calculate 12h ATR(7) for volatility filter
+    atr_period_short = 7
+    tr_12h = np.maximum(np.maximum(high_12h - low_12h,
+                                  np.abs(np.roll(high_12h, 1) - low_12h)),
+                       np.abs(np.roll(low_12h, 1) - high_12h))
+    tr_12h[0] = high_12h[0] - low_12h[0]  # First TR
+    atr_7_12h = np.full(len(tr_12h), np.nan)
+    for i in range(atr_period_short, len(tr_12h)):
+        if not np.isnan(tr_12h[i-atr_period_short+1:i+1]).any():
+            atr_7_12h[i] = np.mean(tr_12h[i-atr_period_short+1:i+1])
+    
+    # Calculate 12h ATR(30) for volatility filter
+    atr_period_long = 30
+    atr_30_12h = np.full(len(tr_12h), np.nan)
+    for i in range(atr_period_long, len(tr_12h)):
+        if not np.isnan(tr_12h[i-atr_period_long+1:i+1]).any():
+            atr_30_12h[i] = np.mean(tr_12h[i-atr_period_long+1:i+1])
+    
+    # ATR ratio (current ATR(7) / ATR(30)) for volatility expansion
+    atr_ratio_12h = np.full(len(tr_12h), np.nan)
+    for i in range(len(tr_12h)):
+        if not np.isnan(atr_7_12h[i]) and not np.isnan(atr_30_12h[i]) and atr_30_12h[i] > 0:
+            atr_ratio_12h[i] = atr_7_12h[i] / atr_30_12h[i]
     
     # Calculate 12h Chopiness Index (CHOP) for regime filter
     chop_lookback = 14
-    tr1 = np.maximum(np.maximum(high_12h - low_12h,
-                               np.abs(np.roll(high_12h, 1) - low_12h)),
-                    np.abs(np.roll(low_12h, 1) - high_12h))
+    sum_tr = np.full(len(tr_12h), np.nan)
+    for i in range(chop_lookback, len(tr_12h)):
+        if not np.isnan(tr_12h[i-chop_lookback:i]).any():
+            sum_tr[i] = np.sum(tr_12h[i-chop_lookback:i])
     
-    # Sum of TR over chop_lookback period
-    sum_tr = np.full(len(tr1), np.nan)
-    for i in range(chop_lookback, len(tr1)):
-        if not np.isnan(tr1[i-chop_lookback:i]).any():
-            sum_tr[i] = np.sum(tr1[i-chop_lookback:i])
-    
-    # Highest high and lowest low over chop_lookback period
     hh = np.full(len(high_12h), np.nan)
     ll = np.full(len(low_12h), np.nan)
     for i in range(chop_lookback, len(high_12h)):
-        if not np.isnan(high_12h[i-chop_lookback:i+1]).any() and not np.isnan(low_12h[i-chop_lookback:i+1]).any():
+        if (not np.isnan(high_12h[i-chop_lookback:i+1]).any() and 
+            not np.isnan(low_12h[i-chop_lookback:i+1]).any()):
             hh[i] = np.max(high_12h[i-chop_lookback:i+1])
             ll[i] = np.min(low_12h[i-chop_lookback:i+1])
     
-    # Chopiness Index
     chop = np.full(len(high_12h), np.nan)
     for i in range(chop_lookback, len(high_12h)):
         if (not np.isnan(sum_tr[i]) and not np.isnan(hh[i]) and not np.isnan(ll[i]) and 
@@ -74,7 +85,7 @@ def generate_signals(prices):
             chop[i] = np.nan
     
     # Align all HTF indicators to 4h timeframe
-    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
+    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h)
     chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
     
     # Calculate 4h Donchian channels (20-period)
@@ -92,14 +103,13 @@ def generate_signals(prices):
     for i in range(1, n):  # Start from second bar to avoid index issues
         # Skip if any required data is invalid
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(volume_ma_20_12h_aligned[i]) or 
+            np.isnan(atr_ratio_12h_aligned[i]) or 
             np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 2.0x 20-period MA
-        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        volume_confirm = volume_12h_aligned[i] > 2.0 * volume_ma_20_12h_aligned[i]
+        # Volatility expansion: ATR ratio > 1.2
+        volatility_confirm = atr_ratio_12h_aligned[i] > 1.2
         
         # Chop regime filter: CHOP < 50 indicates trending market (avoid ranging)
         regime_confirm = chop_aligned[i] < 50.0
@@ -113,12 +123,12 @@ def generate_signals(prices):
         exit_short = donchian_up or (chop_aligned[i] > 60.0)
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Donchian breakout up + volume confirmation + trending regime
-            if donchian_up and volume_confirm and regime_confirm:
+            # Long entry: Donchian breakout up + volatility expansion + trending regime
+            if donchian_up and volatility_confirm and regime_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Donchian breakout down + volume confirmation + trending regime
-            elif donchian_down and volume_confirm and regime_confirm:
+            # Short entry: Donchian breakout down + volatility expansion + trending regime
+            elif donchian_down and volatility_confirm and regime_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
