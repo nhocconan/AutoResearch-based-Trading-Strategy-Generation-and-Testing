@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR filter and volume confirmation
-# - Long when price breaks above 20-period Donchian upper channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
-# - Short when price breaks below 20-period Donchian lower channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
-# - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
-# - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Donchian channels identify clear breakouts with defined risk levels
-# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# Hypothesis: 4h Williams Alligator with 1d ATR regime filter and volume confirmation
+# - Uses Williams Alligator (jaw=13, teeth=8, lips=5) to identify trending vs ranging markets
+# - Long when: price > Alligator teeth AND Alligator is aligned (jaw > teeth > lips) AND 1d ATR < median ATR AND volume > 1.5x avg volume
+# - Short when: price < Alligator teeth AND Alligator is aligned (jaw < teeth < lips) AND 1d ATR < median ATR AND volume > 1.5x avg volume
+# - Exit when price crosses Alligator teeth or Alligator loses alignment
+# - Discrete position sizing 0.25 to limit fee churn
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Williams Alligator identifies trend strength and direction with built-in smoothing
+# - ATR filter ensures we trade during low volatility periods when trends are more reliable
 # - Volume confirmation reduces false breakouts
-# - Proven pattern from DB: SOLUSDT test Sharpe 1.10-1.38 with similar logic
 
-name = "4h_1d_donchian_atr_volume_v1"
+name = "4h_1d_alligator_atr_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,7 +25,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Pre-compute 4h OHLC and volume
@@ -34,21 +34,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Donchian channels (20-period)
-    def rolling_max(arr, window):
+    # Williams Alligator (jaw=13, teeth=8, lips=5) - using SMMA (smoothed moving average)
+    def smma(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
+        if len(arr) < window:
+            return result
+        # First value is simple SMA
+        result[window-1] = np.mean(arr[:window])
+        # Subsequent values are smoothed
+        for i in range(window, len(arr)):
+            result[i] = (result[i-1] * (window-1) + arr[i]) / window
         return result
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
+    # Alligator lines
+    jaw = smma(high, 13)  # Jaw (blue) - 13-period SMMA of median price
+    teeth = smma(high, 8)  # Teeth (red) - 8-period SMMA of median price
+    lips = smma(high, 5)   # Lips (green) - 5-period SMMA of median price
     
-    upper_channel = rolling_max(high, 20)
-    lower_channel = rolling_min(low, 20)
+    # Use median price for Alligator calculation (more representative)
+    median_price = (high + low) / 2
+    jaw = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
+    
+    # Alligator alignment: jaw > teeth > lips for uptrend, jaw < teeth < lips for downtrend
+    jaw_gt_teeth = jaw > teeth
+    teeth_gt_lips = teeth > lips
+    jaw_lt_teeth = jaw < teeth
+    teeth_lt_lips = teeth < lips
+    alligator_align_up = jaw_gt_teeth & teeth_gt_lips
+    alligator_align_down = jaw_lt_teeth & teeth_lt_lips
     
     # Pre-compute 4h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,7 +101,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -97,14 +112,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above upper channel AND low volatility regime AND volume spike
-            if (close[i] > upper_channel[i] and 
+            # Long conditions: price > teeth AND alligator aligned up AND low volatility regime AND volume spike
+            if (close[i] > teeth[i] and 
+                alligator_align_up[i] and 
                 low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below lower channel AND low volatility regime AND volume spike
-            elif (close[i] < lower_channel[i] and 
+            # Short conditions: price < teeth AND alligator aligned down AND low volatility regime AND volume spike
+            elif (close[i] < teeth[i] and 
+                  alligator_align_down[i] and 
                   low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
@@ -112,9 +129,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses back inside the Donchian channel
-            exit_long = (position == 1 and close[i] < upper_channel[i])
-            exit_short = (position == -1 and close[i] > lower_channel[i])
+            # Exit conditions: price crosses teeth or alligator loses alignment
+            exit_long = (position == 1 and (close[i] < teeth[i] or not alligator_align_up[i]))
+            exit_short = (position == -1 and (close[i] > teeth[i] or not alligator_align_down[i]))
             
             if exit_long or exit_short:
                 position = 0
