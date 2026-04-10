@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x avg)
-# - Long when price breaks above Donchian(20) high with volume > 1.5x 20-period average AND daily close > daily EMA50
-# - Short when price breaks below Donchian(20) low with volume > 1.5x 20-period average AND daily close < daily EMA50
-# - Exit when price retreats to Donchian(10) midpoint or volume drops below average
-# - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets 15-30 trades/year (60-120 total over 4 years) to avoid fee drag
-# - Donchian breakouts capture strong moves; volume/filters prevent false signals in chop
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# - Long when price breaks above 20-day high with volume > 1.5x 20-day average AND weekly close > weekly EMA50
+# - Short when price breaks below 20-day low with volume > 1.5x 20-day average AND weekly close < weekly EMA50
+# - Exit when price retraces to 10-day EMA or volume drops below average
+# - Weekly trend filter ensures alignment with major trend
+# - Volume confirmation prevents false breakouts
+# - Targets 15-25 trades/year (60-100 total over 4 years) to avoid fee drag
+# - Donchian breakouts capture strong moves; trend/volume filters improve quality
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,23 +22,18 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Pre-compute Donchian channels on 4h data
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_10 = pd.Series(high_4h).rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = pd.Series(low_4h).rolling(window=10, min_periods=10).min().values
-    donchian_mid_10 = (donchian_high_10 + donchian_low_10) / 2.0
+    # Pre-compute Donchian channels (20-period)
+    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
     
     # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -46,44 +42,47 @@ def generate_signals(prices):
     # Pre-compute volume filter: < average volume for exit
     vol_normal = prices['volume'] < volume_20_avg
     
+    # Pre-compute 10-day EMA for exit
+    ema10 = pd.Series(prices['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high_20[i]) or 
-            np.isnan(donchian_low_20[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or np.isnan(volume_20_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long breakout: price > Donchian(20) high with volume spike AND daily uptrend
-            if (prices['close'].iloc[i] > donchian_high_20[i] and 
+            # Long breakout: price > 20-day high with volume spike AND weekly uptrend
+            if (prices['close'].iloc[i] > high_20[i] and 
                 vol_spike.iloc[i] and 
-                prices['close'].iloc[i] > ema50_1d_aligned[i]):
+                prices['close'].iloc[i] > ema50_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short breakdown: price < Donchian(20) low with volume spike AND daily downtrend
-            elif (prices['close'].iloc[i] < donchian_low_20[i] and 
+            # Short breakdown: price < 20-day low with volume spike AND weekly downtrend
+            elif (prices['close'].iloc[i] < low_20[i] and 
                   vol_spike.iloc[i] and 
-                  prices['close'].iloc[i] < ema50_1d_aligned[i]):
+                  prices['close'].iloc[i] < ema50_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price retreats to Donchian(10) midpoint (loss of momentum)
-            # 2. Volume drops below average (loss of conviction)
+            # 1. Price retraces to 10-day EMA
+            # 2. Volume drops below average (loss of momentum)
             if position == 1:  # Long position
-                if (prices['close'].iloc[i] < donchian_mid_10[i] or 
+                if (prices['close'].iloc[i] < ema10[i] or 
                     vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25  # Hold long
             elif position == -1:  # Short position
-                if (prices['close'].iloc[i] > donchian_mid_10[i] or 
+                if (prices['close'].iloc[i] > ema10[i] or 
                     vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
