@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 12h volume spike and chop regime filter
-# - Long when price breaks above Donchian(20) high + 12h volume > 1.8x 20-period volume SMA + Chop(14) > 61.8 (range regime)
-# - Short when price breaks below Donchian(20) low + 12h volume > 1.8x 20-period volume SMA + Chop(14) > 61.8
-# - Exit: price returns to Donchian midpoint (mean reversion within range)
-# - Position sizing: 0.30 discrete level
-# - Donchian captures breakouts from ranges, volume confirms participation, chop filter ensures we trade in ranging markets where mean reversion works
-# - Works in bull/bear: breakouts work in all regimes, chop filter avoids strong trends where breakouts fail
+# Hypothesis: 4h Camarilla pivot breakout with 12h volume spike and chop regime filter
+# - Long when price breaks above Camarilla H3 level + 12h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8 (range regime)
+# - Short when price breaks below Camarilla L3 level + 12h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8
+# - Exit: price returns to Camarilla pivot point (mean reversion within range)
+# - Position sizing: 0.25 discrete level
+# - Camarilla levels derived from prior 12h bar provide structure in ranging markets
+# - Volume confirms institutional participation, chop filter ensures we trade in ranging markets
+# - Works in bull/bear: mean reversion at pivot levels works in all regimes, chop filter avoids strong trends
 # - 4h timeframe targets 20-50 trades/year with strict entry conditions to minimize fee drag
 
-name = "4h_12h_donchian_volume_chop_v1"
+name = "4h_12h_camarilla_vol_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,10 +36,19 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Calculate 12h Camarilla pivot levels (based on prior 12h bar)
+    # Camarilla formula: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
+    # L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
+    # Pivot = (high + low + close) / 3
+    hl_range_12h = df_12h['high'].values - df_12h['low'].values
+    camarilla_pivot = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3
+    camarilla_h3 = camarilla_pivot + 1.1 * hl_range_12h * 1.1 / 4
+    camarilla_l3 = camarilla_pivot - 1.1 * hl_range_12h * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (using completed 12h bar)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
     
     # Calculate 4h Chopiness Index (14-period) for regime filter
     # True Range
@@ -65,38 +75,41 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(chop[i]) or np.isnan(volume_sma_20_12h_aligned[i])):
+        if (np.isnan(camarilla_pivot_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_sma_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.8x 20-period SMA (volume spike)
+        # Get current 12h volume for volume spike confirmation
         vol_12h_current = align_htf_to_ltf(prices, df_12h, df_12h['volume'].values)
-        vol_confirm = vol_12h_current[i] > 1.8 * volume_sma_20_12h_aligned[i]
         
-        # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion breakouts)
+        # Volume confirmation: current 12h volume > 2.0x 20-period SMA (volume spike)
+        vol_confirm = vol_12h_current[i] > 2.0 * volume_sma_20_12h_aligned[i]
+        
+        # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion at pivot levels)
         ranging_market = chop[i] > 61.8
         
-        # Donchian breakout signals
-        breakout_up = close[i] > highest_high[i]  # Price breaks above upper band
-        breakout_down = close[i] < lowest_low[i]  # Price breaks below lower band
-        return_to_mid = abs(close[i] - donchian_mid[i]) < (highest_high[i] - lowest_low[i]) * 0.1  # Within 10% of midpoint
+        # Camarilla breakout signals
+        breakout_up = close[i] > camarilla_h3_aligned[i]   # Price breaks above H3 level
+        breakout_down = close[i] < camarilla_l3_aligned[i] # Price breaks below L3 level
+        return_to_pivot = abs(close[i] - camarilla_pivot_aligned[i]) < (camarilla_h3_aligned[i] - camarilla_l3_aligned[i]) * 0.15  # Within 15% of pivot
         
-        # Entry conditions: Donchian breakout with volume and regime confirmation
+        # Entry conditions: Camarilla breakout with volume and regime confirmation
         long_entry = breakout_up and vol_confirm and ranging_market
         short_entry = breakout_down and vol_confirm and ranging_market
         
-        # Exit conditions: price returns to Donchian midpoint (mean reversion)
-        long_exit = return_to_mid  # Exit long when price returns to midpoint
-        short_exit = return_to_mid  # Exit short when price returns to midpoint
+        # Exit conditions: price returns to Camarilla pivot point (mean reversion)
+        long_exit = return_to_pivot  # Exit long when price returns to pivot
+        short_exit = return_to_pivot  # Exit short when price returns to pivot
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -104,12 +117,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
             if short_exit:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
