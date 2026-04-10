@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and choppiness regime filter
-# - Long when price breaks above H3 (Camarilla resistance) AND volume > 1.5x 20-bar avg AND chop < 61.8 (trending)
-# - Short when price breaks below L3 (Camarilla support) AND volume > 1.5x 20-bar avg AND chop < 61.8 (trending)
-# - Exit when price returns to Pivot Point (PP) level
-# - Uses discrete position sizing (0.30) to balance return and drawdown
-# - Camarilla levels from 12h timeframe provide institutional support/resistance
-# - Volume confirmation avoids low-liquidity false breakouts
-# - Choppiness filter ensures we only trade in trending markets (avoid choppy whipsaws)
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# - Works in both bull and bear markets: breakouts capture trends, chop filter avoids ranging losses
+# Hypothesis: 1d mean reversion with 1w trend filter and volume confirmation
+# - Long when RSI(14) < 30 (oversold) AND 1w EMA(20) > EMA(50) (bullish trend) AND 1d volume > 1.5x 20-bar avg
+# - Short when RSI(14) > 70 (overbought) AND 1w EMA(20) < EMA(50) (bearish trend) AND 1d volume > 1.5x 20-bar avg
+# - Exit when RSI returns to 50 (mean reversion to equilibrium)
+# - Uses discrete position sizing (0.25) to balance return and fee drag
+# - RSI captures short-term exhaustion; 1w EMA filter ensures alignment with higher timeframe trend
+# - Volume confirmation avoids low-liquidity false signals
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Works in both bull and bear markets: mean reversion in ranges, trend filter prevents counter-trend trades
 
-name = "4h_12h_camarilla_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_rsi_meanreversion_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,106 +23,87 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 12h Camarilla pivot levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1w EMA trend filter: EMA(20) vs EMA(50)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_bullish_1w = ema_20_1w > ema_50_1w
+    ema_bearish_1w = ema_20_1w < ema_50_1w
     
-    # Calculate pivot point (PP)
-    pp = (high_12h + low_12h + close_12h) / 3.0
+    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    volume_1d = prices['volume'].values
+    volume_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * volume_20_avg_1d)
     
-    # Calculate Camarilla levels
-    range_12h = high_12h - low_12h
-    h3 = pp + (range_12h * 1.1 / 4.0)  # Resistance level
-    l3 = pp - (range_12h * 1.1 / 4.0)  # Support level
+    # Align HTF indicators to 1d timeframe
+    ema_bullish_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish_1w)
+    ema_bearish_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish_1w)
     
-    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
-    volume_12h = df_12h['volume'].values
-    volume_20_avg_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike_12h = volume_12h > (1.5 * volume_20_avg_12h)
+    # Pre-compute RSI(14) on 1d data
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Pre-compute 4h choppiness index (CHOP) for regime filter
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
+    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    # Handle division by zero (when avg_loss == 0 and avg_gain == 0)
+    rsi = np.where((avg_loss == 0) & (avg_gain == 0), 50, rsi)
     
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index
-    
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # CHOP = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    max_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    sum_atr_14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr_14 / (max_high_14 - min_low_14)) / np.log10(14)
-    chop = np.where((max_high_14 - min_low_14) == 0, 50, chop)  # Avoid division by zero
-    chop = np.where(np.isnan(chop), 50, chop)  # Fill NaN with neutral value
-    
-    # Trending regime: CHOP < 61.8
-    trending_regime = chop < 61.8
-    
-    # Align HTF indicators to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
-    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
-    
-    # Entry conditions
-    long_entry = (prices['close'].values > h3_aligned) & vol_spike_12h_aligned & trending_regime
-    short_entry = (prices['close'].values < l3_aligned) & vol_spike_12h_aligned & trending_regime
-    
-    # Exit condition: price returns to pivot point (PP)
-    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
-    long_exit = prices['close'].values < pp_aligned
-    short_exit = prices['close'].values > pp_aligned
+    # RSI conditions: < 30 oversold, > 70 overbought, exit at 50
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
+    rsi_exit = np.abs(rsi - 50) < 2.5  # Within 2.5 of 50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_spike_12h_aligned[i]) or np.isnan(trending_regime[i]) or
-            np.isnan(pp_aligned[i])):
+        if (np.isnan(ema_bullish_1w_aligned[i]) or np.isnan(ema_bearish_1w_aligned[i]) or
+            np.isnan(vol_spike_1d[i]) or np.isnan(rsi_oversold[i]) or
+            np.isnan(rsi_overbought[i]) or np.isnan(rsi_exit[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            if long_entry[i]:
+        if position == 0:  # Flat - look for new mean reversion entries
+            # Long when RSI oversold AND 1w bullish trend AND volume spike
+            if (rsi_oversold[i] and 
+                ema_bullish_1w_aligned[i] and 
+                vol_spike_1d[i]):
                 position = 1
-                signals[i] = 0.30
-            elif short_entry[i]:
+                signals[i] = 0.25
+            # Short when RSI overbought AND 1w bearish trend AND volume spike
+            elif (rsi_overbought[i] and 
+                  ema_bearish_1w_aligned[i] and 
+                  vol_spike_1d[i]):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot point
-            if position == 1:  # Long position
-                if long_exit[i]:
-                    position = 0
-                    signals[i] = 0.0
+        else:  # Have position - look for exit to RSI = 50 (mean reversion)
+            # Exit when RSI returns to equilibrium (50)
+            exit_signal = rsi_exit[i]
+            
+            if exit_signal:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
+                    signals[i] = 0.25
                 else:
-                    signals[i] = 0.30
-            else:  # Short position
-                if short_exit[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
