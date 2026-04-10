@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR-based trend filter
-# - Primary: 4h price breaking above/below Donchian(20) channel for trend continuation
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# - Primary: 4h price breaking Donchian(20) for trend continuation
 # - HTF trend: 1d ADX(14) > 25 ensures strong trend (works in bull/bear regimes)
 # - HTF volume: 1d volume > 1.5x 20-period MA for institutional participation
 # - Entry: Long when price > Donchian upper + ADX>25 + volume spike; Short when price < Donchian lower + ADX>25 + volume spike
 # - Exit: Price crosses Donchian midpoint (mean of channel) or ADX < 20 (trend weakening)
-# - Position sizing: 0.30 (discrete level to balance return and drawdown)
+# - Position sizing: 0.25 (discrete level to balance return and drawdown)
 # - Target: 80-160 total trades over 4 years (20-40/year) for 4h timeframe
 # - Works in bull/bear: Donchian breakouts capture trends, ADX filter avoids chop, volume confirms participation
 
-name = "4h_1d_donchian_adx_volume_v1"
+name = "4h_1d_donchian_adx_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -114,11 +114,11 @@ def generate_signals(prices):
             # Long entry: price > Donchian upper + strong trend + volume spike
             if (close[i] > donchian_upper[i] and strong_trend and volume_confirm):
                 position = 1
-                signals[i] = 0.30
+                signals[i] = 0.25
             # Short entry: price < Donchian lower + strong trend + volume spike
             elif (close[i] < donchian_lower[i] and strong_trend and volume_confirm):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
@@ -128,12 +128,12 @@ def generate_signals(prices):
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.30
+                    signals[i] = 0.25
             else:  # position == -1 (Short position)
                 if close[i] > donchian_middle[i] or weak_trend:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
