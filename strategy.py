@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w volume confirmation and 1d chop regime filter
-# - Primary: 12h price breaking above/below Donchian(20) channel from prior 1w
-# - Volume filter: 1w volume > 1.5x 20-period volume MA to confirm institutional participation
-# - Regime filter: 1d Choppiness Index(14) > 61.8 (ranging market) to avoid whipsaw in strong trends
-# - Exit: Price returns to Donchian midpoint or opposite channel touch
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Donchian adapts to volatility, chop filter ensures mean-reversion setup
+# Hypothesis: 12h KAMA trend with 1d RSI filter and 1w volume spike confirmation
+# - Primary: Kaufman Adaptive Moving Average (KAMA) direction on 12h timeframe
+# - Entry filter: 1d RSI(14) between 30-70 (avoid extremes) + 1w volume > 2.0x 20-period volume MA
+# - Exit: Price crosses KAMA in opposite direction
+# - Position sizing: 0.25 (discrete level)
+# - Works in bull/bear: KAMA adapts to market noise, volume filter ensures participation, RSI avoids exhaustion
 # - Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe
 
-name = "12h_1w_1d_donchian_volume_chop_v1"
+name = "12h_1d_1w_kama_rsi_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,9 +21,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 30 or len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,87 +33,88 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
-    
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate Donchian(20) from prior 1w (upper/lower channel)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate KAMA(10,2,30) on 12h close
+    # ER = |net change| / sum(|abs change|)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    direction = np.abs(np.diff(close, n=10, prepend=close[:10]))
+    er = np.where(change > 0, direction / change, 0)
+    # Smooth ER
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.copy(close)
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align Donchian levels to 12h timeframe (using prior completed 1w bar)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid)
+    # Calculate 1d RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Calculate 1w volume confirmation: volume > 1.5x 20-period volume MA
+    # Calculate 1w volume confirmation: volume > 2.0x 20-period volume MA
     volume_ma_20_1w = pd.Series(volume_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
     
-    # Calculate 14-period Choppiness Index for regime filter (using 1d data)
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    # Align HTF indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)  # KAMA calculated on 1d but we want 12h alignment
+    # Actually recalculate KAMA on 12h data directly for simplicity
+    # Recalculate KAMA on 12h close
+    change_12h = np.abs(np.diff(close, prepend=close[0]))
+    direction_12h = np.abs(np.diff(close, n=10, prepend=close[:10]))
+    er_12h = np.where(change_12h > 0, direction_12h / change_12h, 0)
+    sc_12h = (er_12h * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama_12h = np.copy(close)
+    for i in range(1, n):
+        kama_12h[i] = kama_12h[i-1] + sc_12h[i] * (close[i] - kama_12h[i-1])
     
-    # Handle first element
-    high_low_1d[0] = high_1d[0] - low_1d[0]
-    high_close_1d[0] = np.abs(high_1d[0] - close_1d[0])
-    low_close_1d[0] = np.abs(low_1d[0] - close_1d[0])
+    # Align 1d RSI to 12h
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    atr_sum_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Align 1w volume MA to 12h
+    vol_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
     
-    # Avoid division by zero
-    range_hl_1d = max_high_1d - min_low_1d
-    range_hl_1d = np.where(range_hl_1d == 0, 1e-10, range_hl_1d)
-    
-    chop_1d = 100 * np.log10(atr_sum_1d / range_hl_1d) / np.log10(14)
-    chop_filter = chop_1d > 61.8  # Chop > 61.8 indicates ranging market
+    # Volume spike condition
+    vol_spike = vol_1w_current > 2.0 * vol_ma_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_ma_20_1w_aligned[i]) or
-            np.isnan(chop_1d[i])):
+        if (np.isnan(kama_12h[i]) or np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(vol_1w_current[i]) or np.isnan(vol_ma_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1w volume > 1.5x 20-period MA
-        vol_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)
-        vol_confirm = vol_1w_current[i] > 1.5 * volume_ma_20_1w_aligned[i]
-        
-        if position == 0:  # Flat - look for new entries at Donchian breakouts
-            # Long entry: price breaks above upper channel + vol confirmation + chop filter
-            if close[i] > donchian_high_aligned[i] and vol_confirm and chop_filter[i]:
+        # Entry conditions: price vs KAMA + RSI filter + volume spike
+        if position == 0:  # Flat - look for new entries
+            # Long: price above KAMA + RSI not overbought + volume spike
+            if close[i] > kama_12h[i] and rsi_1d_aligned[i] < 70 and vol_spike[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below lower channel + vol confirmation + chop filter
-            elif close[i] < donchian_low_aligned[i] and vol_confirm and chop_filter[i]:
+            # Short: price below KAMA + RSI not oversold + volume spike
+            elif close[i] < kama_12h[i] and rsi_1d_aligned[i] > 30 and vol_spike[i]:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit at midpoint or opposite channel
-            # Exit: price reaches midpoint (mean reversion) or touches opposite channel (reversal)
+        else:  # Have position - exit when price crosses KAMA in opposite direction
             if position == 1:  # Long position
-                if close[i] <= donchian_mid_aligned[i] or close[i] >= donchian_high_aligned[i]:
+                if close[i] <= kama_12h[i]:  # Price crosses below KAMA
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] >= donchian_mid_aligned[i] or close[i] <= donchian_low_aligned[i]:
+                if close[i] >= kama_12h[i]:  # Price crosses above KAMA
                     position = 0
                     signals[i] = 0.0
                 else:
