@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike filter and 1d choppiness regime filter
-# - Entry: Long when price breaks above Camarilla H3 + 1d volume > 2.0x 20-period average + 1d Choppiness Index > 61.8 (range regime)
-#          Short when price breaks below Camarilla L3 + 1d volume > 2.0x 20-period average + 1d Choppiness Index > 61.8 (range regime)
-# - Exit: Close-based reversal - exit long when price < Camarilla H3 level, exit short when price > Camarilla L3 level
-# - Position sizing: 0.25 (discrete levels to minimize fee churn)
-# - Uses Camarilla pivot levels from daily data for structure, daily volume spike for confirmation of participation,
-#   and daily Choppiness Index to filter for range-bound markets where mean reversion at pivots works best
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 200 total
-# - Choppiness Index > 61.8 indicates ranging market (ideal for Camarilla mean reversion), < 38.2 indicates trending
+# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and 1d choppiness regime filter
+# - Entry: Long when price breaks above 4h Donchian upper channel (20) + 1h volume > 1.5x 20-period average + 1d Choppiness Index > 61.8 (range regime)
+#          Short when price breaks below 4h Donchian lower channel (20) + 1h volume > 1.5x 20-period average + 1d Choppiness Index > 61.8
+# - Exit: Close-based reversal - exit long when price < 4h Donchian middle (20), exit short when price > 4h Donchian middle (20)
+# - Position sizing: 0.20 (discrete levels to minimize fee churn)
+# - Uses 4h Donchian channels for structure, 1h volume spike for confirmation of participation,
+#   and 1d Choppiness Index to filter for range-bound markets where mean reversion works best
+# - Target: 15-37 trades/year (60-150 total over 4 years) to stay within HARD MAX: 200 total
+# - Choppiness Index > 61.8 indicates ranging market (ideal for mean reversion), < 38.2 indicates trending
 # - Volume spike ensures genuine participation at breakout, reducing false signals
-# - 12h timeframe provides sufficient signal quality while controlling trade frequency
+# - Uses 4h for signal direction (per rules) and 1h only for entry timing precision
 
-name = "12h_1d_camarilla_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "1h_4h_1d_donchian_volume_chop_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,35 +25,34 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    # Pre-compute 1h OHLC
+    high_1h = prices['high'].values
+    low_1h = prices['low'].values
+    close_1h = prices['close'].values
+    volume_1h = prices['volume'].values
     
-    # Pre-compute 1d data for indicators
+    # Pre-compute 4h data for Donchian channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Pre-compute 1d data for Choppiness Index
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # Calculate 4h Donchian channels (20-period)
+    upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    middle_4h = (upper_4h + lower_4h) / 2.0
     
-    camarilla_h3 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 4
-    camarilla_l3 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 4
-    
-    # Calculate 1d volume moving average (20-period)
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1h volume moving average (20-period)
+    volume_ma_20_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
     
     # Calculate 1d Choppiness Index (14-period)
     # True Range
@@ -79,10 +78,11 @@ def generate_signals(prices):
     mask = (range_hl > 0) & (~np.isnan(sum_tr)) & (~np.isnan(range_hl))
     choppiness[mask] = 100 * np.log10(sum_tr[mask] / range_hl[mask]) / np.log10(14)
     
-    # Align all HTF data to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Align all HTF data to 1h timeframe
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    middle_4h_aligned = align_htf_to_ltf(prices, df_4h, middle_4h)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20_1h)  # Using 4h df for 1h volume MA alignment
     choppiness_aligned = align_htf_to_ltf(prices, df_1d, choppiness)
     
     signals = np.zeros(n)
@@ -90,50 +90,51 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(choppiness_aligned[i])):
+        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(middle_4h_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(choppiness_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 12h close
-        close_price = close_12h[i]
+        # Get current 1h close and volume
+        close_price = close_1h[i]
+        volume_price = volume_1h[i]
         
-        # Get current 1d volume for confirmation
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirmation = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
+        # Volume confirmation: > 1.5x 20-period average
+        volume_confirmation = volume_price > 1.5 * volume_ma_aligned[i]
         
-        # Choppiness filter: > 61.8 indicates ranging market (good for mean reversion at pivots)
+        # Choppiness filter: > 61.8 indicates ranging market (good for mean reversion)
         chop_filter = choppiness_aligned[i] > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla H3 + volume confirmation + ranging market
-            if (close_price > camarilla_h3_aligned[i] and 
+            # Long entry: price breaks above 4h Donchian upper channel + volume confirmation + ranging market
+            if (close_price > upper_4h_aligned[i] and 
                 volume_confirmation and 
                 chop_filter):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price breaks below Camarilla L3 + volume confirmation + ranging market
-            elif (close_price < camarilla_l3_aligned[i] and 
+                signals[i] = 0.20
+            # Short entry: price breaks below 4h Donchian lower channel + volume confirmation + ranging market
+            elif (close_price < lower_4h_aligned[i] and 
                   volume_confirmation and 
                   chop_filter):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit long when price < Camarilla H3 level
-            # Exit short when price > Camarilla L3 level
+            # Exit long when price < 4h Donchian middle channel
+            # Exit short when price > 4h Donchian middle channel
             if position == 1:
-                if close_price < camarilla_h3_aligned[i]:
+                if close_price < middle_4h_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1
-                if close_price > camarilla_l3_aligned[i]:
+                if close_price > middle_4h_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
