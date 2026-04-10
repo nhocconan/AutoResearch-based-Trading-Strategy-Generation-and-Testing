@@ -3,46 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h EMA crossover with 1d ADX regime filter and volume spike confirmation
-# - Primary: 6h EMA(9) crossing above/below EMA(21) for trend changes
-# - HTF: 1d ADX > 20 to ensure we're in a trending market (avoid whipsaws in ranging)
-# - Volume confirmation: 6h volume > 1.8x 20-period MA to avoid false breakouts
-# - Long: EMA9 > EMA21 + ADX > 20 + volume spike
-# - Short: EMA9 < EMA21 + ADX > 20 + volume spike
-# - Exit: Opposite EMA crossover or ADX drops below 15 (trend weakening)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ADX regime filter
+# - Primary: 12h price breaking above R4 or below S4 Camarilla levels from 1d
+# - HTF: 1d volume confirmation (current volume > 1.5x 20-period MA) + ADX > 25 for trend strength
+# - Long: Breakout above R4 + volume confirmation + ADX > 25
+# - Short: Breakout below S4 + volume confirmation + ADX > 25
+# - Exit: Price returns to R3/S3 levels
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: ADX filters ranging markets, EMA captures trends, volume confirms momentum
-# - Target: 60-120 trades over 4 years (15-30/year) to stay within fee drag limits
+# - Works in bull/bear: Camarilla pivots act as support/resistance, volume confirms momentum, ADX filters ranging markets
+# - Target: 50-150 trades over 4 years (12-37/year) to stay within fee drag limits
 
-name = "6h_1d_ema_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for calculations
+    if n < 60:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for ADX
+    if len(df_1d) < 30:  # Need enough data for Camarilla and ADX
         return np.zeros(n)
     
-    # Pre-compute 6h data
-    close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
+    # Pre-compute 12h data
+    close_12h = prices['close'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h EMA(9) and EMA(21)
-    ema9_6h = pd.Series(close_6h).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21_6h = pd.Series(close_6h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate Camarilla pivot levels (1d) using previous day's data
+    # Camarilla uses previous day's high, low, close
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Calculate 6h volume moving average (20-period) for volume confirmation
-    volume_ma_20_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # First day will have NaN due to roll, that's expected
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    r4 = pivot + (range_hl * 1.5 / 2)
+    r3 = pivot + (range_hl * 1.25 / 2)
+    s3 = pivot - (range_hl * 1.25 / 2)
+    s4 = pivot - (range_hl * 1.5 / 2)
     
     # Calculate ADX (1d) for trend strength
     # True Range
@@ -69,45 +77,58 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).ewm(alpha=alpha, adjust=False).mean().values
     
-    # Align all HTF indicators to 6h timeframe
+    # Calculate 1d volume moving average (20-period) for volume confirmation
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF indicators to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(ema9_6h[i]) or np.isnan(ema21_6h[i]) or
-            np.isnan(volume_ma_20_6h[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.8x 20-period MA
-        volume_confirm = volume_6h[i] > 1.8 * volume_ma_20_6h[i]
+        # Get current 1d volume (aligned to 12h)
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
         
-        # ADX trend filter: ADX > 20 indicates trending market
-        trend_confirm = adx_aligned[i] > 20.0
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
-        # EMA crossover conditions
-        ema_bullish = ema9_6h[i] > ema21_6h[i]
-        ema_bearish = ema9_6h[i] < ema21_6h[i]
+        # ADX trend filter: ADX > 25 indicates strong trend
+        trend_confirm = adx_aligned[i] > 25.0
         
-        # Exit conditions: Opposite EMA crossover or ADX drops below 15 (trend weakening)
-        exit_long = ema_bearish or (adx_aligned[i] < 15.0)
-        exit_short = ema_bullish or (adx_aligned[i] < 15.0)
+        # Camarilla breakout conditions
+        breakout_long = close_12h[i] > r4_aligned[i]
+        breakout_short = close_12h[i] < s4_aligned[i]
+        
+        # Exit conditions: Price returns to R3/S3 levels
+        exit_long = close_12h[i] < r3_aligned[i]
+        exit_short = close_12h[i] > s3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: EMA bullish crossover + volume confirmation + trend confirmation
-            if ema_bullish and volume_confirm and trend_confirm:
+            # Long entry: Breakout above R4 + volume confirmation + trend confirmation
+            if breakout_long and volume_confirm and trend_confirm:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: EMA bearish crossover + volume confirmation + trend confirmation
-            elif ema_bearish and volume_confirm and trend_confirm:
+            # Short entry: Breakout below S4 + volume confirmation + trend confirmation
+            elif breakout_short and volume_confirm and trend_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
+            # Exit: Price returns to R3/S3 levels
             if position == 1:  # Long position
                 if exit_long:
                     position = 0
