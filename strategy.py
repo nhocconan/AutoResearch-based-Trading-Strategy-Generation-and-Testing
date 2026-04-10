@@ -3,22 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Regime Filter
-# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13) on 6h
-# - Regime: 1d ADX < 20 (range) for mean reversion, ADX > 25 (trend) for momentum
-# - In range (ADX<20): fade extreme Elder Ray (long when Bear Power < -0.5*ATR, short when Bull Power > 0.5*ATR)
-# - In trend (ADX>25): follow Elder Ray (long when Bull Power > 0.5*ATR, short when Bear Power < -0.5*ATR)
-# - Volume confirmation: 6h volume > 1.5x 20-period volume SMA
-# - Position sizing: 0.25 discrete
-# - Works in bull/bear: adapts to regime, avoids whipsaw in strong trends, captures reversals in ranges
+# Hypothesis: 12h Williams Alligator with 1d volume confirmation and chop regime filter
+# - Williams Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3)
+# - Long when Lips > Teeth > Jaw (bullish alignment) + 1d volume > 1.5x 20-period volume SMA + Choppiness Index > 61.8 (ranging market)
+# - Short when Lips < Teeth < Jaw (bearish alignment) + 1d volume > 1.5x 20-period volume SMA + Choppiness Index > 61.8
+# - Exit: Opposite Alligator alignment (Lips crosses Teeth)
+# - Position sizing: 0.25 discrete level
+# - Alligator identifies trend initiation, volume confirms participation, chop filter ensures ranging conditions where Alligator works best
+# - Works in bull/bear: Alligator catches new trends, chop filter prevents whipsaws in strong trends
+# - 12h timeframe targets 30-60 trades/year with strict entry conditions
 
-name = "6h_1d_elderray_regime_volume_v1"
-timeframe = "6h"
+name = "12h_1d_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -35,97 +36,78 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 6h EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Williams Alligator on 12h timeframe
+    # Jaw: 13-period SMMA shifted by 8 bars
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw_raw, 8)
+    jaw[:8] = np.nan
     
-    # Calculate 6h Elder Ray
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Teeth: 8-period SMMA shifted by 5 bars
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)
+    teeth[:5] = np.nan
     
-    # Calculate 6h ATR(14) for power thresholds
+    # Lips: 5-period SMMA shifted by 3 bars
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)
+    lips[:3] = np.nan
+    
+    # Calculate Choppiness Index (14-period) for regime filter
+    # True Range
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
                                 np.abs(low - np.roll(close, 1))))
     tr1[0] = high[0] - low[0]
-    atr = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate 6h volume SMA(20) for confirmation
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Sum of TR over 14 periods
+    sum_tr14 = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate 1d ADX(14) for regime filter
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
+    # Highest high and lowest low over 14 periods
+    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # True Range
-    tr1_1d = np.maximum(df_1d_high - df_1d_low, 
-                        np.maximum(np.abs(df_1d_high - np.roll(df_1d_close, 1)), 
-                                   np.abs(df_1d_low - np.roll(df_1d_close, 1))))
-    tr1_1d[0] = df_1d_high[0] - df_1d_low[0]
-    # Plus Directional Movement
-    plus_dm_1d = np.where((df_1d_high - np.roll(df_1d_high, 1)) > (np.roll(df_1d_low, 1) - df_1d_low), 
-                          np.maximum(df_1d_high - np.roll(df_1d_high, 1), 0), 0)
-    plus_dm_1d[0] = 0
-    # Minus Directional Movement
-    minus_dm_1d = np.where((np.roll(df_1d_low, 1) - df_1d_low) > (df_1d_high - np.roll(df_1d_high, 1)), 
-                           np.maximum(np.roll(df_1d_low, 1) - df_1d_low, 0), 0)
-    minus_dm_1d[0] = 0
-    # Smoothed values
-    atr_1d = pd.Series(tr1_1d).rolling(window=14, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm_1d).rolling(window=14, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm_1d).rolling(window=14, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
-    # Handle division by zero and invalid values
-    plus_di_1d = np.where(atr_1d == 0, 0, plus_di_1d)
-    minus_di_1d = np.where(atr_1d == 0, 0, minus_di_1d)
-    dx_1d = np.where((plus_di_1d + minus_di_1d) == 0, 0, dx_1d)
-    adx_1d = np.where(np.isnan(adx_1d) | np.isinf(adx_1d), 0, adx_1d)
+    # Choppiness Index formula
+    chop = 100 * np.log10(sum_tr14 / (highest_high14 - lowest_low14)) / np.log10(14)
+    chop = np.where((highest_high14 - lowest_low14) == 0, 100, chop)
+    chop = np.where(np.isnan(chop) | np.isinf(chop), 50, chop)
     
-    # Align 1d ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate 1d volume SMA(20) for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(chop[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or 
+            np.isnan(volume_1d_current[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period SMA
+        vol_confirm = volume_1d_current[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Regime filters
-        ranging_market = adx_1d_aligned[i] < 20   # ADX < 20 = range/low trend
-        trending_market = adx_1d_aligned[i] > 25  # ADX > 25 = strong trend
+        # Regime filter: Choppiness Index > 61.8 indicates ranging market
+        ranging_market = chop[i] > 61.8
         
-        # Elder Ray power thresholds
-        bull_threshold = 0.5 * atr[i]
-        bear_threshold = -0.5 * atr[i]
+        # Alligator alignment signals
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Signals based on regime
-        if ranging_market:
-            # In range: fade extreme Elder Ray (mean reversion)
-            long_signal = bear_power[i] < bear_threshold and vol_confirm
-            short_signal = bull_power[i] > bull_threshold and vol_confirm
-        elif trending_market:
-            # In trend: follow Elder Ray (momentum)
-            long_signal = bull_power[i] > bull_threshold and vol_confirm
-            short_signal = bear_power[i] < bear_threshold and vol_confirm
-        else:
-            # Transition regime (ADX 20-25): no trade
-            long_signal = False
-            short_signal = False
+        # Entry conditions: Alligator alignment with volume and chop confirmation
+        long_entry = bullish_alignment and vol_confirm and ranging_market
+        short_entry = bearish_alignment and vol_confirm and ranging_market
         
-        # Exit conditions: power returns to neutral zone
-        long_exit = bull_power[i] > -0.1 * atr[i]  # Exit long when bull power improves
-        short_exit = bear_power[i] < 0.1 * atr[i]   # Exit short when bear power improves
+        # Exit conditions: Opposite Alligator alignment (Lips crosses Teeth)
+        long_exit = lips[i] < teeth[i]  # Exit long when Lips crosses below Teeth
+        short_exit = lips[i] > teeth[i]  # Exit short when Lips crosses above Teeth
         
         if position == 0:  # Flat - look for entry
-            if long_signal:
+            if long_entry:
                 position = 1
                 signals[i] = 0.25
-            elif short_signal:
+            elif short_entry:
                 position = -1
                 signals[i] = -0.25
             else:
