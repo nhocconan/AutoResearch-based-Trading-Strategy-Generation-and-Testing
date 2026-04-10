@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation
-# - Long when BB Width(20) < 20th percentile (squeeze) AND price breaks above upper BB AND 1d EMA(50) > EMA(200) AND 6h volume > 2.0x 20-bar avg
-# - Short when BB Width(20) < 20th percentile (squeeze) AND price breaks below lower BB AND 1d EMA(50) < EMA(200) AND 6h volume > 2.0x 20-bar avg
-# - Exit when price returns to middle BB (20-period SMA)
+# Hypothesis: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above H3 pivot level AND 1w EMA(21) > EMA(55) (bullish trend) AND 12h volume > 1.8x 30-bar avg
+# - Short when price breaks below L3 pivot level AND 1w EMA(21) < EMA(55) (bearish trend) AND 12h volume > 1.8x 30-bar avg
+# - Exit when price returns to the daily pivot point (mean reversion to equilibrium)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Bollinger squeeze identifies low volatility contraction before expansion breakout
-# - 1d EMA filter ensures alignment with daily trend to avoid counter-trend trades
-# - Volume confirmation (2.0x avg) ensures institutional participation
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: squeeze breakouts occur in all regimes, trend filter prevents wrong-direction trades
+# - Camarilla pivots identify key intraday support/resistance levels
+# - 1w EMA filter ensures alignment with weekly trend to avoid counter-trend trades
+# - Volume confirmation avoids low-liquidity false breakouts
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets: breakout trading in trends, pivot mean reversion in ranges
 
-name = "6h_1d_bb_squeeze_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,58 +24,49 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 55:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA trend filter: EMA(50) vs EMA(200)
+    # Pre-compute 1w EMA trend filter: EMA(21) vs EMA(55)
+    close_1w = df_1w['close'].values
+    ema_21 = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_55 = pd.Series(close_1w).ewm(span=55, min_periods=55, adjust=False).mean().values
+    ema_bullish = ema_21 > ema_55
+    ema_bearish = ema_21 < ema_55
+    
+    # Align 1w EMA trend to 12h timeframe
+    ema_bullish_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish)
+    ema_bearish_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish)
+    
+    # Pre-compute daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_bullish = ema_50 > ema_200
-    ema_bearish = ema_50 < ema_200
     
-    # Align 1d EMA trend to 6h timeframe
-    ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
-    ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
+    # Camarilla pivot calculations
+    # Pivot = (High + Low + Close) / 3
+    # Range = High - Low
+    # H3 = Pivot + (Range * 1.1/2)
+    # L3 = Pivot - (Range * 1.1/2)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    rng = high_1d - low_1d
+    h3 = pivot + (rng * 1.1 / 2.0)
+    l3 = pivot - (rng * 1.1 / 2.0)
     
-    # Pre-compute Bollinger Bands (20, 2) on 6h data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Align daily Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Middle Band = 20-period SMA
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Standard Deviation of close
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    
-    # Upper and Lower Bands
-    upper_bb = sma_20 + (2.0 * std_20)
-    lower_bb = sma_20 - (2.0 * std_20)
-    
-    # Bollinger Band Width = (Upper - Lower) / Middle
-    bb_width = (upper_bb - lower_bb) / sma_20
-    # Handle division by zero (when sma_20 == 0)
-    bb_width = np.where(sma_20 == 0, 0, bb_width)
-    
-    # BB Width percentile (20-period lookback for squeeze definition)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True).values
-    
-    # Squeeze condition: BB Width < 20th percentile
-    squeeze = bb_width_percentile < 0.20
-    
-    # Breakout conditions
-    breakout_up = close > upper_bb  # Price breaks above upper BB
-    breakout_down = close < lower_bb  # Price breaks below lower BB
-    
-    # Return to middle band (exit condition)
-    return_to_middle = np.abs(close - sma_20) < (0.1 * std_20)  # Within 10% of std dev from middle
-    
-    # Pre-compute 6h volume confirmation: > 2.0x 20-period average
+    # Pre-compute 12h volume confirmation: > 1.8x 30-period average
     volume = prices['volume'].values
-    volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * volume_20_avg)
+    volume_30_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_spike = volume > (1.8 * volume_30_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -83,8 +74,8 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(squeeze[i]) or np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(return_to_middle[i]) or np.isnan(vol_spike[i])):
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -94,26 +85,24 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new squeeze breakout entries
-            # Long when squeeze AND breakout up AND 1d bullish trend AND volume spike
-            if (squeeze[i] and 
-                breakout_up[i] and 
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above H3 AND 1w bullish trend AND volume spike
+            if (prices['close'].iloc[i] > h3_aligned[i] and 
                 ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when squeeze AND breakout down AND 1d bearish trend AND volume spike
-            elif (squeeze[i] and 
-                  breakout_down[i] and 
+            # Short when price breaks below L3 AND 1w bearish trend AND volume spike
+            elif (prices['close'].iloc[i] < l3_aligned[i] and 
                   ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to middle BB
-            # Exit when price returns to middle BB
-            exit_signal = return_to_middle[i]
+        else:  # Have position - look for exit to daily pivot (mean reversion)
+            # Exit when price returns to the daily pivot point
+            exit_signal = np.abs(prices['close'].iloc[i] - pivot_aligned[i]) < (0.1 * (h3_aligned[i] - l3_aligned[i]))
             
             if exit_signal:
                 position = 0
