@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
-# - Long when price breaks above H3 level AND 4h EMA(20) > EMA(50) (bullish trend) AND 1h volume > 1.8x 20-bar avg
-# - Short when price breaks below L3 level AND 4h EMA(20) < EMA(50) (bearish trend) AND 1h volume > 1.8x 20-bar avg
-# - Exit when price returns to pivot point (mean reversion to equilibrium)
-# - Uses discrete position sizing (0.20) to minimize fee churn
-# - Camarilla levels provide intraday support/resistance; 4h EMA filter ensures alignment with intermediate trend
+# Hypothesis: 6h Elder Ray Power with 1d ADX regime filter and volume confirmation
+# - Bull Power = High - EMA(13); Bear Power = EMA(13) - Low
+# - Long when Bull Power > 0 AND 1d ADX > 25 (strong trend) AND 6h volume > 1.5x 20-bar avg
+# - Short when Bear Power > 0 AND 1d ADX > 25 (strong trend) AND 6h volume > 1.5x 20-bar avg
+# - Exit when Power reverses sign (Bull Power < 0 for longs, Bear Power < 0 for shorts)
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Elder Ray measures trend strength via price position relative to EMA
+# - 1d ADX filter ensures we only trade in strong trending regimes (avoids chop)
 # - Volume confirmation avoids low-liquidity false signals
-# - Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years)
-# - Works in both bull and bear markets: breakout in trends, pivot reversion in ranges
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets: ADX filter adapts to trending conditions
 
-name = "1h_4h_camarilla_breakout_volume_trend_v1"
-timeframe = "1h"
+name = "6h_1d_elder_power_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,102 +25,111 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h EMA trend filter: EMA(20) vs EMA(50)
-    close_4h = df_4h['close'].values
-    ema_20 = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_50 = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_bullish = ema_20 > ema_50
-    ema_bearish = ema_20 < ema_50
+    # Pre-compute 1d ADX(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 4h EMA trend to 1h timeframe
-    ema_bullish_aligned = align_htf_to_ltf(prices, df_4h, ema_bullish)
-    ema_bearish_aligned = align_htf_to_ltf(prices, df_4h, ema_bearish)
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - pd.Series(close_1d).shift(1)))
+    tr3 = pd.Series(np.abs(low_1d - pd.Series(close_1d).shift(1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
     
-    # Pre-compute 1h volume confirmation: > 1.8x 20-period average
-    volume = prices['volume'].values
-    volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * volume_20_avg)
+    # Directional Movement
+    dm_plus = pd.Series(np.where((high_1d - pd.Series(high_1d).shift(1)) > (pd.Series(low_1d).shift(1) - low_1d),
+                                 np.maximum(high_1d - pd.Series(high_1d).shift(1), 0), 0))
+    dm_minus = pd.Series(np.where((pd.Series(low_1d).shift(1) - low_1d) > (high_1d - pd.Series(high_1d).shift(1)),
+                                  np.maximum(pd.Series(low_1d).shift(1) - low_1d, 0), 0))
     
-    # Pre-compute Camarilla pivot levels (using previous day's OHLC)
+    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # ADX > 25 indicates strong trend
+    adx_strong = adx > 25
+    
+    # Align 1d ADX regime to 6h timeframe
+    adx_strong_aligned = align_htf_to_ltf(prices, df_1d, adx_strong)
+    
+    # Pre-compute EMA(13) for 6h data (Elder Ray base)
+    close = prices['close'].values
+    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    
+    # Elder Ray Power
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    open_price = prices['open'].values
+    bull_power = high - ema_13  # High - EMA(13)
+    bear_power = ema_13 - low   # EMA(13) - Low
     
-    # Calculate daily pivot from previous day's data
-    # We'll use rolling window of 24h (96 bars for 15m, but for 1h we need 24 bars)
-    # Since we're on 1h timeframe, previous day = 24 bars ago
-    prev_high = pd.Series(high).shift(24).rolling(window=24, min_periods=24).max().values
-    prev_low = pd.Series(low).shift(24).rolling(window=24, min_periods=24).min().values
-    prev_close = pd.Series(close).shift(24).rolling(window=24, min_periods=24).last().values
+    # Power conditions
+    bull_power_pos = bull_power > 0
+    bear_power_pos = bear_power > 0
     
-    # Camarilla levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # H3 and L3 levels (most significant for breakouts)
-    h3 = pivot + (range_val * 1.1 / 4)
-    l3 = pivot - (range_val * 1.1 / 4)
-    
-    # Handle division by zero and invalid values
-    h3 = np.where((range_val == 0) | np.isnan(range_val), pivot, h3)
-    l3 = np.where((range_val == 0) | np.isnan(range_val), pivot, l3)
-    pivot = np.where(np.isnan(pivot), close, pivot)
-    
-    # Breakout conditions
-    breakout_long = (close > h3) & ~np.isnan(h3)
-    breakout_short = (close < l3) & ~np.isnan(l3)
-    
-    # Exit condition: price returns to pivot point (within 0.1% of pivot)
-    pivot_exit = np.abs(close - pivot) < (0.001 * pivot)
+    # Pre-compute 6h volume confirmation: > 1.5x 20-period average
+    volume = prices['volume'].values
+    volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(breakout_long[i]) or np.isnan(breakout_short[i]) or
-            np.isnan(pivot_exit[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(adx_strong_aligned[i]) or np.isnan(bull_power_pos[i]) or
+            np.isnan(bear_power_pos[i]) or np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 4h bullish trend AND volume spike
-            if (breakout_long[i] and 
-                ema_bullish_aligned[i] and 
+        if position == 0:  # Flat - look for new entries
+            # Long when Bull Power positive AND 1d ADX strong trend AND volume spike
+            if (bull_power_pos[i] and 
+                adx_strong_aligned[i] and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.20
-            # Short when price breaks below L3 AND 4h bearish trend AND volume spike
-            elif (breakout_short[i] and 
-                  ema_bearish_aligned[i] and 
+                signals[i] = 0.25
+            # Short when Bear Power positive AND 1d ADX strong trend AND volume spike
+            elif (bear_power_pos[i] and 
+                  adx_strong_aligned[i] and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot point
-            # Exit when price returns to pivot (mean reversion)
-            exit_signal = pivot_exit[i]
+        else:  # Have position - look for exit when Power reverses
+            # Exit when Power reverses sign (Bull Power < 0 for longs, Bear Power < 0 for shorts)
+            if position == 1:  # Long position
+                exit_signal = bull_power[i] < 0  # Bull Power turned negative
+            else:  # Short position
+                exit_signal = bear_power[i] < 0  # Bear Power turned negative
             
             if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
                 if position == 1:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
