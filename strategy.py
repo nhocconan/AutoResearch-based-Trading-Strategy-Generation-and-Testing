@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with weekly EMA(21) trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND price > weekly EMA(21)
-# - Short when price breaks below 20-period Donchian low AND price < weekly EMA(21)
-# - Volume confirmation: 1d volume > 1.5x 20-period 1d volume SMA
-# - Exit: Donchian midpoint reversion
+# Hypothesis: 12h Donchian(20) breakout with 1d pivot confirmation and volume filter
+# - Long when price breaks above 12h Donchian high AND price is above 1d pivot point
+# - Short when price breaks below 12h Donchian low AND price is below 1d pivot point
+# - Volume confirmation: 12h volume > 1.5x 20-period 12h volume SMA
+# - Exit: Donchian midpoint reversion or opposite breakout with volume
 # - Position sizing: 0.25 discrete level
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Weekly EMA provides structural bias for BTC/ETH in both bull and bear markets
-# - Donchian breakout captures momentum, volume confirmation reduces false signals
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - 1d pivot provides structural bias, Donchian for breakouts, volume for confirmation
+# - Works in both bull and bear markets by following structure with confirmation
 
-name = "1d_1w_donchian_ema_volume_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +23,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -45,50 +45,64 @@ def generate_signals(prices):
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate weekly EMA(21) for trend filter
-    weekly_close = df_1w['close'].values
-    weekly_ema_21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_ema_21_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_21)
+    # Calculate daily pivot points (using previous day's OHLC)
+    # Pivot = (High + Low + Close) / 3
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    
+    # Track entry extreme for exit logic
+    entry_price = np.full(n, np.nan)
     
     for i in range(donchian_period, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(weekly_ema_21_aligned[i])):
+            np.isnan(volume_sma_20[i]) or np.isnan(daily_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
+        # Volume confirmation: 12h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
         # Donchian breakout signals
         breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
         breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
         
-        # Weekly EMA trend filter
-        price_above_ema = close[i] > weekly_ema_21_aligned[i]
-        price_below_ema = close[i] < weekly_ema_21_aligned[i]
+        # Daily pivot bias
+        price_above_pivot = close[i] > daily_pivot_aligned[i]
+        price_below_pivot = close[i] < daily_pivot_aligned[i]
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and price_above_ema and vol_confirm:
+            if breakout_up and price_above_pivot and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            elif breakout_down and price_below_ema and vol_confirm:
+                entry_price[i] = close[i]
+            elif breakout_down and price_below_pivot and vol_confirm:
                 position = -1
                 signals[i] = -0.25
+                entry_price[i] = close[i]
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit on Donchian midpoint reversion
-            if close[i] < donchian_mid[i]:
+            # Exit on Donchian midpoint reversion or opposite breakout with volume
+            exit_condition = (close[i] < donchian_mid[i]) or \
+                           (breakout_down and vol_confirm)
+            if exit_condition:
                 position = 0
                 signals[i] = 0.0
+                entry_price[i] = np.nan
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            # Exit on Donchian midpoint reversion
-            if close[i] > donchian_mid[i]:
+            # Exit on Donchian midpoint reversion or opposite breakout with volume
+            exit_condition = (close[i] > donchian_mid[i]) or \
+                           (breakout_up and vol_confirm)
+            if exit_condition:
                 position = 0
                 signals[i] = 0.0
+                entry_price[i] = np.nan
             else:
                 signals[i] = -0.25
     
