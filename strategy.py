@@ -3,142 +3,155 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ADX regime filter
-# - Long when price breaks above Camarilla H3 AND 1d volume > 1.3x 20-period average AND ADX(14) > 25
-# - Short when price breaks below Camarilla L3 AND 1d volume > 1.3x 20-period average AND ADX(14) > 25
-# - Exit when price crosses Camarilla H4/L4 levels (strong reversal)
+# Hypothesis: 1d KAMA direction + RSI(14) + choppiness regime filter
+# - KAMA(10,2,30) determines primary trend direction (long when price > KAMA, short when price < KAMA)
+# - RSI(14) for momentum confirmation (long when RSI > 50, short when RSI < 50)
+# - Choppiness Index(14) as regime filter: trade only when CHOP < 61.8 (trending market)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Camarilla levels provide mathematical support/resistance; volume confirms institutional interest
-# - ADX filter ensures we trade only in trending markets, avoiding choppy conditions
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
 
-name = "4h_1d_camarilla_volume_adx_v1"
-timeframe = "4h"
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC
+    # Pre-compute 1d OHLC
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Pre-compute 4h Camarilla pivot levels (based on previous day)
-    def calculate_camarilla(h_prev, l_prev, c_prev):
-        # Camarilla formula: H4 = C + ((H-L)*1.1/2), H3 = C + ((H-L)*1.1/4)
-        # L3 = C - ((H-L)*1.1/4), L4 = C - ((H-L)*1.1/2)
-        range_val = h_prev - l_prev
-        h4 = c_prev + (range_val * 1.1 / 2)
-        h3 = c_prev + (range_val * 1.1 / 4)
-        l3 = c_prev - (range_val * 1.1 / 4)
-        l4 = c_prev - (range_val * 1.1 / 2)
-        return h3, l3, h4, l4
+    # Pre-compute KAMA(10,2,30)
+    def kama_indicator(close, er_length=10, fast_sc=2, slow_sc=30):
+        n = len(close)
+        kama = np.full(n, np.nan)
+        if n < er_length:
+            return kama
+        
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=er_length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.diff(close), 'shape') else np.sum(np.abs(np.diff(close)))
+        # Manual calculation for efficiency ratio
+        er = np.full(n, np.nan)
+        for i in range(er_length, n):
+            price_change = np.abs(close[i] - close[i-er_length])
+            price_volatility = np.sum(np.abs(np.diff(close[i-er_length+1:i+1])))
+            if price_volatility > 0:
+                er[i] = price_change / price_volatility
+            else:
+                er[i] = 1.0
+        
+        # Smoothing constants
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        # KAMA calculation
+        kama[er_length] = close[er_length]  # Seed with close
+        for i in range(er_length+1, n):
+            if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Get previous day's OHLC for each 4h bar (need to align properly)
-    # Since we're on 4h timeframe, we use daily OHLC from previous completed day
-    camarilla_h3 = np.full(n, np.nan)
-    camarilla_l3 = np.full(n, np.nan)
-    camarilla_h4 = np.full(n, np.nan)
-    camarilla_l4 = np.full(n, np.nan)
+    kama = kama_indicator(close, 10, 2, 30)
     
-    # For each bar, use previous day's OHLC (we'll compute this properly)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute RSI(14)
+    def rsi_indicator(close, length=14):
+        n = len(close)
+        rsi = np.full(n, np.nan)
+        if n < length + 1:
+            return rsi
+        
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        # Initial average
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        
+        # Wilder smoothing
+        for i in range(length+1, n):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        
+        # Calculate RSI
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        rsi[avg_loss == 0] = 100
+        rsi[avg_gain == 0] = 0
+        return rsi
     
-    # Calculate Camarilla levels for each day
-    camarilla_h3_1d = np.full_like(high_1d, np.nan)
-    camarilla_l3_1d = np.full_like(high_1d, np.nan)
-    camarilla_h4_1d = np.full_like(high_1d, np.nan)
-    camarilla_l4_1d = np.full_like(high_1d, np.nan)
+    rsi = rsi_indicator(close, 14)
     
-    for i in range(len(high_1d)):
-        h3, l3, h4, l4 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        camarilla_h3_1d[i] = h3
-        camarilla_l3_1d[i] = l3
-        camarilla_h4_1d[i] = h4
-        camarilla_l4_1d[i] = l4
-    
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
-    
-    # Pre-compute 4h ADX (14-period) for regime filter
-    def calculate_adx(high, low, close, period=14):
+    # Pre-compute Choppiness Index(14)
+    def chop_indicator(high, low, close, length=14):
+        n = len(close)
+        chop = np.full(n, np.nan)
+        if n < length * 2:  # Need enough data for ATR calculation
+            return chop
+        
         # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[high[0] - low[0]], tr])
+        tr = np.full(n, np.nan)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        # Directional Movement
-        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                          np.maximum(high[1:] - high[:-1], 0), 0)
-        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                           np.maximum(low[:-1] - low[1:], 0), 0)
-        dm_plus = np.concatenate([[0], dm_plus])
-        dm_minus = np.concatenate([[0], dm_minus])
+        # ATR
+        atr = np.full(n, np.nan)
+        atr[length-1] = np.mean(tr[1:length])  # Simple average for first ATR
+        for i in range(length, n):
+            atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
         
-        # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
-        def wilder_smooth(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.mean(data[:period])
-                for i in range(period, len(data)):
-                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-            return result
+        # Highest high and lowest low over period
+        highest_high = np.full(n, np.nan)
+        lowest_low = np.full(n, np.nan)
+        for i in range(length-1, n):
+            highest_high[i] = np.max(high[i-length+1:i+1])
+            lowest_low[i] = np.min(low[i-length+1:i+1])
         
-        tr_smooth = wilder_smooth(tr, period)
-        dm_plus_smooth = wilder_smooth(dm_plus, period)
-        dm_minus_smooth = wilder_smooth(dm_minus, period)
-        
-        # DI+ and DI-
-        di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-        di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-        
-        # DX
-        dx = np.where((di_plus + di_minus) != 0, 
-                     100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-        
-        # ADX (smoothed DX)
-        adx = wilder_smooth(dx, period)
-        return adx
+        # Choppiness Index
+        for i in range(length-1, n):
+            if not np.isnan(atr[i]) and atr[i] > 0:
+                sum_atr = np.sum(atr[i-length+1:i+1])
+                if highest_high[i] - lowest_low[i] > 0:
+                    chop[i] = 100 * np.log10(sum_atr / (highest_high[i] - lowest_low[i])) / np.log10(length)
+                else:
+                    chop[i] = 50  # Neutral when no range
+            else:
+                chop[i] = 50
+        return chop
     
-    adx = calculate_adx(high, low, close, 14)
+    chop = chop_indicator(high, low, close, 14)
     
-    # Pre-compute 1d volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    def rolling_mean(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.mean(arr[i - window + 1:i + 1])
-        return result
+    # Pre-compute 1w trend filter (optional: only trade with weekly trend)
+    close_1w = df_1w['close'].values
+    def sma_indicator(arr, length):
+        n = len(arr)
+        sma = np.full(n, np.nan)
+        for i in range(length-1, n):
+            sma[i] = np.mean(arr[i-length+1:i+1])
+        return sma
     
-    vol_ma_1d = rolling_mean(volume_1d, 20)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    sma_50_1w = sma_indicator(close_1w, 50)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(sma_50_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -147,29 +160,31 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (1d volume > 1.3x 20-period average)
-        vol_spike = volume_1d_aligned[i] > 1.3 * vol_ma_1d_aligned[i]
+        # Weekly trend filter: only trade in direction of weekly trend
+        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Camarilla H3 breakout AND volume spike AND ADX > 25 (trending)
-            if (close[i] > camarilla_h3_aligned[i] and vol_spike and adx[i] > 25):
-                position = 1
-                signals[i] = 0.25
-            # Short conditions: Camarilla L3 breakdown AND volume spike AND ADX > 25 (trending)
-            elif (close[i] < camarilla_l3_aligned[i] and vol_spike and adx[i] > 25):
-                position = -1
-                signals[i] = -0.25
+            # Choppiness regime filter: only trade in trending markets (CHOP < 61.8)
+            if chop[i] < 61.8:
+                # Long conditions: price > KAMA AND RSI > 50 AND weekly uptrend
+                if close[i] > kama[i] and rsi[i] > 50 and weekly_uptrend:
+                    position = 1
+                    signals[i] = 0.25
+                # Short conditions: price < KAMA AND RSI < 50 AND weekly downtrend
+                elif close[i] < kama[i] and rsi[i] < 50 and weekly_downtrend:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                signals[i] = 0.0  # Choppy market - stay flat
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Camarilla H4/L4 (strong reversal)
-            exit_long = (position == 1 and close[i] < camarilla_l4_aligned[i])
-            exit_short = (position == -1 and close[i] > camarilla_h4_aligned[i])
+            # Exit conditions: reverse signal or choppy market
+            exit_long = (position == 1 and (close[i] <= kama[i] or rsi[i] <= 50 or chop[i] >= 61.8))
+            exit_short = (position == -1 and (close[i] >= kama[i] or rsi[i] >= 50 or chop[i] >= 61.8))
             
-            # Optional: exit if ADX drops below 20 (trend weakening)
-            exit_weak_trend = (adx[i] < 20)
-            
-            if exit_long or exit_short or exit_weak_trend:
+            if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -180,51 +195,199 @@ def generate_signals(prices):
     
     return signals
 
-def rolling_mean(arr, window):
-    result = np.full_like(arr, np.nan, dtype=float)
-    for i in range(window - 1, len(arr)):
-        result[i] = np.mean(arr[i - window + 1:i + 1])
-    return result
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_adx(high, low, close, period=14):
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[high[0] - low[0]], tr])
+# Hypothesis: 1d KAMA direction + RSI(14) + choppiness regime filter
+# - KAMA(10,2,30) determines primary trend direction (long when price > KAMA, short when price < KAMA)
+# - RSI(14) for momentum confirmation (long when RSI > 50, short when RSI < 50)
+# - Choppiness Index(14) as regime filter: trade only when CHOP < 61.8 (trending market)
+# - Uses discrete position sizing 0.25 to limit fee churn
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                      np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                       np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+    # Pre-compute 1d OHLC
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    tr_smooth = wilder_smooth(tr, period)
-    dm_plus_smooth = wilder_smooth(dm_plus, period)
-    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    # Pre-compute KAMA(10,2,30)
+    def kama_indicator(close, er_length=10, fast_sc=2, slow_sc=30):
+        n = len(close)
+        kama = np.full(n, np.nan)
+        if n < er_length:
+            return kama
+        
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=er_length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.diff(close), 'shape') else np.sum(np.abs(np.diff(close)))
+        # Manual calculation for efficiency ratio
+        er = np.full(n, np.nan)
+        for i in range(er_length, n):
+            price_change = np.abs(close[i] - close[i-er_length])
+            price_volatility = np.sum(np.abs(np.diff(close[i-er_length+1:i+1])))
+            if price_volatility > 0:
+                er[i] = price_change / price_volatility
+            else:
+                er[i] = 1.0
+        
+        # Smoothing constants
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        # KAMA calculation
+        kama[er_length] = close[er_length]  # Seed with close
+        for i in range(er_length+1, n):
+            if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # DI+ and DI-
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    kama = kama_indicator(close, 10, 2, 30)
     
-    # DX
-    dx = np.where((di_plus + di_minus) != 0, 
-                 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    # Pre-compute RSI(14)
+    def rsi_indicator(close, length=14):
+        n = len(close)
+        rsi = np.full(n, np.nan)
+        if n < length + 1:
+            return rsi
+        
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        # Initial average
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        
+        # Wilder smoothing
+        for i in range(length+1, n):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        
+        # Calculate RSI
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        rsi[avg_loss == 0] = 100
+        rsi[avg_gain == 0] = 0
+        return rsi
     
-    # ADX (smoothed DX)
-    adx = wilder_smooth(dx, period)
-    return adx
+    rsi = rsi_indicator(close, 14)
+    
+    # Pre-compute Choppiness Index(14)
+    def chop_indicator(high, low, close, length=14):
+        n = len(close)
+        chop = np.full(n, np.nan)
+        if n < length * 2:  # Need enough data for ATR calculation
+            return chop
+        
+        # True Range
+        tr = np.full(n, np.nan)
+        tr[0] = high[0] - low[0]
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # ATR
+        atr = np.full(n, np.nan)
+        atr[length-1] = np.mean(tr[1:length])  # Simple average for first ATR
+        for i in range(length, n):
+            atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
+        
+        # Highest high and lowest low over period
+        highest_high = np.full(n, np.nan)
+        lowest_low = np.full(n, np.nan)
+        for i in range(length-1, n):
+            highest_high[i] = np.max(high[i-length+1:i+1])
+            lowest_low[i] = np.min(low[i-length+1:i+1])
+        
+        # Choppiness Index
+        for i in range(length-1, n):
+            if not np.isnan(atr[i]) and atr[i] > 0:
+                sum_atr = np.sum(atr[i-length+1:i+1])
+                if highest_high[i] - lowest_low[i] > 0:
+                    chop[i] = 100 * np.log10(sum_atr / (highest_high[i] - lowest_low[i])) / np.log10(length)
+                else:
+                    chop[i] = 50  # Neutral when no range
+            else:
+                chop[i] = 50
+        return chop
+    
+    chop = chop_indicator(high, low, close, 14)
+    
+    # Pre-compute 1w trend filter (optional: only trade with weekly trend)
+    close_1w = df_1w['close'].values
+    def sma_indicator(arr, length):
+        n = len(arr)
+        sma = np.full(n, np.nan)
+        for i in range(length-1, n):
+            sma[i] = np.mean(arr[i-length+1:i+1])
+        return sma
+    
+    sma_50_1w = sma_indicator(close_1w, 50)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(30, n):  # Start after warmup
+        # Skip if any required data is invalid
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(sma_50_1w_aligned[i])):
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
+            continue
+        
+        # Weekly trend filter: only trade in direction of weekly trend
+        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
+        
+        if position == 0:  # Flat - look for new entries
+            # Choppiness regime filter: only trade in trending markets (CHOP < 61.8)
+            if chop[i] < 61.8:
+                # Long conditions: price > KAMA AND RSI > 50 AND weekly uptrend
+                if close[i] > kama[i] and rsi[i] > 50 and weekly_uptrend:
+                    position = 1
+                    signals[i] = 0.25
+                # Short conditions: price < KAMA AND RSI < 50 AND weekly downtrend
+                elif close[i] < kama[i] and rsi[i] < 50 and weekly_downtrend:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+            else:
+                signals[i] = 0.0  # Choppy market - stay flat
+        else:  # Have position - look for exit
+            # Exit conditions: reverse signal or choppy market
+            exit_long = (position == 1 and (close[i] <= kama[i] or rsi[i] <= 50 or chop[i] >= 61.8))
+            exit_short = (position == -1 and (close[i] >= kama[i] or rsi[i] >= 50 or chop[i] >= 61.8))
+            
+            if exit_long or exit_short:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
+                    signals[i] = 0.25
+                else:
+                    signals[i] = -0.25
+    
+    return signals
