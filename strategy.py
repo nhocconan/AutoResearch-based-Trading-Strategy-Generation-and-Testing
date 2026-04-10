@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla L3/H3 breakout with 1d volume confirmation and 1d EMA200 trend filter
-# - Long when 4h close breaks above 1d Camarilla H3 resistance in 1d uptrend (close > EMA200) with volume spike
-# - Short when 4h close breaks below 1d Camarilla L3 support in 1d downtrend (close < EMA200) with volume spike
-# - Exit on opposite Camarilla level touch (H3 for longs, L3 for shorts) or ATR-based stoploss (2.0x)
+# Hypothesis: 4h Camarilla pivot long/short with 1d trend filter and volume confirmation
+# - Long when price touches Camarilla L3 support in 1d uptrend (close > EMA200) with volume spike
+# - Short when price touches Camarilla H3 resistance in 1d downtrend (close < EMA200) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
+# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(14) or price reverts to Camarilla pivot
 # - Targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Fixed: removed volume condition from exit logic to reduce whipsaw, improved entry logic for better signal quality
 
-name = "4h_1d_camarilla_breakout_volume_trend_atr_v2"
+name = "4h_1d_camarilla_pivot_volume_trend_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -51,7 +52,10 @@ def generate_signals(prices):
     vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # 1d Camarilla pivot levels (based on same day OHLC)
+    # 1d Camarilla pivot levels (based on previous day)
+    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
+    # H3 = close + 1.1*(high-low)*1.1/4
+    # L3 = close - 1.1*(high-low)*1.1/4
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
@@ -70,34 +74,34 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: ATR-based stoploss or price touches Camarilla L3 (mean reversion)
+            # Exit: ATR-based stoploss or price reverts to Camarilla pivot (mean reversion)
             if (prices['close'].iloc[i] < entry_price - 2.0 * entry_atr or 
-                prices['close'].iloc[i] < camarilla_l3_aligned[i]):
+                prices['close'].iloc[i] > camarilla_h3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: ATR-based stoploss or price touches Camarilla H3 (mean reversion)
+            # Exit: ATR-based stoploss or price reverts to Camarilla pivot (mean reversion)
             if (prices['close'].iloc[i] > entry_price + 2.0 * entry_atr or 
-                prices['close'].iloc[i] > camarilla_h3_aligned[i]):
+                prices['close'].iloc[i] < camarilla_l3_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Camarilla H3/L3 breakout with trend and volume filters
+            # Look for Camarilla L3/H3 touch with trend and volume filters
             if vol_spike_1d_aligned[i]:
-                # Long signal: 4h close breaks above H3 resistance in 1d uptrend
-                if (prices['close'].iloc[i] > camarilla_h3_aligned[i] and 
+                # Long signal: price touches L3 support in 1d uptrend
+                if (prices['low'].iloc[i] <= camarilla_l3_aligned[i] and 
                     prices['close'].iloc[i] > ema_200_1d_aligned[i]):
                     position = 1
                     entry_price = prices['close'].iloc[i]
                     entry_atr = atr_14_1d_aligned[i]
                     signals[i] = 0.25
-                # Short signal: 4h close breaks below L3 support in 1d downtrend
-                elif (prices['close'].iloc[i] < camarilla_l3_aligned[i] and 
+                # Short signal: price touches H3 resistance in 1d downtrend
+                elif (prices['high'].iloc[i] >= camarilla_h3_aligned[i] and 
                       prices['close'].iloc[i] < ema_200_1d_aligned[i]):
                     position = -1
                     entry_price = prices['close'].iloc[i]
