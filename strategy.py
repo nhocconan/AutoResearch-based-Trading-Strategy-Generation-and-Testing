@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (price > EMA50) and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
 # - Long when price breaks above 4h Donchian upper channel AND 1d close > 1d EMA50 (bullish trend)
 # - Short when price breaks below 4h Donchian lower channel AND 1d close < 1d EMA50 (bearish trend)
-# - Volume confirmation: 4h volume > 1.5x 20-period volume SMA
+# - Volume confirmation: 4h volume > 1.3x 20-period volume SMA
 # - Exit: opposite Donchian breakout or volume drops below average
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 19-50 trades/year on 4h timeframe to stay within fee drag limits
-# - Works in both bull and bear markets due to directional trend filter + volatility-based breakouts
+# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Works in both bull and bear markets due to trend filter and volume confirmation
 
-name = "4h_1d_donchian_trend_volume_v2"
+name = "4h_1d_donchian_trend_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +23,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -52,7 +52,7 @@ def generate_signals(prices):
     # Calculate 4h volume SMA for regime filter
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(50, n):  # Start after warmup for indicators
+    for i in range(60, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(close_1d_aligned[i]) or
@@ -60,14 +60,14 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Volume confirmation: 4h volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
         
         # Trend filter: 1d close vs 1d EMA50
         trend_bullish = close_1d_aligned[i] > ema_50_1d_aligned[i]
         trend_bearish = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Donchian breakout signals
+        # Donchian breakout signals (using previous bar's channel to avoid look-ahead)
         breakout_up = close[i] > donchian_upper[i-1]  # Break above previous upper channel
         breakout_down = close[i] < donchian_lower[i-1]  # Break below previous lower channel
         
