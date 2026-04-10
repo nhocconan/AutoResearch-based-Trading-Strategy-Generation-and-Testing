@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND 1d close > 1d open (bullish daily candle) AND volume > 1.5x 20-period volume SMA
-# - Short when price breaks below 20-period Donchian low AND 1d close < 1d open (bearish daily candle) AND volume > 1.5x 20-period volume SMA
-# - Exit: ATR trailing stop (2.5x ATR) or reversion to Donchian midpoint
-# - Uses 1d for signal direction (trend bias) and 12h for entry timing
+# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation
+# - Long when price breaks above 20-period Donchian upper band AND 12h close > 12h open (bullish 12h candle) AND volume > 1.5x 20-period volume SMA
+# - Short when price breaks below 20-period Donchian lower band AND 12h close < 12h open (bearish 12h candle) AND volume > 1.5x 20-period volume SMA
+# - Exit: ATR trailing stop (2.5x ATR from extreme) or reversion to Donchian midpoint
+# - Uses 12h for signal direction (trend bias) and 4h for precise entry timing
 # - Session filter: 08-20 UTC to avoid low-volume Asian session noise
 # - Position sizing: 0.25 discrete level to control drawdown and minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while maintaining statistical significance
-# - Donchian channels provide robust structure that works in both bull and bear markets
+# - Target: 25-50 trades/year (100-200 total over 4 years) to minimize fee drag while maintaining statistical significance
+# - Donchian channels provide clear breakout levels that work in both bull and bear markets
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,20 +32,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data ONCE before loop (MTF rule compliance)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return signals
     
-    # Calculate 1d candle direction (bullish/bearish) for trend filter
-    close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
-    # Bullish 1d candle: close > open
-    bullish_1d = close_1d > open_1d
-    bearish_1d = close_1d < open_1d
-    # Align to 12h timeframe with proper delay (completed 1d bar only)
-    bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, bullish_1d)
-    bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, bearish_1d)
+    # Calculate 12h candle direction (bullish/bearish) for trend filter
+    close_12h = df_12h['close'].values
+    open_12h = df_12h['open'].values
+    # Bullish 12h candle: close > open
+    bullish_12h = close_12h > open_12h
+    bearish_12h = close_12h < open_12h
+    # Align to 4h timeframe with proper delay (completed 12h bar only)
+    bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_12h)
+    bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_12h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
@@ -58,13 +58,13 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Calculate 20-period Donchian channels
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 20-period Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     # Track highest high since entry for trailing stop (long)
     # Track lowest low since entry for trailing stop (short)
@@ -78,27 +78,27 @@ def generate_signals(prices):
             continue
             
         # Skip if any required data is invalid
-        if (np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(bullish_1d_aligned[i]) or np.isnan(bearish_1d_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(donchian_mid[i]) or np.isnan(volume_sma_20[i]) or
+            np.isnan(bullish_12h_aligned[i]) or np.isnan(bearish_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.5x 20-period volume SMA
+        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
         # Donchian breakout signals
-        breakout_up = close[i] > donchian_high[i-1]  # Break above upper channel
-        breakout_down = close[i] < donchian_low[i-1]  # Break below lower channel
+        breakout_up = close[i] > donchian_upper[i-1]  # Break above upper band
+        breakout_down = close[i] < donchian_lower[i-1]  # Break below lower band
         
         if position == 0:  # Flat - look for entry
-            # Long: price breaks above upper channel AND 1d bullish AND volume confirmation
-            if breakout_up and bullish_1d_aligned[i] and vol_confirm:
+            # Long: price breaks above upper band AND 12h bullish AND volume confirmation
+            if breakout_up and bullish_12h_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 highest_since_entry[i] = high[i]  # Initialize trailing stop
-            # Short: price breaks below lower channel AND 1d bearish AND volume confirmation
-            elif breakout_down and bearish_1d_aligned[i] and vol_confirm:
+            # Short: price breaks below lower band AND 12h bearish AND volume confirmation
+            elif breakout_down and bearish_12h_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 lowest_since_entry[i] = low[i]  # Initialize trailing stop
