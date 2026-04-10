@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and choppiness regime filter
-# - Long when price breaks above 20-period Donchian high AND 1d volume > 2.0x 20-period volume SMA AND 1d Choppiness Index > 61.8 (ranging market)
-# - Short when price breaks below 20-period Donchian low AND 1d volume > 2.0x 20-period volume SMA AND 1d Choppiness Index > 61.8 (ranging market)
-# - Exit: ATR trailing stop (2.0 * ATR from extreme) or opposite Donchian breakout
-# - Uses 4h for price action and Donchian channels, 1d for volume and choppiness filters
-# - Choppiness filter ensures we trade only in ranging markets where mean reversion at channel extremes works
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and choppiness regime filter
+# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.5x 20-period volume SMA AND 1d Choppiness Index > 61.8 (ranging market)
+# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.5x 20-period volume SMA AND 1d Choppiness Index > 61.8 (ranging market)
+# - Exit: ATR trailing stop (2.5 * ATR from extreme) or opposite Camarilla level (H3/L3) breakout
+# - Uses 4h for price action and Camarilla levels, 1d for volume and choppiness filters
+# - Choppiness filter ensures we trade only in ranging markets where mean reversion at pivot extremes works
 # - Volume spike adds conviction to breakouts (panic or euphoria)
 # - ATR trailing stop manages risk while letting winners run
 # - Target: 20-35 trades/year to minimize fee drag while capturing high-probability mean reversion
 
-name = "4h_1d_donchian_volume_chop_v1"
+name = "4h_1d_camarilla_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -65,9 +65,21 @@ def generate_signals(prices):
     chop = np.where(hh_ll_1d == 0, 50, chop)  # Avoid division by zero
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Pre-compute Donchian channels for 4h data (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute Camarilla levels for 4h data (based on previous day's OHLC)
+    # Camarilla levels: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low)
+    #                  L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
+    # We use daily OHLC from 1d timeframe to calculate Camarilla levels for 4h
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels from previous 1d bar
+    camarilla_h3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d)
+    camarilla_l3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d)
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Pre-compute ATR for trailing stop (using 4h data)
     tr1 = np.abs(high[1:] - low[1:])
@@ -83,7 +95,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after 20-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -91,8 +103,8 @@ def generate_signals(prices):
         # Get current 1d volume (aligned)
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
         
-        # Volume confirmation: 1d volume > 2.0x 20-period volume SMA (volume spike)
-        vol_confirm = vol_1d_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA (volume spike)
+        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
         # Regime filter: 1d Choppiness Index > 61.8 (ranging market)
         regime_filter = chop_aligned[i] > 61.8
@@ -108,15 +120,15 @@ def generate_signals(prices):
                 long_high[i] = close[i]
                 short_low[i] = close[i]
             
-            # Long: price breaks above Donchian high
-            if close[i] > donch_high[i]:
+            # Long: price breaks above Camarilla H3
+            if close[i] > camarilla_h3_aligned[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25
-            # Short: price breaks below Donchian low
-            elif close[i] < donch_low[i]:
+            # Short: price breaks below Camarilla L3
+            elif close[i] < camarilla_l3_aligned[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
@@ -129,19 +141,19 @@ def generate_signals(prices):
             # Exit conditions
             exit_signal = False
             
-            # Exit 1: ATR trailing stop (2.0 * ATR from extreme)
+            # Exit 1: ATR trailing stop (2.5 * ATR from extreme)
             if position == 1 and not np.isnan(long_high[i]):
-                if close[i] < long_high[i] - 2.0 * atr[i]:
+                if close[i] < long_high[i] - 2.5 * atr[i]:
                     exit_signal = True
             elif position == -1 and not np.isnan(short_low[i]):
-                if close[i] > short_low[i] + 2.0 * atr[i]:
+                if close[i] > short_low[i] + 2.5 * atr[i]:
                     exit_signal = True
             
-            # Exit 2: Opposite Donchian breakout (reversal signal)
+            # Exit 2: Opposite Camarilla level (H3/L3) breakout (reversal signal)
             if not exit_signal:
-                if position == 1 and close[i] < donch_low[i]:
+                if position == 1 and close[i] < camarilla_l3_aligned[i]:
                     exit_signal = True
-                elif position == -1 and close[i] > donch_high[i]:
+                elif position == -1 and close[i] > camarilla_h3_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
