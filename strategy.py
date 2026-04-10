@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike filter and ATR trailing stop
-# - Camarilla levels (H3/L3, H4/L4) from 1d provide institutional support/resistance
-# - Breakout above H4 (bullish) or below L4 (bearish) with 1d volume > 1.5x 20-day average
-# - Volume confirmation ensures breakout has participation, reducing false signals
-# - ATR trailing stop (3.0 * ATR) locks in profits and limits drawdown
-# - Position size: 0.25 to balance risk and minimize fee churn
-# - Target: 20-40 trades/year on 4h (80-160 total over 4 years)
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d volume spike filter and ATR(14) trailing stop
+# - Uses tighter Camarilla H3/L3 levels (vs H4/L4) for more frequent but still selective breakouts
+# - Volume confirmation: 1d volume > 1.8x 20-day average to ensure institutional participation
+# - ATR trailing stop (2.5 * ATR) balances profit protection vs whipsaw avoidance
+# - Position size: 0.25 discrete to minimize fee churn
+# - Designed for 15-25 trades/year (60-100 total over 4 years) to avoid fee drag
 # - Works in bull/bear: Camarilla adapts to volatility, volume filters weak moves, ATR stop manages risk
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_camarilla_h3l3_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,10 +38,10 @@ def generate_signals(prices):
     camarilla_l3 = close_1d - range_1d * 1.1/4
     
     # Align Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Pre-compute 1d volume average (20-period) for spike filter
     volume_1d = df_1d['volume'].values
@@ -71,8 +70,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
             np.isnan(vol_ma_aligned[i]) or np.isnan(atr[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -86,18 +85,18 @@ def generate_signals(prices):
         volume_1d_current = df_1d['volume'].values
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        volume_spike = volume_1d_aligned[i] > 1.5 * vol_ma_aligned[i]
+        # Volume confirmation: current 1d volume > 1.8x 20-day average (stricter filter)
+        volume_spike = volume_1d_aligned[i] > 1.8 * vol_ma_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price > Camarilla H4 AND volume spike
-            if prices['close'].iloc[i] > h4_aligned[i] and volume_spike:
+            # Long conditions: price > Camarilla H3 AND volume spike
+            if prices['close'].iloc[i] > h3_aligned[i] and volume_spike:
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: price < Camarilla L4 AND volume spike
-            elif prices['close'].iloc[i] < l4_aligned[i] and volume_spike:
+            # Short conditions: price < Camarilla L3 AND volume spike
+            elif prices['close'].iloc[i] < l3_aligned[i] and volume_spike:
                 position = -1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 lowest_since_entry = prices['low'].iloc[i]
@@ -108,15 +107,15 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # Exit conditions: price < Camarilla L3 (profit take) OR ATR trailing stop
-                exit_long = prices['close'].iloc[i] < l3_aligned[i]  # Take profit at L3
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 3.0 * atr[i]
+                # Exit conditions: price < Camarilla L4 (stop loss) OR ATR trailing stop
+                exit_long = prices['close'].iloc[i] < l4_aligned[i]  # Stop loss at L4
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr[i]
                 exit_condition = exit_long or trailing_stop
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # Exit conditions: price > Camarilla H3 (profit take) OR ATR trailing stop
-                exit_short = prices['close'].iloc[i] > h3_aligned[i]  # Take profit at H3
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 3.0 * atr[i]
+                # Exit conditions: price > Camarilla H4 (stop loss) OR ATR trailing stop
+                exit_short = prices['close'].iloc[i] > h4_aligned[i]  # Stop loss at H4
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr[i]
                 exit_condition = exit_short or trailing_stop
             
             if exit_condition:
