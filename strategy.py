@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) high AND 1w HMA(21) is rising AND 1d volume > 1.3x 20-period volume SMA
-# - Short when price breaks below Donchian(20) low AND 1w HMA(21) is falling AND 1d volume > 1.3x 20-period volume SMA
-# - Exit: opposite Donchian breakout or volume drops below average
-# - Uses 1d for Donchian and volume, 1w for HMA trend filter
-# - Weekly HMA provides smoothed trend direction to avoid whipsaws
-# - Volume confirmation ensures breakouts have conviction
-# - Target: 15-25 trades/year to minimize fee drag while capturing sustained moves
+# Hypothesis: 6h Camarilla pivot breakout with 12h volume confirmation and 1d trend filter
+# - Long when price breaks above Camarilla R4 AND 12h volume > 1.3x 20-period volume SMA AND 1d close > 1d EMA50
+# - Short when price breaks below Camarilla S4 AND 12h volume > 1.3x 20-period volume SMA AND 1d close < 1d EMA50
+# - Exit: price returns to Camarilla pivot point (PP) or volume drops below average
+# - Uses 6h for Camarilla calculation and breakout, 12h for volume confirmation, 1d for trend filter
+# - Camarilla levels provide intraday support/resistance with statistical edge
+# - Volume confirmation ensures breakouts have institutional participation
+# - 1d EMA50 filter avoids counter-trend trades in strong trends
+# - Target: 12-30 trades/year to minimize fee drag while capturing high-probability breakouts
 
-name = "1d_1w_hma_volume_donchian_v1"
-timeframe = "1d"
+name = "6h_12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,77 +31,90 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop for HMA trend (MTF rule compliance)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 12h data ONCE before loop for volume confirmation (MTF rule compliance)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return signals
     
-    # Calculate HMA(21) on 1w close data
-    close_1w = df_1w['close'].values
-    # HMA formula: WMA(2 * WMA(n/2) - WMA(n)), sqrt(n))
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Load 1d data ONCE before loop for trend filter (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return signals
     
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, mode='valid') / weights.sum()
+    # Pre-compute Camarilla pivot levels for 6h data (using prior bar's OHLC)
+    # Camarilla calculations based on prior period's range
+    prior_close = np.roll(close, 1)
+    prior_high = np.roll(high, 1)
+    prior_low = np.roll(low, 1)
+    prior_close[0] = close[0]  # First bar uses current values
+    prior_high[0] = high[0]
+    prior_low[0] = low[0]
     
-    wma_half = np.array([np.nan] * len(close_1w))
-    wma_full = np.array([np.nan] * len(close_1w))
+    # Calculate pivot point and ranges
+    pivot_point = (prior_high + prior_low + prior_close) / 3.0
+    range_hl = prior_high - prior_low
     
-    if len(close_1w) >= half_len:
-        wma_half[half_len-1:] = wma(close_1w, half_len)
-    if len(close_1w) >= 21:
-        wma_full[20:] = wma(close_1w, 21)
+    # Camarilla levels
+    camarilla_pp = pivot_point
+    camarilla_r1 = pivot_point + (range_hl * 1.1 / 12)
+    camarilla_r2 = pivot_point + (range_hl * 1.1 / 6)
+    camarilla_r3 = pivot_point + (range_hl * 1.1 / 4)
+    camarilla_r4 = pivot_point + (range_hl * 1.1 / 2)
+    camarilla_s1 = pivot_point - (range_hl * 1.1 / 12)
+    camarilla_s2 = pivot_point - (range_hl * 1.1 / 6)
+    camarilla_s3 = pivot_point - (range_hl * 1.1 / 4)
+    camarilla_s4 = pivot_point - (range_hl * 1.1 / 2)
     
-    # HMA = WMA(2*WMA_half - WMA_full), sqrt_len)
-    hma_input = 2 * wma_half - wma_full
-    hma_1w = np.array([np.nan] * len(close_1w))
-    if len(hma_input) >= sqrt_len:
-        hma_1w[sqrt_len-1:] = wma(hma_input, sqrt_len)
+    # Pre-compute volume SMA for 12h data (20-period)
+    volume_12h = df_12h['volume'].values
+    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
     
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Pre-compute EMA50 for 1d close (trend filter)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute Donchian channels for 1d data (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Pre-compute volume SMA for 1d data (20-period)
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Pre-compute 1d close aligned for trend comparison
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
     for i in range(20, n):  # Start after 20-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_sma_20[i]) or np.isnan(hma_1w_aligned[i])):
+        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or 
+            np.isnan(camarilla_pp[i]) or np.isnan(volume_sma_20_12h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(close_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.3x 20-period volume SMA
-        vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
+        # Volume confirmation: 12h volume > 1.3x 20-period volume SMA
+        # Get current 12h volume (need to align it)
+        vol_12h_current = df_12h['volume'].values
+        vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h_current)
+        vol_confirm = vol_12h_aligned[i] > 1.3 * volume_sma_20_12h_aligned[i]
         
-        # Donchian breakout signals (using prior period's levels)
-        breakout_long = close[i] > donchian_high[i-1]  # Break above prior period's high
-        breakout_short = close[i] < donchian_low[i-1]  # Break below prior period's low
+        # Trend filter: 1d close vs EMA50
+        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Weekly HMA trend: rising if current > previous, falling if current < previous
-        hma_rising = hma_1w_aligned[i] > hma_1w_aligned[i-1] if i > 0 else False
-        hma_falling = hma_1w_aligned[i] < hma_1w_aligned[i-1] if i > 0 else False
+        # Camarilla breakout signals
+        breakout_long = close[i] > camarilla_r4[i]  # Break above R4
+        breakout_short = close[i] < camarilla_s4[i]  # Break below S4
         
-        # Exit conditions: opposite breakout or volume drops below average
-        exit_long = close[i] < donchian_low[i-1] or volume[i] < volume_sma_20[i]
-        exit_short = close[i] > donchian_high[i-1] or volume[i] < volume_sma_20[i]
+        # Exit condition: price returns to pivot point
+        exit_long = close[i] < camarilla_pp[i]
+        exit_short = close[i] > camarilla_pp[i]
         
         # Trading logic
         if vol_confirm:
-            # Long: Donchian breakout above with rising weekly HMA
-            if breakout_long and hma_rising:
+            # Long: Camarilla R4 breakout in uptrend
+            if breakout_long and uptrend:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25
-            # Short: Donchian breakout below with falling weekly HMA
-            elif breakout_short and hma_falling:
+            # Short: Camarilla S4 breakdown in downtrend
+            elif breakout_short and downtrend:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
