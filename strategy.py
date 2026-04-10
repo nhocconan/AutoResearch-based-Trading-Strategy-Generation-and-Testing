@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d ADX regime filter
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# - Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d ADX > 25 (trending)
-# - Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d ADX > 25 (trending)
-# - Exit when Elder Ray power reverses sign
+# Hypothesis: 12h Williams Alligator + 1d volume spike + chop regime filter
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs smoothed
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND 1d volume > 2.0x 20-period average AND chop > 61.8 (ranging)
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND 1d volume > 2.0x 20-period average AND chop > 61.8 (ranging)
+# - Exit when Alligator lines cross (Lips-Teeth or Teeth-Jaw crossover)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Elder Ray measures bull/bear power relative to trend (EMA13)
-# - ADX filter ensures we only trade in trending markets where Elder Ray is most effective
-# - Works in both bull and bear markets by following the trend
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Alligator identifies trend emergence with minimal lag
+# - Volume spike confirms institutional participation
+# - Chop filter ensures we trade in ranging markets where Alligator works best
 
-name = "6h_1d_elder_ray_adx_v4"
-timeframe = "6h"
+name = "12h_1d_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,29 +28,39 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h indicators
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Pre-compute 12h Williams Alligator
+    # Jaw: 13-period SMMA smoothed by 8 periods
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Teeth: 8-period SMMA smoothed by 5 periods
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values
     
-    # Smoothed Elder Ray for trend detection (2-period EMA)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=2, adjust=False, min_periods=2).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=2, adjust=False, min_periods=2).mean().values
+    # Lips: 5-period SMMA smoothed by 3 periods
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values
     
-    # Pre-compute 1d ADX (14-period)
+    # Alligator alignment conditions
+    bullish_align = (lips > teeth) & (teeth > jaw)
+    bearish_align = (lips < teeth) & (teeth < jaw)
+    
+    # Pre-compute 12h volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Pre-compute 1d Chop Index (ETF style: 100 * log10(sum(ATR14) / (max(high)-min(low))) / log10(14))
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range and Directional Movement
+    # True Range for ATR
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -59,45 +69,34 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    # ATR(14) using Wilder's smoothing
+    atr_1d = np.zeros_like(tr)
+    atr_1d[13] = np.mean(tr[1:14])  # First ATR value
+    for i in range(14, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Chop Index calculation
+    sum_atr14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_14 = max_high - min_low
+    # Avoid division by zero
+    range_14 = np.where(range_14 == 0, 1e-10, range_14)
+    chop = 100 * np.log10(sum_atr14 / range_14) / np.log10(14)
+    chop_regime = chop > 61.8  # Ranging market
     
-    # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/14)
-    def wilder_smooth(arr, period):
-        result = np.zeros_like(arr)
-        result[period-1] = np.mean(arr[1:period+1])  # First value
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    tr_smooth = wilder_smooth(tr, 14)
-    plus_dm_smooth = wilder_smooth(plus_dm, 14)
-    minus_dm_smooth = wilder_smooth(minus_dm, 14)
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / np.where(tr_smooth == 0, 1, tr_smooth)
-    minus_di = 100 * minus_dm_smooth / np.where(tr_smooth == 0, 1, tr_smooth)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-    adx = np.zeros_like(dx)
-    adx[13] = np.mean(dx[1:14])  # First ADX value
-    for i in range(14, len(dx)):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align HTF indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align HTF indicators to 12h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(volume_spike_aligned[i]) or 
+            np.isnan(chop_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -107,24 +106,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND Bear Power rising (less negative) AND ADX > 25
-            if (bull_power_smooth[i] > 0 and 
-                bear_power_smooth[i] > bear_power_smooth[i-1] and 
-                adx_aligned[i] > 25):
+            # Long conditions: bullish Alligator alignment AND volume spike AND chop regime (ranging)
+            if (bullish_align[i] and 
+                volume_spike_aligned[i] and 
+                chop_regime_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power < 0 AND Bull Power falling (less positive) AND ADX > 25
-            elif (bear_power_smooth[i] < 0 and 
-                  bull_power_smooth[i] < bull_power_smooth[i-1] and 
-                  adx_aligned[i] > 25):
+            # Short conditions: bearish Alligator alignment AND volume spike AND chop regime (ranging)
+            elif (bearish_align[i] and 
+                  volume_spike_aligned[i] and 
+                  chop_regime_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Elder Ray power reverses sign
-            exit_long = (position == 1 and bull_power_smooth[i] <= 0)
-            exit_short = (position == -1 and bear_power_smooth[i] >= 0)
+            # Exit conditions: Alligator lines cross (Lips-Teeth or Teeth-Jaw crossover)
+            exit_long = (position == 1 and 
+                        (lips[i] <= teeth[i] or teeth[i] <= jaw[i]))
+            exit_short = (position == -1 and 
+                          (lips[i] >= teeth[i] or teeth[i] >= jaw[i]))
             
             if exit_long or exit_short:
                 position = 0
