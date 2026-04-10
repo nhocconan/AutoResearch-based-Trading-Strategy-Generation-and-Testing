@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# - Long when price breaks above Camarilla H3 level AND volume > 1.5x 20-period average AND 1d chop > 61.8 (range)
-# - Short when price breaks below Camarilla L3 level AND volume > 1.5x 20-period average AND 1d chop > 61.8 (range)
-# - Exit when price returns to Camarilla H4/L4 levels or opposite pivot breakout with volume confirmation
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d chop regime filter
+# - Long when price breaks above Donchian(20) high AND volume > 1.5x 20-period average AND 1d chop > 61.8 (range)
+# - Short when price breaks below Donchian(20) low AND volume > 1.5x 20-period average AND 1d chop > 61.8 (range)
+# - Exit when price returns to Donchian(20) middle or opposite signal
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Camarilla pivots work well in ranging markets (chop > 61.8) as mean reversion levels
-# - Volume confirmation ensures breakouts have conviction
-# - 12h timeframe reduces trade frequency vs lower timeframes, minimizing fee drag
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Works in range markets via mean reversion at Donchian extremes with volume confirmation
+# - Chop filter ensures we only trade in ranging conditions where breakouts are more likely to fail
 
-name = "12h_1d_camarilla_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,37 +26,17 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute 12h typical price for Camarilla calculation
+    # Pre-compute 4h Donchian channels (20)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    typical_price = (high + low + close) / 3.0
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_high + donchian_low) / 2
     
-    # Calculate Camarilla levels using previous day's OHLC
-    # We need to align daily OHLC to 12h bars
-    df_1d_ohlc = df_1d[['open', 'high', 'low', 'close']]
-    
-    # Get previous day's values for each 12h bar
-    prev_open = df_1d_ohlc['open'].shift(1).values
-    prev_high = df_1d_ohlc['high'].shift(1).values
-    prev_low = df_1d_ohlc['low'].shift(1).values
-    prev_close = df_1d_ohlc['close'].shift(1).values
-    
-    # Calculate Camarilla levels for each day
-    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    camarilla_h4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_l4 = prev_close - (prev_high - prev_low) * 1.1 / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Pre-compute 12h volume confirmation
+    # Pre-compute 4h volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -91,7 +70,7 @@ def generate_signals(prices):
     # Chop regime: > 61.8 = ranging (good for mean reversion at extremes)
     chop_range = chop > 61.8
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     chop_range_aligned = align_htf_to_ltf(prices, df_1d, chop_range)
     
     signals = np.zeros(n)
@@ -99,8 +78,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
-            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(chop_range_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -111,14 +89,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla H3 AND volume spike AND chop range
-            if (close[i] > h3_12h[i] and 
+            # Long conditions: price breaks above Donchian high AND volume spike AND chop range
+            if (close[i] > donchian_high[i-1] and  # breakout above previous period's high
                 volume_spike[i] and 
                 chop_range_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla L3 AND volume spike AND chop range
-            elif (close[i] < l3_12h[i] and 
+            # Short conditions: price breaks below Donchian low AND volume spike AND chop range
+            elif (close[i] < donchian_low[i-1] and  # breakout below previous period's low
                   volume_spike[i] and 
                   chop_range_aligned[i]):
                 position = -1
@@ -126,13 +104,13 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when price returns to Camarilla H4/L4 levels or opposite pivot breakout with volume
+            # Exit when price returns to Donchian middle or opposite signal with volume
             exit_long = (position == 1 and 
-                        (close[i] <= h4_12h[i] or
-                         (close[i] < l3_12h[i] and volume_spike[i])))
+                        (close[i] <= donchian_middle[i] or
+                         (close[i] < donchian_low[i] and volume_spike[i])))
             exit_short = (position == -1 and 
-                         (close[i] >= l4_12h[i] or
-                          (close[i] > h3_12h[i] and volume_spike[i])))
+                         (close[i] >= donchian_middle[i] or
+                          (close[i] > donchian_high[i] and volume_spike[i])))
             
             if exit_long or exit_short:
                 position = 0
