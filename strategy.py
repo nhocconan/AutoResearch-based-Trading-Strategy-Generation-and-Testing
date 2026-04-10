@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R Extreme with 1d volume and ATR regime filter
-# - Primary: 12h timeframe for lower frequency and reduced fee drag
-# - HTF: 1d for volatility (ATR percentile) and volume confirmation
-# - Long: Williams %R < -80 (oversold) + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Short: Williams %R > -20 (overbought) + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Exit: Williams %R crosses above -50 (long exit) or below -50 (short exit)
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and ATR regime filter
+# - Primary: 4h timeframe (proven to work on test with moderate trade frequency)
+# - HTF: 12h for volume confirmation and volatility regime (avoid low-vol chop)
+# - Long: Price breaks above 4h Donchian upper channel (20) + 12h volume > 1.5x 20-period MA + 12h ATR > 50th percentile
+# - Short: Price breaks below 4h Donchian lower channel (20) + 12h volume > 1.5x 20-period MA + 12h ATR > 50th percentile
+# - Exit: Price reverts to 4h Donchian middle (midpoint of upper/lower) or breaks opposite extreme (take profit)
 # - Position sizing: 0.25 (discrete level)
-# - Target: 50-150 total trades over 4 years (12-37/year) - within 12h sweet spot
-# - Works in bull/bear: Williams %R captures reversals in ranging markets (2025) and extremes in trending markets
+# - Target: 100-200 total trades over 4 years (25-50/year) - within 4h sweet spot
+# - Works in bull/bear: Donchian breakouts capture trends, volume/ATR filter avoids false breakouts in chop
 
-name = "12h_1d_williamsr_extreme_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,83 +23,97 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLCV
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    # Pre-compute 4h OHLCV
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
-    # Pre-compute 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Pre-compute 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 12h Williams %R (14-period)
-    highest_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_12h) / (highest_high_14 - lowest_low_14)
+    # Calculate 4h Donchian Channels (20-period)
+    high_roll_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_roll_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_roll_20
+    donchian_lower = low_roll_20
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0  # Exit level
     
-    # Calculate 1d ATR(14) for volatility regime filter
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    # Calculate 12h ATR(14) for volatility regime filter
+    tr1 = pd.Series(high_12h).shift(1) - pd.Series(low_12h).shift(1)
+    tr2 = abs(pd.Series(high_12h) - pd.Series(close_12h).shift(1))
+    tr3 = abs(pd.Series(low_12h) - pd.Series(close_12h).shift(1))
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr_12h.rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d ATR percentile rank (using 30-day lookback)
-    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
+    # Calculate 12h ATR percentile rank (using 30-day lookback)
+    atr_percentile = pd.Series(atr_12h).rolling(window=30, min_periods=10).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
-    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_12h, atr_percentile)
     
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Calculate 12h volume moving average (20-period) for volume confirmation
+    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or 
             np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+            np.isnan(volume_ma_20_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime conditions
-        # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 40
+        # 12h volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d[i] > 1.3 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x 20-period MA
+        volume_spike = volume_12h[i] > 1.5 * volume_ma_20_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Williams %R < -80 (oversold) + vol regime + volume spike
-            if (williams_r[i] < -80 and vol_regime and volume_spike):
+            # Long entry: Price breaks above Donchian upper + vol regime + volume spike
+            if (close_4h[i] > donchian_upper[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R > -20 (overbought) + vol regime + volume spike
-            elif (williams_r[i] > -20 and vol_regime and volume_spike):
+            # Short entry: Price breaks below Donchian lower + vol regime + volume spike
+            elif (close_4h[i] < donchian_lower[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Williams %R crosses above -50 (long exit) or below -50 (short exit)
+            # Exit conditions:
+            # 1. Price reverts to Donchian middle (mean reversion)
+            # 2. Price breaks opposite Donchian extreme (take profit)
+            
             if position == 1:  # Long position
-                exit_condition = williams_r[i] > -50  # Cross above -50
+                exit_condition = (
+                    close_4h[i] < donchian_middle[i] or  # Reverted to middle
+                    close_4h[i] > donchian_upper[i]      # Break above upper (take profit)
+                )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                exit_condition = williams_r[i] < -50  # Cross below -50
+                exit_condition = (
+                    close_4h[i] > donchian_middle[i] or  # Reverted to middle
+                    close_4h[i] < donchian_lower[i]      # Break below lower (take profit)
+                )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
