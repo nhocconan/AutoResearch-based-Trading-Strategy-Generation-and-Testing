@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 12h volume-weighted average price (VWAP) deviation + 1d ATR regime filter
-# - Long when price breaks above Donchian(20) high AND price > 12h VWAP AND 1d ATR(14) < 1d ATR(50) (low volatility regime)
-# - Short when price breaks below Donchian(20) low AND price < 12h VWAP AND 1d ATR(14) < 1d ATR(50)
-# - Exit when price crosses Donchian(20) midline
+# Hypothesis: 4h Camarilla pivot breakout with 1d HMA trend filter and volume confirmation
+# - Long when price breaks above Camarilla H4 level AND 1d HMA(21) rising AND volume > 1.8x 20-period average
+# - Short when price breaks below Camarilla L4 level AND 1d HMA(21) falling AND volume > 1.8x 20-period average
+# - Exit when price returns to Camarilla Pivot point (midline) OR opposite breakout occurs
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Donchian breakouts capture strong momentum moves
-# - 12h VWAP filter ensures we trade with the higher timeframe value area
-# - 1d ATR regime filter avoids high volatility choppy markets where breakouts fail
+# - Camarilla levels from 1d provide strong intraday support/resistance
+# - 1d HMA filter ensures alignment with daily trend
+# - Volume confirmation reduces false breakouts
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "6h_12h_1d_donchian_vwap_atr_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,67 +23,94 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 20 or len(df_1d) < 50:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Pre-compute 6h Donchian channels (20)
+    # Pre-compute 4h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian high/low (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Pre-compute 4h volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # Pre-compute 12h VWAP
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Pre-compute 1d HMA(21) for trend filter
+    def wma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, n + 1)
+        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
     
-    # Typical price
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3
-    # VWAP = cumulative(typical_price * volume) / cumulative(volume)
-    cum_vol_12h = np.cumsum(volume_12h)
-    cum_tpv_12h = np.cumsum(typical_price_12h * volume_12h)
-    vwap_12h = np.divide(cum_tpv_12h, cum_vol_12h, out=np.full_like(cum_tpv_12h, np.nan), where=cum_vol_12h!=0)
-    
-    # Align 12h VWAP to 6h timeframe
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
-    
-    # Pre-compute 1d ATR for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    n_hma = 21
+    half_n = n_hma // 2
+    sqrt_n = int(np.sqrt(n_hma))
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First TR is undefined
+    wma_half = wma(close_1d, half_n)
+    wma_full = wma(close_1d, n_hma)
     
-    # ATR(14) and ATR(50)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    wma_half_padded = np.full_like(close_1d, np.nan)
+    wma_full_padded = np.full_like(close_1d, np.nan)
     
-    # ATR regime: low volatility when ATR(14) < ATR(50)
-    atr_regime_low = atr_14 < atr_50
+    if len(wma_half) > 0:
+        wma_half_padded[half_n-1:half_n-1+len(wma_half)] = wma_half
+    if len(wma_full) > 0:
+        wma_full_padded[n_hma-1:n_hma-1+len(wma_full)] = wma_full
     
-    # Align 1d ATR regime to 6h timeframe
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime_low)
+    # 2*WMA(n/2) - WMA(n)
+    diff = 2 * wma_half_padded - wma_full_padded
+    # WMA(sqrt(n)) of the diff
+    wma_diff = wma(diff, sqrt_n)
+    wma_diff_padded = np.full_like(close_1d, np.nan)
+    if len(wma_diff) > 0:
+        wma_diff_padded[sqrt_n-1:sqrt_n-1+len(wma_diff)] = wma_diff
+    
+    hma_1d = wma_diff_padded
+    hma_slope = np.diff(hma_1d, prepend=np.nan)
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
+    
+    # Align HTF indicators to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising)
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Calculate Camarilla levels using prior 1d OHLC (aligned to 4h)
+    # We need prior day's OHLC for each 4h bar
+    df_1d_index = df_1d.index
+    # Create arrays for prior 1day OHLC aligned to each 4h bar
+    pri_open = align_htf_to_ltf(prices, df_1d, df_1d['open'].values, additional_delay_bars=1)
+    pri_high = align_htf_to_ltf(prices, df_1d, df_1d['high'].values, additional_delay_bars=1)
+    pri_low = align_htf_to_ltf(prices, df_1d, df_1d['low'].values, additional_delay_bars=1)
+    pri_close = align_htf_to_ltf(prices, df_1d, df_1d['close'].values, additional_delay_bars=1)
+    
+    # Camarilla levels calculation
+    # Pivot = (pri_high + pri_low + pri_close) / 3
+    pivot = (pri_high + pri_low + pri_close) / 3
+    range_hl = pri_high - pri_low
+    
+    # Resistance levels
+    r4 = pri_close + range_hl * 1.500  # H4
+    r3 = pri_close + range_hl * 1.250  # H3
+    r2 = pri_close + range_hl * 1.166  # H2
+    r1 = pri_close + range_hl * 1.083  # H1
+    
+    # Support levels
+    s1 = pri_close - range_hl * 1.083  # L1
+    s2 = pri_close - range_hl * 1.166  # L2
+    s3 = pri_close - range_hl * 1.250  # L3
+    s4 = pri_close - range_hl * 1.500  # L4
+    
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vwap_12h_aligned[i]) or np.isnan(atr_regime_aligned[i])):
+        if (np.isnan(pivot[i]) or np.isnan(r4[i]) or np.isnan(s4[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(hma_rising_aligned[i]) or 
+            np.isnan(hma_falling_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -93,24 +120,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Donchian high AND price > 12h VWAP AND low volatility regime
-            if (close[i] > donch_high[i] and 
-                close[i] > vwap_12h_aligned[i] and 
-                atr_regime_aligned[i]):
+            # Long conditions: price breaks above Camarilla H4 AND 1d HMA rising AND volume spike
+            if (close[i] > r4[i] and 
+                hma_rising_aligned[i] and 
+                volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND price < 12h VWAP AND low volatility regime
-            elif (close[i] < donch_low[i] and 
-                  close[i] < vwap_12h_aligned[i] and 
-                  atr_regime_aligned[i]):
+            # Short conditions: price breaks below Camarilla L4 AND 1d HMA falling AND volume spike
+            elif (close[i] < s4[i] and 
+                  hma_falling_aligned[i] and 
+                  volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Donchian midline
-            exit_long = (position == 1 and close[i] < donch_mid[i])
-            exit_short = (position == -1 and close[i] > donch_mid[i])
+            # Exit conditions: price returns to pivot (midline) OR opposite breakout occurs
+            exit_long = (position == 1 and 
+                        (close[i] < pivot[i] or close[i] < s4[i]))
+            exit_short = (position == -1 and 
+                         (close[i] > pivot[i] or close[i] > r4[i]))
             
             if exit_long or exit_short:
                 position = 0
