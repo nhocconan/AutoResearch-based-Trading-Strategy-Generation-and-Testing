@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and ATR trailing stop
-# - Long when price breaks above 20-day Donchian high AND 1w close > 1w open (bullish weekly candle)
-# - Short when price breaks below 20-day Donchian low AND 1w close < 1w open (bearish weekly candle)
-# - Exit: ATR(14) trailing stop (2.5x ATR from extreme) OR Donchian mid-line reversion
-# - Uses 1w for trend bias (avoids whipsaw in bear markets) and 1d for precise entries
-# - Position sizing: 0.25 discrete level to control drawdown and minimize fee churn
-# - Target: 7-25 trades/year (30-100 total over 4 years) to minimize fee drag
-# - Donchian breakouts work in both bull and bear markets when filtered by higher timeframe trend
+# Hypothesis: 6h Elder Ray + 1d regime filter
+# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
+# - Long when Bull Power > 0 AND Bear Power < 0 AND 1d close > 1d EMA50 (bullish regime)
+# - Short when Bear Power > 0 AND Bull Power < 0 AND 1d close < 1d EMA50 (bearish regime)
+# - Exit when power signals weaken (Bull Power < 0 for long, Bear Power < 0 for short)
+# - Uses 1d EMA50 for regime filter to avoid counter-trend trades
+# - Position sizing: 0.25 discrete level
+# - Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
+# - Elder Ray measures bull/bear strength behind price moves, effective in both bull and bear markets when combined with regime filter
 
-name = "1d_1w_donchian_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,116 +31,59 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop (MTF rule compliance)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load 1d data ONCE before loop (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Calculate 1w candle direction (bullish/bearish) for trend filter
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
-    # Bullish 1w candle: close > open
-    bullish_1w = close_1w > open_1w
-    bearish_1w = close_1w < open_1w
-    # Align to 1d timeframe with proper delay (completed 1w bar only)
-    bullish_1w_aligned = align_htf_to_ltf(prices, df_1w, bullish_1w)
-    bearish_1w_aligned = align_htf_to_ltf(prices, df_1w, bearish_1w)
+    # Calculate 1d EMA50 for regime filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Regime: bullish if close > EMA50, bearish if close < EMA50
+    bullish_regime = close_1d > ema50_1d
+    bearish_regime = close_1d < ema50_1d
+    # Align to 6h timeframe with proper delay (completed 1d bar only)
+    bullish_regime_aligned = align_htf_to_ltf(prices, df_1d, bullish_regime)
+    bearish_regime_aligned = align_htf_to_ltf(prices, df_1d, bearish_regime)
     
-    # Calculate ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA13 for Elder Ray (6h timeframe)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Track highest high since entry for trailing stop (long)
-    # Track lowest low since entry for trailing stop (short)
-    highest_since_entry = np.full(n, np.nan)
-    lowest_since_entry = np.full(n, np.nan)
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = ema13 - low   # Bear Power = EMA13 - Low
     
-    for i in range(20, n):  # Start from 20 to have sufficient lookback for Donchian
-        
+    for i in range(13, n):  # Start from 13 to have sufficient lookback for EMA13
         # Skip if any required data is invalid
-        if (np.isnan(atr[i]) or
-            np.isnan(bullish_1w_aligned[i]) or np.isnan(bearish_1w_aligned[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(bullish_regime_aligned[i]) or np.isnan(bearish_regime_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # Calculate Donchian channels (20-period) using pure numpy/pandas
-        # Highest high of last 20 periods (excluding current)
-        highest_high = np.max(high[i-20:i]) if i >= 20 else np.nan
-        # Lowest low of last 20 periods (excluding current)
-        lowest_low = np.min(low[i-20:i]) if i >= 20 else np.nan
-        
-        if np.isnan(highest_high) or np.isnan(lowest_low):
-            signals[i] = 0.0
-            continue
-        
-        # Donchian mid-line
-        donchian_mid = (highest_high + lowest_low) / 2.0
-        
-        # Donchian breakout signals
-        breakout_up = close[i] > highest_high  # Break above 20-period high
-        breakout_down = close[i] < lowest_low  # Break below 20-period low
         
         if position == 0:  # Flat - look for entry
-            # Long: price breaks above Donchian high AND 1w bullish
-            if breakout_up and bullish_1w_aligned[i]:
+            # Long: Bull Power > 0 AND Bear Power < 0 AND bullish 1d regime
+            if bull_power[i] > 0 and bear_power[i] < 0 and bullish_regime_aligned[i]:
                 position = 1
                 signals[i] = 0.25
-                highest_since_entry[i] = high[i]  # Initialize trailing stop
-            # Short: price breaks below Donchian low AND 1w bearish
-            elif breakout_down and bearish_1w_aligned[i]:
+            # Short: Bear Power > 0 AND Bull Power < 0 AND bearish 1d regime
+            elif bear_power[i] > 0 and bull_power[i] < 0 and bearish_regime_aligned[i]:
                 position = -1
                 signals[i] = -0.25
-                lowest_since_entry[i] = low[i]  # Initialize trailing stop
             else:
                 signals[i] = 0.0
-                # Carry forward NaN values for tracking
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:  # Long position - look for exit
-            # Update highest high since entry
-            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            
-            # ATR trailing stop: exit if price drops 2.5*ATR below highest high since entry
-            trailing_stop = highest_since_entry[i] - 2.5 * atr[i]
-            
-            # Exit conditions: trailing stop hit OR reversion to Donchian mid-line
-            exit_condition = (close[i] < trailing_stop) or (close[i] < donchian_mid)
-            
-            if exit_condition:
+            # Exit when Bull Power weakens (< 0) or Bear Power strengthens (> 0)
+            if bull_power[i] < 0 or bear_power[i] > 0:
                 position = 0
                 signals[i] = 0.0
-                # Reset tracking arrays
-                highest_since_entry[i] = np.nan
-                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
-                # Propagate tracking values
-                highest_since_entry[i] = highest_since_entry[i]
-                lowest_since_entry[i] = lowest_since_entry[i-1]
         else:  # position == -1 (Short position) - look for exit
-            # Update lowest low since entry
-            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            
-            # ATR trailing stop: exit if price rises 2.5*ATR above lowest low since entry
-            trailing_stop = lowest_since_entry[i] + 2.5 * atr[i]
-            
-            # Exit conditions: trailing stop hit OR reversion to Donchian mid-line
-            exit_condition = (close[i] > trailing_stop) or (close[i] > donchian_mid)
-            
-            if exit_condition:
+            # Exit when Bear Power weakens (< 0) or Bull Power strengthens (> 0)
+            if bear_power[i] < 0 or bull_power[i] > 0:
                 position = 0
                 signals[i] = 0.0
-                # Reset tracking arrays
-                highest_since_entry[i] = np.nan
-                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
-                # Propagate tracking values
-                highest_since_entry[i] = highest_since_entry[i-1]
-                lowest_since_entry[i] = lowest_since_entry[i]
     
     return signals
