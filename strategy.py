@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w HMA(21) trend filter + volume confirmation
-# - Long when price breaks above Donchian(20) high AND 1w HMA(21) is rising AND volume > 1.5x 20-period average
-# - Short when price breaks below Donchian(20) low AND 1w HMA(21) is falling AND volume > 1.5x 20-period average
-# - Exit when price crosses Donchian(20) midline OR opposite breakout occurs
+# Hypothesis: 6h Donchian(20) breakout + 12h volume-weighted average price (VWAP) deviation + 1d ATR regime filter
+# - Long when price breaks above Donchian(20) high AND price > 12h VWAP AND 1d ATR(14) < 1d ATR(50) (low volatility regime)
+# - Short when price breaks below Donchian(20) low AND price < 12h VWAP AND 1d ATR(14) < 1d ATR(50)
+# - Exit when price crosses Donchian(20) midline
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 # - Donchian breakouts capture strong momentum moves
-# - 1w HMA filter ensures we trade with the higher timeframe trend
-# - Volume confirmation reduces false breakouts
+# - 12h VWAP filter ensures we trade with the higher timeframe value area
+# - 1d ATR regime filter avoids high volatility choppy markets where breakouts fail
 
-name = "1d_1w_donchian_hma_volume_v1"
-timeframe = "1d"
+name = "6h_12h_1d_donchian_vwap_atr_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,11 +23,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_12h) < 20 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d Donchian channels (20)
+    # Pre-compute 6h Donchian channels (20)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -38,54 +39,43 @@ def generate_signals(prices):
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donch_mid = (donch_high + donch_low) / 2
     
-    # Pre-compute 1d volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Pre-compute 12h VWAP
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Pre-compute 1w HMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(arr, n):
-        if len(arr) < n:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, n + 1)
-        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
+    # Typical price
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3
+    # VWAP = cumulative(typical_price * volume) / cumulative(volume)
+    cum_vol_12h = np.cumsum(volume_12h)
+    cum_tpv_12h = np.cumsum(typical_price_12h * volume_12h)
+    vwap_12h = np.divide(cum_tpv_12h, cum_vol_12h, out=np.full_like(cum_tpv_12h, np.nan), where=cum_vol_12h!=0)
     
-    # Calculate WMA for n/2 and n
-    n_hma = 21
-    half_n = n_hma // 2
-    sqrt_n = int(np.sqrt(n_hma))
+    # Align 12h VWAP to 6h timeframe
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
     
-    wma_half = wma(close_1w, half_n)
-    wma_full = wma(close_1w, n_hma)
+    # Pre-compute 1d ATR for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Handle array lengths
-    wma_half_padded = np.full_like(close_1w, np.nan)
-    wma_full_padded = np.full_like(close_1w, np.nan)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First TR is undefined
     
-    if len(wma_half) > 0:
-        wma_half_padded[half_n-1:half_n-1+len(wma_half)] = wma_half
-    if len(wma_full) > 0:
-        wma_full_padded[n_hma-1:n_hma-1+len(wma_full)] = wma_full
+    # ATR(14) and ATR(50)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # 2*WMA(n/2) - WMA(n)
-    diff = 2 * wma_half_padded - wma_full_padded
-    # WMA(sqrt(n)) of the diff
-    wma_diff = wma(diff, sqrt_n)
-    wma_diff_padded = np.full_like(close_1w, np.nan)
-    if len(wma_diff) > 0:
-        wma_diff_padded[sqrt_n-1:sqrt_n-1+len(wma_diff)] = wma_diff
+    # ATR regime: low volatility when ATR(14) < ATR(50)
+    atr_regime_low = atr_14 < atr_50
     
-    hma_1w = wma_diff_padded
-    
-    # HMA slope (rising/falling)
-    hma_slope = np.diff(hma_1w, prepend=np.nan)
-    hma_rising = hma_slope > 0
-    hma_falling = hma_slope < 0
-    
-    # Align HTF indicators to 1d timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising)
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling)
+    # Align 1d ATR regime to 6h timeframe
+    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime_low)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -93,8 +83,7 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(hma_rising_aligned[i]) or 
-            np.isnan(hma_falling_aligned[i])):
+            np.isnan(vwap_12h_aligned[i]) or np.isnan(atr_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -104,26 +93,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Donchian high AND 1w HMA rising AND volume spike
+            # Long conditions: price breaks above Donchian high AND price > 12h VWAP AND low volatility regime
             if (close[i] > donch_high[i] and 
-                hma_rising_aligned[i] and 
-                volume_spike[i]):
+                close[i] > vwap_12h_aligned[i] and 
+                atr_regime_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND 1w HMA falling AND volume spike
+            # Short conditions: price breaks below Donchian low AND price < 12h VWAP AND low volatility regime
             elif (close[i] < donch_low[i] and 
-                  hma_falling_aligned[i] and 
-                  volume_spike[i]):
+                  close[i] < vwap_12h_aligned[i] and 
+                  atr_regime_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Donchian midline OR opposite breakout occurs
-            exit_long = (position == 1 and 
-                        (close[i] < donch_mid[i] or close[i] < donch_low[i]))
-            exit_short = (position == -1 and 
-                         (close[i] > donch_mid[i] or close[i] > donch_high[i]))
+            # Exit conditions: price crosses Donchian midline
+            exit_long = (position == 1 and close[i] < donch_mid[i])
+            exit_short = (position == -1 and close[i] > donch_mid[i])
             
             if exit_long or exit_short:
                 position = 0
