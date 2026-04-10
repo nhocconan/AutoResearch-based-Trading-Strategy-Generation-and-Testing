@@ -3,66 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla H4/L4 breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above H4 level AND 1d EMA200 rising AND volume > 1.8x 20-bar avg
-# - Short when price breaks below L4 level AND 1d EMA200 falling AND volume > 1.8x 20-bar avg
-# - Exit when price crosses the Pivot level (mean reversion to equilibrium)
-# - Uses 1d EMA200 for strong trend filter to avoid weak/choppy markets
-# - H4/L4 levels provide tighter breakouts than H3/L3 for higher quality signals
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# - Long when price breaks above Donchian upper band (20-period high) AND 1d ADX > 25 AND volume > 1.5x 20-bar avg
+# - Short when price breaks below Donchian lower band (20-period low) AND 1d ADX > 25 AND volume > 1.5x 20-bar avg
+# - Exit when price returns to Donchian middle band (20-period midpoint) or ATR-based stoploss
+# - Uses 1d ADX(14) for strong trend filter to avoid whipsaws in ranging markets
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-35 trades/year on 4h timeframe (80-140 total over 4 years)
-# - Focus on BTC/ETH as primary symbols, SOL as secondary
+# - Target: 20-30 trades/year on 4h timeframe (80-120 total over 4 years)
+# - Donchian breakouts capture momentum; ADX filter ensures we only trade strong trends
 
-name = "4h_1d_camarilla_h4l4_breakout_volume_trend_v2"
+name = "4h_1d_donchian_breakout_adx_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Pre-compute Camarilla levels from daily data (using previous day's OHLC)
+    # Pre-compute Donchian channels from 4h data (primary timeframe)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # Donchian(20) - 20-period high/low
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    mid_20 = (high_20 + low_20) / 2.0
+    
+    # ATR(14) for stoploss and volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Pre-compute 1d ADX(14) for trend strength filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels calculation
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # True Range
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
     
-    # H4, L4 levels (tighter breakout levels)
-    h4 = close_1d + (range_1d * 1.1 / 2)
-    l4 = close_1d - (range_1d * 1.1 / 2)
-    # Pivot level for exit
-    piv = pivot
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
-    # Align HTF levels to LTF (4h)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    piv_aligned = align_htf_to_ltf(prices, df_1d, piv)
+    # Smoothed TR, DM+
+    tr_period = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    dm_plus_period = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_period = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Pre-compute 1d EMA(200) for strong trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_period / tr_period
+    di_minus = 100 * dm_minus_period / tr_period
     
-    # Pre-compute volume confirmation: > 1.8x 20-period average (slightly looser for more signals)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align HTF ADX to LTF
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.8 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(piv_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(volume_20_avg[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(mid_20[i]) or 
+            np.isnan(atr[i]) or np.isnan(adx_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -73,28 +96,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H4 AND 1d uptrend (price > EMA200) with volume spike
-            if (prices['close'].iloc[i] > h4_aligned[i] and 
-                prices['close'].iloc[i] > ema200_1d_aligned[i] and  # price above 1d EMA200 = uptrend
+            # Long when price breaks above Donchian upper band AND strong trend (ADX>25) with volume spike
+            if (prices['close'].iloc[i] > high_20[i] and 
+                adx_aligned[i] > 25 and 
                 vol_spike.iloc[i]):
                 position = 1
+                entry_price = prices['close'].iloc[i]
                 signals[i] = 0.25
-            # Short when price breaks below L4 AND 1d downtrend (price < EMA200) with volume spike
-            elif (prices['close'].iloc[i] < l4_aligned[i] and 
-                  prices['close'].iloc[i] < ema200_1d_aligned[i] and  # price below 1d EMA200 = downtrend
+            # Short when price breaks below Donchian lower band AND strong trend (ADX>25) with volume spike
+            elif (prices['close'].iloc[i] < low_20[i] and 
+                  adx_aligned[i] > 25 and 
                   vol_spike.iloc[i]):
                 position = -1
+                entry_price = prices['close'].iloc[i]
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot (mean reversion)
-            # Exit when price crosses the pivot level
+        else:  # Have position - look for exit conditions
             exit_signal = False
+            
+            # Exit when price returns to Donchian middle band (mean reversion to equilibrium)
             if position == 1:  # Long position
-                if prices['close'].iloc[i] <= piv_aligned[i]:
+                if prices['close'].iloc[i] <= mid_20[i]:
+                    exit_signal = True
+                # ATR-based stoploss: exit if price drops 2.5*ATR below entry
+                elif prices['close'].iloc[i] < entry_price - 2.5 * atr[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if prices['close'].iloc[i] >= piv_aligned[i]:
+                if prices['close'].iloc[i] >= mid_20[i]:
+                    exit_signal = True
+                # ATR-based stoploss: exit if price rises 2.5*ATR above entry
+                elif prices['close'].iloc[i] > entry_price + 2.5 * atr[i]:
                     exit_signal = True
             
             if exit_signal:
