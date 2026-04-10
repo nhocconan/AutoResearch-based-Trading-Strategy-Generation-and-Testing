@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla Pivot Breakout with 1d volume and ATR regime filter
-# - Primary: 12h timeframe for lower frequency and reduced fee drag
-# - HTF: 1d for volatility (ATR percentile) and volume confirmation
-# - Long: Price breaks above H3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Short: Price breaks below L3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
+# Hypothesis: 1h Camarilla Pivot Breakout with 4h volume and 1d ATR regime filter
+# - Primary: 1h timeframe for balance of trade frequency and timing precision
+# - HTF: 4h for signal direction (Camarilla pivots), 1d for volatility regime (ATR percentile)
+# - Long: Price breaks above H3 Camarilla pivot (4h) + 1d ATR > 40th percentile + 4h volume > 1.3x 20-period MA
+# - Short: Price breaks below L3 Camarilla pivot (4h) + 1d ATR > 40th percentile + 4h volume > 1.3x 20-period MA
 # - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4
-# - Position sizing: 0.25 (discrete level)
-# - Target: 50-120 total trades over 4 years (12-30/year) - within 12h sweet spot
+# - Position sizing: 0.20 (discrete level to minimize fee churn)
+# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
+# - Target: 60-150 total trades over 4 years = 15-37/year for 1h (within preferred range)
 # - Works in bull/bear: Camarilla pivots capture mean reversion in ranging markets (2025) and breakouts in trending markets
 
-name = "12h_1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "1h_4h_1d_camarilla_pivot_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,36 +24,49 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLCV
-    open_12h = prices['open'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    volume_12h = prices['volume'].values
+    # Pre-compute 1h OHLCV
+    open_1h = prices['open'].values
+    high_1h = prices['high'].values
+    low_1h = prices['low'].values
+    close_1h = prices['close'].values
+    volume_1h = prices['volume'].values
     
-    # Pre-compute 1d data
+    # Pre-compute 4h data for Camarilla calculations
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Pre-compute 1d data for regime filters
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 12h Camarilla Pivot Points (based on previous 1d)
-    # Align daily OHLC to 12h bars (using previous day's OHLC)
+    # Calculate 4h Camarilla Pivot Points (based on previous 1d OHLC)
+    # Align daily OHLC to 4h bars (using previous day's OHLC)
     high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Calculate Camarilla levels for each 12h bar (using previous day's OHLC)
+    # Calculate Camarilla levels for each 4h bar (using previous day's OHLC)
     rng = high_1d_aligned - low_1d_aligned
     h3 = close_1d_aligned + 1.25 * rng  # Long entry: break above H3
     l3 = close_1d_aligned - 1.25 * rng  # Short entry: break below L3
     h4 = close_1d_aligned + 1.5 * rng   # Long exit: break above H4 (take profit)
     l4 = close_1d_aligned - 1.5 * rng   # Short exit: break below L4 (take profit)
     pivot = (high_1d_aligned + low_1d_aligned + close_1d_aligned) / 3.0  # Mean reversion exit
+    
+    # Align 4h Camarilla levels to 1h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_4h, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_4h, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
+    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot)
     
     # Calculate 1d ATR(14) for volatility regime filter
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
@@ -67,18 +81,32 @@ def generate_signals(prices):
     ).values
     atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # Calculate 1d volume moving average (20-period) for volume confirmation
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Calculate 4h volume moving average (20-period) for volume confirmation
+    volume_ma_20_4h = pd.Series(volume_4h := getattr(df_4h, 'volume', None)).rolling(window=20, min_periods=20).mean().values if hasattr(df_4h, 'volume') else np.full(len(df_4h), np.nan)
+    if not hasattr(df_4h, 'volume'):
+        volume_4h = df_4h['volume'].values
+    volume_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20_4h)
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(atr_percentile_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+            np.isnan(volume_ma_20_4h_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             signals[i] = 0.0
             continue
         
@@ -86,18 +114,18 @@ def generate_signals(prices):
         # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
         vol_regime = atr_percentile_aligned[i] > 40
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
-        volume_spike = volume_1d[i] > 1.3 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 4h volume > 1.3x 20-period MA
+        volume_spike = volume_4h[i] > 1.3 * volume_ma_20_4h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long entry: Price breaks above H3 resistance + vol regime + volume spike
-            if (close_12h[i] > h3[i] and vol_regime and volume_spike):
+            if (close_1h[i] > h3_aligned[i] and vol_regime and volume_spike):
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.20
             # Short entry: Price breaks below L3 support + vol regime + volume spike
-            elif (close_12h[i] < l3[i] and vol_regime and volume_spike):
+            elif (close_1h[i] < l3_aligned[i] and vol_regime and volume_spike):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
@@ -107,23 +135,23 @@ def generate_signals(prices):
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_12h[i] < pivot[i] or  # Reverted to pivot
-                    close_12h[i] > h4[i]        # Break above H4 (take profit)
+                    close_1h[i] < pivot_aligned[i] or  # Reverted to pivot
+                    close_1h[i] > h4_aligned[i]        # Break above H4 (take profit)
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_12h[i] > pivot[i] or  # Reverted to pivot
-                    close_12h[i] < l4[i]        # Break below L4 (take profit)
+                    close_1h[i] > pivot_aligned[i] or  # Reverted to pivot
+                    close_1h[i] < l4_aligned[i]        # Break below L4 (take profit)
                 )
                 if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
