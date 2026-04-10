@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA trend with 1d RSI mean reversion and volume spike
-# - Long when 4h KAMA is rising AND 1d RSI < 30 (oversold) AND 1d volume > 1.8x 20-period volume SMA
-# - Short when 4h KAMA is falling AND 1d RSI > 70 (overbought) AND 1d volume > 1.8x 20-period volume SMA
-# - Exit: ATR trailing stop (2.0*ATR) from highest/lowest since entry
-# - Uses 4h for trend direction (KAMA adapts to market noise), 1d for RSI extremes and volume confirmation
-# - KAMA reduces whipsaw in choppy markets; RSI mean reversion captures reversals in extended moves
-# - Volume spike confirms institutional participation; tight entries target ~30-60 trades/year
-# - Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) with volume filter
+# Hypothesis: 4h Donchian breakout with 1d volume spike and choppiness filter
+# - Long when price breaks above 20-period Donchian high AND 1d volume > 2.0x 20-period volume SMA AND chop > 61.8 (range)
+# - Short when price breaks below 20-period Donchian low AND 1d volume > 2.0x 20-period volume SMA AND chop > 61.8 (range)
+# - Exit: ATR trailing stop (2.5*ATR) from highest/lowest since entry
+# - Uses 4h for price action (Donchian breakout), 1d for volume confirmation and regime filter (choppiness)
+# - Volume spike confirms institutional participation; chop filter avoids whipsaw in strong trends
+# - Tight entries target ~25-40 trades/year to minimize fee drag
+# - Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend) with volume/chop filter
 
-name = "4h_1d_kama_rsi_volume_v1"
+name = "4h_1d_donchian_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,74 +30,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for RSI and volume (MTF rule compliance)
+    # Load 1d data ONCE before loop for volume and chop (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
-    
-    # Calculate 1d RSI(14)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    # Wilder's smoothing for RSI
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) >= period:
-            result[period-1] = np.nanmean(values[:period])
-            for i in range(period, len(values)):
-                result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    avg_gain = wilders_smoothing(gain, 14)
-    avg_loss = wilders_smoothing(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Calculate 1d volume SMA for confirmation
     vol_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute KAMA on 4h (primary timeframe)
-    # KAMA parameters: ER period=10, Fast EMA=2, Slow EMA=30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[:1])  # placeholder, will compute properly below
+    # Calculate 1d Choppiness Index (CHOP)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Proper efficiency ratio calculation
-    dir = np.abs(np.diff(close, lookback=10)) if hasattr(np.diff, '__kwdefaults__') else np.abs(close[10:] - close[:-10])
-    # Manual calculation for efficiency ratio
-    change_over_period = np.zeros(n)
-    volatility_sum = np.zeros(n)
-    lookback_er = 10
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr_1d = np.concatenate([[np.nan], tr_1d])
     
-    for i in range(lookback_er, n):
-        change_over_period[i] = np.abs(close[i] - close[i - lookback_er])
-        volatility_sum[i] = np.sum(np.abs(np.diff(close[i - lookback_er:i+1])))
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
     
-    # Avoid division by zero
-    er = np.where(volatility_sum > 0, change_over_period / volatility_sum, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Choppiness Index: 100 * log10(sumTR14 / (HH14 - LL14)) / log10(14)
+    # Avoid division by zero and log of zero
+    range_14 = hh_14 - ll_14
+    chop_1d = np.where(
+        (range_14 > 0) & (~np.isnan(tr_sum_14)) & (tr_sum_14 > 0),
+        100 * np.log10(tr_sum_14 / range_14) / np.log10(14),
+        50  # neutral when invalid
+    )
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # KAMA direction: rising if current > previous, falling if current < previous
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
-    kama_rising[0] = False
-    kama_falling[0] = False
+    # Pre-compute Donchian channels on 4h (primary timeframe)
+    lookback_dc = 20
+    dc_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
+    dc_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
     # ATR for dynamic stoploss (using 4h data)
     tr1 = np.abs(high[1:] - low[:-1])
@@ -111,21 +86,25 @@ def generate_signals(prices):
     highest_high_since_entry = np.full(n, np.nan)
     lowest_low_since_entry = np.full(n, np.nan)
     
-    for i in range(1, n):
+    for i in range(lookback_dc, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(atr_4h[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.8x 20-period volume SMA
+        # Volume confirmation: 1d volume > 2.0x 20-period volume SMA
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 1.8 * volume_sma_20_1d_aligned[i]
+        vol_confirm = vol_1d_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Only trade when volume confirmation is present
-        if vol_confirm:
-            # Long: KAMA rising AND RSI < 30 (oversold)
-            if kama_rising[i] and rsi_1d_aligned[i] < 30:
+        # Chop filter: > 61.8 indicates ranging market (good for mean reversion breakouts)
+        chop_filter = chop_1d_aligned[i] > 61.8
+        
+        # Only trade when both volume confirmation and chop filter are present
+        if vol_confirm and chop_filter:
+            # Long: price breaks above Donchian high
+            if close[i] > dc_high[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
@@ -133,8 +112,8 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
                     highest_high_since_entry[i] = max(highest_high_since_entry[i-1] if i > 0 else high[i], high[i])
-            # Short: KAMA falling AND RSI > 70 (overbought)
-            elif kama_falling[i] and rsi_1d_aligned[i] > 70:
+            # Short: price breaks below Donchian low
+            elif close[i] < dc_low[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
@@ -155,11 +134,11 @@ def generate_signals(prices):
             
             # Check for ATR trailing stop exit
             if position == 1 and not np.isnan(highest_high_since_entry[i]):
-                if close[i] < (highest_high_since_entry[i] - 2.0 * atr_4h[i]):
+                if close[i] < (highest_high_since_entry[i] - 2.5 * atr_4h[i]):
                     position = 0
                     signals[i] = 0.0
             elif position == -1 and not np.isnan(lowest_low_since_entry[i]):
-                if close[i] > (lowest_low_since_entry[i] + 2.0 * atr_4h[i]):
+                if close[i] > (lowest_low_since_entry[i] + 2.5 * atr_4h[i]):
                     position = 0
                     signals[i] = 0.0
         else:
