@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h volume confirmation and 1d ADX regime filter
-# - Uses 4h Camarilla pivot levels (H3/L3) as intraday support/resistance
-# - Long when price breaks above H3 with 4h volume > 1.5x 20-period average, short when breaks below L3
-# - 1d ADX(14) > 25 filters for trending markets to avoid false breakouts in ranging conditions
-# - Session filter: only trade 08:00-20:00 UTC to reduce noise
-# - Discrete position sizing (0.20) minimizes fee churn
-# - Target: 15-35 trades/year (60-140 total over 4 years) to stay within HARD MAX: 200 total
-# - Camarilla H3/L3 levels provide tighter, more frequent breakouts than H4/L4 while maintaining reliability
-# - Volume confirmation on 4h timeframe reduces false signals
-# - Works in both bull and bear markets by following established trends with ADX filter
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter (ADX > 25) and volume confirmation
+# - Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# - Long when Bull Power > 0 AND volume > 1.5x 20-period MA AND ADX(1d) > 25 (trending market)
+# - Short when Bear Power > 0 AND volume confirmation AND ADX(1d) > 25
+# - ATR(14) trailing stop (2.0x) on 6h timeframe
+# - Discrete position sizing (0.25) to minimize fee churn
+# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within HARD MAX: 300 total
+# - Elder Ray works well in 6h timeframe with regime filter, effective in both bull and bear markets by measuring bull/bear strength relative to EMA
 
-name = "1h_4h_1d_camarilla_breakout_volume_adx_v1"
-timeframe = "1h"
+name = "6h_1d_elderray_volume_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,39 +22,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC for Camarilla pivots
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate Camarilla pivot levels for 4h timeframe (H3/L3 for breakout)
-    # Pivot = (High + Low + Close) / 3
-    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
-    # Range = High - Low
-    range_4h = high_4h - low_4h
-    # Camarilla levels: H3 = Close + Range * 1.1/4, L3 = Close - Range * 1.1/4
-    camarilla_h3_4h = close_4h + range_4h * 1.1 / 4.0
-    camarilla_l3_4h = close_4h - range_4h * 1.1 / 4.0
-    
-    # Align Camarilla levels to 1h timeframe (completed 4h bar only)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3_4h)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3_4h)
-    
-    # Pre-compute 4h volume and its 20-period moving average for volume confirmation
-    volume_4h = df_4h['volume'].values
-    volume_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20_4h)
-    
-    # Pre-compute 1d ADX(14) for regime filter (trending market detection)
+    # Pre-compute 1d OHLC for EMA and ADX
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate 1d EMA(13) for Elder Ray
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power_1d = high_1d - ema_13_1d  # Bull Power = High - EMA(13)
+    bear_power_1d = ema_13_1d - low_1d   # Bear Power = EMA(13) - Low
+    
+    # Align Elder Ray to 6h timeframe (completed 1d bar only)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Pre-compute 1d ADX(14) for regime filter
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -88,84 +74,97 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx_1d = pd.Series(dx).rolling(window=tr_period, min_periods=tr_period).mean().values
     
-    # Align ADX to 1h timeframe
+    # Align ADX to 6h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Pre-compute 1h ATR for risk management
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    close_1h = prices['close'].values
+    # Pre-compute 1d volume and its 20-day moving average for volume confirmation
+    volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    tr1_1h = high_1h - low_1h
-    tr2_1h = np.abs(high_1h - np.roll(close_1h, 1))
-    tr3_1h = np.abs(low_1h - np.roll(close_1h, 1))
-    tr1_1h[0] = np.nan
-    tr2_1h[0] = np.nan
-    tr3_1h[0] = np.nan
-    tr_1h = np.maximum.reduce([tr1_1h, tr2_1h, tr3_1h])
-    atr_1h = pd.Series(tr_1h).rolling(window=14, min_periods=14).mean().values
+    # Pre-compute 6h ATR for trailing stop
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
     
-    # Pre-compute session filter (08:00-20:00 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    tr1_6h = high_6h - low_6h
+    tr2_6h = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3_6h = np.abs(low_6h - np.roll(close_6h, 1))
+    tr1_6h[0] = np.nan
+    tr2_6h[0] = np.nan
+    tr3_6h[0] = np.nan
+    tr_6h = np.maximum.reduce([tr1_6h, tr2_6h, tr3_6h])
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    highest_since_entry = 0.0  # for trailing stop
+    lowest_since_entry = 0.0   # for trailing stop
     
     for i in range(50, n):  # Start after warmup
-        # Session filter: only trade 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(atr_1h[i]) or not in_session):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(atr_6h[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             continue
         
-        # Get current 4h volume for filter (use raw volume, aligned)
-        volume_4h_current = volume_4h
-        volume_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_4h_current)
+        # Get current 1d volume for filter (use raw volume, aligned)
+        volume_1d_current = volume_1d
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
         
-        # Volume confirmation: current 4h volume > 1.5x 20-period average
-        volume_confirm = volume_4h_aligned[i] > 1.5 * volume_ma_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-day average
+        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_aligned[i]
         
         # Regime filter: ADX > 25 indicates trending market
         trending_market = adx_aligned[i] > 25.0
         
-        close_price = close_1h[i]
+        close_price = close_6h[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla H3 AND volume confirmation AND trending market
-            if close_price > camarilla_h3_aligned[i] and volume_confirm and trending_market:
+            # Long conditions: Bull Power > 0 AND volume confirmation AND trending market
+            if bull_power_aligned[i] > 0 and volume_confirm and trending_market:
                 position = 1
-                signals[i] = 0.20
-            # Short conditions: price breaks below Camarilla L3 AND volume confirmation AND trending market
-            elif close_price < camarilla_l3_aligned[i] and volume_confirm and trending_market:
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                highest_since_entry = prices['high'].iloc[i]
+                signals[i] = 0.25
+            # Short conditions: Bear Power > 0 AND volume confirmation AND trending market
+            elif bear_power_aligned[i] > 0 and volume_confirm and trending_market:
                 position = -1
-                signals[i] = -0.20
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                lowest_since_entry = prices['low'].iloc[i]
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit conditions
-            # Exit on opposite Camarilla level break or loss of momentum
-            if position == 1:  # Long position
-                # Exit if price breaks below Camarilla L3 (reversal signal)
-                if close_price < camarilla_l3_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
+        else:  # Have position - look for exit or trailing stop
+            # Update highest/lowest since entry for trailing stop
+            if position == 1:
+                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
+                # ATR trailing stop: exit when price drops 2.0*ATR from highest point
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.0 * atr_6h[i]
+                exit_condition = trailing_stop
+            else:  # position == -1
+                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
+                # ATR trailing stop: exit when price rises 2.0*ATR from lowest point
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr_6h[i]
+                exit_condition = trailing_stop
+            
+            if exit_condition:
+                position = 0
+                entry_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
+                signals[i] = 0.0
+            else:
+                if position == 1:
+                    signals[i] = 0.25
                 else:
-                    signals[i] = 0.20
-            else:  # position == -1, Short position
-                # Exit if price breaks above Camarilla H3 (reversal signal)
-                if close_price > camarilla_h3_aligned[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
