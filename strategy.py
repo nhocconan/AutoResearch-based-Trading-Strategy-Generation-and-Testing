@@ -3,128 +3,124 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d trend filter
-# - Primary: 6h timeframe for balance of trade frequency and noise reduction
-# - HTF: 1d for trend direction (price above/below 1d Kumo cloud)
-# - Long: 6h Tenkan-sen crosses above Kijun-sen AND price > 1d Senkou Span A/B (bullish cloud)
-# - Short: 6h Tenkan-sen crosses below Kijun-sen AND price < 1d Senkou Span A/B (bearish cloud)
-# - Exit: Tenkan-sen/Kijun-sen cross in opposite direction
-# - Position sizing: 0.25 (discrete level)
-# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
-# - Works in bull/bear: Ichimoku captures trends in bull markets and avoids false signals in ranging markets via cloud filter
+# Hypothesis: 12h Camarilla Pivot Breakout with volume confirmation and ATR volatility filter
+# - Primary: 12h timeframe for lower frequency and reduced fee drag (target: 50-150 trades over 4 years)
+# - HTF: 1d for ATR-based volatility regime (avoid low-vol chop) and volume confirmation
+# - Long: Price breaks above H3 Camarilla pivot + 1d ATR > 30th percentile + volume > 1.2x 20-period MA
+# - Short: Price breaks below L3 Camarilla pivot + same filters
+# - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4
+# - Position sizing: 0.25 (discrete level to minimize fee churn)
+# - Works in bull/bear: Camarilla pivots capture mean reversion in ranging markets (2025) and breakouts in trending markets
+# - Added robustness: reduced ATR threshold to 30th percentile (was 40) and volume multiplier to 1.2x (was 1.3x) to increase trade frequency while maintaining edge
 
-name = "6h_1d_ichimoku_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Need enough data for Ichimoku calculations
+    if n < 50:  # Need enough data for calculations
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLCV
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h OHLCV
+    open_12h = prices['open'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    volume_12h = prices['volume'].values
     
-    # Pre-compute 1d data for cloud calculation
+    # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high_6h).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low_6h).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (high_tenkan + low_tenkan) / 2
+    # Calculate 12h Camarilla Pivot Points (based on previous 1d OHLC)
+    # Align daily OHLC to 12h bars (using previous day's OHLC)
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high_6h).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low_6h).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (high_kijun + low_kijun) / 2
+    # Calculate Camarilla levels for each 12h bar (using previous day's OHLC)
+    rng = high_1d_aligned - low_1d_aligned
+    h3 = close_1d_aligned + 1.25 * rng  # Long entry: break above H3
+    l3 = close_1d_aligned - 1.25 * rng  # Short entry: break below L3
+    h4 = close_1d_aligned + 1.5 * rng   # Long exit: break above H4 (take profit)
+    l4 = close_1d_aligned - 1.5 * rng   # Short exit: break below L4 (take profit)
+    pivot = (high_1d_aligned + low_1d_aligned + close_1d_aligned) / 3.0  # Mean reversion exit
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Calculate 1d ATR(14) for volatility regime filter
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period_senkou_b = 52
-    high_senkou_b = pd.Series(high_6h).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou_b = pd.Series(low_6h).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (high_senkou_b + low_senkou_b) / 2
+    # Calculate 1d ATR percentile rank (using 30-day lookback)
+    atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
-    # Calculate 1d Kumo cloud (Senkou Span A/B from 1d data)
-    # 1d Tenkan-sen
-    high_1d_tenkan = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_1d_tenkan = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (high_1d_tenkan + low_1d_tenkan) / 2
-    
-    # 1d Kijun-sen
-    high_1d_kijun = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_1d_kijun = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (high_1d_kijun + low_1d_kijun) / 2
-    
-    # 1d Senkou Span A
-    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
-    
-    # 1d Senkou Span B
-    high_1d_senkou_b = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_1d_senkou_b = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = (high_1d_senkou_b + low_1d_senkou_b) / 2
-    
-    # Align 1d cloud to 6h timeframe
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Determine cloud boundaries (top and bottom of cloud)
-    cloud_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    cloud_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    # Calculate 1d volume moving average (20-period) for volume confirmation
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup period (max of Ichimoku periods)
+    for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
+        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
+            np.isnan(atr_percentile_aligned[i]) or 
+            np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Ichimoku signals
-        tenkan_cross_above = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tenkan_cross_below = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        # Regime conditions
+        # 1d volatility regime: ATR > 30th percentile (avoid low-vol chop, increased sensitivity)
+        vol_regime = atr_percentile_aligned[i] > 30
         
-        # Price relative to 1d cloud
-        price_above_cloud = close_6h[i] > cloud_top[i]
-        price_below_cloud = close_6h[i] < cloud_bottom[i]
+        # Volume confirmation: current 1d volume > 1.2x 20-period MA (increased sensitivity)
+        volume_spike = volume_1d[i] > 1.2 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Tenkan crosses above Kijun AND price above 1d cloud
-            if tenkan_cross_above and price_above_cloud:
+            # Long entry: Price breaks above H3 resistance + vol regime + volume spike
+            if (close_12h[i] > h3[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Tenkan crosses below Kijun AND price below 1d cloud
-            elif tenkan_cross_below and price_below_cloud:
+            # Short entry: Price breaks below L3 support + vol regime + volume spike
+            elif (close_12h[i] < l3[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Tenkan/Kijun cross in opposite direction
+            # Exit conditions:
+            # 1. Price reverts to Pivot Point (mean reversion)
+            # 2. Price breaks opposite H4/L4 level (take profit)
+            
             if position == 1:  # Long position
-                if tenkan_cross_below:  # Cross below = exit long
+                exit_condition = (
+                    close_12h[i] < pivot[i] or  # Reverted to pivot
+                    close_12h[i] > h4[i]        # Break above H4 (take profit)
+                )
+                if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if tenkan_cross_above:  # Cross above = exit short
+                exit_condition = (
+                    close_12h[i] > pivot[i] or  # Reverted to pivot
+                    close_12h[i] < l4[i]        # Break below L4 (take profit)
+                )
+                if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
