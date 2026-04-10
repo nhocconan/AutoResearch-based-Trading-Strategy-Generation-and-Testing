@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and ADX trend filter
-# - Primary: 4h Williams %R(14) < -80 for long, > -20 for short (oversold/overbought)
-# - Volume filter: 1d volume > 2.0x 20-period volume MA for institutional confirmation
-# - Trend filter: ADX(14) > 20 to avoid extremely choppy markets (adaptive threshold)
-# - Exit: Williams %R returns to -50 level (mean reversion)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX(14) trend filter
+# - Long: Price breaks above 20-period Donchian high + 1d volume > 2.0x 20-period volume MA + ADX > 25
+# - Short: Price breaks below 20-period Donchian low + 1d volume > 2.0x 20-period volume MA + ADX > 25
+# - Exit: Price returns to 10-period Donchian midpoint (mean reversion within channel)
 # - Position sizing: 0.25 discrete level to minimize fee churn
-# - Works in bull/bear: Williams %R identifies extremes in any market, volume confirms
-#   participation, ADX filter avoids whipsaws in low-volatility regimes
+# - Works in bull/bear: Donchian breakouts capture trends, volume confirms institutional participation,
+#   ADX filter avoids whipsaws in ranging markets. Tight entry conditions target ~30-50 trades/year.
 
-name = "4h_1d_williamsr_volume_trend_v2"
+name = "4h_1d_donchian_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -41,12 +40,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Williams %R for 4h timeframe (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    lookback_wr = 14
-    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Calculate Donchian channels for 4h timeframe (20-period)
+    lookback_dc = 20
+    highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    donchian_range = highest_high - lowest_low
     
     # Calculate 1d volume confirmation: volume > 2.0x 20-period volume MA
     volume_ma_20_1d = pd.Series(volume_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -77,8 +76,8 @@ def generate_signals(prices):
     minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # Calculate +DI and -DI
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
+    plus_di = 100 * plus_dm_smooth / (atr + 1e-10)
+    minus_di = 100 * minus_dm_smooth / (atr + 1e-10)
     
     # Calculate DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
@@ -86,7 +85,8 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(adx[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -94,30 +94,30 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
         vol_confirm = vol_1d_current[i] > 2.0 * volume_ma_20_1d_aligned[i]
         
-        # Trend filter: ADX > 20 (avoid extremely choppy markets)
-        trend_filter = adx[i] > 20
+        # Trend filter: ADX > 25 (avoid choppy markets, catch trends)
+        trend_filter = adx[i] > 25
         
-        if position == 0:  # Flat - look for new Williams %R extremes
-            # Long entry: Williams %R < -80 (oversold) + vol confirmation + trend filter
-            if williams_r[i] < -80 and vol_confirm and trend_filter:
+        if position == 0:  # Flat - look for new Donchian breakouts
+            # Long entry: Price breaks above Donchian high + vol confirmation + trend filter
+            if close[i] > highest_high[i] and vol_confirm and trend_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R > -20 (overbought) + vol confirmation + trend filter
-            elif williams_r[i] > -20 and vol_confirm and trend_filter:
+            # Short entry: Price breaks below Donchian low + vol confirmation + trend filter
+            elif close[i] < lowest_low[i] and vol_confirm and trend_filter:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit to mean reversion
-            # Exit: Williams %R returns to -50 level (mean reversion)
+            # Exit: Price returns to Donchian midpoint (mean reversion within channel)
             if position == 1:  # Long position
-                if williams_r[i] >= -50:
+                if close[i] <= donchian_mid[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if williams_r[i] <= -50:
+                if close[i] >= donchian_mid[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
