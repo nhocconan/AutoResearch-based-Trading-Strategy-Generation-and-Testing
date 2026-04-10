@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX trend filter
-# - Enter long when 4h price breaks above Donchian upper(20) AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX(14) > 25
-# - Enter short when 4h price breaks below Donchian lower(20) AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX(14) > 25
-# - Exit: price returns to Donchian middle (10-period average of upper/lower) or opposite band touch
-# - Donchian breakout captures volatility expansion
-# - Volume confirmation ensures breakouts have participation
-# - ADX filter ensures we only trade in trending markets (avoids chop)
-# - Target: 20-40 trades/year to minimize fee drag while capturing high-probability breakouts
+# Hypothesis: 12h Camarilla pivot long/short with 1d volume spike and 1w trend filter
+# - Enter long when price touches Camarilla L3 support AND 1d volume > 1.8x 20-period volume SMA AND 1w close > 1w EMA20
+# - Enter short when price touches Camarilla H3 resistance AND 1d volume > 1.8x 20-period volume SMA AND 1w close < 1w EMA20
+# - Exit: price moves to Camarilla H4 (for longs) or L4 (for shorts) or opposite pivot touch
+# - Camarilla pivots provide mathematical support/resistance levels
+# - Volume confirmation ensures institutional participation
+# - 1w EMA20 filter avoids counter-trend trades in strong weekly trends
+# - Target: 12-30 trades/year to minimize fee drag while capturing high-probability reversals
 
-name = "4h_1d_donchian_volume_adx_v2"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_volspike_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,91 +30,90 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for volume and ADX filters (MTF rule compliance)
+    # Load 1d data ONCE before loop for volume confirmation and Camarilla calculation (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Pre-compute Donchian channels for 4h data (20-period)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_high_20
-    donchian_lower = lowest_low_20
-    donchian_middle = (donchian_upper + donchian_lower) / 2  # Middle channel
+    # Load 1w data ONCE before loop for trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return signals
+    
+    # Pre-compute Camarilla levels for 1d data (based on previous day's OHLC)
+    # Camarilla formula: 
+    # H4 = close + 1.5*(high-low)
+    # H3 = close + 1.125*(high-low)
+    # L3 = close - 1.125*(high-low)
+    # L4 = close - 1.5*(high-low)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    camarilla_range = high_1d - low_1d
+    h4 = close_1d + 1.5 * camarilla_range
+    h3 = close_1d + 1.125 * camarilla_range
+    l3 = close_1d - 1.125 * camarilla_range
+    l4 = close_1d - 1.5 * camarilla_range
+    
+    # Align Camarilla levels to 12h timeframe (wait for completed 1d bar)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     # Pre-compute volume SMA for 1d data (20-period)
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute ADX for 1d data (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute EMA20 for 1w close (trend filter)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d.shift(1))).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d.shift(1))).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    # Pre-compute 1w close aligned for trend comparison
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    # Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = -pd.Series(low_1d).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    tr_smooth = pd.Series(atr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Pre-compute 1d volume aligned
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    
-    for i in range(20, n):  # Start after 20-bar warmup for Donchian
+    for i in range(20, n):  # Start after 20-bar warmup for volume SMA
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        vol_confirm = volume_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 1d volume > 1.8x 20-period volume SMA
+        volume_1d_current = df_1d['volume'].values
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
+        vol_confirm = volume_1d_aligned[i] > 1.8 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: 1d ADX > 25 (trending market)
-        trend_filter = adx_1d_aligned[i] > 25
+        # Trend filter: 1w close vs EMA20
+        uptrend = close_1w_aligned[i] > ema_20_1w_aligned[i]
+        downtrend = close_1w_aligned[i] < ema_20_1w_aligned[i]
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1]  # Cross above upper band
-        breakout_down = close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1]  # Cross below lower band
+        # Camarilla pivot touch signals (using 12h high/low for touch detection)
+        touch_h3 = high[i] >= h3_aligned[i] and low[i] <= h3_aligned[i]  # Price touched H3 level
+        touch_l3 = high[i] >= l3_aligned[i] and low[i] <= l3_aligned[i]  # Price touched L3 level
+        touch_h4 = high[i] >= h4_aligned[i] and low[i] <= h4_aligned[i]  # Price touched H4 level (exit for longs)
+        touch_l4 = high[i] >= l4_aligned[i] and low[i] <= l4_aligned[i]  # Price touched L4 level (exit for shorts)
         
         # Exit conditions
-        exit_long = close[i] < donchian_middle[i]  # Return to middle band
-        exit_short = close[i] > donchian_middle[i]  # Return to middle band
-        exit_opposite_long = close[i] < donchian_lower[i]  # Touch lower band while long
-        exit_opposite_short = close[i] > donchian_upper[i]  # Touch upper band while short
+        exit_long = touch_h4  # Exit long when price reaches H4
+        exit_short = touch_l4  # Exit short when price reaches L4
+        exit_opposite_long = touch_l3  # Exit long when price touches opposite L3
+        exit_opposite_short = touch_h3  # Exit short when price touches opposite H3
         
         # Trading logic
-        if vol_confirm and trend_filter:
-            # Long: Donchian breakout above upper band
-            if breakout_up:
+        if vol_confirm:
+            # Long: L3 touch in uptrend
+            if touch_l3 and uptrend:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25
-            # Short: Donchian breakout below lower band
-            elif breakout_down:
+            # Short: H3 touch in downtrend
+            elif touch_h3 and downtrend:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
@@ -132,7 +131,7 @@ def generate_signals(prices):
                     # Maintain current position
                     signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
         else:
-            # No volume confirmation or not trending: exit any position
+            # No volume confirmation: exit any position
             if position != 0:
                 position = 0
                 signals[i] = 0.0
