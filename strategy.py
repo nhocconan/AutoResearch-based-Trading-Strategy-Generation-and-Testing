@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Williams %R regime filter
-# - Primary: 6h Elder Ray (Bull Power = EMA13(high) - EMA13(close), Bear Power = EMA13(low) - EMA13(close))
-# - Regime filter: 1d Williams %R > -20 (overbought) for shorts, < -80 (oversold) for longs
-# - Entry: Long when Bull Power > 0 and Bear Power < 0 and Williams %R < -80
-#          Short when Bear Power < 0 and Bull Power > 0 and Williams %R > -20
-# - Exit: Opposite signal or Elder Ray divergence (Bull Power < 0 for long exit, Bear Power > 0 for short exit)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR volatility filter
+# - Primary: 4h price breaking above/below 20-period Donchian channels
+# - Volume filter: 1d volume > 2.0x 20-period volume MA to ensure participation
+# - Volatility filter: ATR(14) < 0.03 * close to avoid extreme volatility periods
+# - Exit: Price reverses to midpoint of Donchian channel (mean reversion)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Elder Ray shows power balance, Williams %R avoids extremes, regime-adaptive
+# - Works in bull/bear: Donchian adapts to volatility, volume confirms breakout, volatility filter avoids noise
+# - Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
 
-name = "6h_1d_elder_ray_williams_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_volatility_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,62 +30,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Pre-compute HTF data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Elder Ray on 6h timeframe
-    ema13_close = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_high = pd.Series(high).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_low = pd.Series(low).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max_20 + low_min_20) / 2
     
-    bull_power = ema13_high - ema13_close  # EMA13(high) - EMA13(close)
-    bear_power = ema13_low - ema13_close   # EMA13(low) - EMA13(close)
+    # Calculate 1d volume confirmation: volume > 2.0x 20-period volume MA
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # Calculate Williams %R on 1d timeframe
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate 14-period ATR for volatility filter
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
     
-    # Align Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Handle first element
+    high_low[0] = high[0] - low[0]
+    high_close[0] = np.abs(high[0] - close[0])
+    low_close[0] = np.abs(low[0] - close[0])
+    
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    volatility_filter = atr < 0.03 * close  # ATR less than 3% of price
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(williams_r_aligned[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Volume filter: current 1d volume > 2.0x 20-period volume MA
+        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_confirm = volume_1d_current[i] > 2.0 * volume_ma_20_1d_aligned[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Long entry: Bull Power > 0 (bulls in control), Bear Power < 0 (bears weak), Williams %R oversold (< -80)
-            if (bull_power[i] > 0 and bear_power[i] < 0 and williams_r_aligned[i] < -80):
+            # Long entry: price breaks above Donchian upper band + vol confirmation + volatility filter
+            if (close[i] > high_max_20[i] and 
+                vol_confirm and volatility_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Bear Power < 0 (bears in control), Bull Power > 0 (bulls weak), Williams %R overbought (> -20)
-            elif (bear_power[i] < 0 and bull_power[i] > 0 and williams_r_aligned[i] > -20):
+            # Short entry: price breaks below Donchian lower band + vol confirmation + volatility filter
+            elif (close[i] < low_min_20[i] and 
+                  vol_confirm and volatility_filter[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit conditions:
-            # Long exit: Bull Power <= 0 (bulls losing control) OR Bear Power >= 0 (bears gaining control)
-            # Short exit: Bear Power >= 0 (bears losing control) OR Bull Power <= 0 (bulls gaining control)
+        else:  # Have position - look for exit to midpoint
+            # Exit: price returns to midpoint of Donchian channel
             if position == 1:  # Long position
-                if bull_power[i] <= 0 or bear_power[i] >= 0:
+                if close[i] >= donchian_mid[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if bear_power[i] >= 0 or bull_power[i] <= 0:
+                if close[i] <= donchian_mid[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
