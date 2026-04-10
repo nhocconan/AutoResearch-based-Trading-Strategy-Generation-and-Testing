@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR expansion filter and chop regime
-# - Long: price breaks above Donchian(20) high + 1d ATR(14) > 1.5x 20-period average + chop > 61.8 (range)
-# - Short: price breaks below Donchian(20) low + 1d ATR(14) > 1.5x 20-period average + chop > 61.8 (range)
-# - Exit: close-based reversal - exit long when price < Donchian(10) high, exit short when price > Donchian(10) low
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
+# - Long: price breaks above Camarilla H3 level + 1d volume > 1.5x 20-period average + chop > 61.8 (range)
+# - Short: price breaks below Camarilla L3 level + 1d volume > 1.5x 20-period average + chop > 61.8 (range)
+# - Exit: close-based reversal - exit long when price < Camarilla H3, exit short when price > Camarilla L3
 # - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
 # - Position sizing: 0.25 (discrete level)
-# - Uses Donchian breakouts for structure, ATR expansion for volatility confirmation, chop filter to avoid trending markets
-# - Target: 100-180 total trades over 4 years (25-45/year) to stay within HARD MAX: 400 total
-# - Works in both bull and bear: chop filter identifies ranging markets where breakouts fade, ATR confirms genuine volatility expansion
+# - Uses Camarilla pivots for structure, volume confirmation for conviction, chop filter to avoid trending markets
+# - Target: 75-150 total trades over 4 years (19-38/year) to stay within HARD MAX: 400 total
+# - Works in both bull and bear: chop filter identifies ranging markets where pivot levels hold, volume confirms genuine breakouts
 
-name = "4h_1d_donchian_breakout_atr_chop_v1"
+name = "4h_1d_camarilla_breakout_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,14 +36,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Donchian channels (20-period) for 4h
-    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate Donchian channels (10-period) for exits
-    highest_high_10 = pd.Series(high_4h).rolling(window=10, min_periods=10).max().values
-    lowest_low_10 = pd.Series(low_4h).rolling(window=10, min_periods=10).min().values
+    volume_1d = df_1d['volume'].values
     
     # Calculate ATR (14-period) for 4h stoploss
     tr1 = high_4h - low_4h
@@ -64,18 +57,10 @@ def generate_signals(prices):
     
     atr_14_4h = wilders_smoothing(tr, 14)
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = 0  # First TR is 0 (no previous close)
-    atr_14_1d = wilders_smoothing(tr_1d, 14)
-    
-    # Calculate 1d ATR moving average (20-period)
-    atr_1d_series = pd.Series(atr_14_1d)
-    atr_ma_20_1d = atr_1d_series.rolling(window=20, min_periods=20).mean().values
-    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+    # Calculate 1d volume moving average (20-period)
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     # Calculate True Range for chop
     tr1_1d_chop = high_1d - low_1d
@@ -104,57 +89,80 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after warmup period (need at least 20 for Donchian)
+    for i in range(20, n):  # Start after warmup period (need at least 20 for volume MA)
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(highest_high_10[i]) or np.isnan(lowest_low_10[i]) or
-            np.isnan(atr_14_4h[i]) or np.isnan(atr_ma_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(volume_ma_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(atr_14_4h[i])):
             signals[i] = 0.0
             continue
         
         # Get current 4h close
         close_price = close_4h[i]
         
-        # Get current 1d ATR for volatility confirmation
-        atr_1d_current = align_htf_to_ltf(prices, df_1d, atr_14_1d)[i]
-        atr_expansion = atr_1d_current > 1.5 * atr_ma_aligned[i]
+        # Get current 1d data for Camarilla calculation (use previous completed 1d bar)
+        # Get index of completed 1d bar for current 4h bar
+        # We need to use the 1d bar that closed before or at the current 4h bar
+        # Since we're using align_htf_to_ltf, we can get the aligned values
         
-        # Chop regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
-        chop_filter = chop_aligned[i] > 61.8
-        
-        if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian(20) high + ATR expansion + chop filter
-            if (close_price > highest_high_20[i] and atr_expansion and chop_filter):
-                position = 1
-                entry_price = close_price
-                signals[i] = 0.25
-            # Short entry: price breaks below Donchian(20) low + ATR expansion + chop filter
-            elif (close_price < lowest_low_20[i] and atr_expansion and chop_filter):
-                position = -1
-                entry_price = close_price
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-        else:  # Have position - look for exit or stoploss
-            # Calculate stoploss level
-            if position == 1:  # Long position
-                stop_loss = entry_price - 2.0 * atr_14_4h[i]
-                # Exit conditions: price < Donchian(10) high OR stoploss hit
-                if close_price < highest_high_10[i] or close_price <= stop_loss:
-                    position = 0
-                    entry_price = 0.0
-                    signals[i] = 0.0
-                else:
+        # Calculate Camarilla levels from previous 1d bar
+        # We'll use the 1d data shifted by 1 to avoid look-ahead
+        if i >= 16:  # Need at least one 1d bar (16x 4h bars) to calculate
+            # Get the 1d index for current position
+            # Since we don't have direct mapping, we'll use the aligned arrays approach
+            # For simplicity, we'll use the previous 1d bar's data
+            
+            # Get aligned 1d OHLC (these will be the values from the completed 1d bar)
+            high_1d_prev = align_htf_to_ltf(prices, df_1d, high_1d)[i]
+            low_1d_prev = align_htf_to_ltf(prices, df_1d, low_1d)[i]
+            close_1d_prev = align_htf_to_ltf(prices, df_1d, close_1d)[i]
+            
+            # Calculate Camarilla levels
+            range_1d = high_1d_prev - low_1d_prev
+            camarilla_h3 = close_1d_prev + range_1d * 1.1 / 4
+            camarilla_l3 = close_1d_prev - range_1d * 1.1 / 4
+            
+            # Get current 1d volume for confirmation
+            volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+            volume_spike = volume_1d_current > 1.5 * volume_ma_aligned[i]
+            
+            # Chop regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
+            chop_filter = chop_aligned[i] > 61.8
+            
+            if position == 0:  # Flat - look for new entries
+                # Long entry: price breaks above Camarilla H3 + volume spike + chop filter
+                if (close_price > camarilla_h3 and volume_spike and chop_filter):
+                    position = 1
+                    entry_price = close_price
                     signals[i] = 0.25
-            else:  # position == -1, Short position
-                stop_loss = entry_price + 2.0 * atr_14_4h[i]
-                # Exit conditions: price > Donchian(10) low OR stoploss hit
-                if close_price > lowest_low_10[i] or close_price >= stop_loss:
-                    position = 0
-                    entry_price = 0.0
-                    signals[i] = 0.0
-                else:
+                # Short entry: price breaks below Camarilla L3 + volume spike + chop filter
+                elif (close_price < camarilla_l3 and volume_spike and chop_filter):
+                    position = -1
+                    entry_price = close_price
                     signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+            else:  # Have position - look for exit or stoploss
+                # Calculate stoploss level
+                if position == 1:  # Long position
+                    stop_loss = entry_price - 2.0 * atr_14_4h[i]
+                    # Exit conditions: price < Camarilla H3 OR stoploss hit
+                    if close_price < camarilla_h3 or close_price <= stop_loss:
+                        position = 0
+                        entry_price = 0.0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = 0.25
+                else:  # position == -1, Short position
+                    stop_loss = entry_price + 2.0 * atr_14_4h[i]
+                    # Exit conditions: price > Camarilla L3 OR stoploss hit
+                    if close_price > camarilla_l3 or close_price >= stop_loss:
+                        position = 0
+                        entry_price = 0.0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = -0.25
+        else:
+            # Not enough 1d data yet
+            signals[i] = 0.0
     
     return signals
