@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) upper band AND 1d EMA(50) > EMA(200) (bullish trend) AND volume > 1.5x 20-bar avg
-# - Short when price breaks below Donchian(20) lower band AND 1d EMA(50) < EMA(200) (bearish trend) AND volume > 1.5x 20-bar avg
-# - Exit when price crosses below Donchian(20) middle band (for longs) or above middle band (for shorts)
-# - Uses discrete position sizing (0.30) to balance return and drawdown
-# - Donchian channels provide clear structure; 1d EMA filter avoids counter-trend trades
-# - Volume confirmation ensures breakout validity
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# - Works in bull markets via trend-following breakouts; avoids bear markets via 1d EMA filter (only takes longs in bull, shorts in bear)
+# Hypothesis: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 (1d) AND 1w EMA(21) > EMA(50) (bullish trend) AND 12h volume > 1.5x 20-bar avg
+# - Short when price breaks below Camarilla L3 (1d) AND 1w EMA(21) < EMA(50) (bearish trend) AND 12h volume > 1.5x 20-bar avg
+# - Exit when price returns to Camarilla pivot point (1d) or opposite H3/L3 level
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Camarilla levels provide intraday support/resistance; 1w EMA filter ensures alignment with higher timeframe trend
+# - Volume confirmation avoids low-liquidity false signals
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets: breakouts in trends, mean reversion in ranges via pivot returns
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1w_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,40 +24,42 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA trend filter: EMA(50) vs EMA(200)
+    # Pre-compute 1w EMA trend filter: EMA(21) vs EMA(50)
+    close_1w = df_1w['close'].values
+    ema_21 = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_bullish = ema_21 > ema_50
+    ema_bearish = ema_21 < ema_50
+    
+    # Align 1w EMA trend to 12h timeframe
+    ema_bullish_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish)
+    ema_bearish_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish)
+    
+    # Pre-compute 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_bullish = ema_50 > ema_200
-    ema_bearish = ema_50 < ema_200
     
-    # Align 1d EMA trend to 4h timeframe
-    ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
-    ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
+    # Camarilla calculations
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
     
-    # Pre-compute Donchian(20) channels on 4h data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_band = highest_high
-    lower_band = lowest_low
-    middle_band = (upper_band + lower_band) / 2.0
-    
-    # Donchian breakout conditions
-    breakout_up = close > upper_band  # Price closes above upper band
-    breakout_down = close < lower_band  # Price closes below lower band
-    
-    # Exit conditions: cross middle band
-    exit_long = close < middle_band  # For long positions
-    exit_short = close > middle_band  # For short positions
-    
-    # Pre-compute 4h volume confirmation: > 1.5x 20-period average
+    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * volume_20_avg)
@@ -68,46 +70,49 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(exit_long[i]) or np.isnan(exit_short[i]) or
-            np.isnan(vol_spike[i])):
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                signals[i] = 0.30
+                signals[i] = 0.25
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
             continue
         
+        price = prices['close'].iloc[i]
+        
         if position == 0:  # Flat - look for new breakout entries
-            # Long when bullish breakout AND 1d bullish trend AND volume spike
-            if (breakout_up[i] and 
+            # Long when price breaks above H3 AND 1w bullish trend AND volume spike
+            if (price > h3_aligned[i] and 
                 ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
-                signals[i] = 0.30
-            # Short when bearish breakout AND 1d bearish trend AND volume spike
-            elif (breakout_down[i] and 
+                signals[i] = 0.25
+            # Short when price breaks below L3 AND 1w bearish trend AND volume spike
+            elif (price < l3_aligned[i] and 
                   ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
-                signals[i] = -0.30
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit at middle band
-            # Exit when price crosses middle band
+        else:  # Have position - look for exit
+            # Exit conditions: price returns to pivot or opposite H3/L3 level
             if position == 1:  # Long position
-                if exit_long[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.30
+                exit_signal = (price <= pivot_aligned[i]) or (price >= h4_aligned[i])
             else:  # Short position
-                if exit_short[i]:
-                    position = 0
-                    signals[i] = 0.0
+                exit_signal = (price >= pivot_aligned[i]) or (price <= l4_aligned[i])
+            
+            if exit_signal:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
+                    signals[i] = 0.25
                 else:
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
