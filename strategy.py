@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 12h trend filter and volume confirmation
-# - Williams %R(14) from 6h: oversold < -80 for long, overbought > -20 for short
-# - 12h EMA(50) trend filter: only long when price > EMA50, short when price < EMA50
-# - 6h volume confirmation: current volume > 1.5x 20-period volume SMA
-# - Exit: Williams %R crosses above -50 (for long) or below -50 (for short)
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
+# - Long when price breaks above Camarilla H3 level + 1d volume > 2.0x 20-period volume SMA + Chop(14) > 61.8 (range regime)
+# - Short when price breaks below Camarilla L3 level + 1d volume > 2.0x 20-period volume SMA + Chop(14) > 61.8
+# - Exit: price returns to Camarilla pivot point (mean reversion within pivot structure)
 # - Position sizing: 0.25 discrete level
-# - Williams %R identifies extreme reversals, EMA filter ensures we trade with higher timeframe trend
-# - Volume confirmation adds institutional participation signal
-# - 6h timeframe targets 12-37 trades/year with strict entry conditions to minimize fee drag
-# - Works in bull/bear: mean reversion at extremes works in all regimes, trend filter avoids counter-trend trades
+# - Camarilla pivots provide intraday support/resistance levels from prior day
+# - Volume confirms institutional participation, chop filter ensures we trade in ranging markets
+# - Works in bull/bear: mean reversion at pivot point works in all regimes, chop filter avoids strong trends
+# - 4h timeframe targets 19-50 trades/year with strict entry conditions to minimize fee drag
 
-name = "6h_12h_williamsr_volume_trend_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,8 +23,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -37,50 +36,78 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 6h Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    hh_ll = highest_high - lowest_low
-    williams_r = np.where(hh_ll != 0, 
-                          ((highest_high - close) / hh_ll) * -100, 
-                          -50)  # default to neutral when invalid
+    # Calculate 4h Chopiness Index (14-period) for regime filter
+    # True Range
+    tr1 = np.maximum(high - low, 
+                     np.maximum(np.abs(high - np.roll(close, 1)), 
+                                np.abs(low - np.roll(close, 1))))
+    tr1[0] = high[0] - low[0]
+    # Sum of TR over period
+    sum_tr = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over period
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Chop formula: 100 * log10(sum_TR / (HH - LL)) / log10(N)
+    # Avoid division by zero and log of zero/negative
+    hl_range = hh - ll
+    chop = np.where((hl_range > 0) & (sum_tr > 0), 
+                    100 * np.log10(sum_tr / hl_range) / np.log10(14), 
+                    50)  # default to neutral when invalid
     
-    # Calculate 6h volume SMA(20) for confirmation
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d OHLC for Camarilla pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate Camarilla levels for 1d: based on previous day's OHLC
+    # Camarilla formulas: Pivot = (H+L+C)/3, Range = H-L
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: H3 = Pivot + 1.1 * Range / 2, L3 = Pivot - 1.1 * Range / 2
+    camarilla_h3_1d = pivot_1d + 1.1 * range_1d / 2
+    camarilla_l3_1d = pivot_1d - 1.1 * range_1d / 2
+    camarilla_pivot_1d = pivot_1d
+    
+    # Align Camarilla levels to 4h timeframe (using completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot_1d)
+    
+    # Calculate 1d volume SMA(20) for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Get current 1d volume for volume spike confirmation
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
         
-        # Williams %R conditions
-        williams_oversold = williams_r[i] < -80   # Oversold condition for long
-        williams_overbought = williams_r[i] > -20 # Overbought condition for short
-        williams_exit_long = williams_r[i] > -50  # Exit long when crosses above -50
-        williams_exit_short = williams_r[i] < -50 # Exit short when crosses below -50
+        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (volume spike)
+        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # 12h EMA trend filter
-        uptrend = close[i] > ema_50_12h_aligned[i]   # Price above 12h EMA50 = uptrend
-        downtrend = close[i] < ema_50_12h_aligned[i] # Price below 12h EMA50 = downtrend
+        # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion at pivot)
+        ranging_market = chop[i] > 61.8
         
-        # Entry conditions
-        long_entry = williams_oversold and vol_confirm and uptrend
-        short_entry = williams_overbought and vol_confirm and downtrend
+        # Camarilla breakout signals
+        breakout_up = close[i] > camarilla_h3_aligned[i]   # Price breaks above H3
+        breakout_down = close[i] < camarilla_l3_aligned[i] # Price breaks below L3
+        return_to_pivot = abs(close[i] - camarilla_pivot_aligned[i]) < (camarilla_h3_aligned[i] - camarilla_l3_aligned[i]) * 0.3  # Within 30% of pivot
         
-        # Exit conditions
-        long_exit = williams_exit_long
-        short_exit = williams_exit_short
+        # Entry conditions: Camarilla breakout with volume and regime confirmation
+        long_entry = breakout_up and vol_confirm and ranging_market
+        short_entry = breakout_down and vol_confirm and ranging_market
+        
+        # Exit conditions: price returns to Camarilla pivot (mean reversion)
+        long_exit = return_to_pivot  # Exit long when price returns to pivot
+        short_exit = return_to_pivot  # Exit short when price returns to pivot
         
         if position == 0:  # Flat - look for entry
             if long_entry:
