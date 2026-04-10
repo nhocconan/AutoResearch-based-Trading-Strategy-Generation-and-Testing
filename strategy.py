@@ -3,23 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50 > EMA200) and volume confirmation
-# - Long when price breaks above Donchian upper band AND 1d EMA50 > EMA200 (bullish trend) AND volume > 1.5x 20-period volume SMA
-# - Short when price breaks below Donchian lower band AND 1d EMA50 < EMA200 (bearish trend) AND volume > 1.5x 20-period volume SMA
-# - Exit: ATR trailing stop (2.0x ATR) or reversion to Donchian midpoint
-# - Uses 4h for entry timing and 1d for trend filter to avoid whipsaws
+# Hypothesis: 4h Camarilla breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level AND 1d close > 1d open (bullish 1d candle) AND volume > 1.5x 20-period volume SMA
+# - Short when price breaks below Camarilla L3 level AND 1d close < 1d open (bearish 1d candle) AND volume > 1.5x 20-period volume SMA
+# - Exit: price reversion to Camarilla pivot point (mid-level) or ATR trailing stop (1.5x ATR)
+# - Uses 1d for signal direction (trend bias) and 4h for precise entry timing
 # - Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# - Position sizing: 0.25 discrete level to balance return and drawdown
+# - Position sizing: 0.25 discrete level to balance profit potential and drawdown control
 # - Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag while maintaining statistical significance
-# - Donchian breakouts work in both bull and bear markets when combined with trend filter and volume confirmation
+# - Camarilla levels provide institutional support/resistance that works in both bull and bear markets
+# - Uses previous completed 1d bar for Camarilla calculation to avoid look-ahead
 
-name = "4h_1d_donchian_breakout_trend_volume_v1"
+name = "4h_1d_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,26 +35,18 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return signals
     
-    # Calculate 1d EMA50 and EMA200 for trend filter
+    # Calculate 1d candle direction (bullish/bearish) for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    open_1d = df_1d['open'].values
+    # Bullish 1d candle: close > open
+    bullish_1d = close_1d > open_1d
+    bearish_1d = close_1d < open_1d
     # Align to 4h timeframe with proper delay (completed 1d bar only)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Calculate Donchian channels (20-period) on 4h data
-    # Upper band = highest high over past 20 periods
-    # Lower band = lowest low over past 20 periods
-    # Middle band = (upper + lower) / 2
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = highest_20
-    donchian_lower = lowest_20
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, bullish_1d)
+    bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, bearish_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
@@ -82,31 +75,62 @@ def generate_signals(prices):
             
         # Skip if any required data is invalid
         if (np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(donchian_middle[i])):
+            np.isnan(bullish_1d_aligned[i]) or np.isnan(bearish_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Trend filter: 1d EMA50 > EMA200 for bullish, < for bearish
-        bullish_trend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
-        bearish_trend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
+        # Calculate Camarilla pivot levels for today (using previous day's OHLC)
+        # Need to get previous day's high, low, close from 1d data
+        if len(df_1d) >= 2:
+            # Get previous day's OHLC (completed 1d bar)
+            prev_high_1d = df_1d['high'].shift(1).values
+            prev_low_1d = df_1d['low'].shift(1).values
+            prev_close_1d = df_1d['close'].shift(1).values
+            
+            # Align previous day's OHLC to 4h timeframe
+            prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+            prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+            prev_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
+            
+            # Calculate Camarilla levels
+            # H4 = Close + 1.5*(High-Low)
+            # H3 = Close + 1.125*(High-Low)
+            # H2 = Close + 0.75*(High-Low)
+            # H1 = Close + 0.5*(High-Low)
+            # Pivot = (High + Low + Close)/3
+            # L1 = Close - 0.5*(High-Low)
+            # L2 = Close - 0.75*(High-Low)
+            # L3 = Close - 1.125*(High-Low)
+            # L4 = Close - 1.5*(High-Low)
+            
+            rang = prev_high_1d_aligned - prev_low_1d_aligned
+            camarilla_h3 = prev_close_1d_aligned + 1.125 * rang
+            camarilla_l3 = prev_close_1d_aligned - 1.125 * rang
+            camarilla_pivot = (prev_high_1d_aligned + prev_low_1d_aligned + prev_close_1d_aligned) / 3.0
+            
+            # Check for valid Camarilla levels
+            if np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or np.isnan(camarilla_pivot[i]):
+                signals[i] = 0.0
+                continue
+        else:
+            signals[i] = 0.0
+            continue
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # Break above upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # Break below lower band
+        # Camarilla breakout signals
+        breakout_up = close[i] > camarilla_h3[i-1]  # Break above H3 level
+        breakout_down = close[i] < camarilla_l3[i-1]  # Break below L3 level
         
         if position == 0:  # Flat - look for entry
-            # Long: price breaks above upper band AND bullish trend AND volume confirmation
-            if breakout_up and bullish_trend and vol_confirm:
+            # Long: price breaks above H3 AND 1d bullish AND volume confirmation
+            if breakout_up and bullish_1d_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 highest_since_entry[i] = high[i]  # Initialize trailing stop
-            # Short: price breaks below lower band AND bearish trend AND volume confirmation
-            elif breakout_down and bearish_trend and vol_confirm:
+            # Short: price breaks below L3 AND 1d bearish AND volume confirmation
+            elif breakout_down and bearish_1d_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 lowest_since_entry[i] = low[i]  # Initialize trailing stop
@@ -120,11 +144,11 @@ def generate_signals(prices):
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
             
-            # ATR trailing stop: exit if price drops 2.0*ATR below highest high since entry
-            trailing_stop = highest_since_entry[i] - 2.0 * atr[i]
+            # ATR trailing stop: exit if price drops 1.5*ATR below highest high since entry
+            trailing_stop = highest_since_entry[i] - 1.5 * atr[i]
             
-            # Exit conditions: trailing stop hit OR reversion to midpoint
-            exit_condition = (close[i] < trailing_stop) or (close[i] < donchian_middle[i])
+            # Exit conditions: trailing stop hit OR reversion to pivot point
+            exit_condition = (close[i] < trailing_stop) or (close[i] < camarilla_pivot[i])
             
             if exit_condition:
                 position = 0
@@ -141,11 +165,11 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
             
-            # ATR trailing stop: exit if price rises 2.0*ATR above lowest low since entry
-            trailing_stop = lowest_since_entry[i] + 2.0 * atr[i]
+            # ATR trailing stop: exit if price rises 1.5*ATR above lowest low since entry
+            trailing_stop = lowest_since_entry[i] + 1.5 * atr[i]
             
-            # Exit conditions: trailing stop hit OR reversion to midpoint
-            exit_condition = (close[i] > trailing_stop) or (close[i] > donchian_middle[i])
+            # Exit conditions: trailing stop hit OR reversion to pivot point
+            exit_condition = (close[i] > trailing_stop) or (close[i] > camarilla_pivot[i])
             
             if exit_condition:
                 position = 0
