@@ -3,27 +3,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d volume spike and 1w trend filter
-# - Long when Williams %R(14) < -80 (oversold) AND 1d volume > 1.5x 20-period volume SMA AND 1w close > 1w EMA50
-# - Short when Williams %R(14) > -20 (overbought) AND 1d volume > 1.5x 20-period volume SMA AND 1w close < 1w EMA50
-# - Exit: Williams %R returns to -50 level or volume drops below average
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike confirmation and 1w trend filter
+# - Long when price breaks above 4h Donchian upper band (20-period high) AND 1d volume > 1.5x 20-period volume SMA AND 1w close > 1w EMA50
+# - Short when price breaks below 4h Donchian lower band (20-period low) AND 1d volume > 1.5x 20-period volume SMA AND 1w close < 1w EMA50
+# - Exit: price retreats to 4h Donchian midpoint or volume drops below confirmation threshold
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 12-37 trades/year on 6h timeframe to stay within fee drag limits
-# - Williams %R identifies extreme reversals, volume confirms momentum, 1w EMA50 filters trend
+# - Target: 19-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Uses Donchian channels for structure, volume for confirmation, weekly trend for bias
 
-name = "6h_1d_1w_williamsr_meanreversion_v1"
-timeframe = "6h"
+name = "4h_1d_1w_donchian_volume_trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,13 +35,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 6h Williams %R(14)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate 4h Donchian channels (20-period)
+    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_roll_max
+    donchian_lower = low_roll_min
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
     # Calculate 1d volume SMA for confirmation
     volume_1d = df_1d['volume'].values
@@ -56,47 +55,51 @@ def generate_signals(prices):
     # Calculate 1w close for trend comparison
     close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    for i in range(40, n):  # Start after warmup for indicators
+    for i in range(60, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        # Map 6h index to 1d index (4x 6h bars = 1d bar)
-        idx_1d = i // 4
-        if idx_1d >= len(volume_1d):
-            vol_confirm = False
+        # Get 1d volume for current 4h bar (each 1d bar contains 6x 4h bars)
+        idx_1d = i // 6
+        if idx_1d < len(volume_1d):
+            vol_1d_current = volume_1d[idx_1d]
+            vol_confirm = vol_1d_current > 1.5 * volume_sma_20_1d_aligned[i]
         else:
-            vol_confirm = volume_1d[idx_1d] > 1.5 * volume_sma_20_1d_aligned[i]
+            vol_confirm = False
         
         # Trend filter: 1w close vs 1w EMA50
         trend_bullish = close_1w_aligned[i] > ema_50_1w_aligned[i]
         trend_bearish = close_1w_aligned[i] < ema_50_1w_aligned[i]
         
-        # Williams %R signals
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        exit_signal = abs(williams_r[i] + 50) < 10  # Exit when near -50 (neutral)
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_upper[i-1]  # Break above previous upper band
+        breakout_down = close[i] < donchian_lower[i-1]  # Break below previous lower band
+        
+        # Exit conditions: price retreats to midpoint or loss of volume confirmation
+        exit_long = close[i] < donchian_mid[i] or not vol_confirm
+        exit_short = close[i] > donchian_mid[i] or not vol_confirm
         
         if position == 0:  # Flat - look for entry
-            if oversold and trend_bullish and vol_confirm:
+            if breakout_up and trend_bullish and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            elif overbought and trend_bearish and vol_confirm:
+            elif breakout_down and trend_bearish and vol_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            if exit_signal or not vol_confirm:
+            if exit_long:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
-            if exit_signal or not vol_confirm:
+            if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
