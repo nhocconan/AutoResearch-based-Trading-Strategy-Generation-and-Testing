@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and ADX regime filter
-# - Primary: 4h price breaking above/below 20-period Donchian channels
-# - HTF: 12h volume confirmation (current volume > 1.8x 20-period MA) + ADX > 20 for trend strength
-# - Long: Breakout above upper channel + volume confirmation + ADX > 20
-# - Short: Breakout below lower channel + volume confirmation + ADX > 20
-# - Exit: Price returns to opposite channel (long exits at lower, short exits at upper)
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Donchian captures breakouts, volume confirms momentum, ADX filters ranging markets
-# - Target: 80-160 trades over 4 years (20-40/year) to stay within fee drag limits
+# Hypothesis: 1h mean reversion with 4h/1d regime filter
+# - Primary: 1h RSI(2) for short-term mean reversion
+# - HTF: 4h ADX > 25 for trend regime + 1d close > 200 EMA for bull filter
+# - Long: RSI(2) < 10 + 4h ADX > 25 + 1d close > 200 EMA
+# - Short: RSI(2) > 90 + 4h ADX > 25 + 1d close < 200 EMA
+# - Exit: RSI(2) crosses 50
+# - Position sizing: 0.20 (discrete level to minimize fee churn)
+# - Works in bull/bear: ADX filters trending markets, 200 EMA filters bull/bear bias, RSI(2) captures short-term reversals
+# - Target: 80-120 trades over 4 years (20-30/year) to stay within fee drag limits
 
-name = "4h_12h_donchian_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "1h_4h_1d_rsi2_adx_ema_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,112 +23,116 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough data for volume MA and ADX
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_4h) < 30 or len(df_1d) < 50:
         return np.zeros(n)
     
+    # Pre-compute 1h data
+    close_1h = prices['close'].values
+    
     # Pre-compute 4h data
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Pre-compute 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Pre-compute 1d data
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    # Upper channel: highest high over past 20 periods
-    # Lower channel: lowest low over past 20 periods
-    upper_channel = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1h RSI(2)
+    delta = pd.Series(close_1h).diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 12h ADX for trend strength
+    # Wilder's smoothing for RSI
+    alpha = 1.0 / 2
+    avg_gain = pd.Series(gain).ewm(alpha=alpha, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=alpha, adjust=False, min_periods=2).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_2 = 100 - (100 / (1 + rs))
+    
+    # Calculate 4h ADX(14)
     # True Range
-    tr1 = np.abs(np.roll(high_12h, 1) - np.roll(low_12h, 1))
-    tr2 = np.abs(np.roll(high_12h, 1) - np.roll(close_12h, 1))
-    tr3 = np.abs(np.roll(low_12h, 1) - np.roll(close_12h, 1))
+    tr1 = np.abs(np.roll(high_4h, 1) - np.roll(low_4h, 1))
+    tr2 = np.abs(np.roll(high_4h, 1) - np.roll(close_4h, 1))
+    tr3 = np.abs(np.roll(low_4h, 1) - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    up_move = np.roll(high_12h, 1) - high_12h
-    down_move = low_12h - np.roll(low_12h, 1)
+    up_move = np.roll(high_4h, 1) - high_4h
+    down_move = low_4h - np.roll(low_4h, 1)
     
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
+    # Smoothed values (Wilder's smoothing)
     period = 14
     alpha = 1.0 / period
     
-    atr = pd.Series(tr).ewm(alpha=alpha, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr
+    atr_4h = pd.Series(tr).ewm(alpha=alpha, adjust=False).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr_4h
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=alpha, adjust=False).mean().values / atr_4h
     
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=alpha, adjust=False).mean().values
+    adx_4h = pd.Series(dx).ewm(alpha=alpha, adjust=False).mean().values
     
-    # Calculate 12h volume moving average (20-period) for volume confirmation
-    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA(200)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align all HTF indicators to 4h timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_12h, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_12h, lower_channel)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
+    # Align all HTF indicators to 1h timeframe
+    rsi_2_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close_1h}), rsi_2)  # 1h indicator, no alignment needed
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(upper_channel_aligned[i]) or np.isnan(lower_channel_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_ma_20_12h_aligned[i])):
+        if (np.isnan(rsi_2[i]) or np.isnan(adx_4h_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 12h volume (aligned to 4h)
-        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        # Volume confirmation: current 12h volume > 1.8x 20-period MA
-        volume_confirm = volume_12h_aligned[i] > 1.8 * volume_ma_20_12h_aligned[i]
+        if not in_session:
+            signals[i] = 0.0
+            continue
         
-        # ADX trend filter: ADX > 20 indicates sufficient trend strength
-        trend_confirm = adx_aligned[i] > 20.0
+        # Regime filters
+        trend_filter = adx_4h_aligned[i] > 25.0
+        bull_filter = close_1h[i] > ema_200_1d_aligned[i]
+        bear_filter = close_1h[i] < ema_200_1d_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_long = close_4h[i] > upper_channel_aligned[i]
-        breakout_short = close_4h[i] < lower_channel_aligned[i]
-        
-        # Exit conditions: Price returns to opposite channel
-        exit_long = close_4h[i] < lower_channel_aligned[i]  # Long exits at lower channel
-        exit_short = close_4h[i] > upper_channel_aligned[i]  # Short exits at upper channel
+        # Mean reversion signals
+        oversold = rsi_2[i] < 10.0
+        overbought = rsi_2[i] > 90.0
+        exit_signal = (rsi_2[i] > 50.0 and position == 1) or (rsi_2[i] < 50.0 and position == -1)
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Breakout above upper channel + volume confirmation + trend confirmation
-            if breakout_long and volume_confirm and trend_confirm:
+            # Long entry: Oversold + trend regime + bull bias
+            if oversold and trend_filter and bull_filter:
                 position = 1
-                signals[i] = 0.25
-            # Short entry: Breakout below lower channel + volume confirmation + trend confirmation
-            elif breakout_short and volume_confirm and trend_confirm:
+                signals[i] = 0.20
+            # Short entry: Overbought + trend regime + bear bias
+            elif overbought and trend_filter and bear_filter:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Price returns to opposite channel
-            if position == 1:  # Long position
-                if exit_long:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # position == -1 (Short position)
-                if exit_short:
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit: RSI crosses 50
+            if exit_signal:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.20 if position == 1 else -0.20
     
     return signals
