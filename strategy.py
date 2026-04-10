@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d volatility filter and volume confirmation
-# - Long when Williams %R(14) < -80 (oversold) AND 1d ATR(14) < 20-period median ATR AND volume > 1.3x 20-period average volume
-# - Short when Williams %R(14) > -20 (overbought) AND 1d ATR(14) < 20-period median ATR AND volume > 1.3x 20-period average volume
-# - Exit when Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
+# Hypothesis: 1d Camarilla pivot breakout with 1w volume confirmation and chop regime filter
+# - Long when price breaks above Camarilla H3 level AND 1w volume > 1.5x 20-period average volume AND chop < 61.8 (trending regime)
+# - Short when price breaks below Camarilla L3 level AND 1w volume > 1.5x 20-period average volume AND chop < 61.8 (trending regime)
+# - Exit when price crosses back inside the Camarilla H3-L3 range
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Williams %R identifies extreme momentum conditions for mean reversion
-# - ATR filter ensures we trade during low volatility periods when reversals are more reliable
-# - Volume confirmation reduces false signals
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Camarilla pivots identify key intraday support/resistance levels that often act as breakout points
+# - Volume confirmation ensures breakouts have conviction
+# - Chop filter avoids whipsaws in ranging markets
 
-name = "4h_1d_williamsr_atr_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_vol_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,71 +23,74 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough data for Williams %R and ATR
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC and volume
+    # Pre-compute 1d OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Williams %R (14-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    # Pre-compute 1d Camarilla pivot levels (based on previous day)
+    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), etc.
+    # We use H3/L3 for breakouts
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # First bar uses current values
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
+    camarilla_range = prev_high - prev_low
+    h3 = prev_close + 1.125 * camarilla_range
+    l3 = prev_close - 1.125 * camarilla_range
+    h4 = prev_close + 1.5 * camarilla_range
+    l4 = prev_close - 1.5 * camarilla_range
     
-    highest_high = rolling_max(high, 14)
-    lowest_low = rolling_min(low, 14)
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Pre-compute 1d volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 1d ATR(14) for volatility regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d Chopiness Index (14-period) for regime filter
+    def true_range(high, low, prev_close):
+        tr1 = high - low
+        tr2 = np.abs(high - prev_close)
+        tr3 = np.abs(low - prev_close)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = true_range(high, low, prev_close)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    atr_1d = np.zeros_like(tr)
-    atr_1d[13] = np.mean(tr[1:14])  # First ATR value
-    for i in range(14, len(tr)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    # Chop = 100 * log10(sum(TR14) / (max_high14 - min_low14)) / log10(14)
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    range_14 = max_high14 - min_low14
     
-    # ATR regime: low volatility when current ATR < median of last 20 ATR values
-    atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
-    low_vol_regime = atr_1d < atr_median_20
+    # Avoid division by zero
+    chop = np.full_like(close, 50.0, dtype=float)  # Default to neutral
+    mask = (range_14 > 0) & (~np.isnan(range_14)) & (~np.isnan(sum_tr14))
+    chop[mask] = 100 * np.log10(sum_tr14[mask] / range_14[mask]) / np.log10(14)
     
-    # Align HTF indicators to 4h timeframe
-    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
+    # Trending regime: chop < 61.8
+    trending_regime = chop < 61.8
+    
+    # Align HTF indicators to 1d timeframe
+    # For 1w data, we need to align volume and chop (though chop is 1d here, keeping structure)
+    vol_ma_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1w = df_1w['volume'].values > (1.5 * vol_ma_1w)
+    volume_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_spike_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(low_vol_regime_aligned[i])):
+        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(trending_regime[i]) or
+            np.isnan(volume_spike_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -97,24 +100,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Williams %R oversold AND low volatility regime AND volume spike
-            if (williams_r[i] < -80 and 
-                low_vol_regime_aligned[i] and 
-                volume_spike[i]):
+            # Long conditions: price breaks above H3 AND volume spike AND trending regime
+            if (close[i] > h3[i] and 
+                volume_spike_1w_aligned[i] and 
+                trending_regime[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Williams %R overbought AND low volatility regime AND volume spike
-            elif (williams_r[i] > -20 and 
-                  low_vol_regime_aligned[i] and 
-                  volume_spike[i]):
+            # Short conditions: price breaks below L3 AND volume spike AND trending regime
+            elif (close[i] < l3[i] and 
+                  volume_spike_1w_aligned[i] and 
+                  trending_regime[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Williams %R crosses back above -50 (for longs) or below -50 (for shorts)
-            exit_long = (position == 1 and williams_r[i] > -50)
-            exit_short = (position == -1 and williams_r[i] < -50)
+            # Exit conditions: price crosses back inside the H3-L3 range
+            exit_long = (position == 1 and close[i] < h3[i])
+            exit_short = (position == -1 and close[i] > l3[i])
             
             if exit_long or exit_short:
                 position = 0
