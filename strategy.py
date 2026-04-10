@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 4h 20-period high with volume > 2.0x average AND daily close > daily EMA50
-# - Short when price breaks below 4h 20-period low with volume > 2.0x average AND daily close < daily EMA50
-# - Exit when price crosses 4h 10-period midpoint (mean reversion)
-# - Daily trend filter ensures alignment with major trend
-# - Volume confirmation prevents false breakouts (strict 2.0x threshold)
-# - Targets 20-40 trades/year (80-160 total over 4 years) to avoid fee drag
-# - Donchian breakouts work in both trending and ranging markets when combined with trend and volume filters
+# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation
+# - Williams Alligator: Jaw (SMA13, 8-bar shift), Teeth (SMA8, 5-bar shift), Lips (SMA5, 3-bar shift)
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND price > Lips AND weekly close > weekly EMA20 AND volume > 1.5x average
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND price < Lips AND weekly close < weekly EMA20 AND volume > 1.5x average
+# - Exit when Alligator lines cross (Lips crosses Teeth) OR volume drops below average
+# - Weekly trend filter ensures alignment with major trend
+# - Volume confirmation prevents false signals
+# - Targets 20-30 trades/year (80-120 total over 4 years) to avoid fee drag
+# - Williams Alligator is effective in trending markets and avoids whipsaws in ranging markets
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_alligator_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,61 +23,79 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels (20-period) on 4h data
-    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
-    # 10-period midpoint for exit
-    high_10 = prices['high'].rolling(window=10, min_periods=10).max().values
-    low_10 = prices['low'].rolling(window=10, min_periods=10).min().values
-    midpoint_10 = (high_10 + low_10) / 2.0
+    # Pre-compute Williams Alligator on daily data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Jaw: SMA(13) shifted 8 bars
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: SMA(8) shifted 5 bars
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: SMA(5) shifted 3 bars
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Pre-compute volume confirmation: > 2.0x 20-period average (strict threshold)
+    # Pre-compute 1w EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
+    
+    # Pre-compute volume filter: < average volume for exit
+    vol_normal = prices['volume'] < volume_20_avg
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(13, n):  # Start after Alligator warmup
         # Skip if any required data is invalid
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(midpoint_10[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(volume_20_avg[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_20_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long breakout: price > 20-day high with volume spike AND daily uptrend
-            if (prices['close'].iloc[i] > high_20[i] and 
-                vol_spike.iloc[i] and 
-                prices['close'].iloc[i] > ema50_1d_aligned[i]):
+        if position == 0:  # Flat - look for new entries
+            # Bullish Alligator alignment: Lips > Teeth > Jaw
+            bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+            # Bearish Alligator alignment: Lips < Teeth < Jaw
+            bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+            
+            # Long entry: bullish alignment AND price > Lips AND weekly uptrend AND volume spike
+            if (bullish_alignment and 
+                prices['close'].iloc[i] > lips[i] and 
+                prices['close'].iloc[i] > ema20_1w_aligned[i] and
+                vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short breakdown: price < 20-day low with volume spike AND daily downtrend
-            elif (prices['close'].iloc[i] < low_20[i] and 
-                  vol_spike.iloc[i] and 
-                  prices['close'].iloc[i] < ema50_1d_aligned[i]):
+            # Short entry: bearish alignment AND price < Lips AND weekly downtrend AND volume spike
+            elif (bearish_alignment and 
+                  prices['close'].iloc[i] < lips[i] and 
+                  prices['close'].iloc[i] < ema20_1w_aligned[i] and
+                  vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
         else:  # Have position - look for exit
-            # Exit when price crosses 10-period midpoint (mean reversion signal)
+            # Exit conditions:
+            # 1. Alligator lines cross (Lips crosses Teeth) - trend weakening
+            # 2. Volume drops below average (loss of momentum)
+            lips_teeth_cross = (lips[i] > teeth[i] and lips[i-1] <= teeth[i-1]) or \
+                               (lips[i] < teeth[i] and lips[i-1] >= teeth[i-1])
+            
             if position == 1:  # Long position
-                if prices['close'].iloc[i] < midpoint_10[i]:
+                if lips_teeth_cross or vol_normal.iloc[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25  # Hold long
             elif position == -1:  # Short position
-                if prices['close'].iloc[i] > midpoint_10[i]:
+                if lips_teeth_cross or vol_normal.iloc[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
