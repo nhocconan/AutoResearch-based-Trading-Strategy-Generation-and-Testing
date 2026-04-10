@@ -3,23 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d regime filter
-# - Bull Power = High - EMA13(close); Bear Power = EMA13(close) - Low
-# - Long when Bull Power > 0 AND Bear Power < 0 AND 1d close > 1d SMA50 (bull regime)
-# - Short when Bear Power > 0 AND Bull Power < 0 AND 1d close < 1d SMA50 (bear regime)
-# - Exit when power signs diverge or regime flips
-# - Uses 1d regime to avoid counter-trend trades in strong trends
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Position size: 0.25 discrete to minimize fee churn
-# - Works in both bull and bear by adapting to 1d regime
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and chop regime filter
+# - Long when price breaks above 4h Donchian upper(20) AND 1d volume > 1.3x 20-period volume SMA AND chop(14) > 61.8 (range)
+# - Short when price breaks below 4h Donchian lower(20) AND 1d volume > 1.3x 20-period volume SMA AND chop(14) > 61.8 (range)
+# - Exit: price retreats to Donchian midpoint or volume drops below average
+# - Uses 1d timeframe for volume confirmation and chop filter, 4h for execution timing
+# - Position sizing: 0.25 discrete level to minimize fee drag
+# - Target: 15-40 trades/year on 4h timeframe to stay within fee drag limits
 
-name = "6h_1d_elder_ray_regime_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_chop_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -31,48 +29,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max_20 + low_min_20) / 2.0
     
-    # Elder Ray components
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # Calculate 1d volume SMA for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # 1d regime filter: SMA50
+    # Calculate 1d chopiness index (14-period) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Regime: bullish if close > SMA50, bearish if close < SMA50
-    regime_bullish = close_1d_aligned > sma_50_1d_aligned
-    regime_bearish = close_1d_aligned < sma_50_1d_aligned
+    # True Range
+    tr1 = pd.Series(high_1d).rolling(2).max().values - pd.Series(low_1d).rolling(2).min().values
+    tr2 = np.abs(pd.Series(high_1d).rolling(2).shift(1).values - pd.Series(close_1d).rolling(2).shift(1).values)
+    tr3 = np.abs(pd.Series(low_1d).rolling(2).shift(1).values - pd.Series(close_1d).rolling(2).shift(1).values)
+    tr = np.maximum.reduce([tr1, tr2, tr3])
     
-    for i in range(50, n):  # Start after warmup for EMA13 and SMA50
+    # Chop = 100 * log10(sum(TR14) / (max(HH14) - min(LL14))) / log10(14)
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    denominator = hh_14 - ll_14
+    denominator = np.where(denominator == 0, 1e-10, denominator)  # Avoid division by zero
+    chop = 100 * np.log10(tr_sum / denominator) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(sma_50_1d_aligned[i]) or np.isnan(close_1d_aligned[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Elder Ray signals with regime filter
-        long_signal = bull_power[i] > 0 and bear_power[i] < 0 and regime_bullish[i]
-        short_signal = bear_power[i] > 0 and bull_power[i] < 0 and regime_bearish[i]
+        # Volume confirmation: 1d volume > 1.3x 20-period volume SMA
+        idx_1d = i // 6  # 4h bars per 1d (6*4h = 24h)
+        if idx_1d >= len(volume_1d):
+            vol_confirm = False
+        else:
+            vol_confirm = volume_1d[idx_1d] > 1.3 * volume_sma_20_1d_aligned[i]
         
-        # Exit conditions: power divergence or regime flip
-        exit_long = (bull_power[i] <= 0 or bear_power[i] >= 0 or not regime_bullish[i])
-        exit_short = (bear_power[i] <= 0 or bull_power[i] >= 0 or not regime_bearish[i])
+        # Chop regime filter: chop > 61.8 (range-bound market)
+        chop_filter = chop_aligned[i] > 61.8
+        
+        # Donchian breakout signals
+        breakout_up = close[i] > high_max_20[i-1]  # Break above previous upper band
+        breakout_down = close[i] < low_min_20[i-1]  # Break below previous lower band
+        
+        # Exit conditions: price retreats to midpoint or loss of volume confirmation
+        exit_long = close[i] < donchian_mid[i] or not vol_confirm
+        exit_short = close[i] > donchian_mid[i] or not vol_confirm
         
         if position == 0:  # Flat - look for entry
-            if long_signal:
+            if breakout_up and vol_confirm and chop_filter:
                 position = 1
                 signals[i] = 0.25
-            elif short_signal:
+            elif breakout_down and vol_confirm and chop_filter:
                 position = -1
                 signals[i] = -0.25
             else:
