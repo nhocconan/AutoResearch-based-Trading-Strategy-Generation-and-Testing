@@ -3,17 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1w chop regime filter with asymmetric logic
-# - Primary signal: Donchian(20) breakout on 4h with volume confirmation
-# - Volume filter: 1d volume > 1.3x 20-period average (avoid low-quality breakouts)
-# - Regime filter: 1w Choppiness Index > 61.8 = ranging (fade touches), < 38.2 = trending (breakout)
-# - Asymmetric logic: In ranging markets, only trade touches with strong volume; in trending, only breakouts
-# - Position sizing: 0.25 discrete to minimize fee churn
-# - Stoploss: 2.0x ATR(20) to limit drawdown
-# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within proven working range
+# Hypothesis: 12h Williams Alligator + 1d volume spike + 1w chop regime filter
+# - Primary signal: Williams Alligator (Jaw/Teeth/Lips) alignment on 12h
+#   * Long: Lips > Teeth > Jaw (bullish alignment)
+#   * Short: Lips < Teeth < Jaw (bearish alignment)
+# - Volume confirmation: 1d volume > 1.8x 20-period average volume (strong participation)
+# - Regime filter: 1w Choppiness Index > 61.8 (range market) enables mean reversion at extremes
+#   * In ranging markets (CHOP > 61.8): trade Alligator alignment with price near extremes
+#   * In trending markets (CHOP < 38.2): trade strong Alligator alignment
+# - Works in bull/bear: Alligator catches trends early; chop filter avoids whipsaws in ranges
+# - Position size: 0.25 discrete level to minimize fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) per 12h strategy guidelines
+# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(14)
 
-name = "4h_1d_1w_donchian_volume_chop_v2"
-timeframe = "4h"
+name = "12h_1d_1w_alligator_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +34,7 @@ def generate_signals(prices):
     # Pre-compute 1d volume spike filter
     volume_1d = df_1d['volume'].values
     avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.3 * avg_volume_20)
+    volume_spike = volume_1d > (1.8 * avg_volume_20)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     # Pre-compute 1w Choppiness Index
@@ -59,22 +63,47 @@ def generate_signals(prices):
                         50)  # neutral when no range
     chop_aligned = align_htf_to_ltf(prices, df_1w, chop_raw, additional_delay_bars=0)
     
-    # Pre-compute 4h Donchian Channel (20)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
+    # Pre-compute 12h Williams Alligator
+    # Jaw: Smoothed Median Price (13, 8)
+    # Teeth: Smoothed Median Price (8, 5)
+    # Lips: Smoothed Median Price (5, 3)
+    median_price = (prices['high'].values + prices['low'].values) / 2
     
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Jaw (13, 8)
+    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).median().values
+    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values
     
-    # Pre-compute 4h ATR(20) for stoploss
-    tr_4h1 = high_4h - low_4h
-    tr_4h2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr_4h3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
-    tr_4h[0] = tr_4h1[0]
-    atr_20 = pd.Series(tr_4h).rolling(window=20, min_periods=20).mean().values
+    # Teeth (8, 5)
+    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).median().values
+    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values
+    
+    # Lips (5, 3)
+    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).median().values
+    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values
+    
+    # Alligator alignment signals
+    lips_above_teeth = lips > teeth
+    teeth_above_jaw = teeth > jaw
+    lips_below_teeth = lips < teeth
+    teeth_below_jaw = teeth < jaw
+    
+    bullish_alignment = lips_above_teeth & teeth_above_jaw
+    bearish_alignment = lips_below_teeth & teeth_below_jaw
+    
+    bullish_aligned = align_htf_to_ltf(prices, prices, bullish_alignment.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, prices, bearish_alignment.astype(float))
+    
+    # Pre-compute 12h ATR(14) for stoploss
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    
+    tr_12h1 = high_12h - low_12h
+    tr_12h2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr_12h3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
+    tr_12h[0] = tr_12h1[0]
+    atr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -82,53 +111,53 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
             np.isnan(volume_spike_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(atr_20[i])):
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Donchian mean reversion OR stoploss hit
-            if close_4h[i] < donchian_mid[i] or close_4h[i] < entry_price - 2.0 * atr_20[i]:
+            # Exit: Alligator reversal OR stoploss hit
+            if (not bullish_aligned[i]) or close_12h[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Donchian mean reversion OR stoploss hit
-            if close_4h[i] > donchian_mid[i] or close_4h[i] > entry_price + 2.0 * atr_20[i]:
+            # Exit: Alligator reversal OR stoploss hit
+            if (not bearish_aligned[i]) or close_12h[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakouts with volume spike and chop regime filter
-            # In ranging markets (CHOP > 61.8): fade Donchian touches (mean reversion)
-            # In trending markets (CHOP < 38.2): breakout continuation
+            # Look for Alligator alignment with volume spike and chop regime filter
+            # In ranging markets (CHOP > 61.8): trade alignment with price near extremes
+            # In trending markets (CHOP < 38.2): trade strong alignment
             if volume_spike_aligned[i]:
-                if chop_aligned[i] > 61.8:  # ranging market - mean reversion
-                    # Long: price touches lower Donchian band
-                    if close_4h[i] <= donchian_low[i] * 1.0005:  # tight buffer for precision
+                if chop_aligned[i] > 61.8:  # ranging market
+                    # Long: bullish alignment + price near low (mean reversion long)
+                    if bullish_aligned[i] and close_12h[i] <= low_12h[i] * 1.002:
                         position = 1
-                        entry_price = close_4h[i]
+                        entry_price = close_12h[i]
                         signals[i] = 0.25
-                    # Short: price touches upper Donchian band
-                    elif close_4h[i] >= donchian_high[i] * 0.9995:
+                    # Short: bearish alignment + price near high (mean reversion short)
+                    elif bearish_aligned[i] and close_12h[i] >= high_12h[i] * 0.998:
                         position = -1
-                        entry_price = close_4h[i]
+                        entry_price = close_12h[i]
                         signals[i] = -0.25
-                elif chop_aligned[i] < 38.2:  # trending market - breakout continuation
-                    # Long: price breaks above upper Donchian band
-                    if close_4h[i] > donchian_high[i]:
+                elif chop_aligned[i] < 38.2:  # trending market
+                    # Long: strong bullish alignment
+                    if bullish_aligned[i]:
                         position = 1
-                        entry_price = close_4h[i]
+                        entry_price = close_12h[i]
                         signals[i] = 0.25
-                    # Short: price breaks below lower Donchian band
-                    elif close_4h[i] < donchian_low[i]:
+                    # Short: strong bearish alignment
+                    elif bearish_aligned[i]:
                         position = -1
-                        entry_price = close_4h[i]
+                        entry_price = close_12h[i]
                         signals[i] = -0.25
     
     return signals
