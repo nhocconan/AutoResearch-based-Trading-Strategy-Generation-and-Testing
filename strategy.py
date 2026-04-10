@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX > 25
-# - Long when price breaks above 4h Donchian upper band AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX > 25
-# - Short when price breaks below 4h Donchian lower band AND 1d volume > 1.5x 20-period volume SMA AND 1d ADX > 25
-# - Exit: price returns to 4h Donchian mid-band
-# - Uses 4h for price action (Donchian channels), 1d for volume and ADX confirmation
-# - Donchian breakouts capture strong momentum; volume confirms validity; ADX filters weak markets
-# - Session filter: 08-20 UTC to avoid low-liquidity hours
-# - Tight entries target 15-30 trades/year to minimize fee drag while maintaining edge
+# Hypothesis: 6h Donchian(20) breakout with 1w volume confirmation and 1d ADX > 25
+# - Long when price breaks above 6h Donchian upper band AND 1w volume > 1.5x 20-period volume SMA AND 1d ADX > 25
+# - Short when price breaks below 6h Donchian lower band AND 1w volume > 1.5x 20-period volume SMA AND 1d ADX > 25
+# - Exit: price returns to 6h Donchian mid-band or ATR trailing stop (2.5*ATR)
+# - Uses 6h for price action (Donchian channels), 1w for volume confirmation, 1d for ADX trend filter
+# - Donchian breakouts capture strong momentum; volume confirms validity; ADX filters weak/choppy markets
+# - Tight entries target 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 # - Works in bull (breakouts up) and bear (breakouts down) with volume and trend filters
 
-name = "1h_4h_1d_donchian_volume_adx_v1"
-timeframe = "1h"
+name = "6h_1w_1d_donchian_volume_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,33 +30,20 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Session filter: 08-20 UTC (avoid low-liquidity hours)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop (MTF rule compliance)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Load 1w data ONCE before loop for volume confirmation (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return signals
     
-    # Pre-compute Donchian channels on 4h (primary timeframe)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    upper_band = highest_high
-    lower_band = lowest_low
-    mid_band = (upper_band + lower_band) / 2.0
-    
-    # Load 1d data ONCE before loop (MTF rule compliance)
+    # Load 1d data ONCE before loop for ADX trend filter (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Calculate 1d volume SMA for confirmation
-    vol_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Calculate 1w volume SMA for confirmation
+    vol_1w = df_1w['volume'].values
+    volume_sma_20_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
     
     # Calculate 1d ADX(14) for trend strength filter
     high_1d = df_1d['high'].values
@@ -95,59 +81,101 @@ def generate_signals(prices):
     adx_1d = wilders_smoothing(dx_1d, 14)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
+    # Pre-compute Donchian channels on 6h (primary timeframe)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    upper_band = highest_high
+    lower_band = lowest_low
+    mid_band = (upper_band + lower_band) / 2.0
+    
+    # ATR for dynamic stoploss (using 6h data)
+    tr_6h1 = np.abs(high[1:] - low[:-1])
+    tr_6h2 = np.abs(high[1:] - close[:-1])
+    tr_6h3 = np.abs(low[1:] - close[:-1])
+    tr_6h = np.maximum(np.maximum(tr_6h1, tr_6h2), tr_6h3)
+    tr_6h = np.concatenate([[np.nan], tr_6h])
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    
     for i in range(lookback, n):
         # Skip if any required data is invalid
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+            np.isnan(volume_sma_20_1w_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(atr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 1w volume > 1.5x 20-period volume SMA
+        vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w)
+        vol_confirm = vol_1w_aligned[i] > 1.5 * volume_sma_20_1w_aligned[i]
         
         # Trend filter: 1d ADX > 25 indicates sufficient trend strength
         trend_filter = adx_1d_aligned[i] > 25.0
         
         # Only trade when both volume confirmation and trend filter are present
         if vol_confirm and trend_filter:
-            # Long breakout: price breaks above 4h Donchian upper band
+            # Long breakout: price breaks above Donchian upper band
             if close[i] > upper_band[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
-                    signals[i] = 0.20
+                    signals[i] = 0.25
                 else:
-                    signals[i] = 0.20  # Maintain position
-            # Short breakout: price breaks below 4h Donchian lower band
+                    signals[i] = 0.25  # Maintain position
+            # Short breakout: price breaks below Donchian lower band
             elif close[i] < lower_band[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
-                    signals[i] = -0.20
+                    signals[i] = -0.25
                 else:
-                    signals[i] = -0.20  # Maintain position
-            # Exit: price returns to mid-band (within 0.5% of band width)
-            elif abs(close[i] - mid_band[i]) < (upper_band[i] - lower_band[i]) * 0.005:
+                    signals[i] = -0.25  # Maintain position
+            # Exit: price returns to mid-band (within 0.1% of band width)
+            elif abs(close[i] - mid_band[i]) < (upper_band[i] - lower_band[i]) * 0.001:
+                if position != 0:  # Only signal on exit
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.0  # Maintain flat
+            # Alternative exit: ATR-based trailing stop
+            elif position == 1 and close[i] < (highest_high_since_entry - 2.5 * atr_6h[i]):
+                if position != 0:  # Only signal on exit
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.0  # Maintain flat
+            elif position == -1 and close[i] > (lowest_low_since_entry + 2.5 * atr_6h[i]):
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
             else:
-                # Maintain current position
-                signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+                # Maintain current position and update tracking levels
+                if position == 1:
+                    # Track highest high since entry for trailing stop
+                    if 'highest_high_since_entry' not in locals():
+                        highest_high_since_entry = high[i]
+                    else:
+                        highest_high_since_entry = max(highest_high_since_entry, high[i])
+                    signals[i] = 0.25
+                elif position == -1:
+                    # Track lowest low since entry for trailing stop
+                    if 'lowest_low_since_entry' not in locals():
+                        lowest_low_since_entry = low[i]
+                    else:
+                        lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
         else:
             # No trade: exit any position if conditions not met
             if position != 0:
                 position = 0
+                # Reset tracking variables
+                if 'highest_high_since_entry' in locals():
+                    del highest_high_since_entry
+                if 'lowest_low_since_entry' in locals():
+                    del lowest_low_since_entry
                 signals[i] = 0.0
             else:
                 signals[i] = 0.0
