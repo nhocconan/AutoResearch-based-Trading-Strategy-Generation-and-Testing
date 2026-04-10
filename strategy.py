@@ -4,15 +4,15 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Williams Alligator + 1d trend filter (EMA50) + volume confirmation
-# - Alligator: Jaw (EMA13, 8-bar shift), Teeth (EMA8, 5-bar shift), Lips (EMA5, 3-bar shift)
-# - Long: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 (uptrend) AND volume > 1.8x 20-period average
-# - Short: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 (downtrend) AND volume > 1.8x 20-period average
+# - Alligator: Jaw (EMA13, 8-period offset), Teeth (EMA8, 5-period offset), Lips (EMA5, 3-period offset)
+# - Long: Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA50 (uptrend) AND volume > 1.5x 20-period average
+# - Short: Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA50 (downtrend) AND volume > 1.5x 20-period average
 # - Uses discrete position sizing (0.25) to minimize fee churn
 # - ATR-based stoploss (2.0x ATR(14)) to manage risk
 # - Designed for 4h timeframe: targets 20-50 trades/year to avoid fee drag
-# - Works in bull/bear markets: trend filter prevents counter-trend trades, Alligator captures trend strength
+# - Works in bull/bear markets: trend filter prevents counter-trend trades, Alligator captures trend alignment
 
-name = "4h_1d_alligator_volume_v1"
+name = "4h_1d_alligator_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,17 +31,17 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Pre-compute 4h Williams Alligator components
+    # Pre-compute 4h Alligator components
     close_4h = prices['close'].values
-    # Jaw: EMA13 with 8-bar shift
+    # Jaw: EMA13 with 8-period offset
     jaw = pd.Series(close_4h).ewm(span=13, adjust=False, min_periods=13).mean().values
     jaw = np.roll(jaw, 8)
     jaw[:8] = np.nan
-    # Teeth: EMA8 with 5-bar shift
+    # Teeth: EMA8 with 5-period offset
     teeth = pd.Series(close_4h).ewm(span=8, adjust=False, min_periods=8).mean().values
     teeth = np.roll(teeth, 5)
     teeth[:5] = np.nan
-    # Lips: EMA5 with 3-bar shift
+    # Lips: EMA5 with 3-period offset
     lips = pd.Series(close_4h).ewm(span=5, adjust=False, min_periods=5).mean().values
     lips = np.roll(lips, 3)
     lips[:3] = np.nan
@@ -49,7 +49,7 @@ def generate_signals(prices):
     # Pre-compute 4h volume confirmation
     volume_4h = prices['volume'].values
     avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_4h > (1.8 * avg_volume_20)
+    vol_spike = volume_4h > (1.5 * avg_volume_20)
     
     # Pre-compute 4h ATR(14) for stoploss
     high_4h = prices['high'].values
@@ -73,7 +73,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: Alligator alignment breaks OR stoploss hit
+            # Exit: Alligator alignment breaks bearish OR stoploss hit
             if not (lips[i] > teeth[i] and teeth[i] > jaw[i]) or close_4h[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
@@ -81,7 +81,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Alligator alignment breaks OR stoploss hit
+            # Exit: Alligator alignment breaks bullish OR stoploss hit
             if not (lips[i] < teeth[i] and teeth[i] < jaw[i]) or close_4h[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
