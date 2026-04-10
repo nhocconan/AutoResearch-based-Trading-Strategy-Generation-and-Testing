@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
-# - Long when price > Donchian(20) high AND 1d EMA(50) > EMA(200) AND volume > 1.5x 20-bar avg
-# - Short when price < Donchian(20) low AND 1d EMA(50) < EMA(200) AND volume > 1.5x 20-bar avg
-# - Exit when price crosses opposite Donchian(20) level OR trend reverses
+# - Long when price > Donchian(20) upper AND 1d EMA(50) > EMA(200) AND volume > 1.5x 20-bar avg
+# - Short when price < Donchian(20) lower AND 1d EMA(50) < EMA(200) AND volume > 1.5x 20-bar avg
+# - Exit when price crosses Donchian(20) midpoint (mean reversion)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Donchian captures breakouts; 1d EMA filter ensures alignment with daily trend
+# - Donchian breakout captures momentum; 1d EMA filter ensures alignment with daily trend
 # - Volume confirmation avoids low-liquidity false signals
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
 name = "4h_1d_donchian_breakout_trend_volume_v1"
 timeframe = "4h"
@@ -18,7 +18,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -37,13 +37,16 @@ def generate_signals(prices):
     ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
     ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
     
-    # Pre-compute Donchian(20) channels on 4h data
+    # Pre-compute Donchian(20) channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
     # Pre-compute 4h volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
@@ -53,11 +56,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_spike[i])):
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(donchian_mid[i]) or np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -68,28 +71,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price > Donchian high AND 1d bullish trend AND volume spike
-            if (close[i] > highest_high[i] and 
+            # Long when price > Donchian upper AND 1d bullish trend AND volume spike
+            if (close[i] > donchian_upper[i] and 
                 ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price < Donchian low AND 1d bearish trend AND volume spike
-            elif (close[i] < lowest_low[i] and 
+            # Short when price < Donchian lower AND 1d bearish trend AND volume spike
+            elif (close[i] < donchian_lower[i] and 
                   ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit when price crosses opposite Donchian level OR trend reverses
-            exit_long = (position == 1 and close[i] < lowest_low[i])
-            exit_short = (position == -1 and close[i] > highest_high[i])
-            trend_reversal_long = (position == 1 and not ema_bullish_aligned[i])
-            trend_reversal_short = (position == -1 and not ema_bearish_aligned[i])
+        else:  # Have position - look for exit at Donchian midpoint
+            # Exit when price crosses Donchian midpoint (mean reversion)
+            exit_signal = False
+            if position == 1 and close[i] < donchian_mid[i]:
+                exit_signal = True
+            elif position == -1 and close[i] > donchian_mid[i]:
+                exit_signal = True
             
-            if exit_long or exit_short or trend_reversal_long or trend_reversal_short:
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
