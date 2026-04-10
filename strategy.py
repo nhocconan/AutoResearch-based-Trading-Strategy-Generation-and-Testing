@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND 1d EMA34 rising AND volume > 2.0x 20-period volume SMA
-# - Short when price breaks below 20-period Donchian low AND 1d EMA34 falling AND volume > 2.0x 20-period volume SMA
-# - Exit: ATR trailing stop (3.0x ATR) or time-based exit (max 3 bars hold)
-# - Uses 1d for trend bias (EMA34 direction) and 12h for precise entry timing
-# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
-# - Position sizing: 0.25 discrete level to control drawdown and minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while maintaining statistical significance
-# - Donchian breakouts work in both bull and bear markets when combined with trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA34) and volume confirmation
+# - Long when price breaks above Donchian upper channel (20-period high) AND 1d EMA34 > 1d EMA34 previous AND volume > 1.5x 20-period volume SMA
+# - Short when price breaks below Donchian lower channel (20-period low) AND 1d EMA34 < 1d EMA34 previous AND volume > 1.5x 20-period volume SMA
+# - Exit: ATR trailing stop (2.0x ATR) or Donchian middle band reversion
+# - Uses 1d EMA for trend bias (works in bull/bear via adaptive trend following)
+# - Volume confirmation filters low-momentum breakouts
+# - ATR stoploss manages risk during volatile periods
+# - Position sizing: 0.25 discrete level to balance return and drawdown
+# - Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,17 +34,13 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 35:  # Need sufficient data for EMA34
         return signals
     
     # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_rising = ema_34_1d > np.roll(ema_34_1d, 1)
-    ema_34_falling = ema_34_1d < np.roll(ema_34_1d, 1)
-    # Align to 12h timeframe with proper delay (completed 1d bar only)
-    ema_34_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_rising)
-    ema_34_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_falling)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
@@ -60,82 +56,101 @@ def generate_signals(prices):
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period)
+    # Upper channel = highest high over last 20 periods
+    # Lower channel = lowest low over last 20 periods
+    # Middle channel = (upper + lower) / 2
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (highest_20 + lowest_20) / 2.0
     
-    # Track bars since entry for time-based exit
-    bars_since_entry = np.full(n, 0)
+    # Track highest high since entry for trailing stop (long)
+    # Track lowest low since entry for trailing stop (short)
+    highest_since_entry = np.full(n, np.nan)
+    lowest_since_entry = np.full(n, np.nan)
     
     for i in range(20, n):  # Start from 20 to have sufficient lookback
         # Skip if not in trading session
         if not in_session[i]:
             signals[i] = 0.0
-            bars_since_entry[i] = 0
             continue
             
         # Skip if any required data is invalid
         if (np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_34_rising_aligned[i]) or np.isnan(ema_34_falling_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or np.isnan(donchian_middle[i])):
             signals[i] = 0.0
-            bars_since_entry[i] = 0
             continue
         
-        # Volume confirmation: 12h volume > 2.0x 20-period volume SMA
-        vol_confirm = volume[i] > 2.0 * volume_sma_20[i]
+        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
         # Donchian breakout signals
-        breakout_up = close[i] > donchian_high[i-1]  # Break above Donchian high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below Donchian low
+        breakout_up = close[i] > highest_20[i-1]  # Break above upper channel
+        breakout_down = close[i] < lowest_20[i-1]  # Break below lower channel
+        
+        # 1d EMA trend: rising vs falling
+        ema_rising = ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]
+        ema_falling = ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]
         
         if position == 0:  # Flat - look for entry
-            # Long: price breaks above Donchian high AND 1d EMA34 rising AND volume confirmation
-            if breakout_up and ema_34_rising_aligned[i] and vol_confirm:
+            # Long: price breaks above upper channel AND 1d EMA rising AND volume confirmation
+            if breakout_up and ema_rising and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-                bars_since_entry[i] = 1
-            # Short: price breaks below Donchian low AND 1d EMA34 falling AND volume confirmation
-            elif breakout_down and ema_34_falling_aligned[i] and vol_confirm:
+                highest_since_entry[i] = high[i]  # Initialize trailing stop
+            # Short: price breaks below lower channel AND 1d EMA falling AND volume confirmation
+            elif breakout_down and ema_falling and vol_confirm:
                 position = -1
                 signals[i] = -0.25
-                bars_since_entry[i] = 1
+                lowest_since_entry[i] = low[i]  # Initialize trailing stop
             else:
                 signals[i] = 0.0
-                bars_since_entry[i] = 0
+                # Carry forward NaN values for tracking
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:  # Long position - look for exit
-            # Update bars since entry
-            bars_since_entry[i] = bars_since_entry[i-1] + 1
+            # Update highest high since entry
+            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
             
-            # ATR trailing stop: exit if price drops 3.0*ATR below highest high since entry
-            # We'll use a simplified trailing stop: exit if price drops 3.0*ATR below entry price
-            # For better accuracy, we'd need to track entry price, but we'll use close-based approximation
-            trailing_stop = close[i-1] - 3.0 * atr[i] if i > 0 else close[i] - 3.0 * atr[i]
+            # ATR trailing stop: exit if price drops 2.0*ATR below highest high since entry
+            trailing_stop = highest_since_entry[i] - 2.0 * atr[i]
             
-            # Exit conditions: trailing stop hit OR time-based exit (max 3 bars) OR Donchian reversion
-            exit_condition = (close[i] < trailing_stop) or (bars_since_entry[i] >= 3) or (close[i] < donchian_low[i])
+            # Exit conditions: trailing stop hit OR reversion to Donchian middle
+            exit_condition = (close[i] < trailing_stop) or (close[i] < donchian_middle[i])
             
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
-                bars_since_entry[i] = 0
+                # Reset tracking arrays
+                highest_since_entry[i] = np.nan
+                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
+                # Propagate tracking values
+                highest_since_entry[i] = highest_since_entry[i]
+                lowest_since_entry[i] = lowest_since_entry[i-1]
         else:  # position == -1 (Short position) - look for exit
-            # Update bars since entry
-            bars_since_entry[i] = bars_since_entry[i-1] + 1
+            # Update lowest low since entry
+            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
             
-            # ATR trailing stop: exit if price rises 3.0*ATR above lowest low since entry
-            trailing_stop = close[i-1] + 3.0 * atr[i] if i > 0 else close[i] + 3.0 * atr[i]
+            # ATR trailing stop: exit if price rises 2.0*ATR above lowest low since entry
+            trailing_stop = lowest_since_entry[i] + 2.0 * atr[i]
             
-            # Exit conditions: trailing stop hit OR time-based exit (max 3 bars) OR Donchian reversion
-            exit_condition = (close[i] > trailing_stop) or (bars_since_entry[i] >= 3) or (close[i] > donchian_high[i])
+            # Exit conditions: trailing stop hit OR reversion to Donchian middle
+            exit_condition = (close[i] > trailing_stop) or (close[i] > donchian_middle[i])
             
             if exit_condition:
                 position = 0
                 signals[i] = 0.0
-                bars_since_entry[i] = 0
+                # Reset tracking arrays
+                highest_since_entry[i] = np.nan
+                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
+                # Propagate tracking values
+                highest_since_entry[i] = highest_since_entry[i-1]
+                lowest_since_entry[i] = lowest_since_entry[i]
     
     return signals
