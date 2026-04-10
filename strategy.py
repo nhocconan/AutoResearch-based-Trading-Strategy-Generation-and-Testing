@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# - Long: Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 (strong trend)
-# - Short: Bull Power < 0 AND Bear Power > 0 AND 1d ADX > 25 (strong trend)
+# Hypothesis: 12h Donchian(20) breakout + 1d ADX(14) trend filter + volume confirmation
+# - Long: price > Donchian high(20) AND 1d ADX > 25 (strong trend) AND volume > 1.5x 20-period average
+# - Short: price < Donchian low(20) AND 1d ADX > 25 (strong trend) AND volume > 1.5x 20-period average
 # - Uses discrete position sizing (0.25) to minimize fee churn
 # - ATR-based stoploss (2.0x ATR(14)) to manage risk
-# - Designed for 6h timeframe: targets 12-37 trades/year to avoid fee drag
+# - Designed for 12h timeframe: targets 12-37 trades/year to avoid fee drag
 # - Works in bull/bear markets: ADX filter ensures we only trade strong trends, avoiding chop
 
-name = "6h_1d_elder_ray_adx_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -60,24 +59,26 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 6h EMA(13) for Elder Ray
-    close_6h = prices['close'].values
-    ema_13 = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Pre-compute 12h Donchian channels (20-period)
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
-    # Pre-compute 6h Elder Ray components
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    bull_power = high_6h - ema_13
-    bear_power = ema_13 - low_6h
+    # Pre-compute 12h volume confirmation
+    volume_12h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h > (1.5 * avg_volume_20)
     
-    # Pre-compute 6h ATR(14) for stoploss
-    tr1_6h = high_6h - low_6h
-    tr2_6h = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3_6h = np.abs(low_6h - np.roll(close_6h, 1))
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    tr_6h[0] = tr1_6h[0]
-    atr_14 = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # Pre-compute 12h ATR(14) for stoploss
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_14 = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -85,38 +86,38 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: Elder Ray turns bearish OR stoploss hit
-            if bull_power[i] <= 0 or bear_power[i] >= 0 or close_6h[i] < entry_price - 2.0 * atr_14[i]:
+            # Exit: price < Donchian low OR stoploss hit
+            if close_12h[i] < donchian_low[i] or close_12h[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: Elder Ray turns bullish OR stoploss hit
-            if bull_power[i] >= 0 or bear_power[i] <= 0 or close_6h[i] > entry_price + 2.0 * atr_14[i]:
+            # Exit: price > Donchian high OR stoploss hit
+            if close_12h[i] > donchian_high[i] or close_12h[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Look for Elder Ray signal with ADX trend filter
-            if adx_aligned[i] > 25:
-                # Long: Bull Power > 0 AND Bear Power < 0 (strong bullish momentum)
-                if bull_power[i] > 0 and bear_power[i] < 0:
+            # Look for Donchian breakout with ADX trend and volume filters
+            if vol_spike[i] and adx_aligned[i] > 25:
+                # Long: price > Donchian high(20)
+                if close_12h[i] > donchian_high[i]:
                     position = 1
-                    entry_price = close_6h[i]
+                    entry_price = close_12h[i]
                     signals[i] = 0.25
-                # Short: Bull Power < 0 AND Bear Power > 0 (strong bearish momentum)
-                elif bull_power[i] < 0 and bear_power[i] > 0:
+                # Short: price < Donchian low(20)
+                elif close_12h[i] < donchian_low[i]:
                     position = -1
-                    entry_price = close_6h[i]
+                    entry_price = close_12h[i]
                     signals[i] = -0.25
     
     return signals
