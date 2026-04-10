@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h ATR regime filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND 12h ATR(14) > 12h ATR(50) (expanding volatility)
-# - Short when price breaks below 20-period Donchian low AND 12h ATR(14) > 12h ATR(50)
-# - Volume confirmation: 4h volume > 1.8x 20-period 4h volume SMA (stricter to reduce trades)
-# - Exit: Donchian midpoint reversion
-# - Position sizing: 0.25 discrete level
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
-# - Uses 12h ATR for regime filter to avoid look-ahead and ensure completed-bar timing
-# - Higher volume threshold (1.8x) to reduce overtrading seen in recent failures
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level AND 4h close > 4h open (bullish 4h candle) AND volume > 1.5x 20-period volume SMA
+# - Short when price breaks below Camarilla L3 level AND 4h close < 4h open (bearish 4h candle) AND volume > 1.5x 20-period volume SMA
+# - Exit: price reverts to Camarilla Pivot point (PP) or opposite breakout with volume confirmation
+# - Uses 4h for signal direction (trend bias) and 1h for precise entry timing
+# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
+# - Position sizing: 0.20 discrete level to control drawdown
+# - Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag
 
-name = "4h_12h_donchian_atr_volume_v1"
-timeframe = "4h"
+name = "1h_4h_camarilla_pivot_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,86 +26,90 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 20-period Donchian channels
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Load 4h data ONCE before loop (MTF rule compliance)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return signals
     
-    # Load 12h HTF data ONCE before loop (MANDATORY)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
-        return np.zeros(n)
+    # Calculate 4h candle direction (bullish/bearish) for trend filter
+    close_4h = df_4h['close'].values
+    open_4h = df_4h['open'].values
+    # Bullish 4h candle: close > open
+    bullish_4h = close_4h > open_4h
+    bearish_4h = close_4h < open_4h
+    # Align to 1h timeframe with proper delay (completed 4h bar only)
+    bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, bullish_4h)
+    bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, bearish_4h)
     
-    # Calculate 12h ATR(14) and ATR(50) for volatility regime filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    tr1 = pd.Series(high_12h - low_12h)
-    tr2 = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
-    tr3 = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_50_12h = pd.Series(tr_12h).rolling(window=50, min_periods=50).mean().values
-    
-    # Align 12h ATR to 4h timeframe (proper completed-bar timing)
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    atr_50_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_50_12h)
+    # Calculate 1h Camarilla pivot levels (based on previous bar)
+    # PP = (H + L + C) / 3
+    # H3 = PP + (H - L) * 1.1 / 2
+    # L3 = PP - (H - L) * 1.1 / 2
+    pp = (np.roll(high, 1) + np.roll(low, 1) + np.roll(close, 1)) / 3.0
+    rng = np.roll(high, 1) - np.roll(low, 1)
+    h3 = pp + rng * 1.1 / 2.0
+    l3 = pp - rng * 1.1 / 2.0
     
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Track entry extreme for exit logic
-    entry_price = np.full(n, np.nan)
-    
-    for i in range(donchian_period, n):
+    for i in range(1, n):  # Start from 1 to have previous bar data
+        # Skip if not in trading session
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+            
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]) or
-            np.isnan(atr_14_12h_aligned[i]) or np.isnan(atr_50_12h_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(h3[i]) or np.isnan(l3[i]) or np.isnan(pp[i]) or
+            np.isnan(volume_sma_20[i]) or
+            np.isnan(bullish_4h_aligned[i]) or np.isnan(bearish_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: 12h ATR(14) > 12h ATR(50) (expanding volatility regime)
-        vol_regime = atr_14_12h_aligned[i] > atr_50_12h_aligned[i]
+        # Volume confirmation: 1h volume > 1.5x 20-period volume SMA
+        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Volume confirmation: 4h volume > 1.8x 20-period volume SMA (stricter threshold)
-        vol_confirm = volume[i] > 1.8 * volume_sma_20[i]
-        
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
+        # Camarilla breakout signals
+        breakout_up = close[i] > h3[i]  # Break above H3
+        breakout_down = close[i] < l3[i]  # Break below L3
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and vol_regime and vol_confirm:
+            # Long: price breaks above H3 AND 4h bullish AND volume confirmation
+            if breakout_up and bullish_4h_aligned[i] and vol_confirm:
                 position = 1
-                signals[i] = 0.25
-                entry_price[i] = close[i]
-            elif breakout_down and vol_regime and vol_confirm:
+                signals[i] = 0.20
+            # Short: price breaks below L3 AND 4h bearish AND volume confirmation
+            elif breakout_down and bearish_4h_aligned[i] and vol_confirm:
                 position = -1
-                signals[i] = -0.25
-                entry_price[i] = close[i]
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
-            # Exit on Donchian midpoint reversion
-            if close[i] < donchian_mid[i]:
+            # Exit on reversion to Pivot point OR opposite breakout with volume
+            exit_condition = (close[i] < pp[i]) or \
+                           (breakout_down and vol_confirm)
+            if exit_condition:
                 position = 0
                 signals[i] = 0.0
-                entry_price[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         else:  # position == -1 (Short position) - look for exit
-            # Exit on Donchian midpoint reversion
-            if close[i] > donchian_mid[i]:
+            # Exit on reversion to Pivot point OR opposite breakout with volume
+            exit_condition = (close[i] > pp[i]) or \
+                           (breakout_up and vol_confirm)
+            if exit_condition:
                 position = 0
                 signals[i] = 0.0
-                entry_price[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
