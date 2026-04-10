@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
-# - Williams Alligator (jaw=13, teeth=8, lips=5) from 1d to define trend direction and market state
-# - Alligator sleeping (jaw/teeth/lips intertwined) = ranging market → fade extremes at Camarilla H3/L3
-# - Alligator awakening (jaws diverging) = trending market → breakout in direction of jaw alignment
-# - Volume confirmation: current 12h volume > 1.8x 30-period average to avoid false breakouts
-# - Designed for 12h timeframe: targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
-# - Works in bull/bear markets: Alligator adapts to trending/ranging regimes
+# Hypothesis: 4h Donchian(20) breakout with 12h ADX trend filter and volume confirmation
+# - Donchian breakout provides clear entry/exit rules with proven edge in trending markets
+# - 12h ADX(14) > 25 ensures we only trade when higher timeframe trend is strong
+# - Volume confirmation: current 4h volume > 1.5x 20-period average to filter weak breakouts
+# - Designed for 4h timeframe: targets 20-50 trades/year (80-200 total over 4 years) to avoid fee drag
+# - Works in bull/bear markets: ADX filter ensures we trade with higher timeframe trend direction
 # - Uses discrete position sizing (0.25) to minimize fee churn
 
-name = "12h_1d_alligator_camarilla_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,118 +21,93 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d Williams Alligator
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    median_price_1d = (high_1d + low_1d) / 2.0
+    # Pre-compute 12h ADX(14) for trend filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-    def smma(data, period):
-        result = np.full_like(data, np.nan, dtype=np.float64)
-        if len(data) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_DATA) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    jaw = smma(median_price_1d, 13)
-    teeth = smma(median_price_1d, 8)
-    lips = smma(median_price_1d, 5)
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
+                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
+                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Align Alligator components to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Pre-compute 1d Camarilla levels (H3/L3 for mean reversion, H4/L4 for breakout)
-    rango_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + (rango_1d * 1.1 / 4)
-    camarilla_l3 = close_1d - (rango_1d * 1.1 / 4)
-    camarilla_h4 = close_1d + (rango_1d * 1.1 / 2)
-    camarilla_l4 = close_1d - (rango_1d * 1.1 / 2)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
     
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
-    # Pre-compute 12h volume confirmation
-    volume_12h = prices['volume'].values
-    avg_volume_30 = pd.Series(volume_12h).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume_12h > (1.8 * avg_volume_30)
+    # Pre-compute 4h Donchian channels (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    
+    # Donchian channels
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 4h volume confirmation
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (1.5 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator state: sleeping (intertwined) vs awakening (diverging)
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        
-        # Alligator sleeping: all lines close together (market ranging)
-        max_line = max(jaw_val, teeth_val, lips_val)
-        min_line = min(jaw_val, teeth_val, lips_val)
-        alligator_sleeping = (max_line - min_line) < (0.001 * close_1d[i])  # 0.1% threshold
-        
-        # Alligator awakening: jaws aligned with trend
-        jaw_above_teeth = jaw_val > teeth_val
-        teeth_above_lips = teeth_val > lips_val
-        jaw_below_teeth = jaw_val < teeth_val
-        teeth_below_lips = teeth_val < lips_val
-        
         if position == 1:  # Long position
-            # Exit: price closes below L3 (mean reversion failure) or Alligator reverses
-            if prices['close'].iloc[i] < camarilla_l3_aligned[i] or (jaw_below_teeth and teeth_below_lips):
+            # Exit: price closes below Donchian low (trend reversal)
+            if close_4h[i] < donchian_low[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H3 (mean reversion failure) or Alligator reverses
-            if prices['close'].iloc[i] > camarilla_h3_aligned[i] or (jaw_above_teeth and teeth_above_lips):
+            # Exit: price closes above Donchian high (trend reversal)
+            if close_4h[i] > donchian_high[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            if vol_spike[i]:
-                # Alligator sleeping: ranging market → mean reversion at H3/L3
-                if alligator_sleeping:
-                    # Mean reversion long: price touches L3 and Alligator sleeping
-                    if prices['close'].iloc[i] <= camarilla_l3_aligned[i] * 1.002:  # 0.2% buffer
-                        position = 1
-                        signals[i] = 0.25
-                    # Mean reversion short: price touches H3 and Alligator sleeping
-                    elif prices['close'].iloc[i] >= camarilla_h3_aligned[i] * 0.998:  # 0.2% buffer
-                        position = -1
-                        signals[i] = -0.25
-                # Alligator awakening: trending market → breakout in jaw direction
-                else:
-                    # Breakout long: jaw above teeth and lips, price breaks H4
-                    if jaw_above_teeth and teeth_above_lips and prices['close'].iloc[i] > camarilla_h4_aligned[i]:
-                        position = 1
-                        signals[i] = 0.25
-                    # Breakout short: jaw below teeth and lips, price breaks L4
-                    elif jaw_below_teeth and teeth_below_lips and prices['close'].iloc[i] < camarilla_l4_aligned[i]:
-                        position = -1
-                        signals[i] = -0.25
+            # Look for Donchian breakout with trend and volume filters
+            if vol_spike[i] and adx_aligned[i] > 25:
+                # Breakout long: price closes above Donchian high
+                if close_4h[i] > donchian_high[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Breakout short: price closes below Donchian low
+                elif close_4h[i] < donchian_low[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
