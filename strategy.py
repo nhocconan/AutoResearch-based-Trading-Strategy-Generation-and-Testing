@@ -3,21 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + ADX trend strength + volume confirmation
-# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
-# - Trend up when Lips > Teeth > Jaw, down when Lips < Teeth < Jaw
-# - ADX > 25 confirms strong trend (avoid choppy markets)
-# - Volume > 1.2x 20-period average confirms participation
-# - Enter long when Alligator bullish + ADX>25 + volume confirmation
-# - Enter short when Alligator bearish + ADX>25 + volume confirmation
-# - Exit when Alligator reverses (Teeth crosses Lips) OR ADX < 20 (trend weakening)
+# Hypothesis: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Long when price breaks above H3 level with volume > 1.3x average AND weekly close > weekly EMA20
+# - Short when price breaks below L3 level with volume > 1.3x average AND weekly close < weekly EMA20
+# - Exit when price retests pivot point (PP) or volume drops below average
+# - Weekly trend filter ensures alignment with major trend
+# - Volume confirmation prevents false breakouts
 # - Targets 12-25 trades/year (50-100 total over 4 years) to avoid fee drag
-# - Williams Alligator identifies trend inception and continuation
-# - ADX filters out ranging markets where Alligator whipsaws
-# - Volume confirmation ensures breakouts have conviction
+# - Camarilla pivots work well in ranging markets; breakouts capture strong moves in both bull and bear regimes
 
-name = "6h_1d_williams_alligator_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,101 +22,73 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Pre-compute Williams Alligator on 6h data
-    median_price = (prices['high'] + prices['low']) / 2.0
-    jaw = median_price.rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values
-    teeth = median_price.rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values
-    lips = median_price.rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values
+    # Pre-compute Camarilla pivot levels from daily data (using prior day's OHLC)
+    high_1d = prices['high'].rolling(window=2, min_periods=2).max().shift(1).values  # prior day high
+    low_1d = prices['low'].rolling(window=2, min_periods=2).min().shift(1).values    # prior day low
+    close_1d = prices['close'].rolling(window=2, min_periods=2).mean().shift(1).values  # prior day close
     
-    # Alligator relationships
-    alligator_bullish = (lips > teeth) & (teeth > jaw)
-    alligator_bearish = (lips < teeth) & (teeth < jaw)
+    # Calculate pivot point (PP)
+    PP = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels
+    range_hl = high_1d - low_1d
+    H3 = PP + (range_hl * 1.1 / 4)
+    L3 = PP - (range_hl * 1.1 / 4)
+    H4 = PP + (range_hl * 1.1 / 2)
+    L4 = PP - (range_hl * 1.1 / 2)
     
-    # Pre-compute ADX on 1d for trend strength (HTF)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1w EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed TR, DM+ , DM- (Wilder's smoothing = EMA with alpha=1/period)
-    period = 14
-    alpha = 1.0 / period
-    tr_period = pd.Series(tr).ewm(alpha=alpha, adjust=False).mean().values
-    dm_plus_period = pd.Series(dm_plus).ewm(alpha=alpha, adjust=False).mean().values
-    dm_minus_period = pd.Series(dm_minus).ewm(alpha=alpha, adjust=False).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_period / tr_period
-    di_minus = 100 * dm_minus_period / tr_period
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=alpha, adjust=False).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Pre-compute volume confirmation: > 1.2x 20-period average
+    # Pre-compute volume confirmation: > 1.3x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (1.2 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.3 * volume_20_avg)
     
-    # Exit conditions
-    alligator_weak = ~(alligator_bullish | alligator_bearish)  # Transition state
-    adx_weak = adx_aligned < 20  # Trend weakening
+    # Pre-compute volume filter: < average volume for exit
+    vol_normal = prices['volume'] < volume_20_avg
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after Alligator warmup
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or np.isnan(PP[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_20_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long entry: Alligator bullish + strong trend + volume confirmation
-            if (alligator_bullish[i] and 
-                adx_aligned[i] > 25 and 
-                vol_spike.iloc[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long breakout: price > H3 with volume spike AND weekly uptrend
+            if (prices['high'].iloc[i] > H3[i] and 
+                vol_spike.iloc[i] and 
+                prices['close'].iloc[i] > ema20_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Alligator bearish + strong trend + volume confirmation
-            elif (alligator_bearish[i] and 
-                  adx_aligned[i] > 25 and 
-                  vol_spike.iloc[i]):
+            # Short breakdown: price < L3 with volume spike AND weekly downtrend
+            elif (prices['low'].iloc[i] < L3[i] and 
+                  vol_spike.iloc[i] and 
+                  prices['close'].iloc[i] < ema20_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Alligator reverses (Teeth crosses Lips)
-            # 2. ADX drops below 20 (trend weakening)
+            # 1. Price retests pivot point (PP) (mean reversion signal)
+            # 2. Volume drops below average (loss of momentum)
             if position == 1:  # Long position
-                if (alligator_weak[i] or 
-                    adx_weak[i]):
+                if (prices['low'].iloc[i] < PP[i] or 
+                    vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25  # Hold long
             elif position == -1:  # Short position
-                if (alligator_weak[i] or 
-                    adx_weak[i]):
+                if (prices['high'].iloc[i] > PP[i] or 
+                    vol_normal.iloc[i]):
                     position = 0
                     signals[i] = 0.0
                 else:
