@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and 1w trend filter (Elder Ray)
-# - Long when price breaks above 12h Donchian upper band (20-period high) AND 1d volume > 1.5x 20-period volume SMA AND 1w Elder Ray bull power > 0
-# - Short when price breaks below 12h Donchian lower band (20-period low) AND 1d volume > 1.5x 20-period volume SMA AND 1w Elder Ray bear power < 0
-# - Exit: price retreats to 12h Donchian midpoint or volume drops below average
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d trend filter (EMA50)
+# - Long when price breaks above 4h Donchian upper(20) AND 12h volume > 1.3x 20-period volume SMA AND 1d close > 1d EMA50
+# - Short when price breaks below 4h Donchian lower(20) AND 12h volume > 1.3x 20-period volume SMA AND 1d close < 1d EMA50
+# - Exit: price retreats to 4h Donchian midpoint or loss of volume confirmation
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 12-37 trades/year on 12h timeframe to stay within fee drag limits
-# - Uses Donchian structure from 12h, volume confirmation from 1d, trend filter from 1w Elder Ray
+# - Target: 20-50 trades/year on 4h timeframe to stay within fee drag limits
+# - Uses Donchian channels for structure, 12h for volume confirmation, 1d for trend filter
 
-name = "12h_1d_1w_donchian_volume_elder_v1"
-timeframe = "12h"
+name = "4h_12h_1d_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,9 +21,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 30:
+    if len(df_12h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,53 +35,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h Donchian channels (20-period)
+    # Calculate 4h Donchian channels (20-period)
     high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_max_20 + low_min_20) / 2.0
+    donchian_upper = high_max_20
+    donchian_lower = low_min_20
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    # Calculate 1d volume SMA for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Align 12h volume SMA for confirmation
+    volume_12h = df_12h['volume'].values
+    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
     
-    # Calculate 1w Elder Ray for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    ema_13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1w = high_1w - ema_13_1w
-    bear_power_1w = low_1w - ema_13_1w
+    # Calculate 1d close for trend comparison
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Align 1w Elder Ray to 12h timeframe
-    bull_power_1w_aligned = align_htf_to_ltf(prices, df_1w, bull_power_1w)
-    bear_power_1w_aligned = align_htf_to_ltf(prices, df_1w, bear_power_1w)
-    
-    # Align 1d volume SMA to 12h timeframe
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    
-    for i in range(40, n):  # Start after warmup for indicators
+    for i in range(60, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or
-            np.isnan(bull_power_1w_aligned[i]) or np.isnan(bear_power_1w_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(donchian_mid[i]) or np.isnan(volume_sma_20_12h_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(close_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.5x 20-period volume SMA AND 1d volume > 1.5x 20-period volume SMA
-        vol_confirm_12h = volume[i] > 1.5 * pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
-        vol_confirm_1d = volume_1d[i // 4] > 1.5 * volume_sma_20_1d_aligned[i] if i // 4 < len(volume_1d) else False
-        vol_confirm = vol_confirm_12h and vol_confirm_1d
+        # Volume confirmation: 12h volume > 1.3x 20-period volume SMA
+        vol_confirm = volume[i // 3] > 1.3 * volume_sma_20_12h_aligned[i] if i // 3 < len(volume_12h) else False
         
-        # Trend filter: 1w Elder Ray
-        trend_bullish = bull_power_1w_aligned[i] > 0
-        trend_bearish = bear_power_1w_aligned[i] < 0
+        # Trend filter: 1d close vs 1d EMA50
+        trend_bullish = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        trend_bearish = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Donchian breakout signals
-        breakout_up = close[i] > high_max_20[i-1]  # Break above previous upper band
-        breakout_down = close[i] < low_min_20[i-1]  # Break below previous lower band
+        # Donchian breakout signals (using previous bar's levels to avoid look-ahead)
+        breakout_up = close[i] > donchian_upper[i-1]
+        breakout_down = close[i] < donchian_lower[i-1]
         
         # Exit conditions: price retreats to midpoint or loss of volume confirmation
         exit_long = close[i] < donchian_mid[i] or not vol_confirm
