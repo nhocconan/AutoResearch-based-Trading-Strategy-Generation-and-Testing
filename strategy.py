@@ -3,117 +3,133 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d Volume Spike + ATR Trailing Stop
-# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price
-# - Long when Lips > Teeth > Jaw (bullish alignment) AND 1d volume > 2.0x 20-bar avg
-# - Short when Lips < Teeth < Jaw (bearish alignment) AND 1d volume > 2.0x 20-bar avg
-# - Exit via ATR trailing stop: 3*ATR from extreme price
-# - Uses 12h timeframe for lower trade frequency (~20-40/year) to minimize fee drag
-# - Alligator catches trends; volume confirms conviction; ATR stop manages risk
-# - Works in both bull (trend following) and bear (short trends) markets
+# Hypothesis: 4h Donchian breakout with 12h ADX trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high AND 12h ADX > 25 AND volume > 1.5x 20-bar avg
+# - Short when price breaks below Donchian(20) low AND 12h ADX > 25 AND volume > 1.5x 20-bar avg
+# - Exit when price touches Donchian midpoint (mean reversion to equilibrium)
+# - Uses 12h ADX > 25 for strong trend filter to avoid whipsaws in ranging markets
+# - Discrete position sizing (0.25) to minimize fee churn
+# - Target: 20-30 trades/year on 4h timeframe (80-120 total over 4 years)
+# - Donchian breakouts work well in trending markets; ADX filter ensures we only trade strong trends
 
-name = "12h_1d_alligator_volume_atrstop_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
     
-    # Pre-compute Williams Alligator on 12h timeframe
-    # Median price = (high + low) / 2
-    median_price = (prices['high'] + prices['low']) / 2
+    # Pre-compute 12h ADX for trend filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Jaw: 13-period SMA, smoothed by 8 periods
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
-    jaw = pd.Series(jaw).rolling(window=8, min_periods=8).mean()
+    # Calculate ADX components
+    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
     
-    # Teeth: 8-period SMA, smoothed by 5 periods
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
-    teeth = pd.Series(teeth).rolling(window=5, min_periods=5).mean()
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
     
-    # Lips: 5-period SMA, smoothed by 3 periods
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
-    lips = pd.Series(lips).rolling(window=3, min_periods=3).mean()
+    # Wilder's smoothing
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Aligator alignment conditions
-    lips_above_teeth = lips > teeth
-    teeth_above_jaw = teeth > jaw
-    lips_below_teeth = lips < teeth
-    teeth_below_jaw = teeth < jaw
+    period = 14
+    if len(plus_dm) >= period and len(minus_dm) >= period and len(tr) >= period:
+        plus_dm_smooth = wilders_smoothing(plus_dm, period)
+        minus_dm_smooth = wilders_smoothing(minus_dm, period)
+        tr_smooth = wilders_smoothing(tr, period)
+        
+        # Avoid division by zero
+        plus_di = np.where(tr_smooth != 0, (plus_dm_smooth / tr_smooth) * 100, 0)
+        minus_di = np.where(tr_smooth != 0, (minus_dm_smooth / tr_smooth) * 100, 0)
+        dx = np.where((plus_di + minus_di) != 0, 
+                      (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100, 0)
+        adx = wilders_smoothing(dx, period)
+    else:
+        adx = np.full_like(close_12h, np.nan)
     
-    bullish_align = lips_above_teeth & teeth_above_jaw
-    bearish_align = lips_below_teeth & teeth_below_jaw
+    # Align HTF ADX to LTF
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
-    # Pre-compute 1d volume confirmation: > 2.0x 20-period average
-    volume_20_avg = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = df_1d['volume'] > (2.0 * volume_20_avg)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.values)
+    # Pre-compute Donchian channels (20-period) from 4h data
+    high_roll = prices['high'].rolling(window=20, min_periods=20).max().values
+    low_roll = prices['low'].rolling(window=20, min_periods=20).min().values
+    donchian_high = high_roll
+    donchian_low = low_roll
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Pre-compute ATR(14) for trailing stop
-    high_low = prices['high'] - prices['low']
-    high_close = np.abs(prices['high'] - prices['close'].shift())
-    low_close = np.abs(prices['low'] - prices['close'].shift())
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Pre-compute volume confirmation: > 1.5x 20-period average
+    volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(60, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bullish_align.iloc[i]) or np.isnan(bearish_align.iloc[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_20_avg[i])):
             # Hold current position or flat
-            signals[i] = 0.25 * position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long when bullish Alligator alignment AND volume spike
-            if bullish_align.iloc[i] and vol_spike_1d_aligned[i]:
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above Donchian high AND strong trend with volume spike
+            if (prices['close'].iloc[i] > donchian_high[i] and 
+                adx_aligned[i] > 25 and 
+                vol_spike.iloc[i]):
                 position = 1
-                entry_price = prices['close'].iloc[i]
-                highest_since_entry = entry_price
-                lowest_since_entry = entry_price
                 signals[i] = 0.25
-            # Short when bearish Alligator alignment AND volume spike
-            elif bearish_align.iloc[i] and vol_spike_1d_aligned[i]:
+            # Short when price breaks below Donchian low AND strong trend with volume spike
+            elif (prices['close'].iloc[i] < donchian_low[i] and 
+                  adx_aligned[i] > 25 and 
+                  vol_spike.iloc[i]):
                 position = -1
-                entry_price = prices['close'].iloc[i]
-                highest_since_entry = entry_price
-                lowest_since_entry = entry_price
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - update extremes and check trailing stop
-            # Update highest/lowest since entry
+        else:  # Have position - look for exit to midpoint (mean reversion)
+            # Exit when price returns to Donchian midpoint
+            exit_signal = False
             if position == 1:  # Long position
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                
-                # Check trailing stop: 3*ATR below highest
-                if prices['close'].iloc[i] < highest_since_entry - 3.0 * atr[i]:
-                    position = 0
-                    signals[i] = 0.0
-                else:
+                if prices['close'].iloc[i] <= donchian_mid[i]:
+                    exit_signal = True
+            elif position == -1:  # Short position
+                if prices['close'].iloc[i] >= donchian_mid[i]:
+                    exit_signal = True
+            
+            if exit_signal:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
                     signals[i] = 0.25
-            else:  # Short position
-                highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                
-                # Check trailing stop: 3*ATR above lowest
-                if prices['close'].iloc[i] > lowest_since_entry + 3.0 * atr[i]:
-                    position = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = -0.25
     
