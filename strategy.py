@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 20-period high AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
-# - Short when price breaks below 20-period low AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
-# - Exit on opposite Donchian breakout (10-period) to capture swings
-# - Uses 1d EMA50 for trend filter to avoid counter-trend trades in bear markets
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above H3 level AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
+# - Short when price breaks below L3 level AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
+# - Exit when price returns to Pivot level (mean reversion to equilibrium)
+# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-35 trades/year on 4h timeframe (80-140 total over 4 years)
-# - Donchian breakouts work in both trending and ranging markets; trend filter adds robustness
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Camarilla pivots work well in ranging markets; trend filter adds directional bias in trends
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,22 +26,30 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels from 4h data (20-period for entry, 10-period for exit)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
+    # Pre-compute Camarilla pivot levels from daily data
+    # Using 1d data for pivot calculation (standard practice)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period Donchian for entry
-    donchian_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day's OHLC
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # 10-period Donchian for exit (opposite side)
-    donchian_high_10 = pd.Series(high_4h).rolling(window=10, min_periods=10).max().values
-    donchian_low_10 = pd.Series(low_4h).rolling(window=10, min_periods=10).min().values
+    # H3, L3 levels (most important for breakouts)
+    h3 = close_1d + (range_1d * 1.1 / 4)
+    l3 = close_1d - (range_1d * 1.1 / 4)
+    # Pivot level for exit
+    piv = pivot
+    
+    # Align HTF levels to LTF
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    piv_aligned = align_htf_to_ltf(prices, df_1d, piv)
     
     # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1d_arr = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d_arr).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Pre-compute volume confirmation: > 2.0x 20-period average
@@ -53,9 +61,9 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or 
-            np.isnan(donchian_high_10[i]) or np.isnan(donchian_low_10[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(piv_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -66,29 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above 20-period high AND 1d uptrend with volume spike
-            if (prices['close'].iloc[i] > donchian_high_20[i] and 
+            # Long when price breaks above H3 AND 1d uptrend with volume spike
+            if (prices['close'].iloc[i] > h3_aligned[i] and 
                 prices['close'].iloc[i] > ema50_1d_aligned[i] and  # price above 1d EMA50
                 vol_spike.iloc[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below 20-period low AND 1d downtrend with volume spike
-            elif (prices['close'].iloc[i] < donchian_low_20[i] and 
+            # Short when price breaks below L3 AND 1d downtrend with volume spike
+            elif (prices['close'].iloc[i] < l3_aligned[i] and 
                   prices['close'].iloc[i] < ema50_1d_aligned[i] and  # price below 1d EMA50
                   vol_spike.iloc[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit on opposite Donchian breakout
-            # Exit long when price breaks below 10-period low
-            # Exit short when price breaks above 10-period high
+        else:  # Have position - look for exit to pivot (mean reversion)
+            # Exit when price returns to pivot level
             exit_signal = False
             if position == 1:  # Long position
-                if prices['close'].iloc[i] < donchian_low_10[i]:
+                if prices['close'].iloc[i] <= piv_aligned[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if prices['close'].iloc[i] > donchian_high_10[i]:
+                if prices['close'].iloc[i] >= piv_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
