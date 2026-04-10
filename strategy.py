@@ -50,6 +50,7 @@ def generate_signals(prices):
     # Pre-compute 4h Donchian channels (20-period)
     high_4h = prices['high'].values
     low_4h = prices['low'].values
+    close_4h = prices['close'].values
     donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
