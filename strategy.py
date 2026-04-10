@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND 1d close > 1d open (bullish daily candle) AND volume > 1.5x 20-period volume SMA
-# - Short when price breaks below 20-period Donchian low AND 1d close < 1d open (bearish daily candle) AND volume > 1.5x 20-period volume SMA
-# - Exit: ATR trailing stop (2.5x ATR) or reversion to Donchian midpoint
-# - Uses 1d for signal direction (trend bias) and 4h for precise entry timing
-# - Session filter: 08-20 UTC to avoid low-volume Asian session noise
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and ATR trailing stop
+# - Long when price breaks above 20-day Donchian high AND 1w close > 1w open (bullish weekly candle)
+# - Short when price breaks below 20-day Donchian low AND 1w close < 1w open (bearish weekly candle)
+# - Exit: ATR(14) trailing stop (2.5x ATR from extreme) OR Donchian mid-line reversion
+# - Uses 1w for trend bias (avoids whipsaw in bear markets) and 1d for precise entries
 # - Position sizing: 0.25 discrete level to control drawdown and minimize fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag while maintaining statistical significance
-# - Donchian breakouts work in both bull and bear markets when filtered by higher timeframe trend and volume
+# - Target: 7-25 trades/year (30-100 total over 4 years) to minimize fee drag
+# - Donchian breakouts work in both bull and bear markets when filtered by higher timeframe trend
 
-name = "4h_1d_donchian_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,29 +26,24 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1w data ONCE before loop (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return signals
     
-    # Calculate 1d candle direction (bullish/bearish) for trend filter
-    close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
-    # Bullish 1d candle: close > open
-    bullish_1d = close_1d > open_1d
-    bearish_1d = close_1d < open_1d
-    # Align to 4h timeframe with proper delay (completed 1d bar only)
-    bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, bullish_1d)
-    bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, bearish_1d)
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 1w candle direction (bullish/bearish) for trend filter
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    # Bullish 1w candle: close > open
+    bullish_1w = close_1w > open_1w
+    bearish_1w = close_1w < open_1w
+    # Align to 1d timeframe with proper delay (completed 1w bar only)
+    bullish_1w_aligned = align_htf_to_ltf(prices, df_1w, bullish_1w)
+    bearish_1w_aligned = align_htf_to_ltf(prices, df_1w, bearish_1w)
     
     # Calculate ATR(14) for trailing stop
     tr1 = high - low
@@ -58,47 +52,44 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 20-period volume SMA for confirmation
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 20-period Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
-    
     # Track highest high since entry for trailing stop (long)
     # Track lowest low since entry for trailing stop (short)
     highest_since_entry = np.full(n, np.nan)
     lowest_since_entry = np.full(n, np.nan)
     
-    for i in range(20, n):  # Start from 20 to have sufficient lookback
-        # Skip if not in trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
+    for i in range(20, n):  # Start from 20 to have sufficient lookback for Donchian
+        
         # Skip if any required data is invalid
-        if (np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(bullish_1d_aligned[i]) or np.isnan(bearish_1d_aligned[i])):
+        if (np.isnan(atr[i]) or
+            np.isnan(bullish_1w_aligned[i]) or np.isnan(bearish_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Calculate Donchian channels (20-period) using pure numpy/pandas
+        # Highest high of last 20 periods (excluding current)
+        highest_high = np.max(high[i-20:i]) if i >= 20 else np.nan
+        # Lowest low of last 20 periods (excluding current)
+        lowest_low = np.min(low[i-20:i]) if i >= 20 else np.nan
         
-        # Donchian breakout signals (using previous bar's levels to avoid look-ahead)
-        breakout_up = close[i] > donchian_high[i-1]  # Break above Donchian high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below Donchian low
+        if np.isnan(highest_high) or np.isnan(lowest_low):
+            signals[i] = 0.0
+            continue
+        
+        # Donchian mid-line
+        donchian_mid = (highest_high + lowest_low) / 2.0
+        
+        # Donchian breakout signals
+        breakout_up = close[i] > highest_high  # Break above 20-period high
+        breakout_down = close[i] < lowest_low  # Break below 20-period low
         
         if position == 0:  # Flat - look for entry
-            # Long: price breaks above Donchian high AND 1d bullish AND volume confirmation
-            if breakout_up and bullish_1d_aligned[i] and vol_confirm:
+            # Long: price breaks above Donchian high AND 1w bullish
+            if breakout_up and bullish_1w_aligned[i]:
                 position = 1
                 signals[i] = 0.25
                 highest_since_entry[i] = high[i]  # Initialize trailing stop
-            # Short: price breaks below Donchian low AND 1d bearish AND volume confirmation
-            elif breakout_down and bearish_1d_aligned[i] and vol_confirm:
+            # Short: price breaks below Donchian low AND 1w bearish
+            elif breakout_down and bearish_1w_aligned[i]:
                 position = -1
                 signals[i] = -0.25
                 lowest_since_entry[i] = low[i]  # Initialize trailing stop
@@ -115,8 +106,8 @@ def generate_signals(prices):
             # ATR trailing stop: exit if price drops 2.5*ATR below highest high since entry
             trailing_stop = highest_since_entry[i] - 2.5 * atr[i]
             
-            # Exit conditions: trailing stop hit OR reversion to Donchian midpoint
-            exit_condition = (close[i] < trailing_stop) or (close[i] < donchian_mid[i])
+            # Exit conditions: trailing stop hit OR reversion to Donchian mid-line
+            exit_condition = (close[i] < trailing_stop) or (close[i] < donchian_mid)
             
             if exit_condition:
                 position = 0
@@ -136,8 +127,8 @@ def generate_signals(prices):
             # ATR trailing stop: exit if price rises 2.5*ATR above lowest low since entry
             trailing_stop = lowest_since_entry[i] + 2.5 * atr[i]
             
-            # Exit conditions: trailing stop hit OR reversion to Donchian midpoint
-            exit_condition = (close[i] > trailing_stop) or (close[i] > donchian_mid[i])
+            # Exit conditions: trailing stop hit OR reversion to Donchian mid-line
+            exit_condition = (close[i] > trailing_stop) or (close[i] > donchian_mid)
             
             if exit_condition:
                 position = 0
