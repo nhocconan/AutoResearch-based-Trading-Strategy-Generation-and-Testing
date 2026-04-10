@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation
-# - Long: 12h close > Donchian upper(20) + price > 1w EMA50 (uptrend) + 12h volume > 1.5x 20-period MA
-# - Short: 12h low < Donchian lower(20) + price < 1w EMA50 (downtrend) + 12h volume > 1.5x 20-period MA
-# - Exit: Close back inside Donchian channel (mean reversion) or opposite signal
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and choppiness regime filter
+# - Long: price breaks above Camarilla H3 level + 1d volume > 1.5x 20-period MA + CHOP(14) < 61.8 (trending regime)
+# - Short: price breaks below Camarilla L3 level + 1d volume > 1.5x 20-period MA + CHOP(14) < 61.8 (trending regime)
+# - Exit: price returns to Camarilla Pivot level or opposite signal
 # - Position sizing: 0.25 (discrete level)
-# - Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag
-# - Donchian breakouts capture volatility expansion, EMA50 filters for higher-timeframe trend,
-#   volume confirms institutional participation. Works in bull/bear: breakouts with trend in bull,
+# - Target: 80-160 total trades over 4 years (20-40/year) to avoid fee drag
+# - Camarilla levels provide intraday support/resistance, volume confirms institutional participation,
+#   chop filter avoids false breakouts in ranging markets. Works in bull/bear: breakouts with trend in bull,
 #   mean reversion exits in bear ranges.
 
-name = "12h_1w_donchian_breakout_trend_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,79 +23,100 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLCV
-    open_12h = prices['open'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    volume_12h = prices['volume'].values
+    # Pre-compute 4h OHLC
+    open_4h = prices['open'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
-    # Pre-compute 1w data
-    close_1w = df_1w['close'].values
+    # Pre-compute 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian Channel (20-period) for 12h
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (H + L + C) / 3
+    # H3 = C + (H - L) * 1.1 / 4
+    # L3 = C - (H - L) * 1.1 / 4
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    h3_1d = close_1d + range_1d * 1.1 / 4.0
+    l3_1d = close_1d - range_1d * 1.1 / 4.0
     
-    # Calculate 1w EMA50
-    close_1w_series = pd.Series(close_1w)
-    ema_50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align Camarilla levels to 4h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # Calculate 12h volume moving average (20-period)
-    volume_12h_series = pd.Series(volume_12h)
-    volume_ma_20_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, prices, volume_ma_20_12h)  # same timeframe
+    # Calculate 1d volume moving average (20-period)
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    
+    # Calculate Choppiness Index (14-period) for 1d
+    # CHOP = 100 * log10(sum(ATR(14)) / (n * log(n))) / log10(n)
+    # Simplified: CHOP = 100 * log10(ATR_sum / (14 * log10(14))) / log10(14)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    chop_1d = 100 * np.log10(atr_sum / (14 * np.log10(14))) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period (need at least 50 for Donchian20)
+    for i in range(50, n):  # Start after warmup period (need at least 50 for ATR14/CHOP)
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ma_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(volume_ma_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 12h OHLCV
-        open_price = open_12h[i]
-        high_price = high_12h[i]
-        low_price = low_12h[i]
-        close_price = close_12h[i]
-        volume_price = volume_12h[i]
+        # Get current 4h OHLC
+        close_price = close_4h[i]
         
-        # Get aligned 1w data for current 12h bar (completed 1w bar)
-        ema_50_current = ema_50_aligned[i]
+        # Get aligned 1d data for current 4h bar (completed 1d bar)
+        pivot_current = pivot_aligned[i]
+        h3_current = h3_aligned[i]
+        l3_current = l3_aligned[i]
         volume_ma_current = volume_ma_aligned[i]
+        volume_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        chop_current = chop_aligned[i]
         
-        # Volume spike condition: current 12h volume > 1.5x 20-period MA
-        volume_spike = volume_price > 1.5 * volume_ma_current
+        # Volume spike condition: current 1d volume > 1.5x 20-period MA
+        volume_spike = volume_1d_current > 1.5 * volume_ma_current
         
-        # Donchian breakout conditions
-        bullish_breakout = close_price > donchian_upper[i]
-        bearish_breakout = low_price < donchian_lower[i]
+        # Trending regime condition: CHOP < 61.8 (below choppy threshold)
+        trending_regime = chop_current < 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: bullish Donchian breakout + price > 1w EMA50 + volume spike
-            if (bullish_breakout and close_price > ema_50_current and volume_spike):
+            # Long entry: price breaks above H3 + volume spike + trending regime
+            if (close_price > h3_current and volume_spike and trending_regime):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: bearish Donchian breakout + price < 1w EMA50 + volume spike
-            elif (bearish_breakout and close_price < ema_50_current and volume_spike):
+            # Short entry: price breaks below L3 + volume spike + trending regime
+            elif (close_price < l3_current and volume_spike and trending_regime):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when price closes back inside the Donchian channel (mean reversion)
-            if position == 1 and close_price < donchian_upper[i]:
+            # Exit when price returns to pivot level or opposite signal
+            if position == 1 and close_price <= pivot_current:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close_price > donchian_lower[i]:
+            elif position == -1 and close_price >= pivot_current:
                 position = 0
                 signals[i] = 0.0
             else:
