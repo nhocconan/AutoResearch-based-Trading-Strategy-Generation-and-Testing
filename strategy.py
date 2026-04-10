@@ -3,50 +3,58 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ATR filter and volume spike confirmation
-# - Long when price breaks above Donchian(20) high AND ATR(14) > 1.2x ATR(50) AND volume > 1.5x 20-bar avg
-# - Short when price breaks below Donchian(20) low AND ATR(14) > 1.2x ATR(50) AND volume > 1.5x 20-bar avg
-# - Exit when price touches Donchian middle (mean reversion) OR ATR volatility collapses
-# - Uses volatility expansion filter to avoid choppy markets and focus on genuine breakouts
+# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation
+# - Long when price > Alligator Jaw AND Jaw > Teeth > Lips (bullish alignment) AND volume > 1.5x 20-bar avg
+# - Short when price < Alligator Jaw AND Jaw < Teeth < Lips (bearish alignment) AND volume > 1.5x 20-bar avg
+# - Exit when Alligator lines cross (Jaw-Teeth or Teeth-Lips crossover) indicating trend weakness
+# - Uses 1w EMA50 for trend filter to avoid counter-trend trades in bear markets
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-35 trades/year on 4h timeframe (80-140 total over 4 years)
+# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
+# - Williams Alligator excels in trending markets; 1w filter improves bear market performance
 
-name = "4h_1d_donchian_breakout_volatility_filter_v1"
-timeframe = "4h"
+name = "1d_1w_alligator_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Pre-compute Donchian channels (20-period)
-    high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
-    low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
-    dc_middle = (high_20 + low_20) / 2
+    # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Pre-compute ATR for volatility filter
-    high_low = prices['high'] - prices['low']
-    high_close = np.abs(prices['high'] - prices['close'].shift(1))
-    low_close = np.abs(prices['low'] - prices['close'].shift(1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volatility expansion: short-term ATR > long-term ATR (expanding volatility)
-    vol_expansion = atr14 > (atr50 * 1.2)
+    # Pre-compute Williams Alligator from daily data (Jaw=13, Teeth=8, Lips=5)
+    # Alligator uses SMAs with future shift (but we align properly to avoid look-ahead)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Pre-compute volume confirmation
+    # Jaw: 13-period SMMA shifted 8 bars forward
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth: 8-period SMMA shifted 5 bars forward  
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips: 5-period SMMA shifted 3 bars forward
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (volume_20_avg * 1.5)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(100, n):  # Start after warmup for Alligator shifts
         # Skip if any required data is invalid
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(dc_middle[i]) or
-            np.isnan(atr14[i]) or np.isnan(atr50[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -56,31 +64,30 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian high AND volatility expansion AND volume spike
-            if (prices['close'].iloc[i] > high_20[i] and 
-                vol_expansion[i] and 
-                vol_spike.iloc[i]):
+        if position == 0:  # Flat - look for new entries
+            # Bullish alignment: Jaw > Teeth > Lips AND price above Jaw
+            bullish = (jaw[i] > teeth[i] > lips[i]) and (prices['close'].iloc[i] > jaw[i])
+            # Bearish alignment: Jaw < Teeth < Lips AND price below Jaw
+            bearish = (jaw[i] < teeth[i] < lips[i]) and (prices['close'].iloc[i] < jaw[i])
+            
+            # Long when bullish alignment with 1w uptrend and volume spike
+            if bullish and (prices['close'].iloc[i] > ema50_1w_aligned[i]) and vol_spike.iloc[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below Donchian low AND volatility expansion AND volume spike
-            elif (prices['close'].iloc[i] < low_20[i] and 
-                  vol_expansion[i] and 
-                  vol_spike.iloc[i]):
+            # Short when bearish alignment with 1w downtrend and volume spike
+            elif bearish and (prices['close'].iloc[i] < ema50_1w_aligned[i]) and vol_spike.iloc[i]:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit conditions
-            # Exit when price returns to Donchian middle OR volatility contracts
+        else:  # Have position - look for exit on Alligator cross (trend weakness)
+            # Exit when Jaw-Teeth cross OR Teeth-Lips cross (indicates trend losing momentum)
             exit_signal = False
             if position == 1:  # Long position
-                if (prices['close'].iloc[i] <= dc_middle[i] or 
-                    not vol_expansion[i]):
+                if (jaw[i] <= teeth[i]) or (teeth[i] <= lips[i]):
                     exit_signal = True
             elif position == -1:  # Short position
-                if (prices['close'].iloc[i] >= dc_middle[i] or 
-                    not vol_expansion[i]):
+                if (jaw[i] >= teeth[i]) or (teeth[i] >= lips[i]):
                     exit_signal = True
             
             if exit_signal:
