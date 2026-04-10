@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high (4h) AND 1d ADX > 25 AND 4h volume > 1.5x 20-period average
-# - Short when price breaks below 20-period Donchian low (4h) AND 1d ADX > 25 AND 4h volume > 1.5x 20-period average
+# Hypothesis: 4h Donchian(20) breakout with 1d volume regime filter
+# - Long when price breaks above 20-period Donchian high (4h) AND 1d volume > 1.2x 20-period average
+# - Short when price breaks below 20-period Donchian low (4h) AND 1d volume > 1.2x 20-period average
 # - Exit when price crosses 20-period Donchian midpoint
-# - Donchian channels provide clear trend-following structure with built-in volatility adaptation
-# - 1d ADX filter ensures we only trade when higher timeframe is strongly trending (works in bull/bear)
-# - Volume confirmation prevents false signals in low participation
-# - Target: 20-50 trades/year on 4h (75-200 total over 4 years) to avoid fee drag
+# - Uses 1d volume regime to ensure participation in higher timeframe move
+# - Volume confirmation prevents false breakouts in low liquidity
+# - Target: 30-60 trades/year on 4h (120-240 total over 4 years) to avoid fee drag
 
-name = "4h_1d_donchian_breakout_volume_adx_v1"
+name = "4h_1d_donchian_breakout_volume_regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -26,62 +25,14 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d volume regime (20-period average)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = np.full_like(vol_1d, np.nan, dtype=float)
+    for i in range(19, len(vol_1d)):
+        vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Wilder smoothing
-    tr_14 = np.full_like(tr, np.nan, dtype=float)
-    dm_plus_14 = np.full_like(dm_plus, np.nan, dtype=float)
-    dm_minus_14 = np.full_like(dm_minus, np.nan, dtype=float)
-    
-    if len(tr) >= 14:
-        tr_14[13] = np.nanmean(tr[1:14])
-        dm_plus_14[13] = np.nanmean(dm_plus[1:14])
-        dm_minus_14[13] = np.nanmean(dm_minus[1:14])
-        
-        for i in range(14, len(tr)):
-            tr_14[i] = tr_14[i-1] - (tr_14[i-1] / 14) + tr[i]
-            dm_plus_14[i] = dm_plus_14[i-1] - (dm_plus_14[i-1] / 14) + dm_plus[i]
-            dm_minus_14[i] = dm_minus_14[i-1] - (dm_minus_14[i-1] / 14) + dm_minus[i]
-    
-    di_plus = np.full_like(tr_14, np.nan, dtype=float)
-    di_minus = np.full_like(tr_14, np.nan, dtype=float)
-    mask = ~np.isnan(tr_14) & (tr_14 != 0)
-    di_plus[mask] = (dm_plus_14[mask] / tr_14[mask]) * 100
-    di_minus[mask] = (dm_minus_14[mask] / tr_14[mask]) * 100
-    
-    dx = np.full_like(di_plus, np.nan, dtype=float)
-    mask_dx = (~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0))
-    dx[mask_dx] = (np.abs(di_plus[mask_dx] - di_minus[mask_dx]) / (di_plus[mask_dx] + di_minus[mask_dx])) * 100
-    
-    adx = np.full_like(dx, np.nan, dtype=float)
-    if len(dx) >= 14:
-        valid_dx = dx[14:28]
-        if not np.all(np.isnan(valid_dx)):
-            adx[27] = np.nanmean(valid_dx)
-            for i in range(28, len(dx)):
-                if not np.isnan(dx[i]) and not np.isnan(adx[i-1]):
-                    adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align HTF indicators to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align HTF volume regime to 4h timeframe
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     # Pre-compute 4h Donchian channels (20-period)
     high_4h = prices['high'].values
@@ -101,10 +52,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(adx_1d_aligned[i])):
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -113,32 +64,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (1.5x average)
+        # Volume regime condition (current volume > 1.2x 20-period average)
         vol_4h = prices['volume'].values
-        vol_ma_20 = np.full_like(vol_4h, np.nan, dtype=float)
-        for j in range(19, i+1):
-            vol_ma_20[j] = np.mean(vol_4h[j-19:j+1])
-        vol_spike = not np.isnan(vol_ma_20[i]) and vol_4h[i] > 1.5 * vol_ma_20[i]
+        vol_regime = not np.isnan(vol_ma_20_aligned[i]) and vol_4h[i] > 1.2 * vol_ma_20_aligned[i]
         
         close_now = close_4h[i]
         donchian_high_now = donchian_high[i]
         donchian_low_now = donchian_low[i]
         donchian_mid_now = donchian_mid[i]
-        adx_now = adx_1d_aligned[i]
         
         # Donchian breakout signals
         breakout_up = close_now > donchian_high_now  # price breaks above Donchian high
         breakout_down = close_now < donchian_low_now  # price breaks below Donchian low
-        mid_cross_up = (close_4h[i-1] <= donchian_mid_now and close_now > donchian_mid_now)  # crosses above midpoint
-        mid_cross_down = (close_4h[i-1] >= donchian_mid_now and close_now < donchian_mid_now)  # crosses below midpoint
+        mid_cross_up = (i > 0 and close_4h[i-1] <= donchian_mid_now and close_now > donchian_mid_now)  # crosses above midpoint
+        mid_cross_down = (i > 0 and close_4h[i-1] >= donchian_mid_now and close_now < donchian_mid_now)  # crosses below midpoint
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Donchian high AND 1d trending (ADX > 25) AND volume spike
-            if (breakout_up and adx_now > 25 and vol_spike):
+            # Long conditions: price breaks above Donchian high AND volume regime
+            if breakout_up and vol_regime:
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND 1d trending (ADX > 25) AND volume spike
-            elif (breakout_down and adx_now > 25 and vol_spike):
+            # Short conditions: price breaks below Donchian low AND volume regime
+            elif breakout_down and vol_regime:
                 position = -1
                 signals[i] = -0.25
             else:
