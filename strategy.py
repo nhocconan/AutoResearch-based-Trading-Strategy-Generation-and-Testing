@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ADX trend filter
-# - Primary: 4h price breaks above/below Donchian(20) channels (structure-based breakout)
-# - Volume filter: 1d volume > 1.5x 20-period volume MA to confirm institutional participation
-# - Trend filter: ADX(14) > 25 to ensure we trade only in trending markets (avoid chop)
-# - Exit: Price returns to Donchian(20) midpoint (mean reversion within the channel)
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Donchian adapts to volatility, volume confirms breakout quality,
-#   ADX filter avoids ranging markets, effective in both bull and bear regimes
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and ADX trend filter
+# - Primary: 4h Williams %R(14) < -80 for long, > -20 for short (oversold/overbought)
+# - Volume filter: 1d volume > 2.0x 20-period volume MA for institutional confirmation
+# - Trend filter: ADX(14) > 20 to avoid extremely choppy markets (adaptive threshold)
+# - Exit: Williams %R returns to -50 level (mean reversion)
+# - Position sizing: 0.25 discrete level to minimize fee churn
+# - Works in bull/bear: Williams %R identifies extremes in any market, volume confirms
+#   participation, ADX filter avoids whipsaws in low-volatility regimes
 
-name = "4h_1d_donchian_volume_trend_v1"
+name = "4h_1d_williamsr_volume_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -41,28 +41,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Donchian channels for 4h timeframe (20-period)
-    # Upper channel = highest high over 20 periods
-    # Lower channel = lowest low over 20 periods
-    # Middle channel = (upper + lower) / 2
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # Calculate Williams %R for 4h timeframe (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    lookback_wr = 14
+    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # Calculate 1d volume confirmation: volume > 1.5x 20-period volume MA
+    # Calculate 1d volume confirmation: volume > 2.0x 20-period volume MA
     volume_ma_20_1d = pd.Series(volume_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     # Calculate ADX(14) for trend filter
-    # ADX calculation requires +DI and -DI
-    # +DI = 100 * EWMASM((+DM / ATR), 14)
-    # -DI = 100 * EWMASM((-DM / ATR), 14)
-    # DX = 100 * ABS((+DI - -DI) / (+DI + -DI))
-    # ADX = EWMASM(DX, 14)
-    
     # Calculate True Range (TR)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -91,45 +81,43 @@ def generate_signals(prices):
     minus_di = 100 * minus_dm_smooth / atr
     
     # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)  # Avoid division by zero
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period MA
+        # Volume confirmation: 1d volume > 2.0x 20-period MA (aligned)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        vol_confirm = vol_1d_current[i] > 2.0 * volume_ma_20_1d_aligned[i]
         
-        # Trend filter: ADX > 25 (trending market)
-        trend_filter = adx[i] > 25
+        # Trend filter: ADX > 20 (avoid extremely choppy markets)
+        trend_filter = adx[i] > 20
         
-        if position == 0:  # Flat - look for new Donchian breakouts
-            # Long entry: Price breaks above upper channel + vol confirmation + trend filter
-            if close[i] > donchian_upper[i] and vol_confirm and trend_filter:
+        if position == 0:  # Flat - look for new Williams %R extremes
+            # Long entry: Williams %R < -80 (oversold) + vol confirmation + trend filter
+            if williams_r[i] < -80 and vol_confirm and trend_filter:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price breaks below lower channel + vol confirmation + trend filter
-            elif close[i] < donchian_lower[i] and vol_confirm and trend_filter:
+            # Short entry: Williams %R > -20 (overbought) + vol confirmation + trend filter
+            elif williams_r[i] > -20 and vol_confirm and trend_filter:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit
-            # Exit: Price returns to Donchian middle (mean reversion within channel)
+        else:  # Have position - look for exit to mean reversion
+            # Exit: Williams %R returns to -50 level (mean reversion)
             if position == 1:  # Long position
-                if close[i] <= donchian_middle[i]:
+                if williams_r[i] >= -50:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] >= donchian_middle[i]:
+                if williams_r[i] <= -50:
                     position = 0
                     signals[i] = 0.0
                 else:
