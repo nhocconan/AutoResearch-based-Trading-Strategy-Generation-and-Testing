@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
-# - Uses Camarilla pivot levels (H3/L3) from prior 4h bar for breakout entries
-# - 4h close vs EMA20 determines trend direction (bullish/bearish)
-# - Only trade during 08-20 UTC session to avoid low-liquidity hours
-# - Volume confirmation: 1h volume > 1.3x 20-period volume SMA
-# - Position sizing: 0.20 discrete level to minimize fee drag
-# - Target: 15-37 trades/year on 1h timeframe to stay within fee drag limits
-# - Works in bull/bear: trend filter adapts direction, session avoids chop
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above 6h Camarilla R4 level AND 1d volume > 1.2x 20-period volume SMA AND 1w close > 1w EMA20
+# - Short when price breaks below 6h Camarilla S4 level AND 1d volume > 1.2x 20-period volume SMA AND 1w close < 1w EMA20
+# - Exit: price retreats to Camarilla pivot point (PP) or volume drops below average
+# - Position sizing: 0.25 discrete level to minimize fee drag
+# - Target: 12-37 trades/year on 6h timeframe to stay within fee drag limits
+# - Uses Camarilla levels from 1d timeframe for structure, 6h for execution timing
 
-name = "1h_4h_camarilla_breakout_trend_v1"
-timeframe = "1h"
+name = "6h_1d_1w_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,8 +21,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -32,72 +32,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 1h volume SMA for regime filter
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h Camarilla pivot levels from 1d OHLC
+    # Camarilla formula: PP = (H + L + C) / 3
+    # R4 = PP + (H - L) * 1.1/2
+    # S4 = PP - (H - L) * 1.1/2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Camarilla pivot levels (based on prior 4h bar)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    camarilla_r4 = camarilla_pp + camarilla_range * 1.1 / 2.0
+    camarilla_s4 = camarilla_pp - camarilla_range * 1.1 / 2.0
     
-    pivot = (high_4h + low_4h + close_4h) / 3.0
-    range_4h = high_4h - low_4h
-    camarilla_h3 = pivot + range_4h * 1.1 / 4.0
-    camarilla_l3 = pivot - range_4h * 1.1 / 4.0
+    # Align 1d Camarilla levels to 6h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # AlCamarilla levels to 1h timeframe (completed 4h bar only)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    # Calculate 1w EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate 1w close for trend comparison
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
-    # Calculate 4h close for trend comparison
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+    # Calculate 1d volume SMA for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    
+    # Calculate 6h volume for confirmation
+    volume_sma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(40, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(close_4h_aligned[i]) or
-            np.isnan(volume_sma_20[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_sma_20_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Volume confirmation: 6h volume > 1.2x 20-period volume SMA AND 1d volume > 1.2x 20-period volume SMA
+        vol_confirm_6h = volume[i] > 1.2 * volume_sma_20_6h[i]
+        vol_confirm_1d = volume_1d[i // 4] > 1.2 * volume_sma_20_1d_aligned[i] if i // 4 < len(volume_1d) else False
+        vol_confirm = vol_confirm_6h and vol_confirm_1d
         
-        # Volume confirmation: 1h volume > 1.3x 20-period volume SMA
-        vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
+        # Trend filter: 1w close vs 1w EMA20
+        trend_bullish = close_1w_aligned[i] > ema_20_1w_aligned[i]
+        trend_bearish = close_1w_aligned[i] < ema_20_1w_aligned[i]
         
-        # Trend filter: 4h close vs 4h EMA20
-        trend_bullish = close_4h_aligned[i] > ema_20_4h_aligned[i]
-        trend_bearish = close_4h_aligned[i] < ema_20_4h_aligned[i]
+        # Camarilla breakout signals
+        breakout_up = close[i] > camarilla_r4_aligned[i-1]  # Break above previous R4
+        breakout_down = close[i] < camarilla_s4_aligned[i-1]  # Break below previous S4
         
-        # Camarilla breakout signals (using prior completed 4h bar levels)
-        breakout_up = close[i] > camarilla_h3_aligned[i-1]  # Break above H3
-        breakout_down = close[i] < camarilla_l3_aligned[i-1]  # Break below L3
-        
-        # Exit conditions: opposite breakout or loss of volume confirmation
-        exit_long = breakout_down or not vol_confirm
-        exit_short = breakout_up or not vol_confirm
+        # Exit conditions: price retreats to pivot point or loss of volume confirmation
+        exit_long = close[i] < camarilla_pp_aligned[i] or not vol_confirm
+        exit_short = close[i] > camarilla_pp_aligned[i] or not vol_confirm
         
         if position == 0:  # Flat - look for entry
             if breakout_up and trend_bullish and vol_confirm:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif breakout_down and trend_bearish and vol_confirm:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -105,12 +108,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
             if exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
