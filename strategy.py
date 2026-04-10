@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d ADX regime filter
-# - Primary: 4h Donchian breakout for clear structure-based entries
-# - Volume filter: 12h volume > 1.5x 20-period volume MA to confirm institutional participation
-# - Regime filter: 1d ADX(14) > 25 to ensure trending conditions and avoid chop
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike and 1d ADX regime filter
+# - Primary: 4h Donchian breakout captures institutional breakouts in both bull/bear markets
+# - Volume filter: 12h volume > 2.0x 20-period volume MA to confirm strong participation (avoid false breakouts)
+# - Regime filter: 1d ADX(14) > 20 to ensure sufficient trend strength (lower threshold for more signals in ranging markets)
 # - Exit: Price crosses opposite Donchian(10) band for faster mean-reversion exits
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe
-# - Works in bull/bear: Donchian captures breakouts, volume confirms strength, ADX avoids whipsaws in ranging markets
+# - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
+# - Works in bull/bear: Donchian captures breakouts, volume confirms strength, ADX avoids whipsaws in weak trends
 
-name = "4h_12h_1d_donchian_volume_adx_v1"
+name = "4h_12h_1d_donchian_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -93,12 +93,12 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current 12h volume > 1.5x 20-period volume MA
+        # Volume filter: current 12h volume > 2.0x 20-period volume MA (strong confirmation)
         volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        volume_confirmed = volume_12h_aligned[i] > 1.5 * volume_ma_20_aligned[i]
+        volume_confirmed = volume_12h_aligned[i] > 2.0 * volume_ma_20_aligned[i]
         
-        # Regime filter: ADX > 25 to ensure trending conditions
-        trending = adx_aligned[i] > 25
+        # Regime filter: ADX > 20 to ensure trending conditions (lower threshold for more signals)
+        trending = adx_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
             # Long entry: price above Donchian(20) high + volume confirmation + trending
