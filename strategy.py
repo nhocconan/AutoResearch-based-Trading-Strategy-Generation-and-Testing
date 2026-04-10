@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR(14) regime filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR regime filter
 # - Primary: 4h price breaks above/below 20-period Donchian channel for trend capture
 # - HTF: 1d volume > 1.3x 20-period MA for confirmation (avoids low-volume breakouts)
 # - Regime filter: 4h ATR(14) > 1.5x ATR(50) to ensure trending market (avoids chop)
