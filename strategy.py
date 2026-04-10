@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
 # - Long when price breaks above H3 level AND 1d EMA50 rising AND volume > 2.0x 20-bar avg
 # - Short when price breaks below L3 level AND 1d EMA50 falling AND volume > 2.0x 20-bar avg
 # - Exit when price returns to Pivot level (mean reversion to equilibrium)
 # - Uses 1d EMA50 for trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 # - Camarilla pivots work well in ranging markets; trend filter adds directional bias in trends
 
-name = "6h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
