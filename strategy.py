@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
-# - Long when price breaks above Camarilla H3 level + 1d volume > 2.0x 20-period volume SMA + Chop(14) > 61.8 (range regime)
-# - Short when price breaks below Camarilla L3 level + 1d volume > 2.0x 20-period volume SMA + Chop(14) > 61.8
-# - Exit: price returns to Camarilla pivot point (mean reversion within pivot structure)
+# Hypothesis: 4h Donchian breakout with 1d ATR filter and chop regime filter
+# - Long when price breaks above Donchian(20) high + ATR(14) > ATR(50) (expanding volatility) + Chop < 38.2 (trending regime)
+# - Short when price breaks below Donchian(20) low + ATR(14) > ATR(50) + Chop < 38.2
+# - Exit: price returns to Donchian midpoint (mean reversion within channel)
 # - Position sizing: 0.25 discrete level
-# - Camarilla pivots provide intraday support/resistance levels from prior day
-# - Volume confirms institutional participation, chop filter ensures we trade in ranging markets
-# - Works in bull/bear: mean reversion at pivot point works in all regimes, chop filter avoids strong trends
-# - 4h timeframe targets 19-50 trades/year with strict entry conditions to minimize fee drag
+# - Donchian provides clear trend structure, ATR filter ensures volatility expansion, chop filter avoids ranging markets
+# - Works in bull/bear: breakouts capture strong moves, chop filter avoids false signals in ranges
+# - 4h timeframe targets 25-60 trades/year with strict entry conditions to minimize fee drag
 
-name = "4h_1d_camarilla_volume_chop_v1"
+name = "4h_1d_donchian_atr_chop_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,7 +23,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,6 +34,11 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    
+    # Calculate 4h Donchian Channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     # Calculate 4h Chopiness Index (14-period) for regime filter
     # True Range
@@ -48,66 +52,62 @@ def generate_signals(prices):
     hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
     ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
     # Chop formula: 100 * log10(sum_TR / (HH - LL)) / log10(N)
-    # Avoid division by zero and log of zero/negative
     hl_range = hh - ll
     chop = np.where((hl_range > 0) & (sum_tr > 0), 
                     100 * np.log10(sum_tr / hl_range) / np.log10(14), 
                     50)  # default to neutral when invalid
     
-    # Calculate 1d OHLC for Camarilla pivots
+    # Calculate 4h ATR(14) and ATR(50) for volatility filter
+    atr14 = np.maximum(high - low, 
+                       np.maximum(np.abs(high - np.roll(close, 1)), 
+                                  np.abs(low - np.roll(close, 1))))
+    atr14[0] = high[0] - low[0]
+    atr14_ma = pd.Series(atr14).rolling(window=14, min_periods=14).mean().values
+    
+    atr50 = np.maximum(high - low, 
+                       np.maximum(np.abs(high - np.roll(close, 1)), 
+                                  np.abs(low - np.roll(close, 1))))
+    atr50[0] = high[0] - low[0]
+    atr50_ma = pd.Series(atr50).rolling(window=50, min_periods=50).mean().values
+    
+    # Volatility expansion: ATR(14) > ATR(50) * 1.1
+    vol_expansion = atr14_ma > (atr50_ma * 1.1)
+    
+    # Calculate 1d ATR for HTF volatility regime
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for 1d: based on previous day's OHLC
-    # Camarilla formulas: Pivot = (H+L+C)/3, Range = H-L
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: H3 = Pivot + 1.1 * Range / 2, L3 = Pivot - 1.1 * Range / 2
-    camarilla_h3_1d = pivot_1d + 1.1 * range_1d / 2
-    camarilla_l3_1d = pivot_1d - 1.1 * range_1d / 2
-    camarilla_pivot_1d = pivot_1d
-    
-    # Align Camarilla levels to 4h timeframe (using completed 1d bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot_1d)
-    
-    # Calculate 1d volume SMA(20) for confirmation
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(chop[i]) or 
+            np.isnan(vol_expansion[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume for volume spike confirmation
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+        # Regime filter: Chop < 38.2 indicates trending market (favorable for breakouts)
+        trending_market = chop[i] < 38.2
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (volume spike)
-        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_high[i]   # Price breaks above upper band
+        breakout_down = close[i] < donchian_low[i]  # Price breaks below lower band
+        return_to_mid = abs(close[i] - donchian_mid[i]) < (donchian_high[i] - donchian_low[i]) * 0.2  # Within 20% of midpoint
         
-        # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion at pivot)
-        ranging_market = chop[i] > 61.8
+        # Entry conditions: Donchian breakout with volatility expansion and trending regime
+        long_entry = breakout_up and vol_expansion[i] and trending_market
+        short_entry = breakout_down and vol_expansion[i] and trending_market
         
-        # Camarilla breakout signals
-        breakout_up = close[i] > camarilla_h3_aligned[i]   # Price breaks above H3
-        breakout_down = close[i] < camarilla_l3_aligned[i] # Price breaks below L3
-        return_to_pivot = abs(close[i] - camarilla_pivot_aligned[i]) < (camarilla_h3_aligned[i] - camarilla_l3_aligned[i]) * 0.3  # Within 30% of pivot
-        
-        # Entry conditions: Camarilla breakout with volume and regime confirmation
-        long_entry = breakout_up and vol_confirm and ranging_market
-        short_entry = breakout_down and vol_confirm and ranging_market
-        
-        # Exit conditions: price returns to Camarilla pivot (mean reversion)
-        long_exit = return_to_pivot  # Exit long when price returns to pivot
-        short_exit = return_to_pivot  # Exit short when price returns to pivot
+        # Exit conditions: price returns to Donchian midpoint (mean reversion within channel)
+        long_exit = return_to_mid  # Exit long when price returns to midpoint
+        short_exit = return_to_mid  # Exit short when price returns to midpoint
         
         if position == 0:  # Flat - look for entry
             if long_entry:
