@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
-# - Donchian(20) from 12h: breakout above upper band = long, below lower band = short
-# - 1d ADX(14) > 25 to ensure trending market and avoid chop (works in bull/bear)
-# - Volume confirmation: current 12h volume > 2.0x 20-period average
-# - ATR-based trailing stop: exit long when price < highest_high - 2.5*ATR, exit short when price > lowest_low + 2.5*ATR
-# - Designed for 12h timeframe: targets 12-37 trades/year to avoid fee drag
-# - Uses discrete position sizing (0.25) to minimize fee churn
+# Hypothesis: 4h Camarilla pivot breakout with 1d ADX trend filter and volume confirmation
+# - Camarilla levels calculated from prior 1d OHLC: L3/H3 for mean reversion, L4/H4 for breakouts
+# - Long when price breaks above H4 with 1d ADX > 25 and volume spike (>2x 20-period avg)
+# - Short when price breaks below L4 with same filters
+# - Exit when price returns to H3/L3 (mean reversion zone) or ATR trailing stop hit
+# - Designed for low trade frequency (<30/year) to minimize fee drag while capturing strong trends
+# - Works in bull/bear markets: ADX filter ensures we only trade with higher timeframe trend
+# - Uses discrete position sizing (0.30) to balance return and drawdown control
 
-name = "12h_1d_donchian_adx_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -59,79 +60,95 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 12h Donchian channels (20-period)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
+    # Pre-compute prior 1d OHLC for Camarilla levels (aligned to 4h)
+    # Shift by 1 to use prior day's data only (no look-ahead)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # first value fallback
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # Donchian upper band: highest high over past 20 periods
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Donchian lower band: lowest low over past 20 periods
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: based on prior day's range
+    # H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    # H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
+    range_1d = prev_high_1d - prev_low_1d
+    H4 = prev_close_1d + 1.5 * range_1d
+    L4 = prev_close_1d - 1.5 * range_1d
+    H3 = prev_close_1d + 1.125 * range_1d
+    L3 = prev_close_1d - 1.125 * range_1d
     
-    # Pre-compute 12h volume confirmation
-    volume_12h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > (2.0 * avg_volume_20)
+    # Align Camarilla levels to 4h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Pre-compute 12h ATR(14) for trailing stop
-    tr1_12h = high_12h - low_12h
-    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h[0] = tr1_12h[0]
-    atr_14 = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Pre-compute 4h volume confirmation
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (2.0 * avg_volume_20)  # stricter volume filter
+    
+    # Pre-compute 4h ATR(14) for trailing stop
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    
+    tr1_4h = high_4h - low_4h
+    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_14 = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     highest_high = 0.0  # for trailing stop
     lowest_low = 0.0    # for trailing stop
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_spike[i]) or
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
             # Update highest high for trailing stop
-            if close_12h[i] > highest_high:
-                highest_high = close_12h[i]
-            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
-            if close_12h[i] < highest_high - 2.5 * atr_14[i] or close_12h[i] < highest_20[i]:
+            if close_4h[i] > highest_high:
+                highest_high = close_4h[i]
+            # Exit: price returns to H3 (mean reversion) OR trailing stop hit
+            if close_4h[i] < H3_aligned[i] or close_4h[i] < highest_high - 2.5 * atr_14[i]:
                 position = 0
                 highest_high = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 
         elif position == -1:  # Short position
             # Update lowest low for trailing stop
-            if close_12h[i] < lowest_low:
-                lowest_low = close_12h[i]
-            # Exit: trailing stop hit OR price re-enters Donchian channel (failed breakout)
-            if close_12h[i] > lowest_low + 2.5 * atr_14[i] or close_12h[i] > lowest_20[i]:
+            if close_4h[i] < lowest_low:
+                lowest_low = close_4h[i]
+            # Exit: price returns to L3 (mean reversion) OR trailing stop hit
+            if close_4h[i] > L3_aligned[i] or close_4h[i] > lowest_low + 2.5 * atr_14[i]:
                 position = 0
                 lowest_low = 0.0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Flat
-            # Look for Donchian breakout with trend and volume filters
+            # Look for Camarilla breakout with trend and volume filters
             if vol_spike[i] and adx_aligned[i] > 25:
-                # Breakout long: price closes above upper Donchian band
-                if close_12h[i] > highest_20[i]:
+                # Breakout long: price closes above H4
+                if close_4h[i] > H4_aligned[i]:
                     position = 1
-                    entry_price = close_12h[i]
-                    highest_high = close_12h[i]
-                    signals[i] = 0.25
-                # Breakout short: price closes below lower Donchian band
-                elif close_12h[i] < lowest_20[i]:
+                    highest_high = close_4h[i]
+                    signals[i] = 0.30
+                # Breakout short: price closes below L4
+                elif close_4h[i] < L4_aligned[i]:
                     position = -1
-                    entry_price = close_12h[i]
-                    lowest_low = close_12h[i]
-                    signals[i] = -0.25
+                    lowest_low = close_4h[i]
+                    signals[i] = -0.30
     
     return signals
