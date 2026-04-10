@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and ATR trailing stop
-# - Long when price breaks above 20-period 12h Donchian high AND 1d volume > 1.5x 20-period volume SMA
-# - Short when price breaks below 20-period 12h Donchian low AND 1d volume > 1.5x 20-period volume SMA
+# Hypothesis: 4h Donchian breakout with 1d volume confirmation and ATR trailing stop
+# - Long when price breaks above 20-period 4h Donchian high AND 1d volume > 1.5x 20-period volume SMA
+# - Short when price breaks below 20-period 4h Donchian low AND 1d volume > 1.5x 20-period volume SMA
 # - Exit: ATR trailing stop (3.0 * ATR from extreme) or opposite Donchian breakout
-# - Uses 12h for price action and Donchian channels, 1d for volume confirmation
-# - Target: 15-35 trades/year to minimize fee drag while capturing strong breakout moves
+# - Uses 4h for price action and Donchian channels, 1d for volume confirmation
+# - Target: 25-50 trades/year to minimize fee drag while capturing strong breakout moves
 # - Donchian breakouts work in both bull (trend continuation) and bear (trend acceleration) markets
 # - Volume confirmation reduces false breakouts in ranging/low-volatility periods
 
-name = "12h_1d_donchian_volbreak_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volbreak_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return signals
     
-    # Calculate 20-period Donchian channels on 12h data
+    # Calculate 20-period Donchian channels on 4h data
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute ATR for trailing stop (using 12h data)
+    # Pre-compute ATR for trailing stop (using 4h data)
     tr1 = np.abs(high[1:] - low[1:])
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
