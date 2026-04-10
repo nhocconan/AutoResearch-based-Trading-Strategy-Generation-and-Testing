@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d Volume Spike + ATR Trailing Stop
-# - Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength
-# - 1d volume spike confirms institutional participation in breakout moves
-# - ATR(14) trailing stop (2.5x) manages risk in volatile 12h timeframe
+# Hypothesis: 4h Camarilla Pivot Breakout + 12h Volume Spike + ATR Trailing Stop
+# - 4h Camarilla pivot levels (H3/L3) act as institutional support/resistance
+# - Breakout above H3 or below L3 with 12h volume spike confirms institutional participation
+# - ATR(14) trailing stop (2.0x) manages risk and adapts to volatility
 # - Discrete position sizing (0.25) minimizes fee churn
-# - Target: 12-25 trades/year (50-100 total over 4 years) to avoid fee drag
-# - Works in bull/bear: Alligator adapts to trends, volume filter avoids false signals, ATR stop controls drawdown
+# - Target: 15-35 trades/year (60-140 total over 4 years) to avoid fee drag
+# - Works in bull/bear: Camarilla levels adapt to price action, volume filter avoids false breakouts, ATR stop controls drawdown
 
-name = "12h_1d_alligator_volume_atr_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,54 +21,56 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d ATR for volume normalization (14-period)
+    # Pre-compute 12h ATR volume for confirmation (14-period ATR)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1_12h[0] = np.nan
+    tr2_12h[0] = np.nan
+    tr3_12h[0] = np.nan
+    tr_12h = np.maximum.reduce([tr1_12h, tr2_12h, tr3_12h])
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    
+    # 12h ATR volume: volume / ATR (normalizes volume by volatility)
+    atr_volume_12h = volume_12h / atr_12h
+    atr_volume_ma_20_12h = pd.Series(atr_volume_12h).rolling(window=20, min_periods=20).mean().values
+    atr_volume_ma_aligned = align_htf_to_ltf(prices, df_12h, atr_volume_ma_20_12h)
+    
+    # Pre-compute 4h Camarilla pivot levels from previous day
+    # Need daily OHLC for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for each day: based on previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1_1d[0] = np.nan
-    tr2_1d[0] = np.nan
-    tr3_1d[0] = np.nan
-    tr_1d = np.maximum.reduce([tr1_1d, tr2_1d, tr3_1d])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Camarilla levels: H4/H3/L3/L4 from previous day
+    # H3 = close + 1.1*(high-low)/2
+    # L3 = close - 1.1*(high-low)/2
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2.0
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2.0
     
-    # 1d ATR volume: volume / ATR (normalizes volume by volatility)
-    atr_volume_1d = volume_1d / atr_1d
-    atr_volume_ma_20_1d = pd.Series(atr_volume_1d).rolling(window=20, min_periods=20).mean().values
-    atr_volume_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_volume_ma_20_1d)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Pre-compute 12h Williams Alligator (Jaw=13, Teeth=8, Lips=5, all SMMA)
+    # Pre-compute 4h ATR for trailing stop (14-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    median_price = (high + low) / 2.0  # Williams uses median price
     
-    def smma(arr, period):
-        """Smoothed Moving Average (Williams Alligator uses SMMA)"""
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is SMA
-        result[period-1] = np.nanmean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA*(period-1) + CURRENT_PRICE) / period
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(median_price, 13)  # Jaw (Blue) - 13-period SMMA
-    teeth = smma(median_price, 8)  # Teeth (Red) - 8-period SMMA
-    lips = smma(median_price, 5)   # Lips (Green) - 5-period SMMA
-    
-    # Pre-compute 12h ATR for trailing stop (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -86,7 +88,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
             np.isnan(atr_volume_ma_aligned[i]) or np.isnan(atr[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -96,30 +98,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 1d ATR volume for filter (aligned)
-        atr_volume_1d_current = atr_volume_1d
-        atr_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_volume_1d_current)
+        # Get current 12h ATR volume for filter (aligned)
+        atr_volume_12h_current = atr_volume_12h
+        atr_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_volume_12h_current)
         
-        # Volume confirmation: current 1d ATR volume > 2.0x 20-day average
-        volume_confirm = atr_volume_1d_aligned[i] > 2.0 * atr_volume_ma_aligned[i]
+        # Volume confirmation: current 12h ATR volume > 1.8x 20-day average
+        volume_confirm = atr_volume_12h_aligned[i] > 1.8 * atr_volume_ma_aligned[i]
         
-        # Alligator trend conditions:
-        # Lips > Teeth > Jaw = Uptrend (Green > Red > Blue)
-        # Lips < Teeth < Jaw = Downtrend (Green < Red < Blue)
-        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Price levels for breakout
+        current_close = prices['close'].iloc[i]
+        camarilla_h3_level = camarilla_h3_aligned[i]
+        camarilla_l3_level = camarilla_l3_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Alligator uptrend AND volume confirmation
-            if alligator_long and volume_confirm:
+            # Long conditions: Close above H3 AND volume confirmation
+            if current_close > camarilla_h3_level and volume_confirm:
                 position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else current_close
                 highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: Alligator downtrend AND volume confirmation
-            elif alligator_short and volume_confirm:
+            # Short conditions: Close below L3 AND volume confirmation
+            elif current_close < camarilla_l3_level and volume_confirm:
                 position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                entry_price = prices['open'].iloc[i+1] if i+1 < n else current_close
                 lowest_since_entry = prices['low'].iloc[i]
                 signals[i] = -0.25
             else:
@@ -128,13 +129,13 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # ATR trailing stop: exit when price drops 2.5*ATR from highest point
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr[i]
+                # ATR trailing stop: exit when price drops 2.0*ATR from highest point
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.0 * atr[i]
                 exit_condition = trailing_stop
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # ATR trailing stop: exit when price rises 2.5*ATR from lowest point
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr[i]
+                # ATR trailing stop: exit when price rises 2.0*ATR from lowest point
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr[i]
                 exit_condition = trailing_stop
             
             if exit_condition:
