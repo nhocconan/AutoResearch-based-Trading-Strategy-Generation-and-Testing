@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
-# - Long when price breaks above Camarilla R4 (1d) AND 1d volume > 1.5x 20-bar avg AND 1w close > 1w open (bullish weekly candle)
-# - Short when price breaks below Camarilla S4 (1d) AND 1d volume > 1.5x 20-bar avg AND 1w close < 1w open (bearish weekly candle)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above Camarilla R4 (1d) AND 1d volume > 2.0x 20-bar avg AND 1w close > 1w open (bullish weekly candle)
+# - Short when price breaks below Camarilla S4 (1d) AND 1d volume > 2.0x 20-bar avg AND 1w close < 1w open (bearish weekly candle)
 # - Exit when price returns to Camarilla PP (pivot point) from 1d
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Camarilla levels provide precise intraday support/resistance; volume confirms institutional participation
-# - Weekly trend filter ensures alignment with higher timeframe momentum, reducing counter-trend whipsaws
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Volume threshold increased to 2.0x to reduce false breakouts and overtrading
+# - Weekly trend filter ensures alignment with higher timeframe momentum
 
-name = "6h_1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_1w_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,15 +38,15 @@ def generate_signals(prices):
     camarilla_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2.0)
     camarilla_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2.0)
     
-    # Align 1d Camarilla levels to 6h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    # Pre-compute 1d volume confirmation: > 2.0x 20-period average (stricter to reduce trades)
     volume_1d = df_1d['volume'].values
     volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.5 * volume_20_avg)
+    vol_spike_1d = volume_1d > (2.0 * volume_20_avg)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     # Pre-compute 1w trend filter: bullish if close > open, bearish if close < open
