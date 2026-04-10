@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d volume spike and 1w trend filter
-# - Primary: 6h price breaking above/below Camarilla H3/L3 levels from prior 1d session
-# - HTF volume filter: 1d volume > 1.8x 20-period MA for institutional participation
-# - HTF trend filter: 1w close > 1w EMA20 for long bias, < EMA20 for short bias
-# - Entry: Long when close > H3 + volume filter + 1w uptrend; Short when close < L3 + volume filter + 1w downtrend
-# - Exit: Price retouches Camarilla pivot point (PP) from prior 1d session
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 50-150 total trades over 4 years (12-38/year) for 6h timeframe
-# - Works in bull/bear: Camarilla levels adapt to volatility, volume confirms validity, 1w trend ensures alignment with higher timeframe momentum
+# Hypothesis: 6h Elder Ray + 1d ATR Regime Filter
+# - Primary: 6h Elder Ray (Bull Power = Close - EMA13, Bear Power = EMA13 - Close)
+# - HTF regime: 1d ATR(14) / ATR(50) > 1.2 = high volatility (trend mode), < 0.8 = low volatility (range mode)
+# - In high volatility: trend follow (long when Bull Power > 0 and rising, short when Bear Power > 0 and rising)
+# - In low volatility: mean revert (long when Bull Power < -0.5*ATR6h and turning up, short when Bear Power < -0.5*ATR6h and turning down)
+# - Volume confirmation: 6h volume > 1.5x 20-period MA
+# - Position sizing: 0.25
+# - Works in bull/bear: adapts to volatility regime, uses Elder Ray for momentum/mean reversion, volume confirms participation
 
-name = "6h_1d_1w_camarilla_pivot_trend_v1"
+name = "6h_1d_elder_ray_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,8 +23,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 20:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -35,35 +33,40 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from prior 1d session
-    def calculate_camarilla(high, low, close):
-        # Camarilla equations for H3, L3, and PP (pivot point)
-        range_val = high - low
-        pp = (high + low + close) / 3.0
-        h3 = pp + (range_val * 1.1 / 4.0)
-        l3 = pp - (range_val * 1.1 / 4.0)
-        return h3, l3, pp
+    # Calculate ATR for 6h (primary)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # first bar
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    h3_1d, l3_1d, pp_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    # Calculate EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power = close - ema_13  # Close - EMA13
+    bear_power = ema_13 - close  # EMA13 - Close
     
-    # Calculate 1d volume MA(20)
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    # Calculate 1d ATR regime filter
+    tr1d = high_1d - low_1d
+    tr1d_hl = np.abs(high_1d - np.roll(close_1d, 1))
+    tr1d_ll = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1d[0] = high_1d[0] - low_1d[0]
+    tr1d_hl[0] = np.abs(high_1d[0] - close_1d[0])
+    tr1d_ll[0] = np.abs(low_1d[0] - close_1d[0])
+    tr_1d = np.maximum(tr1d, np.maximum(tr1d_hl, tr1d_ll))
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_50_1d = pd.Series(tr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_14_1d / np.where(atr_50_1d != 0, atr_50_1d, 1e-10)
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
     
-    # Calculate 1w EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 6h volume MA(20)
+    volume_ma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -74,42 +77,70 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(pp_1d_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or not in_session[i]):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(atr_6h[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(volume_ma_20_6h[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.8x 20-period MA
-        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.8 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 6h volume > 1.5x 20-period MA
+        volume_confirm = volume[i] > 1.5 * volume_ma_20_6h[i]
         
-        # Trend filter: 1w close > EMA20 for uptrend, < EMA20 for downtrend
-        # Use the last completed 1w bar (already aligned via align_htf_to_ltf)
-        trend_up = close_1w[-1] > ema_20_1w[-1] if len(close_1w) > 0 else False
-        trend_down = close_1w[-1] < ema_20_1w[-1] if len(close_1w) > 0 else False
+        # Regime filters
+        high_vol = atr_ratio_1d_aligned[i] > 1.2  # ATR(14)/ATR(50) > 1.2
+        low_vol = atr_ratio_1d_aligned[i] < 0.8   # ATR(14)/ATR(50) < 0.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: close > H3 + volume confirmation + 1w uptrend
-            if (close[i] > h3_1d_aligned[i] and volume_confirm and trend_up):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: close < L3 + volume confirmation + 1w downtrend
-            elif (close[i] < l3_1d_aligned[i] and volume_confirm and trend_down):
-                position = -1
-                signals[i] = -0.25
-            else:
+            if high_vol:  # High volatility: trend follow
+                # Long: Bull Power > 0 and rising (current > previous)
+                # Short: Bear Power > 0 and rising (current > previous)
+                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and volume_confirm:
+                    position = 1
+                    signals[i] = 0.25
+                elif bear_power[i] > 0 and bear_power[i] > bear_power[i-1] and volume_confirm:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+            elif low_vol:  # Low volatility: mean revert
+                # Long: Bull Power < -0.5*ATR6h and turning up (current > previous)
+                # Short: Bear Power < -0.5*ATR6h and turning down (current < previous)
+                if bull_power[i] < -0.5 * atr_6h[i] and bull_power[i] > bull_power[i-1] and volume_confirm:
+                    position = 1
+                    signals[i] = 0.25
+                elif bear_power[i] < -0.5 * atr_6h[i] and bear_power[i] < bear_power[i-1] and volume_confirm:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+            else:  # Neutral regime - no trade
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Price retouches Camarilla pivot point (PP) from prior 1d session
+            # Exit conditions: regime change or power reversal
             if position == 1:  # Long position
-                if close[i] <= pp_1d_aligned[i]:
+                exit_condition = False
+                if high_vol and (bull_power[i] <= 0 or bull_power[i] < bull_power[i-1]):
+                    exit_condition = True  # Trend follow exit: power <= 0 or falling
+                elif low_vol and bull_power[i] >= -0.2 * atr_6h[i]:
+                    exit_condition = True  # Mean revert exit: power back to neutral
+                elif not (high_vol or low_vol):  # Neutral regime exit
+                    exit_condition = True
+                
+                if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] >= pp_1d_aligned[i]:
+                exit_condition = False
+                if high_vol and (bear_power[i] <= 0 or bear_power[i] < bear_power[i-1]):
+                    exit_condition = True  # Trend follow exit: power <= 0 or falling
+                elif low_vol and bear_power[i] >= -0.2 * atr_6h[i]:
+                    exit_condition = True  # Mean revert exit: power back to neutral
+                elif not (high_vol or low_vol):  # Neutral regime exit
+                    exit_condition = True
+                
+                if exit_condition:
                     position = 0
                     signals[i] = 0.0
                 else:
