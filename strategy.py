@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level AND 1d close > 1d open (bullish daily candle) AND volume > 1.5x 20-period volume SMA
-# - Short when price breaks below Camarilla L3 level AND 1d close < 1d open (bearish daily candle) AND volume > 1.5x 20-period volume SMA
-# - Exit: price reversion to Camarilla pivot point (mid-level) or ATR trailing stop (2.0x ATR)
-# - Uses 1d for signal direction (trend bias) and 6h for precise entry timing
+# Hypothesis: 6h Elder Ray Index with 1d regime filter and volume confirmation
+# - Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# - Long when Bull Power > 0 AND Bear Power < 0 (strong bullish momentum) AND 1d close > 1d SMA(50) (bullish regime) AND volume > 1.5x 20-period volume SMA
+# - Short when Bear Power > 0 AND Bull Power < 0 (strong bearish momentum) AND 1d close < 1d SMA(50) (bearish regime) AND volume > 1.5x 20-period volume SMA
+# - Exit: Elder Ray divergence (Bull Power < 0 for longs, Bear Power < 0 for shorts) OR ATR trailing stop (2.5x ATR)
+# - Uses 1d for regime filter (trend bias) and 6h for precise Elder Ray calculation
 # - Session filter: 08-20 UTC to avoid low-volume Asian session noise
 # - Position sizing: 0.25 discrete level to control drawdown and minimize fee churn
 # - Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while maintaining statistical significance
-# - Camarilla levels provide institutional support/resistance that works in both bull and bear markets
-# - Reduced ATR multiplier (2.0 vs 2.5) for faster exits in ranging markets
-# - Uses previous completed 1d bar for Camarilla calculation to avoid look-ahead
+# - Elder Ray measures bull/bear power behind price movements, effective in both trending and ranging markets
+# - Uses previous completed 1d bar for regime calculation to avoid look-ahead
 
-name = "6h_1d_camarilla_breakout_v1"
+name = "6h_1d_elder_ray_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -36,18 +36,18 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return signals
     
-    # Calculate 1d candle direction (bullish/bearish) for trend filter
+    # Calculate 1d EMA(50) for regime filter
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
-    # Bullish 1d candle: close > open
-    bullish_1d = close_1d > open_1d
-    bearish_1d = close_1d < open_1d
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Bullish regime: close > EMA(50)
+    bullish_regime = close_1d > ema_50_1d
+    bearish_regime = close_1d < ema_50_1d
     # Align to 6h timeframe with proper delay (completed 1d bar only)
-    bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, bullish_1d)
-    bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, bearish_1d)
+    bullish_regime_aligned = align_htf_to_ltf(prices, df_1d, bullish_regime)
+    bearish_regime_aligned = align_htf_to_ltf(prices, df_1d, bearish_regime)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
@@ -63,6 +63,13 @@ def generate_signals(prices):
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Calculate EMA(13) for Elder Ray on 6h
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA(13)
+    bear_power = ema_13 - low   # Bear Power = EMA(13) - Low
+    
     # Track highest high since entry for trailing stop (long)
     # Track lowest low since entry for trailing stop (short)
     highest_since_entry = np.full(n, np.nan)
@@ -76,62 +83,26 @@ def generate_signals(prices):
             
         # Skip if any required data is invalid
         if (np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(bullish_1d_aligned[i]) or np.isnan(bearish_1d_aligned[i])):
+            np.isnan(bullish_regime_aligned[i]) or np.isnan(bearish_regime_aligned[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: 6h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
-        # Calculate Camarilla pivot levels for today (using previous day's OHLC)
-        # Need to get previous day's high, low, close from 1d data
-        if len(df_1d) >= 2:
-            # Get previous day's OHLC (completed 1d bar)
-            prev_high_1d = df_1d['high'].shift(1).values
-            prev_low_1d = df_1d['low'].shift(1).values
-            prev_close_1d = df_1d['close'].shift(1).values
-            
-            # Align previous day's OHLC to 6h timeframe
-            prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-            prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
-            prev_close_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
-            
-            # Calculate Camarilla levels
-            # H4 = Close + 1.5*(High-Low)
-            # H3 = Close + 1.125*(High-Low)
-            # H2 = Close + 0.75*(High-Low)
-            # H1 = Close + 0.5*(High-Low)
-            # Pivot = (High + Low + Close)/3
-            # L1 = Close - 0.5*(High-Low)
-            # L2 = Close - 0.75*(High-Low)
-            # L3 = Close - 1.125*(High-Low)
-            # L4 = Close - 1.5*(High-Low)
-            
-            rang = prev_high_1d_aligned - prev_low_1d_aligned
-            camarilla_h3 = prev_close_1d_aligned + 1.125 * rang
-            camarilla_l3 = prev_close_1d_aligned - 1.125 * rang
-            camarilla_pivot = (prev_high_1d_aligned + prev_low_1d_aligned + prev_close_1d_aligned) / 3.0
-            
-            # Check for valid Camarilla levels
-            if np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or np.isnan(camarilla_pivot[i]):
-                signals[i] = 0.0
-                continue
-        else:
-            signals[i] = 0.0
-            continue
-        
-        # Camarilla breakout signals
-        breakout_up = close[i] > camarilla_h3[i-1]  # Break above H3 level
-        breakout_down = close[i] < camarilla_l3[i-1]  # Break below L3 level
+        # Elder Ray signals
+        strong_bullish = (bull_power[i] > 0) and (bear_power[i] < 0)  # Both bulls in control and bears weak
+        strong_bearish = (bear_power[i] > 0) and (bull_power[i] < 0)  # Both bears in control and bulls weak
         
         if position == 0:  # Flat - look for entry
-            # Long: price breaks above H3 AND 1d bullish AND volume confirmation
-            if breakout_up and bullish_1d_aligned[i] and vol_confirm:
+            # Long: strong bullish momentum AND bullish regime AND volume confirmation
+            if strong_bullish and bullish_regime_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 highest_since_entry[i] = high[i]  # Initialize trailing stop
-            # Short: price breaks below L3 AND 1d bearish AND volume confirmation
-            elif breakout_down and bearish_1d_aligned[i] and vol_confirm:
+            # Short: strong bearish momentum AND bearish regime AND volume confirmation
+            elif strong_bearish and bearish_regime_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 lowest_since_entry[i] = low[i]  # Initialize trailing stop
@@ -145,11 +116,11 @@ def generate_signals(prices):
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
             
-            # ATR trailing stop: exit if price drops 2.0*ATR below highest high since entry
-            trailing_stop = highest_since_entry[i] - 2.0 * atr[i]
+            # ATR trailing stop: exit if price drops 2.5*ATR below highest high since entry
+            trailing_stop = highest_since_entry[i] - 2.5 * atr[i]
             
-            # Exit conditions: trailing stop hit OR reversion to pivot point
-            exit_condition = (close[i] < trailing_stop) or (close[i] < camarilla_pivot[i])
+            # Exit conditions: trailing stop hit OR Elder Ray divergence (bull power weakening)
+            exit_condition = (close[i] < trailing_stop) or (bull_power[i] < 0)
             
             if exit_condition:
                 position = 0
@@ -166,11 +137,11 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
             
-            # ATR trailing stop: exit if price rises 2.0*ATR above lowest low since entry
-            trailing_stop = lowest_since_entry[i] + 2.0 * atr[i]
+            # ATR trailing stop: exit if price rises 2.5*ATR above lowest low since entry
+            trailing_stop = lowest_since_entry[i] + 2.5 * atr[i]
             
-            # Exit conditions: trailing stop hit OR reversion to pivot point
-            exit_condition = (close[i] > trailing_stop) or (close[i] > camarilla_pivot[i])
+            # Exit conditions: trailing stop hit OR Elder Ray divergence (bear power weakening)
+            exit_condition = (close[i] > trailing_stop) or (bear_power[i] < 0)
             
             if exit_condition:
                 position = 0
