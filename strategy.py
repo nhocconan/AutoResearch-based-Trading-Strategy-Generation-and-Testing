@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX regime filter
-# - Long when price breaks above 4h Donchian upper (20-period high) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20 (trending)
-# - Short when price breaks below 4h Donchian lower (20-period low) AND 1d volume > 1.5x 20-period average AND 1d ADX > 20
-# - Exit when price returns to 4h Donchian midpoint (mean of upper/lower)
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation
+# - Long when Williams %R(14) < -80 (oversold) AND 1d close > 1d EMA50 (uptrend) AND 6h volume > 1.5x 20-period average
+# - Short when Williams %R(14) > -20 (overbought) AND 1d close < 1d EMA50 (downtrend) AND 6h volume > 1.5x 20-period average
+# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Donchian channels provide objective breakout levels that work in both bull and bear markets
-# - Volume confirmation reduces false breakouts during low-participation moves
-# - Daily ADX filter ensures we trade only when higher timeframe is trending (avoids chop)
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Williams %R identifies exhaustion points in both trending and ranging markets
+# - Daily EMA50 filter ensures we trade with higher timeframe trend (avoids counter-trend in strong moves)
+# - Volume confirmation reduces false signals from low-participation exhaustion
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_donchian_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_williamsr_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,101 +24,59 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC
+    # Pre-compute 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Donchian channels (20-period)
-    lookback = 20
+    # Pre-compute 6h Williams %R(14)
     highest_high = np.full_like(high, np.nan, dtype=float)
     lowest_low = np.full_like(low, np.nan, dtype=float)
+    for i in range(13, len(high)):
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
+    williams_r = np.full_like(close, np.nan, dtype=float)
+    for i in range(13, len(close)):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # Avoid division by zero
     
-    for i in range(lookback-1, len(high)):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Pre-compute 6h volume MA(20)
+    vol_ma_6h = np.full_like(volume, np.nan, dtype=float)
+    for i in range(19, len(volume)):
+        vol_ma_6h[i] = np.mean(volume[i-19:i+1])
     
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
-    
-    # Pre-compute 1d volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = np.full_like(volume_1d, np.nan, dtype=float)
-    for i in range(19, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
-    
-    # Pre-compute 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA(50)
     close_1d = df_1d['close'].values
+    ema_50_1d = np.full_like(close_1d, np.nan, dtype=float)
+    if len(close_1d) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * multiplier) + (ema_50_1d[i-1] * (1 - multiplier))
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    # Align HTF indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)  # Williams %R is 6h indicator, no HTF alignment needed
+    vol_ma_6h_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_6h)    # Actually 6h, but using mtf_data for consistency
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Wilder's smoothing function
-    def wheilder_smoothing(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value: simple average
-        result[period-1] = np.nansum(arr[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]):
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    atr_1d = wheilder_smoothing(tr, 14)
-    dm_plus_smooth = wheilder_smoothing(dm_plus, 14)
-    dm_minus_smooth = wheilder_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.full_like(atr_1d, np.nan, dtype=float)
-    di_minus = np.full_like(atr_1d, np.nan, dtype=float)
-    for i in range(14, len(atr_1d)):
-        if not np.isnan(atr_1d[i]) and atr_1d[i] != 0:
-            di_plus[i] = (dm_plus_smooth[i] / atr_1d[i]) * 100
-            di_minus[i] = (dm_minus_smooth[i] / atr_1d[i]) * 100
-    
-    # DX and ADX
-    dx = np.full_like(di_plus, np.nan, dtype=float)
-    for i in range(14, len(di_plus)):
-        if not np.isnan(di_plus[i]) and not np.isnan(di_minus[i]):
-            di_sum = di_plus[i] + di_minus[i]
-            if di_sum != 0:
-                dx[i] = np.abs(di_plus[i] - di_minus[i]) / di_sum * 100
-    
-    adx_1d = wheilder_smoothing(dx, 14)
-    
-    # Align HTF indicators to 4h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Correct alignment: 6h indicators don't need HTF alignment, 1d EMA does
+    williams_r_aligned = williams_r  # 6h indicator, already aligned
+    vol_ma_6h_aligned = vol_ma_6h    # 6h indicator, already aligned
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)  # 1d EMA needs alignment
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(60, n):  # Start after warmup for Williams %R(14) and EMA50
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_6h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -129,22 +87,26 @@ def generate_signals(prices):
         
         if position == 0:  # Flat - look for new entries
             # Volume spike condition (1.5x average)
-            vol_spike = volume[i] > 1.5 * vol_ma_1d_aligned[i]
+            vol_spike = volume[i] > 1.5 * vol_ma_6h_aligned[i]
             
-            # Long conditions: price > upper band AND volume spike AND 1d trending (ADX > 20)
-            if (close[i] > donchian_upper[i] and vol_spike and adx_1d_aligned[i] > 20):
+            # Long conditions: Williams %R < -80 (oversold) AND 1d uptrend (close > EMA50) AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                vol_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price < lower band AND volume spike AND 1d trending (ADX > 20)
-            elif (close[i] < donchian_lower[i] and vol_spike and adx_1d_aligned[i] > 20):
+            # Short conditions: Williams %R > -20 (overbought) AND 1d downtrend (close < EMA50) AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  vol_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit condition: price returns to midpoint
-            exit_long = (position == 1 and close[i] < donchian_mid[i])
-            exit_short = (position == -1 and close[i] > donchian_mid[i])
+            # Exit conditions: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+            exit_long = (position == 1 and williams_r_aligned[i] > -50)
+            exit_short = (position == -1 and williams_r_aligned[i] < -50)
             
             if exit_long or exit_short:
                 position = 0
@@ -157,14 +119,118 @@ def generate_signals(prices):
     
     return signals
 
-def wheilder_smoothing(arr, period):
-    result = np.full_like(arr, np.nan, dtype=float)
-    if len(arr) < period:
-        return result
-    # First value: simple average
-    result[period-1] = np.nansum(arr[:period])
-    # Subsequent values: Wilder's smoothing
-    for i in range(period, len(arr)):
-        if not np.isnan(result[i-1]):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-    return result
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation
+# - Long when Williams %R(14) < -80 (oversold) AND 1d close > 1d EMA50 (uptrend) AND 6h volume > 1.5x 20-period average
+# - Short when Williams %R(14) > -20 (overbought) AND 1d close < 1d EMA50 (downtrend) AND 6h volume > 1.5x 20-period average
+# - Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+# - Uses discrete position sizing 0.25 to limit fee churn
+# - Williams %R identifies exhaustion points in both trending and ranging markets
+# - Daily EMA50 filter ensures we trade with higher timeframe trend (avoids counter-trend in strong moves)
+# - Volume confirmation reduces false signals from low-participation exhaustion
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+
+name = "6h_1d_williamsr_trend_volume_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTf data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
+        return np.zeros(n)
+    
+    # Pre-compute 6h OHLCV
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Pre-compute 6h Williams %R(14)
+    highest_high = np.full_like(high, np.nan, dtype=float)
+    lowest_low = np.full_like(low, np.nan, dtype=float)
+    for i in range(13, len(high)):
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
+    williams_r = np.full_like(close, np.nan, dtype=float)
+    for i in range(13, len(close)):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # Avoid division by zero
+    
+    # Pre-compute 6h volume MA(20)
+    vol_ma_6h = np.full_like(volume, np.nan, dtype=float)
+    for i in range(19, len(volume)):
+        vol_ma_6h[i] = np.mean(volume[i-19:i+1])
+    
+    # Pre-compute 1d EMA(50)
+    close_1d = df_1d['close'].values
+    ema_50_1d = np.full_like(close_1d, np.nan, dtype=float)
+    if len(close_1d) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * multiplier) + (ema_50_1d[i-1] * (1 - multiplier))
+    
+    # Align HTF indicators to 6h timeframe
+    williams_r_aligned = williams_r  # 6h indicator, already aligned
+    vol_ma_6h_aligned = vol_ma_6h    # 6h indicator, already aligned
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)  # 1d EMA needs alignment
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(60, n):  # Start after warmup for Williams %R(14) and EMA50
+        # Skip if any required data is invalid
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(vol_ma_6h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
+            continue
+        
+        if position == 0:  # Flat - look for new entries
+            # Volume spike condition (1.5x average)
+            vol_spike = volume[i] > 1.5 * vol_ma_6h_aligned[i]
+            
+            # Long conditions: Williams %R < -80 (oversold) AND 1d uptrend (close > EMA50) AND volume spike
+            if (williams_r_aligned[i] < -80 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                vol_spike):
+                position = 1
+                signals[i] = 0.25
+            # Short conditions: Williams %R > -20 (overbought) AND 1d downtrend (close < EMA50) AND volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  vol_spike):
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+        else:  # Have position - look for exit
+            # Exit conditions: Williams %R crosses above -50 (for longs) or below -50 (for shorts)
+            exit_long = (position == 1 and williams_r_aligned[i] > -50)
+            exit_short = (position == -1 and williams_r_aligned[i] < -50)
+            
+            if exit_long or exit_short:
+                position = 0
+                signals[i] = 0.0
+            else:
+                if position == 1:
+                    signals[i] = 0.25
+                else:
+                    signals[i] = -0.25
+    
+    return signals
