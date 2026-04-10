@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Target: 20-35 trades/year (80-140 total over 4 years) to avoid fee drag
 # - Volume filter reduces false breakouts, improving win rate
 
-name = "4h_1d_donchian_volume_v2"
+name = "4h_1d_donchian_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
