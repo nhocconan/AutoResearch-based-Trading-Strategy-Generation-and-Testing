@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and chop regime filter
-# - Long when price breaks above H3 Camarilla level (from prior 1d) AND volume > 1.5x 20-period average AND chop < 61.8 (trending)
-# - Short when price breaks below L3 Camarilla level (from prior 1d) AND volume > 1.5x 20-period average AND chop < 61.8 (trending)
-# - Exit when price returns to H4/L4 levels or chop > 61.8 (range) as risk control
-# - Uses discrete position sizing (0.25) to balance return and drawdown
-# - Camarilla levels provide institutional support/resistance; breakouts capture momentum
-# - Volume confirmation ensures institutional participation
-# - Chop filter (14-period) avoids whipsaws in ranging markets
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: breakouts work in trends, chop filter avoids false signals in ranges
+# Hypothesis: 1d mean reversion with 1w trend filter and volume confirmation
+# - Long when RSI(14) < 30 (oversold) AND 1w EMA(20) > EMA(50) (bullish trend) AND 1d volume > 1.5x 20-bar avg
+# - Short when RSI(14) > 70 (overbought) AND 1w EMA(20) < EMA(50) (bearish trend) AND 1d volume > 1.5x 20-bar avg
+# - Exit when RSI returns to 50 (mean reversion to equilibrium)
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - RSI captures short-term exhaustion; 1w EMA filter ensures alignment with higher timeframe trend
+# - Volume confirmation avoids low-liquidity false signals
+# - Session filter (08-20 UTC) reduces noise trades
+# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Works in both bull and bear markets: mean reversion in ranges, trend filter prevents counter-trend trades
 
-name = "12h_1d_camarilla_breakout_volume_chop_v1"
-timeframe = "12h"
+name = "1d_1w_rsi_meanreversion_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,77 +24,58 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d Camarilla levels (based on prior day's range)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate prior day's range (shifted by 1 to avoid look-ahead)
-    prior_high = np.roll(high_1d, 1)
-    prior_low = np.roll(low_1d, 1)
-    prior_close = np.roll(close_1d, 1)
-    
-    # Set first value to NaN (no prior day available)
-    prior_high[0] = np.nan
-    prior_low[0] = np.nan
-    prior_close[0] = np.nan
-    
-    # Calculate Camarilla levels for current day (based on prior day)
-    range_1d = prior_high - prior_low
-    H3 = prior_close + (range_1d * 1.1 / 4)
-    L3 = prior_close - (range_1d * 1.1 / 4)
-    H4 = prior_close + (range_1d * 1.1 / 2)
-    L4 = prior_close - (range_1d * 1.1 / 2)
+    # Pre-compute 1w EMA trend filter: EMA(20) vs EMA(50)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_bullish_1w = ema_20_1w > ema_50_1w
+    ema_bearish_1w = ema_20_1w < ema_50_1w
     
     # Pre-compute 1d volume confirmation: > 1.5x 20-period average
     volume_1d = df_1d['volume'].values
     volume_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = volume_1d > (1.5 * volume_20_avg_1d)
     
-    # Pre-compute 12h chop regime filter (14-period)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar TR is just high-low
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
-    sum_atr_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    
-    # Avoid division by zero
-    chop = np.where(range_14 > 0, 100 * np.log10(sum_atr_14 / range_14) / np.log10(14), 50)
-    chop = np.where(np.isnan(chop), 50, chop)
-    chop_filter = chop < 61.8  # Trending regime (chop < 61.8)
-    
-    # Align HTF indicators to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Align HTF indicators to 1d timeframe
+    ema_bullish_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish_1w)
+    ema_bearish_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish_1w)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # Pre-compute RSI(14) on 1d data
+    close = prices['close'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    # Handle division by zero (when avg_loss == 0 and avg_gain == 0)
+    rsi = np.where((avg_loss == 0) & (avg_gain == 0), 50, rsi)
+    
+    # RSI conditions: < 30 oversold, > 70 overbought, exit at 50
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
+    rsi_exit = np.abs(rsi - 50) < 2.5  # Within 2.5 of 50
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_filter[i])):
+        if (np.isnan(ema_bullish_1w_aligned[i]) or np.isnan(ema_bearish_1w_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(rsi_oversold[i]) or
+            np.isnan(rsi_overbought[i]) or np.isnan(rsi_exit[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -104,30 +85,31 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND volume spike AND trending regime
-            if (close_12h[i] > H3_aligned[i] and 
-                vol_spike_1d_aligned[i] and 
-                chop_filter[i]):
+        # Apply session filter
+        if not in_session[i]:
+            # Outside session: flatten position
+            position = 0
+            signals[i] = 0.0
+            continue
+        
+        if position == 0:  # Flat - look for new mean reversion entries
+            # Long when RSI oversold AND 1w bullish trend AND volume spike
+            if (rsi_oversold[i] and 
+                ema_bullish_1w_aligned[i] and 
+                vol_spike_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND volume spike AND trending regime
-            elif (close_12h[i] < L3_aligned[i] and 
-                  vol_spike_1d_aligned[i] and 
-                  chop_filter[i]):
+            # Short when RSI overbought AND 1w bearish trend AND volume spike
+            elif (rsi_overbought[i] and 
+                  ema_bearish_1w_aligned[i] and 
+                  vol_spike_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit conditions
-            # Exit when price returns to H4/L4 levels OR chop > 61.8 (range)
-            exit_signal = False
-            if position == 1:  # Long position
-                if close_12h[i] < H4_aligned[i] or chop_filter[i] == False:
-                    exit_signal = True
-            else:  # Short position
-                if close_12h[i] > L4_aligned[i] or chop_filter[i] == False:
-                    exit_signal = True
+        else:  # Have position - look for exit to RSI = 50 (mean reversion)
+            # Exit when RSI returns to equilibrium (50)
+            exit_signal = rsi_exit[i]
             
             if exit_signal:
                 position = 0
