@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and 1w chop regime filter
-# - Long when price breaks above Donchian(20) high + volume > 1.8x 20-period 1d volume EMA + CHOP(14) > 61.8 (ranging market)
-# - Short when price breaks below Donchian(20) low + volume > 1.8x 20-period 1d volume EMA + CHOP(14) > 61.8 (ranging market)
-# - Exit: Price crosses Donchian midpoint (mean of 20-period high/low)
+# Hypothesis: 4h Williams %R reversal with 1d volume spike and 1w ADX trend filter
+# - Long when Williams %R(14) crosses above -80 (oversold bounce) + volume > 2.0x 20-period 1d volume SMA + ADX(14) > 25 (trending market)
+# - Short when Williams %R(14) crosses below -20 (overbought rejection) + volume > 2.0x 20-period 1d volume SMA + ADX(14) > 25 (trending market)
+# - Exit: Williams %R crosses -50 (mean reversion to midpoint)
 # - Position sizing: 0.25 discrete level
-# - Targets ~25-35 trades/year on 4h timeframe. Donchian breakout captures momentum,
-#   volume confirmation validates breakout strength, chop filter ensures mean-reversion environment.
-#   Works in bull/bear: breakouts work in both regimes, chop filter avoids strong trends where false breakouts occur.
+# - Targets ~20-30 trades/year on 4h timeframe. Williams %R captures momentum reversals,
+#   volume confirmation validates conviction, ADX filter ensures we trade with trend strength.
+#   Works in bull/bear: oversold bounces in bear markets, overbought rejections in bull markets,
+#   ADX filter avoids choppy markets where Williams %R gives false signals.
 
-name = "4h_1d_1w_donchian_volume_chop_v1"
+name = "4h_1d_1w_williamsr_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,17 +37,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Donchian Channel(20) from 4h data
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high_20 + lowest_low_20) / 2
+    # Calculate Williams %R(14) from 4h data
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # avoid division by zero
     
-    # Calculate 1d volume EMA for confirmation (20-period)
+    # Calculate 1d volume SMA for confirmation (20-period)
     volume_1d = df_1d['volume'].values
-    volume_ema_20_1d = pd.Series(volume_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ema_20_1d)
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Calculate 1w Choppiness Index(14) for regime filter
+    # Calculate 1w ADX(14) for trend filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -59,47 +61,60 @@ def generate_signals(prices):
     tr3[0] = 0
     tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Sum of TR over 14 periods
-    tr_sum_14 = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
+    # Directional Movement
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Smoothed values
+    tr_14 = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # Choppiness Index: CI = 100 * log10(tr_sum_14 / (hh_14 - ll_14)) / log10(14)
-    # Avoid division by zero
-    hh_ll_diff = hh_14 - ll_14
-    choppiness = 100 * np.log10(tr_sum_14 / np.where(hh_ll_diff == 0, 1e-10, hh_ll_diff)) / np.log10(14)
-    choppiness_aligned = align_htf_to_ltf(prices, df_1w, choppiness)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    plus_di = np.where(tr_14 == 0, 0, plus_di)
+    minus_di = np.where(tr_14 == 0, 0, minus_di)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(volume_ema_20_1d_aligned[i]) or 
-            np.isnan(choppiness_aligned[i])):
+        if (np.isnan(highest_high_14[i]) or np.isnan(lowest_low_14[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume for confirmation (aligned to 4h)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 1.8 * volume_ema_20_1d_aligned[i]
+        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Regime filter: CHOP > 61.8 indicates ranging market (mean revert)
-        regime_filter = choppiness_aligned[i] > 61.8
+        # Trend filter: ADX > 25 indicates trending market
+        trend_filter = adx_aligned[i] > 25
         
-        # Donchian breakout entry conditions
-        # Long: price breaks above upper band + volume confirmation + ranging market
-        # Short: price breaks below lower band + volume confirmation + ranging market
-        long_entry = (close[i] > highest_high_20[i] and 
+        # Williams %R entry conditions
+        # Long: Williams %R crosses above -80 (oversold bounce) + volume confirmation + trending market
+        # Short: Williams %R crosses below -20 (overbought rejection) + volume confirmation + trending market
+        long_entry = (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
                      vol_confirm and 
-                     regime_filter)
-        short_entry = (close[i] < lowest_low_20[i] and 
+                     trend_filter)
+        short_entry = (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
                       vol_confirm and 
-                      regime_filter)
+                      trend_filter)
         
-        # Exit conditions: price crosses Donchian midpoint
-        exit_long = close[i] < donchian_mid[i]
-        exit_short = close[i] > donchian_mid[i]
+        # Exit conditions: Williams %R crosses -50 (mean reversion)
+        exit_long = williams_r[i] < -50 and williams_r[i-1] >= -50
+        exit_short = williams_r[i] > -50 and williams_r[i-1] <= -50
         
         if position == 0:  # Flat - look for entry
             if long_entry:
