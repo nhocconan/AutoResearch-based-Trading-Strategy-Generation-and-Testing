@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 12h chop regime filter
-# - Long when price breaks above Donchian(20) high AND 1d volume > 1.3x 20-period average AND 12h chop > 61.8 (ranging market)
-# - Short when price breaks below Donchian(20) low AND 1d volume > 1.3x 20-period average AND 12h chop > 61.8 (ranging market)
-# - Exit when price returns to Donchian(20) midpoint (mean reversion within the channel)
+# Hypothesis: 4h Williams %R mean reversion with 12h chop regime filter and 1d volume spike
+# - Long when Williams %R(14) < -80 (oversold) AND 12h chop > 61.8 (ranging market) AND 1d volume > 1.5x 20-period average
+# - Short when Williams %R(14) > -20 (overbought) AND 12h chop > 61.8 (ranging market) AND 1d volume > 1.5x 20-period average
+# - Exit when Williams %R returns to -50 (mean reversion)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Donchian breakouts capture momentum in ranging markets; volume confirms institutional participation
-# - Chop filter ensures we only trade when market is ranging (avoid strong trends where breakouts fail)
+# - Williams %R captures reversals in ranging markets; volume confirms participation; chop filter avoids strong trends
 # - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "4h_1d_12h_donchian_volume_chop_v1"
+name = "4h_1d_12h_williamsr_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,7 +32,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Donchian Channel (20-period)
+    # Pre-compute 4h Williams %R (14-period)
     def highest_high(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
@@ -46,9 +45,14 @@ def generate_signals(prices):
             result[i] = np.min(arr[i - window + 1:i + 1])
         return result
     
-    donchian_high = highest_high(high, 20)
-    donchian_low = lowest_low(low, 20)
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    hh_14 = highest_high(high, 14)
+    ll_14 = lowest_low(low, 14)
+    williams_r = np.full_like(close, np.nan, dtype=float)
+    for i in range(13, len(close)):
+        if hh_14[i] > ll_14[i]:
+            williams_r[i] = (hh_14[i] - close[i]) / (hh_14[i] - ll_14[i]) * -100
+        else:
+            williams_r[i] = -50.0
     
     # Pre-compute 4h ATR (14-period) for stoploss
     def true_range(h, l, c_prev):
@@ -100,8 +104,15 @@ def generate_signals(prices):
     chop_12h = np.zeros_like(close_12h)
     for i in range(13, len(close_12h)):
         if hh_12h[i] > ll_12h[i]:
-            log_sum = np.log10(rolling_sum(tr_12h, 14)[i] / (hh_12h[i] - ll_12h[i]))
-            chop_12h[i] = 100 * log_sum / np.log10(14)
+            # Avoid division by zero and log of zero
+            tr_sum = 0.0
+            for j in range(i-13, i+1):
+                tr_sum += tr_12h[j]
+            denominator = hh_12h[i] - ll_12h[i]
+            if denominator > 0 and tr_sum > 0:
+                chop_12h[i] = 100 * np.log10(tr_sum / denominator) / np.log10(14)
+            else:
+                chop_12h[i] = 50.0
         else:
             chop_12h[i] = 50.0
     
@@ -116,8 +127,8 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(chop_regime_12h_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(chop_regime_12h_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -127,32 +138,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Volume confirmation: current 1d volume > 1.3x 20-period average
-            # Since we don't have current 1d volume aligned, use price action as proxy
-            # Primary: Donchian breakout + chop regime
+            # Volume confirmation: current 1d volume > 1.5x 20-period average
+            # Since we don't have current 1d volume aligned, use HTF volume as proxy
+            vol_condition = volume_1d[-1] > 1.5 * vol_ma_1d_aligned[i] if len(volume_1d) > 0 else False
             
-            # Long conditions: price breaks above Donchian high AND chop regime
-            if close[i] > donchian_high[i] and chop_regime_12h_aligned[i]:
-                # Additional confirmation: bullish momentum (close in upper half of bar)
-                if close[i] > (high[i] + low[i]) / 2:
-                    position = 1
-                    signals[i] = 0.25
-            # Short conditions: price breaks below Donchian low AND chop regime
-            elif close[i] < donchian_low[i] and chop_regime_12h_aligned[i]:
-                # Additional confirmation: bearish momentum (close in lower half of bar)
-                if close[i] < (high[i] + low[i]) / 2:
-                    position = -1
-                    signals[i] = -0.25
+            # Long conditions: Williams %R oversold AND chop regime AND volume spike
+            if williams_r[i] < -80 and chop_regime_12h_aligned[i] and vol_condition:
+                position = 1
+                signals[i] = 0.25
+            # Short conditions: Williams %R overbought AND chop regime AND volume spike
+            elif williams_r[i] > -20 and chop_regime_12h_aligned[i] and vol_condition:
+                position = -1
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price returns to Donchian midpoint
-            exit_long = (position == 1 and close[i] <= donchian_mid[i])
-            exit_short = (position == -1 and close[i] >= donchian_mid[i])
+            # Exit conditions: Williams %R returns to -50 (mean reversion)
+            exit_long = (position == 1 and williams_r[i] >= -50)
+            exit_short = (position == -1 and williams_r[i] <= -50)
             
             # Optional: ATR-based stoploss
-            stop_long = (position == 1 and close[i] <= donchian_high[i] - 2.0 * atr[i])
-            stop_short = (position == -1 and close[i] >= donchian_low[i] + 2.0 * atr[i])
+            stop_long = (position == 1 and close[i] <= high[i] - 2.0 * atr[i])
+            stop_short = (position == -1 and close[i] >= low[i] + 2.0 * atr[i])
             
             if exit_long or exit_short or stop_long or stop_short:
                 position = 0
@@ -164,9 +171,3 @@ def generate_signals(prices):
                     signals[i] = -0.25
     
     return signals
-
-def rolling_sum(arr, window):
-    result = np.full_like(arr, np.nan, dtype=float)
-    for i in range(window - 1, len(arr)):
-        result[i] = np.sum(arr[i - window + 1:i + 1])
-    return result
