@@ -3,22 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) high AND weekly close > weekly open (bullish weekly bias) AND volume > 1.5x 20-period volume SMA
-# - Short when price breaks below Donchian(20) low AND weekly close < weekly open (bearish weekly bias) AND volume > 1.5x 20-period volume SMA
-# - Exit: opposite Donchian breakout or volume drops below average
-# - Uses 1d for Donchian and volume, 1w for trend bias
-# - Weekly trend filter ensures we only trade in the direction of the higher timeframe momentum
-# - Volume confirmation ensures breakouts have conviction
-# - Target: 10-25 trades/year to minimize fee drag while capturing meaningful moves
+# Hypothesis: 6h Camarilla pivot volume spike strategy
+# - Long when price breaks above Camarilla R3 level AND 6h volume > 2.0x 20-period volume SMA
+# - Short when price breaks below Camarilla S3 level AND 6h volume > 2.0x 20-period volume SMA
+# - Exit: price returns to Camarilla pivot level (mean reversion) or volume drops below average
+# - Uses 6h for price/volume, 1d for Camarilla pivot calculation (prior day's OHLC)
+# - Camarilla levels from daily timeframe provide institutional support/resistance
+# - Volume spike ensures breakouts have conviction and filters false signals
+# - Mean reversion to pivot provides defined exit in ranging markets
+# - Target: 12-25 trades/year to minimize fee drag while capturing institutional flows
 
-name = "1d_1w_donchian_trend_volume_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -30,64 +31,77 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop for weekly trend filter (MTF rule compliance)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 1d data ONCE before loop for Camarilla pivot calculation (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate weekly trend: bullish if weekly close > weekly open
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish weekly candle
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    # Calculate Camarilla pivot levels from 1d data (using prior day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Pre-compute Donchian channels for 1d data (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: based on prior day's range
+    # R4 = close + (high - low) * 1.1/2
+    # R3 = close + (high - low) * 1.1/4
+    # R2 = close + (high - low) * 1.1/6
+    # R1 = close + (high - low) * 1.1/12
+    # PP = (high + low + close) / 3
+    # S1 = close - (high - low) * 1.1/12
+    # S2 = close - (high - low) * 1.1/6
+    # S3 = close - (high - low) * 1.1/4
+    # S4 = close - (high - low) * 1.1/2
     
-    # Pre-compute volume SMA for 1d data (20-period)
+    range_1d = high_1d - low_1d
+    camarilla_r3 = close_1d + range_1d * 1.1 / 4.0
+    camarilla_s3 = close_1d - range_1d * 1.1 / 4.0
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    
+    # Pre-compute volume SMA for 6h data (20-period)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(20, n):  # Start after 20-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_sma_20[i]) or np.isnan(weekly_bullish_aligned[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(camarilla_pp_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
+        # Volume confirmation: 6h volume > 2.0x 20-period volume SMA
+        vol_confirm = volume[i] > 2.0 * volume_sma_20[i]
         
-        # Donchian breakout signals
-        breakout_long = close[i] > donchian_high[i-1]  # Break above prior period's high
-        breakout_short = close[i] < donchian_low[i-1]  # Break below prior period's low
+        # Camarilla breakout signals
+        breakout_long = close[i] > camarilla_r3_aligned[i]  # Break above R3
+        breakout_short = close[i] < camarilla_s3_aligned[i]  # Break below S3
         
-        # Weekly trend filter
-        weekly_trend_bullish = weekly_bullish_aligned[i] > 0.5  # Convert to boolean
-        weekly_trend_bearish = weekly_bullish_aligned[i] <= 0.5  # Convert to boolean
-        
-        # Exit conditions: opposite breakout or volume drops below average
-        exit_long = close[i] < donchian_low[i-1] or volume[i] < volume_sma_20[i]
-        exit_short = close[i] > donchian_high[i-1] or volume[i] < volume_sma_20[i]
+        # Mean reversion exit: price returns to pivot level
+        exit_long = close[i] < camarilla_pp_aligned[i]
+        exit_short = close[i] > camarilla_pp_aligned[i]
         
         # Trading logic
         if vol_confirm:
-            # Long: Donchian breakout above with bullish weekly trend
-            if breakout_long and weekly_trend_bullish:
+            # Long: Camarilla breakout above R3
+            if breakout_long:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25
-            # Short: Donchian breakout below with bearish weekly trend
-            elif breakout_short and weekly_trend_bearish:
+            # Short: Camarilla breakout below S3
+            elif breakout_short:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
                 else:
                     signals[i] = -0.25
             else:
-                # Check for exits
+                # Check for mean reversion exits
                 if position == 1 and exit_long:
                     position = 0
                     signals[i] = 0.0
