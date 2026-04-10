@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ATR-based volatility breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above highest high of last 20 periods + ATR(10) expansion + 1d uptrend + volume > 2.0x 20-bar avg
-# - Short when price breaks below lowest low of last 20 periods + ATR(10) expansion + 1d downtrend + volume spike
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and choppiness regime filter
+# - Long when price breaks above Donchian(20) high + 1d volume > 2.0x 20-bar avg + CHOP(14) > 61.8 (range)
+# - Short when price breaks below Donchian(20) low + 1d volume > 2.0x 20-bar avg + CHOP(14) > 61.8 (range)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - ATR filter ensures breakouts occur during expanding volatility (avoids false breakouts in chop)
-# - 1d trend filter aligns with higher timeframe momentum
+# - Targets ~25 trades/year (100 total over 4 years) to avoid fee drag
+# - CHOP filter ensures mean-reversion logic in ranging markets (2025 is bearish/ranging)
 # - Volume confirmation ensures institutional participation
-# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
+# - Donchian breakouts capture momentum after consolidation
 
-name = "6h_1d_atr_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,13 +26,13 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d indicators
+    # Pre-compute 1d HTF indicators
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA(50) for trend filter
+    # 1d EMA(50) for trend context (not used in entry but for regime)
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
@@ -41,26 +41,27 @@ def generate_signals(prices):
     vol_spike_1d = volume_1d > (2.0 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute 6h indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
+    # 1d Choppiness Index: CHOP > 61.8 = ranging market (mean revert)
+    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(14)
+    tr1 = np.maximum(high_1d[1:] - low_1d[:-1], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
+    tr = np.concatenate([[np.nan], tr2])  # align with index
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ATR(10) for volatility measurement
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # ATR expansion: current ATR > 1.5x ATR of 10 periods ago
-    atr_expansion = np.zeros(n, dtype=bool)
-    atr_expansion[10:] = atr[10:] > (1.5 * atr[:-10])
-    atr_expansion[:10] = False
+    # Avoid division by zero
+    range_14 = hh_14 - ll_14
+    chop_raw = np.where(range_14 > 0, 
+                        100 * np.log10(pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values) / 
+                        np.log10(14) / np.log10(range_14), 50)
+    chop_1d = chop_raw
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Donchian channels (20-period)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute 4h Donchian channels
+    highest_high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -68,32 +69,31 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i])):
+            np.isnan(chop_1d_aligned[i]) or np.isnan(highest_high_20[i]) or 
+            np.isnan(lowest_low_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long signal: price breaks above highest high + ATR expansion + 1d uptrend + volume spike
-            if (close[i] > highest_high_20[i] and 
-                atr_expansion[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                vol_spike_1d_aligned[i]):
+            # Long signal: Donchian breakout above + volume spike + choppy (range) market
+            if (prices['close'].iloc[i] > highest_high_20[i] and 
+                vol_spike_1d_aligned[i] and 
+                chop_1d_aligned[i] > 61.8):
                 position = 1
                 signals[i] = 0.25
-            # Short signal: price breaks below lowest low + ATR expansion + 1d downtrend + volume spike
-            elif (close[i] < lowest_low_20[i] and 
-                  atr_expansion[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  vol_spike_1d_aligned[i]):
+            # Short signal: Donchian breakdown below + volume spike + choppy (range) market
+            elif (prices['close'].iloc[i] < lowest_low_20[i] and 
+                  vol_spike_1d_aligned[i] and 
+                  chop_1d_aligned[i] > 61.8):
                 position = -1
                 signals[i] = -0.25
         else:  # Have position - look for exit
-            # Exit when price returns to middle of Donchian channel (mean reversion)
-            mid_point = (highest_high_20[i] + lowest_low_20[i]) / 2.0
-            if position == 1 and close[i] < mid_point:
+            # Exit when price returns to midpoint of Donchian channel (mean reversion)
+            midpoint = (highest_high_20[i] + lowest_low_20[i]) / 2.0
+            if position == 1 and prices['close'].iloc[i] < midpoint:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close[i] > mid_point:
+            elif position == -1 and prices['close'].iloc[i] > midpoint:
                 position = 0
                 signals[i] = 0.0
             # Hold position otherwise
