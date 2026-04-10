@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d Supertrend + Volume Spike
-# - Williams %R(14): Overbought > -20, Oversold < -80
-# - 1d Supertrend(ATR=10, mult=3.0): Determines primary trend direction
-# - Long when Williams %R crosses above -80 from below AND 1d Supertrend = uptrend AND volume > 2.0x 20-period average
-# - Short when Williams %R crosses below -20 from above AND 1d Supertrend = downtrend AND volume > 2.0x 20-period average
-# - Exit when Williams %R crosses opposite threshold (-20 for long, -80 for short) or Supertrend flips
-# - Volume confirmation prevents false signals in low-participation moves
-# - Williams %R excels at catching reversals in both bull and bear markets
-# - Supertrend filter ensures we only trade with the higher timeframe trend
-# - Targets ~20-30 trades/year (80-120 total over 4 years) to balance opportunity and fee drag
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high AND 1d ADX > 25 AND volume > 1.5x avg
+# - Short when price breaks below Donchian(20) low AND 1d ADX > 25 AND volume > 1.5x avg
+# - Exit when price crosses Donchian(20) midline or ADX < 20 (trend weakening)
+# - Uses discrete position sizing (0.30) to balance return and drawdown
+# - Targets ~12-25 trades/year (50-100 total over 4 years) to avoid fee drag
+# - Donchian channels provide clear breakout levels with built-in stop via opposite band
+# - ADX filter ensures we only trade strong trends, reducing whipsaws
+# - Volume confirmation validates breakout strength
+# - Works in both bull (upward breakouts) and bear (downward breakouts) markets
 
-name = "6h_1d_williamsr_supertrend_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_adx_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,112 +25,102 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute Williams %R(14) on 6h data
+    # Pre-compute Donchian channels (20-period)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Donchian high: rolling max of high
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian low: rolling min of low
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian midline: average of high and low bands
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          ((highest_high - close) / (highest_high - lowest_low)) * -100,
-                          -50.0)  # Neutral when range is zero
-    
-    # Pre-compute 1d Supertrend components
+    # Pre-compute 1d ADX for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(10) for Supertrend
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_10 = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate True Range (TR)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Supertrend calculation
-    hl2 = (high_1d + low_1d) / 2
-    upper_band = hl2 + (3.0 * atr_10)
-    lower_band = hl2 - (3.0 * atr_10)
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Initialize Supertrend arrays
-    supertrend = np.zeros_like(close_1d)
-    direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                    result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Set first valid value
-    supertrend[0] = hl2[0]
-    direction[0] = 1
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
     
-    for i in range(1, len(close_1d)):
-        if close_1d[i] > supertrend[i-1]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-        
-        # Ensure Supertrend stays within bounds
-        if direction[i] == 1 and supertrend[i] > upper_band[i]:
-            direction[i] = -1
-            supertrend[i] = upper_band[i]
-        elif direction[i] == -1 and supertrend[i] < lower_band[i]:
-            direction[i] = 1
-            supertrend[i] = lower_band[i]
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Align 1d Supertrend direction to 6h timeframe
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
-    
-    # Pre-compute volume confirmation: > 2.0x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(supertrend_direction_aligned[i]) or 
-            np.isnan(volume_20_avg[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long signal: Williams %R crosses above -80 from below AND 1d uptrend AND volume spike
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and  # Cross above -80
-                supertrend_direction_aligned[i] == 1 and 
-                vol_spike.iloc[i]):
+            # Long signal: price breaks above Donchian high AND strong trend AND volume spike
+            if (close[i] > donchian_high[i] and 
+                adx_1d_aligned[i] > 25 and 
+                vol_spike[i]):
                 position = 1
-                signals[i] = 0.25
-            # Short signal: Williams %R crosses below -20 from above AND 1d downtrend AND volume spike
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and  # Cross below -20
-                  supertrend_direction_aligned[i] == -1 and 
-                  vol_spike.iloc[i]):
+                signals[i] = 0.30
+            # Short signal: price breaks below Donchian low AND strong trend AND volume spike
+            elif (close[i] < donchian_low[i] and 
+                  adx_1d_aligned[i] > 25 and 
+                  vol_spike[i]):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Williams %R crosses opposite threshold
-            # 2. 1d Supertrend direction flips
+            # 1. Price crosses Donchian midline (trend weakening/reversal)
+            # 2. ADX drops below 20 (trend losing strength)
             if position == 1:
-                if williams_r[i] < -20 or supertrend_direction_aligned[i] == -1:
+                if close[i] < donchian_mid[i] or adx_1d_aligned[i] < 20:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25  # Hold long
+                    signals[i] = 0.30  # Hold long
             elif position == -1:
-                if williams_r[i] > -80 or supertrend_direction_aligned[i] == 1:
+                if close[i] > donchian_mid[i] or adx_1d_aligned[i] < 20:
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25  # Hold short
+                    signals[i] = -0.30  # Hold short
     
     return signals
