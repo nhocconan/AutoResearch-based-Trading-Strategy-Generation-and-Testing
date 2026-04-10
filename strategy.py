@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power with 12h regime filter and volume confirmation
-# - Elder Ray Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# - Long when Bull Power > 0 AND Bear Power rising (less negative) AND 12h close > EMA50 AND volume > 1.5x 20-bar avg
-# - Short when Bear Power < 0 AND Bull Power falling (less positive) AND 12h close < EMA50 AND volume > 1.5x 20-bar avg
-# - Exit when power signals reverse (Bull Power <= 0 for longs, Bear Power >= 0 for shorts)
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and chop regime filter
+# - Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-bar avg AND chop > 61.8 (ranging market)
+# - Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-bar avg AND chop > 61.8
+# - Exit when price returns to Donchian midpoint (mean reversion to equilibrium)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Elder Ray measures bull/bear power relative to EMA; regime filter ensures trend alignment
-# - Works in bull markets (buy strength) and bear markets (sell weakness) with proper regime filter
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian breakouts capture volatility expansion; volume confirms institutional participation
+# - Chop > 61.8 ensures we trade in ranging markets where mean reversion works best
 
-name = "6h_12h_elder_ray_power_regime_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,51 +22,58 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute EMA13 for Elder Ray (12h timeframe)
-    close_12h = df_12h['close'].values
-    ema13_12h = pd.Series(close_12h).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    volume_1d = df_1d['volume'].values
+    volume_20_avg = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * volume_20_avg)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute EMA50 for regime filter (12h timeframe)
-    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Pre-compute 1d chop regime: > 61.8 = ranging (good for mean reversion)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
-    volume_12h = df_12h['volume'].values
-    volume_20_avg_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike_12h = volume_12h > (1.5 * volume_20_avg_12h)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align 12h indicators to 6h timeframe
-    ema13_12h_aligned = align_htf_to_ltf(prices, df_12h, ema13_12h)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
+    # ATR(14)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute Elder Ray Power components from 6h data
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Sum of absolute price changes over 14 periods
+    price_change = np.abs(np.diff(close_1d))
+    sum_price_change = pd.Series(price_change).rolling(window=14, min_periods=14).sum().values
+    sum_price_change = np.concatenate([[np.nan]*14, sum_price_change])
     
-    # Bull Power = High - EMA13
-    bull_power_6h = high_6h - ema13_12h_aligned
-    # Bear Power = EMA13 - Low
-    bear_power_6h = ema13_12h_aligned - low_6h
+    # Choppiness Index: CHOP = 100 * log10(sum_price_change / (atr * 14)) / log10(14)
+    chop_1d = 100 * np.log10(sum_price_change / (atr_1d * 14)) / np.log10(14)
+    chop_1d = np.where((atr_1d * 14) > 0, chop_1d, 50)  # Avoid division by zero
+    chop_high = chop_1d > 61.8  # Chop > 61.8 = ranging market
+    chop_high_aligned = align_htf_to_ltf(prices, df_1d, chop_high)
     
-    # Pre-compute power trends (rising/falling) using 2-bar difference
-    bull_power_rising = np.zeros(n, dtype=bool)
-    bear_power_rising = np.zeros(n, dtype=bool)
-    bull_power_rising[2:] = bull_power_6h[2:] > bull_power_6h[:-2]
-    bear_power_rising[2:] = bear_power_6h[2:] > bear_power_6h[:-2]
+    # Pre-compute Donchian channels from LTF data (4h)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
+    
+    # Donchian(20)
+    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema13_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_spike_12h_aligned[i]) or np.isnan(bull_power_6h[i]) or
-            np.isnan(bear_power_6h[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(chop_high_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -77,32 +83,29 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND Bear Power rising AND regime bullish AND volume spike
-            if (bull_power_6h[i] > 0 and 
-                bear_power_rising[i] and 
-                close_6h[i] > ema50_12h_aligned[i] and 
-                vol_spike_12h_aligned[i]):
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above Donchian high AND volume spike AND chop > 61.8 (ranging)
+            if (prices['high'].iloc[i] > donchian_high[i] and 
+                vol_spike_1d_aligned[i] and 
+                chop_high_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power < 0 AND Bull Power falling AND regime bearish AND volume spike
-            elif (bear_power_6h[i] > 0 and  # Note: Bear Power is EMA-Low, so >0 means bearish
-                  ~bull_power_rising[i] and  # Bull Power falling
-                  close_6h[i] < ema50_12h_aligned[i] and 
-                  vol_spike_12h_aligned[i]):
+            # Short when price breaks below Donchian low AND volume spike AND chop > 61.8
+            elif (prices['low'].iloc[i] < donchian_low[i] and 
+                  vol_spike_1d_aligned[i] and 
+                  chop_high_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit when power signals reverse
-            # Exit long when Bull Power <= 0 (power gone)
-            # Exit short when Bear Power <= 0 (selling pressure gone)
+        else:  # Have position - look for exit to Donchian midpoint (mean reversion)
+            # Exit when price returns to Donchian midpoint
             exit_signal = False
             if position == 1:  # Long position
-                if bull_power_6h[i] <= 0:
+                if prices['low'].iloc[i] <= donchian_mid[i]:
                     exit_signal = True
             elif position == -1:  # Short position
-                if bear_power_6h[i] <= 0:  # Bear Power weakening
+                if prices['high'].iloc[i] >= donchian_mid[i]:
                     exit_signal = True
             
             if exit_signal:
