@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d HMA(21) trend filter and volume confirmation
-# - Long when price breaks above Donchian(20) upper band AND 1d HMA(21) rising (bullish trend) AND 4h volume > 1.5x 20-bar avg
-# - Short when price breaks below Donchian(20) lower band AND 1d HMA(21) falling (bearish trend) AND 4h volume > 1.5x 20-bar avg
-# - Exit when price closes below Donchian(20) middle (for longs) or above middle (for shorts)
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
+# - Long when price breaks above Donchian(20) high AND 1d HMA(21) rising AND 4h volume > 1.5x 20-bar avg
+# - Short when price breaks below Donchian(20) low AND 1d HMA(21) falling AND 4h volume > 1.5x 20-bar avg
+# - Exit when price crosses Donchian(20) midline (mean of 20-period high/low)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Donchian breakout captures strong momentum; 1d HMA filter ensures alignment with daily trend
-# - Volume confirmation avoids low-liquidity false signals
+# - Donchian captures structural breaks; 1d HMA filter ensures alignment with daily trend
+# - Volume confirmation avoids low-liquidity false breakouts
 # - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Works in both bull and bear markets: trend filter prevents counter-trend trades in bear, breakouts capture momentum in bull
 
-name = "4h_1d_donchian_breakout_hma_volume_v1"
+name = "4h_1d_donchian_breakout_hma_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,62 +27,52 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d HMA(21) trend: HMA rising/falling
+    # Pre-compute 1d HMA(21) trend: rising/falling
     close_1d = df_1d['close'].values
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    # HMA formula: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    def wma(data, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(data, weights, 'valid') / weights.sum()
+    
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, mode='valid') / weights.sum()
+    wma_half = np.array([wma(close_1d[i:i+half_len], half_len) if i+half_len <= len(close_1d) else np.nan 
+                         for i in range(len(close_1d))])
+    wma_full = np.array([wma(close_1d[i:i+21], 21) if i+21 <= len(close_1d) else np.nan 
+                         for i in range(len(close_1d))])
+    wma_2x_half = 2 * wma_half
+    diff = wma_2x_half - wma_full
     
-    # Calculate WMA for half period
-    wma_half = np.array([np.nan] * len(close_1d))
-    for i in range(half_len - 1, len(close_1d)):
-        wma_half[i] = wma(close_1d[i - half_len + 1:i + 1], half_len)
-    
-    # Calculate WMA for full period
-    wma_full = np.array([np.nan] * len(close_1d))
-    for i in range(21 - 1, len(close_1d)):
-        wma_full[i] = wma(close_1d[i - 21 + 1:i + 1], 21)
-    
-    # Calculate raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final HMA: WMA of raw_hma with sqrt period
-    hma = np.array([np.nan] * len(close_1d))
-    for i in range(sqrt_len - 1, len(raw_hma)):
-        if not np.isnan(raw_hma[i - sqrt_len + 1:i + 1]).any():
-            hma[i] = wma(raw_hma[i - sqrt_len + 1:i + 1], sqrt_len)
+    hma = np.array([wma(diff[i:i+sqrt_len], sqrt_len) if i+sqrt_len <= len(diff) else np.nan 
+                    for i in range(len(diff))])
     
     # HMA trend: rising if current > previous, falling if current < previous
-    hma_rising = np.array([False] * len(hma))
-    hma_falling = np.array([False] * len(hma))
-    for i in range(1, len(hma)):
-        if not np.isnan(hma[i]) and not np.isnan(hma[i-1]):
-            hma_rising[i] = hma[i] > hma[i-1]
-            hma_falling[i] = hma[i] < hma[i-1]
+    hma_rising = np.zeros_like(hma, dtype=bool)
+    hma_falling = np.zeros_like(hma, dtype=bool)
+    hma_rising[1:] = hma[1:] > hma[:-1]
+    hma_falling[1:] = hma[1:] < hma[:-1]
     
     # Align 1d HMA trend to 4h timeframe
     hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising)
     hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling)
     
-    # Pre-compute Donchian(20) channels on 4h data
+    # Pre-compute Donchian(20) on 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Donchian upper band: highest high over 20 periods
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Donchian lower band: lowest low over 20 periods
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Donchian middle band: average of upper and lower
-    middle_band = (highest_high + lowest_low) / 2
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Donchian breakout conditions
-    breakout_up = close > highest_high  # Price closes above upper band
-    breakout_down = close < lowest_low  # Price closes below lower band
+    breakout_up = close > highest_high
+    breakout_down = close < lowest_low
+    
+    # Exit when price crosses Donchian midline
+    exit_long = close < donchian_mid
+    exit_short = close > donchian_mid
     
     # Pre-compute 4h volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
@@ -95,7 +86,8 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i]) or
             np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(middle_band[i])):
+            np.isnan(exit_long[i]) or np.isnan(exit_short[i]) or
+            np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -106,13 +98,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above Donchian upper AND 1d HMA rising AND volume spike
+            # Long when Donchian breakout up AND 1d HMA rising AND volume spike
             if (breakout_up[i] and 
                 hma_rising_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below Donchian lower AND 1d HMA falling AND volume spike
+            # Short when Donchian breakout down AND 1d HMA falling AND volume spike
             elif (breakout_down[i] and 
                   hma_falling_aligned[i] and 
                   vol_spike[i]):
@@ -120,14 +112,12 @@ def generate_signals(prices):
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit at Donchian middle
-            # Exit when price closes below middle (for longs) or above middle (for shorts)
-            if position == 1:  # Long position
-                exit_signal = close[i] < middle_band[i]
-            else:  # Short position
-                exit_signal = close[i] > middle_band[i]
-            
-            if exit_signal:
+        else:  # Have position - look for exit at Donchian midline
+            # Exit when price crosses Donchian midline
+            if position == 1 and exit_long[i]:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and exit_short[i]:
                 position = 0
                 signals[i] = 0.0
             else:
