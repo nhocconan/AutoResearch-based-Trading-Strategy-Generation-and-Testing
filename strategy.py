@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above S4 (strong support) AND 1d close > 1d EMA(50) (bullish trend) AND 6h volume > 1.8x 20-bar avg
-# - Short when price breaks below R4 (strong resistance) AND 1d close < 1d EMA(50) (bearish trend) AND 6h volume > 1.8x 20-bar avg
-# - Exit when price returns to the 1d VWAP (mean reversion to fair value)
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 (1d) AND 1d EMA(50) > EMA(200) (bullish trend) AND 12h volume > 1.5x 20-bar avg
+# - Short when price breaks below Camarilla L3 (1d) AND 1d EMA(50) < EMA(200) (bearish trend) AND 12h volume > 1.5x 20-bar avg
+# - Exit when price returns to Camarilla Pivot level (mean reversion to equilibrium)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Camarilla S4/R4 are strong institutional levels where price often reverses or accelerates
-# - 1d EMA filter ensures alignment with higher timeframe trend
-# - Volume confirmation avoids low-liquidity false breakouts
-# - VWAP exit provides logical mean reversion target
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Works in both bull and bear markets: breakouts in trends, VWAP mean reversion in ranges
+# - Camarilla levels act as intraday support/resistance; 1d trend filter ensures alignment with higher timeframe
+# - Volume confirmation avoids low-liquidity false signals
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets: breakouts in trends, mean reversion in ranges
 
-name = "6h_1d_camarilla_breakout_vwap_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,41 +27,45 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA(50) trend filter
+    # Pre-compute 1d EMA trend filter: EMA(50) vs EMA(200)
     close_1d = df_1d['close'].values
     ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_bullish = ema_50 > close_1d  # Price above EMA = bullish
-    ema_bearish = ema_50 < close_1d  # Price below EMA = bearish
+    ema_200 = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_bullish = ema_50 > ema_200
+    ema_bearish = ema_50 < ema_200
     
-    # Align 1d EMA trend to 6h timeframe
+    # Align 1d EMA trend to 12h timeframe
     ema_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_bullish)
     ema_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_bearish)
     
-    # Pre-compute 1d VWAP for exit
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
-    
-    # Align 1d VWAP to 6h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # Pre-compute Camarilla pivot levels from 1d OHLC
-    # Camarilla: R4 = close + ((high - low) * 1.1/2), S4 = close - ((high - low) * 1.1/2)
+    # Pre-compute Camarilla pivot levels from 1d data (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    camarilla_range = (high_1d - low_1d) * 1.1 / 2
-    r4 = close_1d + camarilla_range
-    s4 = close_1d - camarilla_range
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Pre-compute 6h volume confirmation: > 1.8x 20-period average
+    # Camarilla levels: H3/L3 are the key breakout levels
+    camarilla_h3 = close_1d + (range_1d * 1.1 / 4)
+    camarilla_l3 = close_1d - (range_1d * 1.1 / 4)
+    camarilla_pivot = pivot  # Exit level
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * volume_20_avg)
+    vol_spike = volume > (1.5 * volume_20_avg)
+    
+    # Use 12h price for breakout signals
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -71,8 +73,8 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(ema_bullish_aligned[i]) or np.isnan(ema_bearish_aligned[i]) or
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_spike[i])):
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -83,27 +85,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above S4 AND 1d bullish trend AND volume spike
-            if (prices['close'].iloc[i] > s4_aligned[i] and 
+            # Long when price breaks above Camarilla H3 AND 1d bullish trend AND volume spike
+            if (close_12h[i] > camarilla_h3_aligned[i] and 
                 ema_bullish_aligned[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below R4 AND 1d bearish trend AND volume spike
-            elif (prices['close'].iloc[i] < r4_aligned[i] and 
+            # Short when price breaks below Camarilla L3 AND 1d bearish trend AND volume spike
+            elif (close_12h[i] < camarilla_l3_aligned[i] and 
                   ema_bearish_aligned[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to VWAP (mean reversion)
-            # Exit when price returns to 1d VWAP (within 0.1% tolerance)
-            price = prices['close'].iloc[i]
-            vwap = vwap_1d_aligned[i]
-            exit_signal = np.abs(price - vwap) / vwap < 0.001  # Within 0.1% of VWAP
+        else:  # Have position - look for exit to Camarilla Pivot (mean reversion)
+            # Exit when price returns to Camarilla Pivot level
+            long_exit = (position == 1 and low_12h[i] <= camarilla_pivot_aligned[i])
+            short_exit = (position == -1 and high_12h[i] >= camarilla_pivot_aligned[i])
             
-            if exit_signal:
+            if long_exit or short_exit:
                 position = 0
                 signals[i] = 0.0
             else:
