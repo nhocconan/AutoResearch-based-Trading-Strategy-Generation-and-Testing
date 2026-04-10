@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR trend filter
-# - Primary: 4h price breaks above/below 20-period Donchian channel for trend capture
-# - HTF: 1d volume > 1.3x 20-period MA for confirmation (avoids low-volume breakouts)
-# - Regime filter: 4h ATR(14) > 1.5x ATR(50) to ensure trending market (avoids chop)
-# - Long: Close > Upper Donchian(20) + volume confirmation + ATR trending regime
-# - Short: Close < Lower Donchian(20) + volume confirmation + ATR trending regime
-# - Exit: Close crosses back inside Donchian channel OR ATR regime shifts to ranging
+# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
+# - Primary: 4h price breaks above/below Camarilla pivot levels (H3/L3) from prior 1d session
+# - HTF: 1d volume > 1.2x 20-period MA for confirmation (avoids low-volume breakouts)
+# - Regime filter: 4h Choppiness Index (14) < 38.2 to ensure trending market (avoids chop)
+# - Long: Close > H3 + volume confirmation + chop regime (trending)
+# - Short: Close < L3 + volume confirmation + chop regime (trending)
+# - Exit: Close crosses back inside H3/L3 levels OR chop regime shifts to ranging (CHOP > 61.8)
 # - Position sizing: 0.25 (discrete level, balances return/drawdown, reduces fee churn)
-# - Works in bull/bear: Donchian adapts to volatility, volume filters false breakouts, ATR regime avoids chop
+# - Works in bull/bear: Camarilla adapts to volatility, volume filters false breakouts, chop regime avoids whipsaws
 # - Target: 80-150 total trades over 4 years (20-38/year) for 4h timeframe
 
-name = "4h_1d_donchian_volume_atr_v2"
+name = "4h_1d_camarilla_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,23 +34,33 @@ def generate_signals(prices):
     low_4h = prices['low'].values
     
     # Pre-compute 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Donchian channel (20-period)
-    upper_donchian = np.full(len(close_4h), np.nan)
-    lower_donchian = np.full(len(close_4h), np.nan)
+    # Calculate 1d Camarilla pivot levels (H3, L3) from prior day
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
     
-    for i in range(19, len(close_4h)):
-        if not (np.isnan(high_4h[i-19:i+1]).any() or np.isnan(low_4h[i-19:i+1]).any()):
-            upper_donchian[i] = np.max(high_4h[i-19:i+1])
-            lower_donchian[i] = np.min(low_4h[i-19:i+1])
+    for i in range(1, len(close_1d)):
+        if not (np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]) or np.isnan(close_1d[i-1])):
+            # Calculate pivot and ranges from previous day
+            high_prev = high_1d[i-1]
+            low_prev = low_1d[i-1]
+            close_prev = close_1d[i-1]
+            range_prev = high_prev - low_prev
+            
+            # Camarilla levels
+            camarilla_h3[i] = close_prev + range_prev * 1.1 / 4
+            camarilla_l3[i] = close_prev - range_prev * 1.1 / 4
     
-    # Calculate 4h ATR(14) and ATR(50) for regime filter
-    atr_14 = np.full(len(close_4h), np.nan)
-    atr_50 = np.full(len(close_4h), np.nan)
-    tr = np.full(len(close_4h), np.nan)
+    # Calculate 4h Choppiness Index (14)
+    chop = np.full(len(close_4h), np.nan)
+    atr_sum = np.full(len(close_4h), np.nan)
     
     # True Range
+    tr = np.full(len(close_4h), np.nan)
     for i in range(1, len(close_4h)):
         if not (np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or np.isnan(close_4h[i-1])):
             tr[i] = max(
@@ -59,21 +69,18 @@ def generate_signals(prices):
                 abs(low_4h[i] - close_4h[i-1])
             )
     
-    # ATR(14) using Wilder's smoothing
-    for i in range(14, len(tr)):
+    # ATR sum for Chop denominator
+    for i in range(13, len(tr)):
         if not np.isnan(tr[i-13:i+1]).any():
-            if i == 14:
-                atr_14[i] = np.mean(tr[1:15])  # First ATR is simple average
-            else:
-                atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+            atr_sum[i] = np.sum(tr[i-13:i+1])
     
-    # ATR(50) using Wilder's smoothing
-    for i in range(50, len(tr)):
-        if not np.isnan(tr[i-49:i+1]).any():
-            if i == 50:
-                atr_50[i] = np.mean(tr[1:51])  # First ATR is simple average
-            else:
-                atr_50[i] = (atr_50[i-1] * 49 + tr[i]) / 50
+    # Choppiness Index
+    for i in range(13, len(close_4h)):
+        if not (np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or np.isnan(atr_sum[i])):
+            highest_high = np.max(high_4h[i-13:i+1])
+            lowest_low = np.min(low_4h[i-13:i+1])
+            if atr_sum[i] > 0 and (highest_high - lowest_low) > 0:
+                chop[i] = 100 * np.log10(atr_sum[i] / (highest_high - lowest_low)) / np.log10(14)
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = np.full(len(volume_1d), np.nan)
@@ -82,51 +89,50 @@ def generate_signals(prices):
             volume_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     
     # Align all HTF/LTF indicators to 4h timeframe
-    upper_donchian_aligned = align_htf_to_ltf(prices, prices, upper_donchian)
-    lower_donchian_aligned = align_htf_to_ltf(prices, prices, lower_donchian)
-    atr_14_aligned = align_htf_to_ltf(prices, prices, atr_14)
-    atr_50_aligned = align_htf_to_ltf(prices, prices, atr_50)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    chop_aligned = align_htf_to_ltf(prices, prices, chop)
     volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period for ATR(50)
+    for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
+        # Volume confirmation: current 1d volume > 1.2x 20-period MA
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
+        volume_confirm = volume_1d_aligned[i] > 1.2 * volume_ma_20_1d_aligned[i]
         
-        # ATR regime filter: ATR(14) > 1.5x ATR(50) indicates trending market
-        atr_trending = atr_14_aligned[i] > 1.5 * atr_50_aligned[i]
+        # Chop regime filter: CHOP < 38.2 = trending, CHOP > 61.8 = ranging
+        chop_trending = chop_aligned[i] < 38.2
+        chop_ranging = chop_aligned[i] > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Close > Upper Donchian + volume confirmation + ATR trending
-            if close_4h[i] > upper_donchian_aligned[i] and volume_confirm and atr_trending:
+            # Long entry: Close > H3 + volume confirmation + chop trending
+            if close_4h[i] > camarilla_h3_aligned[i] and volume_confirm and chop_trending:
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Close < Lower Donchian + volume confirmation + ATR trending
-            elif close_4h[i] < lower_donchian_aligned[i] and volume_confirm and atr_trending:
+            # Short entry: Close < L3 + volume confirmation + chop trending
+            elif close_4h[i] < camarilla_l3_aligned[i] and volume_confirm and chop_trending:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Close crosses back inside Donchian channel OR ATR regime shifts to ranging
+            # Exit: Close crosses back inside H3/L3 levels OR chop regime shifts to ranging
             if position == 1:  # Long position
-                if close_4h[i] < upper_donchian_aligned[i] or not atr_trending:
+                if close_4h[i] < camarilla_h3_aligned[i] or chop_ranging:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close_4h[i] > lower_donchian_aligned[i] or not atr_trending:
+                if close_4h[i] > camarilla_l3_aligned[i] or chop_ranging:
                     position = 0
                     signals[i] = 0.0
                 else:
