@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w volume spike + chop regime filter
+# Hypothesis: 1d Donchian(20) breakout with 1w volume spike and chop regime filter
 # - Primary: 1d price breaks above/below Donchian channel (20-period high/low)
 # - HTF: 1w volume > 2.0x 20-period MA for confirmation (avoids low-volume breakouts)
 # - Regime filter: 1d Choppiness Index (14) < 38.2 = trending market (trend follow)
