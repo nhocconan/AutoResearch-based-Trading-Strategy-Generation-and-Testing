@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout + 1d ATR regime filter + volume confirmation
-# - Long when price breaks above Camarilla H3 level AND 1d ATR(14) < 20-period median ATR (low volatility regime) AND volume > 1.8x 20-period average
-# - Short when price breaks below Camarilla L3 level AND 1d ATR(14) < 20-period median ATR AND volume > 1.8x 20-period average
+# Hypothesis: 4h Camarilla pivot breakout with volume spike and ATR regime filter
+# - Long when price breaks above Camarilla H3 level AND volume > 2.0x 20-period average AND 1d ATR(14) < 20-period median ATR (low volatility regime)
+# - Short when price breaks below Camarilla L3 level AND volume > 2.0x 20-period average AND 1d ATR(14) < 20-period median ATR
 # - Exit when price returns to Camarilla PIVOT level (mean reversion to equilibrium)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 # - Camarilla levels provide institutional support/resistance that work in both trending and ranging markets
 # - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
 # - Volume confirmation reduces false breakouts
 
-name = "12h_1d_camarilla_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_atr_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,15 +27,15 @@ def generate_signals(prices):
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC and volume
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     # Pre-compute 1d ATR(14) for regime filter
     high_1d = df_1d['high'].values
@@ -58,11 +58,10 @@ def generate_signals(prices):
         atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
     # ATR regime: low volatility when current ATR < median of last 20 ATR values
-    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
     atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
     low_vol_regime = atr_1d < atr_median_20
     
-    # Pre-compute 12h Camarilla levels from previous period's OHLC
+    # Pre-compute 4h Camarilla levels from previous period's OHLC
     # Camarilla levels use previous period's range
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
@@ -78,10 +77,8 @@ def generate_signals(prices):
     # Camarilla levels
     camarilla_h3 = pivot + (range_hl * 1.1 / 4)
     camarilla_l3 = pivot - (range_hl * 1.1 / 4)
-    camarilla_h4 = pivot + (range_hl * 1.1 / 2)
-    camarilla_l4 = pivot - (range_hl * 1.1 / 2)
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
