@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Elder Ray Index with 1d ADX regime filter and volume confirmation
-# - Long when Elder Ray Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25 AND volume > 1.5x 20-period average volume
-# - Short when Elder Ray Bear Power < 0 AND Bull Power > 0 AND 1d ADX > 25 AND volume > 1.5x 20-period average volume
-# - Exit when Elder Ray Bull Power < 0 (for longs) or Bear Power > 0 (for shorts) OR ADX < 20 (regime change)
+# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d ATR regime filter
+# - Long when price breaks above 20-period Donchian upper channel on 4h AND volume > 2.0x 20-period average volume on 12h AND 1d ATR(14) < median ATR(20) (low volatility regime)
+# - Short when price breaks below 20-period Donchian lower channel on 4h AND volume > 2.0x 20-period average volume on 12h AND 1d ATR(14) < median ATR(20)
+# - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Elder Ray measures bull/bear power relative to EMA13, effective in both trending and ranging markets
-# - ADX filter ensures we trade only when trend strength is sufficient (>25) and exits when weak (<20) to avoid whipsaws
-# - Volume confirmation reduces false signals
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Donchian channels provide clear breakout levels with defined risk
+# - Volume confirmation on 12h filters false breakouts
+# - ATR regime filter ensures we trade during low volatility when breakouts are more sustainable
+# - Works in both bull (breakouts continue) and bear (breakdowns continue) markets
 
-name = "12h_1d_elder_ray_adx_volume_v1"
-timeframe = "12h"
+name = "4h_12h_1d_donchian_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,29 +24,44 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_12h) < 20 or len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC and volume
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 12h EMA13 for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Pre-compute 4h Donchian channels (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.max(arr[i - window + 1:i + 1])
+        return result
     
-    # Pre-compute 12h Elder Ray Index
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.min(arr[i - window + 1:i + 1])
+        return result
     
-    # Pre-compute 12h volume confirmation (20-period average)
+    upper_channel = rolling_max(high, 20)
+    lower_channel = rolling_min(low, 20)
+    
+    # Pre-compute 4h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Pre-compute 1d ADX for regime filter
+    # Pre-compute 12h volume (for additional confirmation)
+    vol_12h = df_12h['volume'].values
+    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    volume_spike_12h = vol_12h > (1.5 * vol_ma_12h)
+    volume_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
+    
+    # Pre-compute 1d ATR(14) for regime filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -61,78 +77,24 @@ def generate_signals(prices):
     
     # ATR(14) using Wilder's smoothing
     atr_1d = np.zeros_like(tr)
-    atr_1d[13] = np.mean(tr[1:14])  # First ATR value
-    for i in range(14, len(tr)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    if len(tr) >= 14:
+        atr_1d[13] = np.mean(tr[1:14])  # First ATR value
+        for i in range(14, len(tr)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Directional Movement calculation
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(high_1d)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    for i in range(1, len(high_1d)):
-        up_move = high_1d[i] - high_1d[i-1]
-        down_move = low_1d[i-1] - low_1d[i]
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        else:
-            plus_dm[i] = 0
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-        else:
-            minus_dm[i] = 0
-    
-    # Smoothed Directional Movement (+DI and -DI)
-    atr_period = 14
-    smoothed_plus_dm = np.zeros_like(plus_dm)
-    smoothed_minus_dm = np.zeros_like(minus_dm)
-    smoothed_tr = np.zeros_like(tr)
-    
-    # Initial values
-    smoothed_plus_dm[atr_period] = np.sum(plus_dm[1:atr_period+1])
-    smoothed_minus_dm[atr_period] = np.sum(minus_dm[1:atr_period+1])
-    smoothed_tr[atr_period] = np.sum(tr[1:atr_period+1])
-    
-    # Wilder's smoothing
-    for i in range(atr_period+1, len(high_1d)):
-        smoothed_plus_dm[i] = (smoothed_plus_dm[i-1] * (atr_period-1) + plus_dm[i]) / atr_period
-        smoothed_minus_dm[i] = (smoothed_minus_dm[i-1] * (atr_period-1) + minus_dm[i]) / atr_period
-        smoothed_tr[i] = (smoothed_tr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    # Calculate +DI and -DI
-    plus_di = np.zeros_like(high_1d)
-    minus_di = np.zeros_like(high_1d)
-    for i in range(atr_period, len(high_1d)):
-        if smoothed_tr[i] != 0:
-            plus_di[i] = (smoothed_plus_dm[i] / smoothed_tr[i]) * 100
-            minus_di[i] = (smoothed_minus_dm[i] / smoothed_tr[i]) * 100
-    
-    # Calculate DX and ADX
-    dx = np.zeros_like(high_1d)
-    for i in range(atr_period, len(high_1d)):
-        if (plus_di[i] + minus_di[i]) != 0:
-            dx[i] = (np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
-    
-    adx_1d = np.zeros_like(high_1d)
-    adx_1d[2*atr_period-1] = np.mean(dx[atr_period:2*atr_period])  # First ADX value
-    for i in range(2*atr_period, len(high_1d)):
-        adx_1d[i] = (adx_1d[i-1] * (atr_period-1) + dx[i]) / atr_period
-    
-    # ADX regime: strong trend when ADX > 25, weak trend when ADX < 20
-    strong_trend = adx_1d > 25
-    weak_trend = adx_1d < 20
-    
-    # Align HTF indicators to 12h timeframe
-    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
-    weak_trend_aligned = align_htf_to_ltf(prices, df_1d, weak_trend)
+    # ATR regime: low volatility when current ATR < median of last 20 ATR values
+    atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
+    low_vol_regime = atr_1d < atr_median_20
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(strong_trend_aligned[i]) or np.isnan(weak_trend_aligned[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i]) or
+            np.isnan(volume_spike_12h_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -142,28 +104,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND Bear Power < 0 AND strong trend AND volume spike
-            if (bull_power[i] > 0 and 
-                bear_power[i] < 0 and 
-                strong_trend_aligned[i] and 
-                volume_spike[i]):
+            # Long conditions: price breaks above upper channel AND volume spike (both timeframes) AND low volatility regime
+            if (close[i] > upper_channel[i] and 
+                volume_spike[i] and 
+                volume_spike_12h_aligned[i] and 
+                low_vol_regime_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power < 0 AND Bull Power > 0 AND strong trend AND volume spike
-            elif (bear_power[i] < 0 and 
-                  bull_power[i] > 0 and 
-                  strong_trend_aligned[i] and 
-                  volume_spike[i]):
+            # Short conditions: price breaks below lower channel AND volume spike (both timeframes) AND low volatility regime
+            elif (close[i] < lower_channel[i] and 
+                  volume_spike[i] and 
+                  volume_spike_12h_aligned[i] and 
+                  low_vol_regime_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: 
-            # For longs: Bull Power < 0 OR weak trend regime
-            # For shorts: Bear Power > 0 OR weak trend regime
-            exit_long = (position == 1 and (bull_power[i] < 0 or weak_trend_aligned[i]))
-            exit_short = (position == -1 and (bear_power[i] > 0 or weak_trend_aligned[i]))
+            # Exit conditions: price crosses back inside the Donchian channel
+            exit_long = (position == 1 and close[i] < upper_channel[i])
+            exit_short = (position == -1 and close[i] > lower_channel[i])
             
             if exit_long or exit_short:
                 position = 0
