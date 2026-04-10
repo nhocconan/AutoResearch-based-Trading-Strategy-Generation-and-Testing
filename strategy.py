@@ -3,90 +3,121 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA trend filter and volume confirmation
-# - Long when price breaks above Donchian upper band (20-period high) AND 1w HMA(21) is rising AND volume > 1.5x 20-period average
-# - Short when price breaks below Donchian lower band (20-period low) AND 1w HMA(21) is falling AND volume > 1.5x 20-period average
-# - Exit when price returns to Donchian midpoint (mean reversion)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
+# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.5x 20-period average AND chop > 61.8 (ranging market)
+# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.5x 20-period average AND chop > 61.8
+# - Exit when price returns to Camarilla H4/L4 levels (mean reversion to pivot)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Donchian breakouts capture strong trends, HMA filter ensures we only trade with higher timeframe trend
+# - Camarilla levels work well in ranging markets (chop > 61.8) which occur frequently in BTC/ETH bear markets
 # - Volume confirmation reduces false breakouts
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "1d_donchian_hma_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute indicators
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
+    # Pre-compute 12h volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
+    
+    # Pre-compute 12h Choppiness Index (14-period)
+    def true_range(h, l, c_prev):
+        tr1 = h - l
+        tr2 = np.abs(h - c_prev)
+        tr3 = np.abs(l - c_prev)
+        return np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    def rolling_sum(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.sum(arr[i - window + 1:i + 1])
+        return result
+    
+    # Calculate True Range
+    tr = np.zeros_like(high)
+    tr[0] = high[0] - low[0]  # First bar
+    for i in range(1, len(high)):
+        tr[i] = true_range(high[i], low[i], close[i-1])
+    
+    # Calculate ATR (14-period)
+    atr = np.zeros_like(tr)
+    atr[13] = np.mean(tr[1:15])  # First ATR value
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
+    
+    # Calculate Choppiness Index
+    def highest_high(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
             result[i] = np.max(arr[i - window + 1:i + 1])
         return result
     
-    def rolling_min(arr, window):
+    def lowest_low(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
             result[i] = np.min(arr[i - window + 1:i + 1])
         return result
     
-    upper_band = rolling_max(high, 20)
-    lower_band = rolling_min(low, 20)
-    midpoint = (upper_band + lower_band) / 2
+    hh = highest_high(high, 14)
+    ll = lowest_low(low, 14)
+    chop = np.zeros_like(close)
+    for i in range(13, len(close)):
+        if hh[i] > ll[i]:
+            log_sum = np.log10(rolling_sum(tr, 14)[i] / (hh[i] - ll[i]))
+            chop[i] = 100 * log_sum / np.log10(14)
+        else:
+            chop[i] = 50.0
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    chop_regime = chop > 61.8  # Ranging market
     
-    # 1w HMA(21) for trend filter
-    def wma(arr, window):
-        weights = np.arange(1, window + 1)
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.dot(arr[i - window + 1:i + 1], weights) / weights.sum()
-        return result
+    # Pre-compute 1d Camarilla pivot levels from previous day
+    # Camarilla levels: based on previous day's high, low, close
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    def hma(arr, window):
-        half_len = window // 2
-        sqrt_len = int(np.sqrt(window))
-        wma_half = wma(arr, half_len)
-        wma_full = wma(arr, window)
-        raw_hma = 2 * wma_half - wma_full
-        return wma(raw_hma, sqrt_len)
+    # Calculate pivot and Camarilla levels for each day
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    close_1w = df_1w['close'].values
-    hma_1w = hma(close_1w, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Camarilla levels
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
     
-    # HMA slope (rising/falling)
-    hma_slope = np.zeros_like(hma_1w_aligned)
-    hma_slope[1:] = np.diff(hma_1w_aligned)
-    hma_rising = hma_slope > 0
-    hma_falling = hma_slope < 0
+    # Align HTF indicators to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(midpoint[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(hma_1w_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(chop_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -96,24 +127,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above upper band AND HMA rising AND volume spike
-            if (close[i] > upper_band[i] and 
-                hma_rising[i] and 
-                volume_spike[i]):
+            # Long conditions: price breaks above H3 AND volume spike AND chop regime (ranging)
+            if (close[i] > h3_aligned[i] and 
+                volume_spike_aligned[i] and 
+                chop_regime_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below lower band AND HMA falling AND volume spike
-            elif (close[i] < lower_band[i] and 
-                  hma_falling[i] and 
-                  volume_spike[i]):
+            # Short conditions: price breaks below L3 AND volume spike AND chop regime (ranging)
+            elif (close[i] < l3_aligned[i] and 
+                  volume_spike_aligned[i] and 
+                  chop_regime_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price returns to midpoint (mean reversion)
-            exit_long = (position == 1 and close[i] < midpoint[i])
-            exit_short = (position == -1 and close[i] > midpoint[i])
+            # Exit conditions: price returns to H4/L4 levels (mean reversion)
+            exit_long = (position == 1 and close[i] < h4_aligned[i])
+            exit_short = (position == -1 and close[i] > l4_aligned[i])
             
             if exit_long or exit_short:
                 position = 0
