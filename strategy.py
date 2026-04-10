@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ATR volatility filter and chop regime filter
-# - Long: price breaks above Donchian upper (20-period) + 1d ATR(14) > 1.5x 20-period MA + chop > 61.8 (range)
-# - Short: price breaks below Donchian lower (20-period) + 1d ATR(14) > 1.5x 20-period MA + chop > 61.8 (range)
-# - Exit: close-based reversal - exit long when price < Donchian lower, exit short when price > Donchian upper
+# Hypothesis: 4h Williams %R mean reversion with 1d regime filter and volume confirmation
+# - Long: Williams %R(14) < -80 (oversold) + 1d chop > 61.8 (range) + volume > 1.5x 20-period MA
+# - Short: Williams %R(14) > -20 (overbought) + 1d chop > 61.8 (range) + volume > 1.5x 20-period MA
+# - Exit: Williams %R crosses above -50 (long exit) or below -50 (short exit)
 # - Stoploss: ATR-based - exit when price moves against position by 2.0 * ATR(14) on 4h
 # - Position sizing: 0.25 (discrete level)
-# - Uses Donchian channels for structure, 1d ATR for volatility confirmation, chop filter to avoid strong trends
+# - Uses Williams %R for mean reversion signals, 1d chop to identify ranging markets, volume to confirm participation
+# - Works in both bull and bear: chop filter identifies ranging markets where mean reversion works, volume confirms genuine moves
 # - Target: 75-150 total trades over 4 years (19-38/year) to stay within HARD MAX: 400 total
-# - Works in both bull and bear: chop filter identifies ranging markets where Donchian levels hold, volatility confirms genuine breakouts
 
-name = "4h_1d_donchian_breakout_vol_chop_v1"
+name = "4h_1d_williamsr_mean_reversion_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,11 +31,13 @@ def generate_signals(prices):
     high_4h = prices['high'].values
     low_4h = prices['low'].values
     close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate ATR (14-period) for 4h stoploss
     tr1 = high_4h - low_4h
@@ -56,28 +58,21 @@ def generate_signals(prices):
     
     atr_14_4h = wilders_smoothing(tr, 14)
     
-    # Calculate 1d ATR (14-period) for volatility filter
+    # Calculate Williams %R (14-period) for 4h
+    highest_high_14 = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_4h) / (highest_high_14 - lowest_low_14)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # Avoid division by zero
+    
+    # Calculate 1d ATR (14-period) for chop calculation
     tr1_1d = high_1d - low_1d
     tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
     tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
     tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     tr_1d[0] = 0  # First TR is 0 (no previous close)
-    atr_14_1d = wilders_smoothing(tr_1d, 14)
-    
-    # Calculate 1d ATR moving average (20-period)
-    atr_1d_series = pd.Series(atr_14_1d)
-    atr_ma_20_1d = atr_1d_series.rolling(window=20, min_periods=20).mean().values
-    atr_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
-    
-    # Calculate True Range for chop
-    tr1_1d_chop = high_1d - low_1d
-    tr2_1d_chop = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d_chop = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d_chop = np.maximum(tr1_1d_chop, np.maximum(tr2_1d_chop, tr3_1d_chop))
-    tr_1d_chop[0] = 0  # First TR is 0 (no previous close)
     
     # Calculate Sum of True Range over 14 periods for chop numerator
-    sum_tr_14 = pd.Series(tr_1d_chop).rolling(window=14, min_periods=14).sum().values
+    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
     
     # Calculate Max High - Min Low over 14 periods for chop denominator
     max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
@@ -92,9 +87,10 @@ def generate_signals(prices):
     )
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate Donchian channels (20-period) from 4h data
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d volume moving average (20-period)
+    volume_1d_series = pd.Series(volume_1d)
+    volume_ma_20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -102,32 +98,33 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup period (need at least 20 for calculations)
         # Skip if any required data is invalid
-        if (np.isnan(atr_ma_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(atr_14_4h[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(atr_14_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 4h close
+        # Get current 4h close and volume
         close_price = close_4h[i]
+        volume_price = volume_4h[i]
         
         # Get aligned 1d data for current 4h bar (completed 1d bar)
-        atr_1d_current = align_htf_to_ltf(prices, df_1d, atr_14_1d)[i]
         chop_current = chop_aligned[i]
+        volume_ma_current = volume_ma_aligned[i]
         
-        # Volatility spike condition: current 1d ATR > 1.5x 20-period MA
-        volatility_spike = atr_1d_current > 1.5 * atr_ma_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x 20-period MA of 1d volume
+        volume_confirm = volume_price > 1.5 * volume_ma_current
         
         # Chop regime filter: chop > 61.8 indicates ranging market (mean reversion favorable)
         chop_filter = chop_current > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper + volatility spike + chop filter
-            if (close_price > donchian_upper[i] and volatility_spike and chop_filter):
+            # Long entry: Williams %R < -80 (oversold) + volume confirm + chop filter
+            if (williams_r[i] < -80 and volume_confirm and chop_filter):
                 position = 1
                 entry_price = close_price
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian lower + volatility spike + chop filter
-            elif (close_price < donchian_lower[i] and volatility_spike and chop_filter):
+            # Short entry: Williams %R > -20 (overbought) + volume confirm + chop filter
+            elif (williams_r[i] > -20 and volume_confirm and chop_filter):
                 position = -1
                 entry_price = close_price
                 signals[i] = -0.25
@@ -137,8 +134,8 @@ def generate_signals(prices):
             # Calculate stoploss level
             if position == 1:  # Long position
                 stop_loss = entry_price - 2.0 * atr_14_4h[i]
-                # Exit conditions: price < Donchian lower OR stoploss hit
-                if close_price < donchian_lower[i] or close_price <= stop_loss:
+                # Exit conditions: Williams %R crosses above -50 OR stoploss hit
+                if williams_r[i] > -50 or close_price <= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
@@ -146,8 +143,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1, Short position
                 stop_loss = entry_price + 2.0 * atr_14_4h[i]
-                # Exit conditions: price > Donchian upper OR stoploss hit
-                if close_price > donchian_upper[i] or close_price >= stop_loss:
+                # Exit conditions: Williams %R crosses below -50 OR stoploss hit
+                if williams_r[i] < -50 or close_price >= stop_loss:
                     position = 0
                     entry_price = 0.0
                     signals[i] = 0.0
