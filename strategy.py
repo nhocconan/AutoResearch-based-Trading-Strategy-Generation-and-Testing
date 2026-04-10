@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout + 1d volume confirmation + ADX trend filter
-# - Long when price breaks above Camarilla R4 (1d) AND 1d ADX > 25 AND volume > 1.5x 20-period average
-# - Short when price breaks below Camarilla S4 (1d) AND 1d ADX > 25 AND volume > 1.5x 20-period average
-# - Exit when price crosses Camarilla PP (pivot point) OR opposite Camarilla breakout occurs
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA(21) trend filter + volume confirmation
+# - Long when price breaks above Donchian(20) high AND 1d HMA(21) is rising AND volume > 1.8x 20-period average
+# - Short when price breaks below Donchian(20) low AND 1d HMA(21) is falling AND volume > 1.8x 20-period average
+# - Exit when price crosses Donchian midline
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Camarilla pivots from 1d provide institutional support/resistance levels
-# - ADX filter ensures we trade only when trending (avoids chop)
-# - Volume confirmation reduces false breakouts
-# - Works in both bull/bear by following the trend with institutional levels
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian breakouts capture strong momentum moves
+# - 1d HMA filter ensures we trade with the higher timeframe trend
+# - Volume confirmation reduces false breakouts (tighter threshold than v1)
 
-name = "6h_1d_camarilla_adx_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,94 +24,77 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 21:
         return np.zeros(n)
     
-    # Pre-compute 6h price and volume
+    # Pre-compute 4h Donchian channels (20)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 6h volume confirmation
+    # Donchian high/low (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Pre-compute 4h volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)  # Tighter threshold
     
-    # Pre-compute 1d Camarilla pivots (using previous day's OHLC)
-    # Camarilla: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # We use previous day's data to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate Camarilla levels for previous day
-    camarilla_pp = (prev_high + prev_low + prev_close) / 3
-    camarilla_r4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
-    camarilla_s4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
-    
-    # Pre-compute 1d ADX(14) for trend filter
-    # ADX calculation: +DM, -DM, TR, then smoothed, then DX, then ADX
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d HMA(21) for trend filter
     close_1d = df_1d['close'].values
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    def wma(arr, n):
+        if len(arr) < n:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, n + 1)
+        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Calculate WMA for n/2 and n
+    n_hma = 21
+    half_n = n_hma // 2
+    sqrt_n = int(np.sqrt(n_hma))
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    wma_half = wma(close_1d, half_n)
+    wma_full = wma(close_1d, n_hma)
     
-    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: prev * (period-1)/period + current/period
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Handle array lengths
+    wma_half_padded = np.full_like(close_1d, np.nan)
+    wma_full_padded = np.full_like(close_1d, np.nan)
     
-    period = 14
-    atr = wilders_smoothing(tr, period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, period)
+    if len(wma_half) > 0:
+        wma_half_padded[half_n-1:half_n-1+len(wma_half)] = wma_half
+    if len(wma_full) > 0:
+        wma_full_padded[n_hma-1:n_hma-1+len(wma_full)] = wma_full
     
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
-    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    # 2*WMA(n/2) - WMA(n)
+    diff = 2 * wma_half_padded - wma_full_padded
+    # WMA(sqrt(n)) of the diff
+    wma_diff = wma(diff, sqrt_n)
+    wma_diff_padded = np.full_like(close_1d, np.nan)
+    if len(wma_diff) > 0:
+        wma_diff_padded[sqrt_n-1:sqrt_n-1+len(wma_diff)] = wma_diff
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
-    adx = wilders_smoothing(dx, period)
+    hma_1d = wma_diff_padded
     
-    # Align HTF indicators to 6h timeframe
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # HMA slope (rising/falling)
+    hma_slope = np.diff(hma_1d, prepend=np.nan)
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
+    
+    # Align HTF indicators to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising)
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(hma_rising_aligned[i]) or 
+            np.isnan(hma_falling_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -122,26 +104,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla R4 AND ADX > 25 AND volume spike
-            if (close[i] > camarilla_r4_aligned[i] and 
-                adx_aligned[i] > 25 and 
+            # Long conditions: price breaks above Donchian high AND 1d HMA rising AND volume spike
+            if (close[i] > donch_high[i] and 
+                hma_rising_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla S4 AND ADX > 25 AND volume spike
-            elif (close[i] < camarilla_s4_aligned[i] and 
-                  adx_aligned[i] > 25 and 
+            # Short conditions: price breaks below Donchian low AND 1d HMA falling AND volume spike
+            elif (close[i] < donch_low[i] and 
+                  hma_falling_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Camarilla PP OR opposite Camarilla breakout occurs
-            exit_long = (position == 1 and 
-                        (close[i] < camarilla_pp_aligned[i] or close[i] < camarilla_s4_aligned[i]))
-            exit_short = (position == -1 and 
-                         (close[i] > camarilla_pp_aligned[i] or close[i] > camarilla_r4_aligned[i]))
+            # Exit conditions: price crosses Donchian midline
+            exit_long = (position == 1 and close[i] < donch_mid[i])
+            exit_short = (position == -1 and close[i] > donch_mid[i])
             
             if exit_long or exit_short:
                 position = 0
