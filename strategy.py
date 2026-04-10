@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above Camarilla H3 level with volume > 2.0x 20-bar average AND 1w close > 1w EMA20
-# - Short when price breaks below Camarilla L3 level with volume > 2.0x 20-bar average AND 1w close < 1w EMA20
-# - Exit when price retreats to Camarilla H4/L4 levels OR volume drops below 0.7x average
-# - Uses 1w trend filter to avoid counter-trend trades and focus on primary trend
-# - Higher volume threshold (2.0x) reduces trade frequency (target: 8-15 trades/year)
-# - Tight exit on H4/L4 levels to capture quick reversals and limit drawdown
-# - Designed to work in both bull (trend continuation) and bear (mean reversion at extremes) markets
+# Hypothesis: 6h Elder Ray + 12h trend filter + volume confirmation
+# - Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low (12h timeframe)
+# - Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND volume > 1.5x 20-bar average AND 12h close > 12h EMA50
+# - Short when Bear Power > 0 AND Bull Power < 0 (bearish momentum) AND volume > 1.5x 20-bar average AND 12h close < 12h EMA50
+# - Exit when momentum reverses (Bull Power < 0 for long, Bear Power < 0 for short) OR volume drops below 0.7x average
+# - Uses 12h EMA50 trend filter to avoid counter-trend trades
+# - Elder Ray captures institutional buying/selling pressure - works in both bull and bear markets
+# - Moderate volume threshold (1.5x) and momentum-based exits target 15-25 trades/year
+# - Focus on BTC/ETH; SOL-only strategies are low value
 
-name = "1d_1w_camarilla_breakout_volume_trend_v2"
-timeframe = "1d"
+name = "6h_12h_elder_ray_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,39 +22,42 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load HTF data ONCE before loop - 12h for Elder Ray and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Pre-compute volume confirmation: > 2.0x 20-period average
+    # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_spike = prices['volume'] > (2.0 * volume_20_avg)
-    
-    # Pre-compute volume filter: < 0.7x average volume for exit (loss of momentum)
+    vol_spike = prices['volume'] > (1.5 * volume_20_avg)
     vol_weak = prices['volume'] < (0.7 * volume_20_avg)
+    
+    # Pre-compute 12h data arrays
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
+    
+    # Align 12h data to 6h timeframe (each 12h bar = 2x 6h bars)
+    h_12h_aligned = align_htf_to_ltf(prices, df_12h, h_12h)
+    l_12h_aligned = align_htf_to_ltf(prices, df_12h, l_12h)
+    c_12h_aligned = align_htf_to_ltf(prices, df_12h, c_12h)
+    
+    # Pre-compute 12h EMA(13) for Elder Ray
+    ema13_12h = pd.Series(c_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_12h_aligned = align_htf_to_ltf(prices, df_12h, ema13_12h)
+    
+    # Pre-compute 12h EMA(50) for trend filter
+    ema50_12h = pd.Series(c_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute aligned 1w data properly
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
-    
-    # Align them to 1d timeframe
-    h_1w_aligned = align_htf_to_ltf(prices, df_1w, h_1w)
-    l_1w_aligned = align_htf_to_ltf(prices, df_1w, l_1w)
-    c_1w_aligned = align_htf_to_ltf(prices, df_1w, c_1w)
-    
-    # Pre-compute 1w EMA(20) for trend filter
-    ema20_1w = pd.Series(c_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_20_avg[i]) or 
-            np.isnan(h_1w_aligned[i]) or np.isnan(l_1w_aligned[i]) or np.isnan(c_1w_aligned[i])):
+        if (np.isnan(ema13_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(volume_20_avg[i]) or np.isnan(h_12h_aligned[i]) or 
+            np.isnan(l_12h_aligned[i]) or np.isnan(c_12h_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -63,67 +67,50 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get previous completed 1w bar values
-        # Since 1d timeframe, 1w data updates every 5 bars (approx)
-        # We use the aligned arrays directly - each 1w value repeats for 5 days
-        # To ensure we're using completed 1w bar data, we check if we're at a weekly boundary
+        # Calculate Elder Ray components for current bar
+        bull_power = h_12h_aligned[i] - ema13_12h_aligned[i]  # High - EMA13
+        bear_power = ema13_12h_aligned[i] - l_12h_aligned[i]  # EMA13 - Low
         
-        # For 1d timeframe, we can use the aligned arrays directly
-        # The aligned 1w data is already stretched to 1d resolution
-        # We need to ensure we're using completed 1w bar data
-        
-        # Simple approach: use current aligned values as they represent the last completed 1w bar
-        # align_htf_to_ltf already handles the delay for completed bars
-        ph = h_1w_aligned[i]   # Current aligned 1w high (represents last completed 1w)
-        pl = l_1w_aligned[i]   # Current aligned 1w low
-        pc = c_1w_aligned[i]   # Current aligned 1w close
-        
-        # Calculate Camarilla levels from previous 1w bar
-        range_val = ph - pl
-        if range_val > 0:
-            camarilla_h3 = pc + (range_val * 1.1 / 4)
-            camarilla_l3 = pc - (range_val * 1.1 / 4)
-            camarilla_h4 = pc + (range_val * 1.1 / 2)
-            camarilla_l4 = pc - (range_val * 1.1 / 2)
-            
-            if position == 0:  # Flat - look for new breakout entries
-                # Long breakout: price > Camarilla H3 with volume spike AND 1w uptrend
-                if (prices['close'].iloc[i] > camarilla_h3 and 
-                    vol_spike.iloc[i] and 
-                    prices['close'].iloc[i] > ema20_1w_aligned[i]):
-                    position = 1
-                    signals[i] = 0.25
-                # Short breakdown: price < Camarilla L3 with volume spike AND 1w downtrend
-                elif (prices['close'].iloc[i] < camarilla_l3 and 
-                      vol_spike.iloc[i] and 
-                      prices['close'].iloc[i] < ema20_1w_aligned[i]):
-                    position = -1
-                    signals[i] = -0.25
-            else:  # Have position - look for exit
-                # Exit conditions:
-                # 1. Price retreats to Camarilla H4/L4 levels
-                # 2. Volume drops below 0.7x average (loss of momentum)
-                if position == 1:  # Long position
-                    if (prices['close'].iloc[i] < camarilla_h4 or 
-                        vol_weak.iloc[i]):
-                        position = 0
-                        signals[i] = 0.0
-                    else:
-                        signals[i] = 0.25  # Hold long
-                elif position == -1:  # Short position
-                    if (prices['close'].iloc[i] > camarilla_l4 or 
-                        vol_weak.iloc[i]):
-                        position = 0
-                        signals[i] = 0.0
-                    else:
-                        signals[i] = -0.25  # Hold short
+        # Get previous bar values for momentum check (to avoid whipsaws)
+        if i >= 1:
+            prev_bull_power = h_12h_aligned[i-1] - ema13_12h_aligned[i-1]
+            prev_bear_power = ema13_12h_aligned[i-1] - l_12h_aligned[i-1]
         else:
-            # Hold current position
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
+            prev_bull_power = bull_power
+            prev_bear_power = bear_power
+        
+        if position == 0:  # Flat - look for new entries
+            # Long entry: bullish momentum (Bull Power > 0 AND Bear Power < 0) with volume spike AND uptrend
+            if (bull_power > 0 and bear_power < 0 and 
+                vol_spike.iloc[i] and 
+                c_12h_aligned[i] > ema50_12h_aligned[i]):
+                position = 1
                 signals[i] = 0.25
-            else:
+            # Short entry: bearish momentum (Bear Power > 0 AND Bull Power < 0) with volume spike AND downtrend
+            elif (bear_power > 0 and bull_power < 0 and 
+                  vol_spike.iloc[i] and 
+                  c_12h_aligned[i] < ema50_12h_aligned[i]):
+                position = -1
                 signals[i] = -0.25
+            else:
+                signals[i] = 0.0  # Stay flat
+        elif position == 1:  # Long position - look for exit
+            # Exit conditions:
+            # 1. Momentum reverses (Bull Power < 0 indicates losing bullish momentum)
+            # 2. Volume drops below 0.7x average (loss of momentum)
+            if (bull_power < 0 or vol_weak.iloc[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25  # Hold long
+        elif position == -1:  # Short position - look for exit
+            # Exit conditions:
+            # 1. Momentum reverses (Bear Power < 0 indicates losing bearish momentum)
+            # 2. Volume drops below 0.7x average (loss of momentum)
+            if (bear_power < 0 or vol_weak.iloc[i]):
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25  # Hold short
     
     return signals
