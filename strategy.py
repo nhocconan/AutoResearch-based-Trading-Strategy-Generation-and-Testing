@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and 12h chop regime filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.5x 20-period volume SMA AND 12h chop > 61.8 (ranging market)
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.5x 20-period volume SMA AND 12h chop > 61.8
-# - Exit: price returns to Camarilla pivot point (mean of high and low)
-# - Uses 4h for price action (Camarilla levels), 1d for volume confirmation, 12h for chop filter
-# - Target: 25-40 trades/year to minimize fee drag while capturing high-probability mean-reversion breakouts
-# - Volume confirmation on 1d reduces false signals; chop filter ensures ranging regime for mean-reversion validity
-# - Camarilla levels provide strong intraday support/resistance in ranging markets
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and 12h chop regime filter
+# - Long when Williams %R < -80 (oversold) AND 1d volume > 1.5x 20-period volume SMA AND 12h chop > 61.8 (ranging market)
+# - Short when Williams %R > -20 (overbought) AND 1d volume > 1.5x 20-period volume SMA AND 12h chop > 61.8
+# - Exit: Williams %R returns to -50 (mean reversion)
+# - Uses 4h for price action (Williams %R), 1d for volume confirmation, 12h for chop filter
+# - Target: 25-40 trades/year to minimize fee drag while capturing high-probability mean-reversion signals
+# - Williams %R is effective in ranging markets; volume confirmation reduces false signals; chop filter ensures regime validity
 
-name = "4h_1d_12h_camarilla_volspike_chop_v1"
+name = "4h_1d_12h_williamsr_volspike_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,23 +44,11 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 4h Camarilla levels (based on previous day's high, low, close)
-    # Camarilla levels: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
-    # We use H3 and L3 for breakouts, pivot = (high+low+close)/3 for exit
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_range = high_1d - low_1d
-    camarilla_h3 = close_1d + 1.1 * camarilla_range
-    camarilla_l3 = close_1d - 1.1 * camarilla_range
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Pre-compute 4h Williams %R (14-period)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # avoid division by zero
     
     # Pre-compute 12h Chopiness Index (14-period) for regime filter
     df_12h_high = df_12h['high'].values
@@ -82,8 +69,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(chop_12h_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(chop_12h_aligned[i]) or 
             np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
@@ -94,20 +80,20 @@ def generate_signals(prices):
         # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
         vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Chop filter: chop > 61.8 indicates ranging market (good for mean-reversion breakouts)
+        # Chop filter: chop > 61.8 indicates ranging market (good for mean-reversion)
         chop_filter = chop_12h_aligned[i] > 61.8
         
         # Only trade when both volume confirmation and chop filter are present
         if vol_confirm and chop_filter:
-            # Long: price breaks above Camarilla H3 level
-            if close[i] > camarilla_h3_aligned[i]:
+            # Long: Williams %R < -80 (oversold)
+            if williams_r[i] < -80:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25
-            # Short: price breaks below Camarilla L3 level
-            elif close[i] < camarilla_l3_aligned[i]:
+            # Short: Williams %R > -20 (overbought)
+            elif williams_r[i] > -20:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
@@ -117,11 +103,11 @@ def generate_signals(prices):
                 # Maintain position
                 signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
             
-            # Exit conditions: price returns to Camarilla pivot point
-            if position == 1 and close[i] < camarilla_pivot_aligned[i]:
+            # Exit conditions: Williams %R returns to -50 (mean reversion)
+            if position == 1 and williams_r[i] > -50:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close[i] > camarilla_pivot_aligned[i]:
+            elif position == -1 and williams_r[i] < -50:
                 position = 0
                 signals[i] = 0.0
         else:
