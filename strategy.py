@@ -3,63 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation
-# - Williams %R(14) on 6h: oversold < -80, overbought > -20
-# - Long when %R crosses above -80 from below AND 1d ADX > 20 (trending or strong range) AND volume > 1.3x 20-period average
-# - Short when %R crosses below -20 from above AND 1d ADX > 20 AND volume > 1.3x 20-period average
-# - Exit when %R crosses opposite threshold (-20 for long exit, -80 for short exit)
-# - Williams %R is a momentum oscillator that identifies overbought/oversold levels
-# - 1d ADX filter ensures we only trade when higher timeframe has sufficient momentum
+# Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation
+# - Williams Alligator: Jaw (13-period smoothed median, shifted 8), Teeth (8-period smoothed median, shifted 5), Lips (5-period smoothed median, shifted 3)
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND price > Lips AND 1w ADX > 25 AND volume > 1.5x 20-period average
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND price < Lips AND 1w ADX > 25 AND volume > 1.5x 20-period average
+# - Exit when Alligator alignment reverses (Lips crosses Teeth or Jaw) OR price crosses Jaw
+# - Alligator identifies trend absence (sleeping) vs trend formation (awakening) with convergence/divergence
+# - 1w ADX filter ensures we only trade when higher timeframe is strongly trending
 # - Volume confirmation prevents false signals in low participation
-# - Target: 12-25 trades/year on 6h (50-100 total over 4 years)
+# - Target: 12-37 trades/year on 12h (50-150 total over 4 years) to avoid fee drag
 
-name = "6h_1d_williamsr_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_alligator_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h Williams %R(14)
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h median price (typical price: (high+low+close)/3)
+    median_price = (prices['high'] + prices['low'] + prices['close']) / 3
+    median_price_values = median_price.values
     
-    williams_r = np.full_like(close_6h, np.nan, dtype=float)
-    period = 14
+    # Williams Alligator components on 12h
+    # Jaw: 13-period SMMA of median, shifted 8 bars
+    jaw_period = 13
+    jaw_shift = 8
+    # Teeth: 8-period SMMA of median, shifted 5 bars
+    teeth_period = 8
+    teeth_shift = 5
+    # Lips: 5-period SMMA of median, shifted 3 bars
+    lips_period = 5
+    lips_shift = 3
     
-    for i in range(period - 1, len(high_6h)):
-        highest_high = np.max(high_6h[i - period + 1:i + 1])
-        lowest_low = np.min(low_6h[i - period + 1:i + 1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close_6h[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50  # neutral when range is zero
+    # Smoothed Moving Average (SMMA) - Wilder's smoothing (EMA with alpha=1/period)
+    def smma(source, period):
+        result = np.full_like(source, np.nan, dtype=float)
+        if len(source) >= period:
+            # First value: simple average
+            result[period-1] = np.mean(source[:period])
+            # Wilder smoothing: SMMA[i] = (SMMA[i-1] * (period-1) + source[i]) / period
+            for i in range(period, len(source)):
+                if not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + source[i]) / period
+        return result
     
-    # Pre-compute 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    jaws_raw = smma(median_price_values, jaw_period)
+    teeth_raw = smma(median_price_values, teeth_period)
+    lips_raw = smma(median_price_values, lips_period)
+    
+    # Apply shifts (shift right = shift forward in time, so we use negative index offset)
+    jaw = np.full_like(jaws_raw, np.nan, dtype=float)
+    teeth = np.full_like(teeth_raw, np.nan, dtype=float)
+    lips = np.full_like(lips_raw, np.nan, dtype=float)
+    
+    for i in range(len(jaws_raw)):
+        if i - jaw_shift >= 0 and not np.isnan(jaws_raw[i]):
+            jaw[i - jaw_shift] = jaws_raw[i]
+        if i - teeth_shift >= 0 and not np.isnan(teeth_raw[i]):
+            teeth[i - teeth_shift] = teeth_raw[i]
+        if i - lips_shift >= 0 and not np.isnan(lips_raw[i]):
+            lips[i - lips_shift] = lips_raw[i]
+    
+    # Pre-compute 1w ADX(14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])  # align with index
     
     # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -105,59 +133,81 @@ def generate_signals(prices):
                 if not np.isnan(dx[i]) and not np.isnan(adx[i-1]):
                     adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Align HTF indicators to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align HTF indicators to 12h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    prev_williams_r = np.full(n, np.nan)  # for crossover detection
+    prev_lips = np.full(n, np.nan)  # for Lips-Teeth/Jaw cross detection
+    prev_teeth = np.full(n, np.nan)
+    prev_jaw = np.full(n, np.nan)
     
-    for i in range(20, n):  # Start after warmup for volume MA
-        # Store previous Williams %R for crossover detection
+    for i in range(100, n):  # Start after warmup
+        # Store previous values for crossover detection
         if i > 0:
-            prev_williams_r[i] = williams_r[i-1]
+            prev_lips[i] = lips[i-1]
+            prev_teeth[i] = teeth[i-1]
+            prev_jaw[i] = jaw[i-1]
         else:
-            prev_williams_r[i] = np.nan
+            prev_lips[i] = np.nan
+            prev_teeth[i] = np.nan
+            prev_jaw[i] = np.nan
         
         # Skip if any required data is invalid
-        if np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]):
-            signals[i] = 0.0
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(adx_1w_aligned[i])):
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = -0.25
             continue
         
-        # Volume condition: current volume > 1.3x 20-period average
+        # Volume spike condition (1.5x average)
         vol_series = prices['volume'].values
-        if i >= 19:
-            vol_ma = np.mean(vol_series[i-19:i+1])
-            vol_condition = vol_series[i] > 1.3 * vol_ma
-        else:
-            vol_condition = False  # not enough data for MA
+        vol_ma_12h = np.full_like(vol_series, np.nan, dtype=float)
+        for j in range(19, i+1):
+            vol_ma_12h[j] = np.mean(vol_series[j-19:j+1])
+        vol_spike = not np.isnan(vol_ma_12h[i]) and vol_series[i] > 1.5 * vol_ma_12h[i]
         
-        williams_now = williams_r[i]
-        williams_prev = prev_williams_r[i]
+        close_price = prices['close'].values[i]
+        lips_now = lips[i]
+        teeth_now = teeth[i]
+        jaw_now = jaw[i]
+        lips_prev = prev_lips[i]
+        teeth_prev = prev_teeth[i]
+        jaw_prev = prev_jaw[i]
         
-        # Williams %R signals
-        williams_bullish_cross = (williams_prev <= -80) and (williams_now > -80)
-        williams_bearish_cross = (williams_prev >= -20) and (williams_now < -20)
-        williams_long_exit = (williams_prev >= -20) and (williams_now < -20)  # cross below -20
-        williams_short_exit = (williams_prev <= -80) and (williams_now > -80)  # cross above -80
+        # Alligator alignment signals
+        bullish_alignment = lips_now > teeth_now > jaw_now
+        bearish_alignment = lips_now < teeth_now < jaw_now
+        
+        # Lips crossing Teeth or Jaw (exit signals)
+        lips_cross_teeth = (lips_prev <= teeth_prev and lips_now > teeth_now) or \
+                          (lips_prev >= teeth_prev and lips_now < teeth_now)
+        lips_cross_jaw = (lips_prev <= jaw_prev and lips_now > jaw_now) or \
+                        (lips_prev >= jaw_prev and lips_now < jaw_now)
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: %R crosses above -80 AND 1d trending (ADX > 20) AND volume spike
-            if (williams_bullish_cross and 
-                adx_1d_aligned[i] > 20 and vol_condition):
+            # Long conditions: bullish alignment AND price > Lips AND 1w trending (ADX > 25) AND volume spike
+            if (bullish_alignment and close_price > lips_now and 
+                adx_1w_aligned[i] > 25 and vol_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: %R crosses below -20 AND 1d trending (ADX > 20) AND volume spike
-            elif (williams_bearish_cross and 
-                  adx_1d_aligned[i] > 20 and vol_condition):
+            # Short conditions: bearish alignment AND price < Lips AND 1w trending (ADX > 25) AND volume spike
+            elif (bearish_alignment and close_price < lips_now and 
+                  adx_1w_aligned[i] > 25 and vol_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: %R crosses opposite threshold
-            exit_long = (position == 1 and williams_long_exit)
-            exit_short = (position == -1 and williams_short_exit)
+            # Exit conditions: Lips crosses Teeth OR Jaw OR alignment reverses
+            exit_long = (position == 1 and 
+                        (lips_cross_teeth or lips_cross_jaw or not bullish_alignment))
+            exit_short = (position == -1 and 
+                         (lips_cross_teeth or lips_cross_jaw or not bearish_alignment))
             
             if exit_long or exit_short:
                 position = 0
