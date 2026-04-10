@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter with volume confirmation
-# - Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# - Long when Bull Power > 0 AND ADX(1d) > 25 (trending market) with volume > 1.5x 20-bar avg
-# - Short when Bear Power > 0 AND ADX(1d) > 25 with volume spike
-# - Uses 1d ADX to avoid whipsaws in ranging markets (6h timeframe prone to noise)
-# - Discrete position sizing (0.25) to minimize fee churn
-# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
-# - Works in both bull and bear: ADX filter ensures we only trade strong trends
+# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level in 1d uptrend (close > EMA50) with volume > 1.8x 20-bar avg
+# - Short when price breaks below Camarilla L3 level in 1d downtrend (close < EMA50) with volume spike
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Targets ~25 trades/year (100 total over 4 years) to avoid fee drag
+# - 1d trend filter reduces false breakouts in ranging markets
+# - ATR-based stoploss to limit drawdown
 
-name = "6h_1d_elder_ray_adx_regime_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,45 +29,18 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # 1d EMA(13) for Elder Ray calculation
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # 1d ADX(14) for trend strength filter
-    # Calculate True Range
-    high_low_1d = high_1d - low_1d
-    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    high_close_1d[0] = np.inf  # First value has no previous close
-    low_close_1d[0] = np.inf
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    
-    # Calculate +DM and -DM
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d indicators to 6h timeframe
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # 1d volume confirmation: > 1.5x 20-period average
     volume_1d = df_1d['volume'].values
+    
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d volume confirmation: > 1.8x 20-period average
     avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
+    vol_spike_1d = volume_1d > (1.8 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute ATR for stoploss (using 6h data)
+    # Pre-compute ATR for stoploss (using 4h data)
     high_low = prices['high'] - prices['low']
     high_close = np.abs(prices['high'] - prices['close'].shift(1))
     low_close = np.abs(prices['low'] - prices['close'].shift(1))
@@ -83,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -106,23 +78,37 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Calculate Elder Ray components using 6h data
-            bull_power = prices['high'].iloc[i] - ema_13_1d_aligned[i]
-            bear_power = ema_13_1d_aligned[i] - prices['low'].iloc[i]
-            
-            # Long signal: Bull Power > 0 AND ADX > 25 (strong trend) with volume spike
-            if (bull_power > 0 and 
-                adx_1d_aligned[i] > 25 and 
-                vol_spike_1d_aligned[i]):
-                position = 1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = 0.25
-            # Short signal: Bear Power > 0 AND ADX > 25 (strong trend) with volume spike
-            elif (bear_power > 0 and 
-                  adx_1d_aligned[i] > 25 and 
-                  vol_spike_1d_aligned[i]):
-                position = -1
-                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
-                signals[i] = -0.25
+            # Calculate Camarilla pivot levels from previous 1d bar
+            if i >= 24:  # Need at least one completed 1d bar (24*4h bars per day)
+                # Previous completed 1d bar index in 4h data
+                prev_1d_idx = ((i // 24) * 24) - 1
+                if prev_1d_idx >= 0:
+                    # Get previous day's OHLC from 4h data (last 24 bars of previous day)
+                    day_start = prev_1d_idx - 23
+                    if day_start >= 0:
+                        day_high = prices['high'].iloc[day_start:prev_1d_idx+1].max()
+                        day_low = prices['low'].iloc[day_start:prev_1d_idx+1].min()
+                        day_close = prices['close'].iloc[prev_1d_idx]
+                        
+                        # Calculate Camarilla levels
+                        range_ = day_high - day_low
+                        if range_ > 0:
+                            camarilla_h3 = day_close + (range_ * 1.1 / 4)
+                            camarilla_l3 = day_close - (range_ * 1.1 / 4)
+                            
+                            # Long signal: price breaks above Camarilla H3 in 1d uptrend with volume spike
+                            if (prices['close'].iloc[i] > camarilla_h3 and 
+                                prices['close'].iloc[i] > ema_50_1d_aligned[i] and 
+                                vol_spike_1d_aligned[i]):
+                                position = 1
+                                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                                signals[i] = 0.25
+                            # Short signal: price breaks below Camarilla L3 in 1d downtrend with volume spike
+                            elif (prices['close'].iloc[i] < camarilla_l3 and 
+                                  prices['close'].iloc[i] < ema_50_1d_aligned[i] and 
+                                  vol_spike_1d_aligned[i]):
+                                position = -1
+                                entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
+                                signals[i] = -0.25
     
     return signals
