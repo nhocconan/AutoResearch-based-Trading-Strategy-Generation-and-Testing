@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA20 trend filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND 1w close > 1w EMA20 AND 1d volume > 1.5x 20-period volume SMA
-# - Short when price breaks below 20-period Donchian low AND 1w close < 1w EMA20 AND 1d volume > 1.5x 20-period volume SMA
-# - Exit: price retreats to midpoint of Donchian channel OR volume drops below average
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume spike and 1d trend filter
+# - Long when price breaks above 6h Camarilla R4 level AND 1d volume > 1.5x 20-period volume SMA AND 1d close > 1d EMA50
+# - Short when price breaks below 6h Camarilla S4 level AND 1d volume > 1.5x 20-period volume SMA AND 1d close < 1d EMA50
+# - Exit: price retreats to Camarilla pivot point (PP)
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 7-25 trades/year on 1d timeframe to stay within fee drag limits
-# - Uses Donchian channels for structure, 1w EMA for trend filter, volume for confirmation
+# - Target: 12-37 trades/year on 6h timeframe to stay within fee drag limits
+# - Uses Camarilla levels from 1d timeframe for structure, 6h for execution timing
+# - Volume spike filter reduces false breakouts; EMA50 ensures trend alignment
 
-name = "1d_donchian_20_1w_volume_v2"
-timeframe = "1d"
+name = "6h_1d_camarilla_volspike_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,8 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,46 +35,59 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 1d Donchian(20) channels
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high = high_roll_max
-    donchian_low = low_roll_min
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Calculate 1d Camarilla pivot levels from previous day OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    camarilla_r4 = camarilla_pp + camarilla_range * 1.1 / 2.0
+    camarilla_s4 = camarilla_pp - camarilla_range * 1.1 / 2.0
     
-    # Calculate 1w close for trend comparison
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Align 1d Camarilla levels to 6h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Calculate 1d volume SMA for confirmation
-    volume_sma_20_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    for i in range(40, n):  # Start after warmup for indicators
+    # Calculate 1d volume SMA for spike detection
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    
+    # Calculate 6h volume for confirmation (optional)
+    volume_sma_20_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(50, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(donchian_mid[i]) or np.isnan(ema_20_1w_aligned[i]) or
-            np.isnan(close_1w_aligned[i]) or np.isnan(volume_sma_20_1d[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        vol_confirm = volume[i] > 1.5 * volume_sma_20_1d[i]
+        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA (spike detection)
+        # Get 1d index for current 6h bar (4x 6h bars = 1d bar)
+        idx_1d = i // 4
+        if idx_1d >= len(volume_1d):
+            vol_confirm = False
+        else:
+            vol_confirm = volume_1d[idx_1d] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: 1w close vs 1w EMA20
-        trend_bullish = close_1w_aligned[i] > ema_20_1w_aligned[i]
-        trend_bearish = close_1w_aligned[i] < ema_20_1w_aligned[i]
+        # Trend filter: 1d close vs 1d EMA50
+        trend_bullish = close_1d[idx_1d] > ema_50_1d_aligned[i] if idx_1d < len(close_1d) else False
+        trend_bearish = close_1d[idx_1d] < ema_50_1d_aligned[i] if idx_1d < len(close_1d) else False
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
+        # Camarilla breakout signals (using previous bar's levels to avoid look-ahead)
+        breakout_up = close[i] > camarilla_r4_aligned[i-1]  # Break above previous R4
+        breakout_down = close[i] < camarilla_s4_aligned[i-1]  # Break below previous S4
         
-        # Exit conditions: price retreats to midpoint or loss of volume confirmation
-        exit_long = close[i] < donchian_mid[i] or not vol_confirm
-        exit_short = close[i] > donchian_mid[i] or not vol_confirm
+        # Exit conditions: price retreats to pivot point
+        exit_long = close[i] < camarilla_pp_aligned[i]
+        exit_short = close[i] > camarilla_pp_aligned[i]
         
         if position == 0:  # Flat - look for entry
             if breakout_up and trend_bullish and vol_confirm:
