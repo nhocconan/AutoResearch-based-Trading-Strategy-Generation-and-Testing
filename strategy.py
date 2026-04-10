@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and 1d ADX regime filter
+# Hypothesis: 4h Donchian(20) breakout with 12h ATR-based volume spike and 1d choppiness regime filter
 # - Primary: 4h price breaks above Donchian(20) high (long) or below Donchian(20) low (short)
-# - Volume filter: 12h volume > 1.5x 20-period MA to confirm institutional participation
-# - Regime filter: 1d ADX(14) > 25 to ensure trending market (avoid choppy conditions)
-# - Entry: Long when breakout above upper band + volume confirmation + ADX > 25
-#          Short when breakout below lower band + volume confirmation + ADX > 25
+# - Volume filter: 12h ATR(10) > 1.5x 20-period ATR MA to confirm institutional participation (more reliable than raw volume)
+# - Regime filter: 1d Choppiness Index(14) > 61.8 to avoid choppy/ranging markets (focus on trending conditions)
+# - Entry: Long when breakout above upper band + volume spike + CHOP > 61.8
+#          Short when breakout below lower band + volume spike + CHOP > 61.8
 # - Exit: Close crosses back inside Donchian channel (mean reversion exit)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
 # - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# - Works in bull/bear: Donchian breakouts capture trends, volume confirms validity, ADX filter avoids false signals in ranging markets
+# - Works in bull/bear: Donchian breakouts capture trends, ATR volume spike avoids fakeouts, CHOP filter avoids false signals in ranging markets
 
-name = "4h_12h_1d_donchian_volume_adx_v1"
+name = "4h_12h_1d_donchian_atr_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,10 +36,9 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    close_12h = df_12h['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -48,27 +47,32 @@ def generate_signals(prices):
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12h volume MA(20)
-    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
+    # Calculate 12h ATR(10) for volume spike filter
+    high_low_12h = high_12h - low_12h
+    high_close_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    low_close_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    high_close_12h[0] = high_low_12h[0]
+    low_close_12h[0] = high_low_12h[0]
+    tr_12h = np.maximum(high_low_12h, np.maximum(high_close_12h, low_close_12h))
+    atr_10_12h = pd.Series(tr_12h).rolling(window=10, min_periods=10).mean().values
+    atr_ma_20_12h = pd.Series(atr_10_12h).rolling(window=20, min_periods=20).mean().values
+    atr_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ma_20_12h)
     
-    # Calculate 1d ADX(14)
-    # ADX calculation: +DM, -DM, TR, then DX, then ADX
-    high_diff = np.diff(high_1d, prepend=high_1d[0])
-    low_diff = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr_14 + 1e-10)
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr_14 + 1e-10)
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Calculate 1d Choppiness Index(14)
+    # CHOP = 100 * log10(sum(TR(14)) / (log10(14) * (max(HH(14)) - min(LL(14)))))
+    high_low_1d = high_1d - low_1d
+    high_close_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close_1d[0] = high_low_1d[0]
+    low_close_1d[0] = high_low_1d[0]
+    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_denom = np.log10(14) * (hh_14 - ll_14)
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # avoid division by zero
+    chop_14 = 100 * np.log10(tr_sum_14 / chop_denom)
+    chop_14_aligned = align_htf_to_ltf(prices, df_1d, chop_14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -80,25 +84,25 @@ def generate_signals(prices):
     for i in range(30, n):
         # Skip if any required data is invalid or outside session
         if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(volume_ma_20_12h_aligned[i]) or np.isnan(adx_14_aligned[i]) or
+            np.isnan(atr_ma_20_12h_aligned[i]) or np.isnan(chop_14_aligned[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-period MA
-        volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
-        volume_confirm = volume_12h_aligned[i] > 1.5 * volume_ma_20_12h_aligned[i]
+        # Volume spike filter: current 12h ATR(10) > 1.5x 20-period ATR MA
+        atr_10_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_10_12h)
+        volume_spike = atr_10_12h_aligned[i] > 1.5 * atr_ma_20_12h_aligned[i]
         
-        # Regime filter: ADX > 25 indicates trending market
-        regime_filter = adx_14_aligned[i] > 25
+        # Regime filter: CHOP > 61.8 indicates trending market (avoid chop)
+        regime_filter = chop_14_aligned[i] > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: breakout above upper Donchian band + volume confirmation + ADX > 25
-            if (close[i] > highest_20[i] and volume_confirm and regime_filter):
+            # Long entry: breakout above upper Donchian band + volume spike + CHOP > 61.8
+            if (close[i] > highest_20[i] and volume_spike and regime_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: breakout below lower Donchian band + volume confirmation + ADX > 25
-            elif (close[i] < lowest_20[i] and volume_confirm and regime_filter):
+            # Short entry: breakout below lower Donchian band + volume spike + CHOP > 61.8
+            elif (close[i] < lowest_20[i] and volume_spike and regime_filter):
                 position = -1
                 signals[i] = -0.25
             else:
