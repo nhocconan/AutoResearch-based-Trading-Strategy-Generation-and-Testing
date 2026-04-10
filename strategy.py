@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 4h Donchian(20) high in 1d uptrend (close > EMA200) with volume spike
-# - Short when price breaks below 4h Donchian(20) low in 1d downtrend (close < EMA200) with volume spike
-# - Exit: ATR trailing stop (highest high since entry - 2.5*ATR for longs, lowest low + 2.5*ATR for shorts)
-# - Uses discrete position sizing (0.30) to minimize fee churn
-# - Targets 75-200 total trades over 4 years (19-50/year) to avoid fee drag
-# - Works in bull (breakouts) and bear (short breakdowns) via symmetric logic
+# Hypothesis: 6h Williams %R extreme + 1d trend filter + volume confirmation
+# - Long when Williams %R(14) < -80 (oversold) in 1d uptrend (close > EMA50) with volume spike
+# - Short when Williams %R(14) > -20 (overbought) in 1d downtrend (close < EMA50) with volume spike
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Williams %R mean reversion exit: close back above -50 for longs, below -50 for shorts
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag
+# - Williams %R works well in ranging/mean-reverting markets common in 2025+ bear/range regime
 
-name = "4h_1d_donchian_breakout_volume_trend_atr_v1"
-timeframe = "4h"
+name = "6h_1d_williamsr_meanrev_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +22,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Pre-compute 1d indicators
@@ -31,82 +31,59 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d EMA(200) for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d volume confirmation: > 1.8x 20-period average (stricter to reduce trades)
+    # 1d Williams %R(14)
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close_1d) / (highest_high_14 - lowest_low_14)
+    williams_r[highest_high_14 == lowest_low_14] = -50  # avoid division by zero
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # 1d volume confirmation: > 1.5x 20-period average
     avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.8 * avg_volume_20_1d)
+    vol_spike_1d = volume_1d > (1.5 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
-    
-    # 4h Donchian channels (20-period)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # 4h ATR(14) for trailing stop
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_14_4h = np.zeros_like(tr)
-    atr_14_4h[14-1] = np.mean(tr[:14])
-    for i in range(14, len(tr)):
-        atr_14_4h[i] = (atr_14_4h[i-1] * (14-1) + tr[i]) / 14
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0  # for long trailing stop
-    lowest_since_entry = 0.0   # for short trailing stop
     
     for i in range(100, n):
-        close_4h = prices['close'].iloc[i]
-        
         # Skip if any required data is invalid
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr_14_4h[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-            # Exit: ATR trailing stop
-            if close_4h < highest_since_entry - 2.5 * atr_14_4h[i]:
+            # Exit: Williams %R mean reversion (close above -50)
+            if williams_r_aligned[i] > -50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-            # Exit: ATR trailing stop
-            if close_4h > lowest_since_entry + 2.5 * atr_14_4h[i]:
+            # Exit: Williams %R mean reversion (close below -50)
+            if williams_r_aligned[i] < -50:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:  # Flat
-            # Look for Donchian breakout with trend and volume filters
+            # Look for Williams %R extremes with trend and volume filters
             if vol_spike_1d_aligned[i]:
-                # Long signal: break above Donchian high in 1d uptrend
-                if (close_4h > donchian_high[i] and 
-                    close_4h > ema_200_1d_aligned[i]):
+                # Long signal: Williams %R < -80 (oversold) in 1d uptrend
+                if (williams_r_aligned[i] < -80 and 
+                    close_1d[-1] > ema_50_1d_aligned[i]):  # Use last known 1d close for trend
                     position = 1
-                    entry_price = close_4h
-                    highest_since_entry = prices['high'].iloc[i]
-                    signals[i] = 0.30
-                # Short signal: break below Donchian low in 1d downtrend
-                elif (close_4h < donchian_low[i] and 
-                      close_4h < ema_200_1d_aligned[i]):
+                    signals[i] = 0.25
+                # Short signal: Williams %R > -20 (overbought) in 1d downtrend
+                elif (williams_r_aligned[i] > -20 and 
+                      close_1d[-1] < ema_50_1d_aligned[i]):
                     position = -1
-                    entry_price = close_4h
-                    lowest_since_entry = prices['low'].iloc[i]
-                    signals[i] = -0.30
+                    signals[i] = -0.25
     
     return signals
