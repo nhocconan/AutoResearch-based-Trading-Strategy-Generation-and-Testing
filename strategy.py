@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-# - Primary: 1d timeframe for lower trade frequency (target: 30-100 trades over 4 years)
-# - HTF: 1w for trend filter (EMA34)
-# - Long: Price > Donchian upper(20) + close > 1w EMA34 + volume > 1.5x 20-day MA
-# - Short: Price < Donchian lower(20) + close < 1w EMA34 + volume > 1.5x 20-day MA
-# - Exit: Price crosses Donchian midpoint (10-day avg of upper/lower) or ATR < 30th percentile
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume and ATR regime filter
+# - Primary: 12h timeframe for lower trade frequency (target: 50-150 trades over 4 years)
+# - HTF: 1d for Camarilla pivot levels (H3/L3) and volume confirmation
+# - Long: Price breaks above H3 + volume > 1.5x 20-period MA + 1d ATR > 50th percentile
+# - Short: Price breaks below L3 + volume > 1.5x 20-period MA + 1d ATR > 50th percentile
+# - Exit: Price retouches pivot point (PP) or ATR < 30th percentile (low vol regime)
 # - Position sizing: 0.25 (discrete level)
-# - Works in bull/bear: Donchian captures breakouts, 1w EMA filters counter-trend, volume/ATR regimes avoid chop
+# - Works in bull/bear: Camarilla levels act as support/resistance; ATR/volume filters avoid false signals in ranging markets
 
-name = "1d_1w_donchian_ema_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,32 +22,37 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLCV
-    open_1d = prices['open'].values
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
-    volume_1d = prices['volume'].values
+    # Pre-compute 12h OHLCV
+    open_12h = prices['open'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    volume_12h = prices['volume'].values
     
-    # Pre-compute 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    # Upper: 20-period high, Lower: 20-period low
-    donch_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_upper + donch_lower) / 2.0  # Midpoint for exit
+    # Calculate 1d Camarilla pivot levels
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = High - Low
+    range_1d = high_1d - low_1d
+    # Resistance levels: R4 = Close + Range * 1.5/2, R3 = Close + Range * 1.25/2, etc.
+    # Standard Camarilla: H3 = Close + Range * 1.1/4, L3 = Close - Range * 1.1/4
+    h3_1d = close_1d + (range_1d * 1.1 / 4)
+    l3_1d = close_1d - (range_1d * 1.1 / 4)
     
-    # Calculate 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align to 12h timeframe (wait for completed 1d bar)
+    pp_12h = align_htf_to_ltf(prices, df_1d, pp_1d)
+    h3_12h = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_12h = align_htf_to_ltf(prices, df_1d, l3_1d)
     
     # Calculate 1d ATR(14) for volatility regime filter
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
@@ -60,52 +65,51 @@ def generate_signals(prices):
     atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
         lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
     ).values
+    atr_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_percentile)
     
     # Calculate 1d volume moving average (20-period) for volume confirmation
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr_percentile[i]) or 
-            np.isnan(volume_ma_20_1d[i])):
+        if (np.isnan(pp_12h[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
+            np.isnan(atr_percentile_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime conditions
-        # Volatility regime: ATR > 30th percentile (avoid extremely low vol)
-        vol_regime = atr_percentile[i] > 30
+        # 1d volatility regime: ATR > 50th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 50
         
-        # Volume confirmation: current volume > 1.5x 20-period MA
-        volume_spike = volume_1d[i] > 1.5 * volume_ma_20_1d[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
+        # Get the current 1d volume value (aligned to 12h)
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_spike = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Price > Donchian upper + close > 1w EMA + vol regime + volume spike
-            if (close_1d[i] > donch_upper[i] and 
-                close_1d[i] > ema_34_1w_aligned[i] and 
-                vol_regime and volume_spike):
+            # Long entry: Price breaks above H3 + vol regime + volume spike
+            if (close_12h[i] > h3_12h[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Price < Donchian lower + close < 1w EMA + vol regime + volume spike
-            elif (close_1d[i] < donch_lower[i] and 
-                  close_1d[i] < ema_34_1w_aligned[i] and 
-                  vol_regime and volume_spike):
+            # Short entry: Price breaks below L3 + vol regime + volume spike
+            elif (close_12h[i] < l3_12h[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
             # Exit conditions:
-            # 1. Price crosses Donchian midpoint (trend weakening)
+            # 1. Price retouches pivot point (PP) - mean reversion
             # 2. ATR falls below 30th percentile (low volatility regime)
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_1d[i] < donch_mid[i] or  # Price crossed below midpoint
-                    atr_percentile[i] < 30  # Low volatility regime
+                    close_12h[i] <= pp_12h[i] or  # Price retraced to or below pivot
+                    atr_percentile_aligned[i] < 30  # Low volatility regime
                 )
                 if exit_condition:
                     position = 0
@@ -114,8 +118,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_1d[i] > donch_mid[i] or  # Price crossed above midpoint
-                    atr_percentile[i] < 30  # Low volatility regime
+                    close_12h[i] >= pp_12h[i] or  # Price retraced to or above pivot
+                    atr_percentile_aligned[i] < 30  # Low volatility regime
                 )
                 if exit_condition:
                     position = 0
