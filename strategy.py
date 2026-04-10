@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla Pivot Breakout with 1d ATR regime and volume confirmation
-# - Primary: 6h timeframe for balanced trade frequency and reduced fee drag vs lower TFs
-# - HTF: 1d for volatility regime (ATR percentile) and volume confirmation
-# - Long: Price breaks above H3 Camarilla pivot (previous day) + 1d ATR > 30th percentile + volume > 1.2x 20-period MA
-# - Short: Price breaks below L3 Camarilla pivot + 1d ATR > 30th percentile + volume > 1.2x 20-period MA
+# Hypothesis: 12h Camarilla Pivot Breakout with 1d volume and ATR regime filter
+# - Primary: 12h timeframe for lower frequency and reduced fee drag
+# - HTF: 1d for volatility (ATR percentile) and volume confirmation
+# - Long: Price breaks above H3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
+# - Short: Price breaks below L3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
 # - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4
 # - Position sizing: 0.25 (discrete level)
-# - Target: 50-150 total trades over 4 years (12-37/year) - within 6h sweet spot
+# - Target: 50-120 total trades over 4 years (12-30/year) - within 12h sweet spot
 # - Works in bull/bear: Camarilla pivots capture mean reversion in ranging markets (2025) and breakouts in trending markets
 
-name = "6h_1d_camarilla_pivot_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,12 +27,12 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLCV
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
-    volume_6h = prices['volume'].values
+    # Pre-compute 12h OHLCV
+    open_12h = prices['open'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
+    volume_12h = prices['volume'].values
     
     # Pre-compute 1d data
     high_1d = df_1d['high'].values
@@ -40,13 +40,13 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 6h Camarilla Pivot Points (based on previous 1d)
-    # Align daily OHLC to 6h bars (using previous day's OHLC)
+    # Calculate 12h Camarilla Pivot Points (based on previous 1d)
+    # Align daily OHLC to 12h bars (using previous day's OHLC)
     high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
     low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
     close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Calculate Camarilla levels for each 6h bar (using previous day's OHLC)
+    # Calculate Camarilla levels for each 12h bar (using previous day's OHLC)
     rng = high_1d_aligned - low_1d_aligned
     h3 = close_1d_aligned + 1.25 * rng  # Long entry: break above H3
     l3 = close_1d_aligned - 1.25 * rng  # Short entry: break below L3
@@ -83,19 +83,19 @@ def generate_signals(prices):
             continue
         
         # Regime conditions
-        # 1d volatility regime: ATR > 30th percentile (avoid extreme low-vol chop)
-        vol_regime = atr_percentile_aligned[i] > 30
+        # 1d volatility regime: ATR > 40th percentile (avoid low-vol chop)
+        vol_regime = atr_percentile_aligned[i] > 40
         
-        # Volume confirmation: current 1d volume > 1.2x 20-period MA
-        volume_spike = volume_1d[i] > 1.2 * volume_ma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period MA
+        volume_spike = volume_1d[i] > 1.3 * volume_ma_20_1d_aligned[i]
         
         if position == 0:  # Flat - look for new entries
             # Long entry: Price breaks above H3 resistance + vol regime + volume spike
-            if (close_6h[i] > h3[i] and vol_regime and volume_spike):
+            if (close_12h[i] > h3[i] and vol_regime and volume_spike):
                 position = 1
                 signals[i] = 0.25
             # Short entry: Price breaks below L3 support + vol regime + volume spike
-            elif (close_6h[i] < l3[i] and vol_regime and volume_spike):
+            elif (close_12h[i] < l3[i] and vol_regime and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
@@ -107,8 +107,8 @@ def generate_signals(prices):
             
             if position == 1:  # Long position
                 exit_condition = (
-                    close_6h[i] < pivot[i] or  # Reverted to pivot
-                    close_6h[i] > h4[i]        # Break above H4 (take profit)
+                    close_12h[i] < pivot[i] or  # Reverted to pivot
+                    close_12h[i] > h4[i]        # Break above H4 (take profit)
                 )
                 if exit_condition:
                     position = 0
@@ -117,8 +117,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
                 exit_condition = (
-                    close_6h[i] > pivot[i] or  # Reverted to pivot
-                    close_6h[i] < l4[i]        # Break below L4 (take profit)
+                    close_12h[i] > pivot[i] or  # Reverted to pivot
+                    close_12h[i] < l4[i]        # Break below L4 (take profit)
                 )
                 if exit_condition:
                     position = 0
