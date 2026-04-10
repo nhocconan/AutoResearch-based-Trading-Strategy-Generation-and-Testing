@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w volume spike and choppiness regime filter
-# - Long: price breaks above Camarilla H3 level (from prior 1w) + 1w volume > 1.8x 20-period MA + CHOP(14) < 61.8 (trending regime)
-# - Short: price breaks below Camarilla L3 level (from prior 1w) + 1w volume > 1.8x 20-period MA + CHOP(14) < 61.8 (trending regime)
-# - Exit: price returns to Camarilla Pivot level (from prior 1w) or opposite signal
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume confirmation
+# - Williams %R(14) on 6h: oversold < -80 for long, overbought > -20 for short
+# - 1d trend filter: price > EMA50 for long bias, price < EMA50 for short bias
+# - Volume confirmation: 6h volume > 1.5x 20-period MA to ensure participation
+# - Exit: Williams %R returns to -50 (mean reversion midpoint) or opposite signal
 # - Position sizing: 0.25 (discrete level)
-# - Target: 50-100 total trades over 4 years (12-25/year) to avoid fee drag
-# - Using 1w HTF for Camarilla levels provides more significant support/resistance than 1d, reducing false breakouts
-# - Volume confirmation on 1w ensures institutional participation, chop filter avoids ranging markets
-# - Works in bull/bear: breakouts with trend in bull, mean reversion exits in bear ranges
+# - Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fees
+# - Works in bull/bear: mean reversion in ranges, trend filter prevents counter-trend in strong moves
 
-name = "1d_1w_camarilla_breakout_volume_chop_v1"
-timeframe = "1d"
+name = "6h_1d_williamsr_meanrev_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,100 +22,78 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLC
-    open_1d = prices['open'].values
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    close_1d = prices['close'].values
-    volume_1d = prices['volume'].values
+    # Pre-compute 6h OHLCV
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Pre-compute 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1w (prior completed week)
-    # Pivot = (H + L + C) / 3
-    # H3 = C + (H - L) * 1.1 / 4
-    # L3 = C - (H - L) * 1.1 / 4
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    h3_1w = close_1w + range_1w * 1.1 / 4.0
-    l3_1w = close_1w - range_1w * 1.1 / 4.0
+    # Calculate Williams %R (14-period) for 6h
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_14 - close_6h) / (highest_high_14 - lowest_low_14) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Align Camarilla levels to 1d (using prior completed 1w bar)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3_1w)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3_1w)
+    # Calculate 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1w volume moving average (20-period)
-    volume_1w_series = pd.Series(volume_1w)
-    volume_ma_20_1w = volume_1w_series.rolling(window=20, min_periods=20).mean().values
-    volume_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
+    # Align 1d EMA50 to 6h (using prior completed 1d bar)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Choppiness Index (14-period) for 1w
-    # CHOP = 100 * log10(sum(ATR(14)) / (n * log(n))) / log10(n)
-    # Simplified: CHOP = 100 * log10(ATR_sum / (14 * log10(14))) / log10(14)
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    chop_1w = 100 * np.log10(atr_sum / (14 * np.log10(14))) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Calculate 6h volume moving average (20-period)
+    volume_6h_series = pd.Series(volume_6h)
+    volume_ma_20_6h = volume_6h_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period (need at least 50 for ATR14/CHOP)
+    for i in range(50, n):  # Start after warmup period (need at least 50 for Williams %R and EMA50)
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(volume_ma_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_aligned[i]) or 
+            np.isnan(volume_ma_20_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d OHLC
-        close_price = close_1d[i]
+        # Get current 6h data
+        close_price = close_6h[i]
+        williams_r_current = williams_r[i]
+        ema50_current = ema50_aligned[i]
+        volume_6h_current = volume_6h[i]
+        volume_ma_current = volume_ma_20_6h[i]
         
-        # Get aligned 1w data for current 1d bar (completed 1w bar)
-        pivot_current = pivot_aligned[i]
-        h3_current = h3_aligned[i]
-        l3_current = l3_aligned[i]
-        volume_ma_current = volume_ma_aligned[i]
-        volume_1w_current = align_htf_to_ltf(prices, df_1w, volume_1w)[i]
-        chop_current = chop_aligned[i]
-        
-        # Volume spike condition: current 1w volume > 1.8x 20-period MA
-        volume_spike = volume_1w_current > 1.8 * volume_ma_current
-        
-        # Trending regime condition: CHOP < 61.8 (below choppy threshold)
-        trending_regime = chop_current < 61.8
+        # Volume spike condition: current 6h volume > 1.5x 20-period MA
+        volume_spike = volume_6h_current > 1.5 * volume_ma_current
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above H3 + volume spike + trending regime
-            if (close_price > h3_current and volume_spike and trending_regime):
+            # Long entry: Williams %R oversold (< -80) + price > EMA50 (uptrend bias) + volume spike
+            if (williams_r_current < -80 and close_price > ema50_current and volume_spike):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below L3 + volume spike + trending regime
-            elif (close_price < l3_current and volume_spike and trending_regime):
+            # Short entry: Williams %R overbought (> -20) + price < EMA50 (downtrend bias) + volume spike
+            elif (williams_r_current > -20 and close_price < ema50_current and volume_spike):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit when price returns to pivot level or opposite signal
-            if position == 1 and close_price <= pivot_current:
+            # Exit when Williams %R returns to -50 (mean reversion midpoint) or opposite signal
+            if position == 1 and williams_r_current >= -50:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and close_price >= pivot_current:
+            elif position == -1 and williams_r_current <= -50:
                 position = 0
                 signals[i] = 0.0
             else:
