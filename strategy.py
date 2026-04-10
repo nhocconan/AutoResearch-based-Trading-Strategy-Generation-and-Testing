@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and 1w ADX trend filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.3x 20-period volume SMA AND 1w ADX > 20
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.3x 20-period volume SMA AND 1w ADX > 20
-# - Exit: price returns to Camarilla pivot point (midpoint) or opposite Camarilla level touch
-# - Uses 4h for price action, 1d for volume confirmation, 1w for trend strength filter
-# - Camarilla levels provide precise intraday support/resistance; volume confirms breakout validity; ADX filters weak trends
-# - Works in bull (breakouts up at H3/H4) and bear (breakouts down at L3/L4) with volume and trend filters
-# - Tight entry conditions target 20-40 trades/year to minimize fee drag
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX trend filter
+# - Long when price breaks above Donchian upper band AND 1d volume > 1.5x 20-period volume SMA AND 1w ADX > 25
+# - Short when price breaks below Donchian lower band AND 1d volume > 1.5x 20-period volume SMA AND 1w ADX > 25
+# - Exit: price returns to Donchian midpoint (mid-band) or ATR-based trailing stop
+# - Uses 4h for price action (Donchian channels), 1d for volume confirmation, 1w for trend strength filter
+# - Donchian breakouts capture strong momentum moves; volume confirms breakout validity; ADX filters weak/choppy markets
+# - Tight entry conditions target 30-60 trades/year to minimize fee drag while maintaining edge
+# - Works in bull (breakouts up) and bear (breakouts down) with volume and trend filters
 
-name = "4h_1d_1w_camarilla_volume_adx_v1"
+name = "4h_1d_1w_donchian_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -65,7 +65,7 @@ def generate_signals(prices):
     plus_dm = np.concatenate([[0.0], plus_dm])
     minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Smoothed values (Wilder's smoothing)
+    # Wilder's smoothing function
     def wilders_smoothing(values, period):
         result = np.full_like(values, np.nan)
         if len(values) >= period:
@@ -83,85 +83,101 @@ def generate_signals(prices):
     adx_1w = wilders_smoothing(dx_1w, 14)
     adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Pre-compute Camarilla pivot levels on 4h (primary timeframe)
+    # Pre-compute Donchian channels on 4h (primary timeframe)
     lookback = 20
-    # Calculate pivot point and support/resistance levels from prior period
-    # We'll use the highest high, lowest low, and close from the lookback period
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    prev_close = pd.Series(close).shift(1).rolling(window=lookback, min_periods=lookback).last().values
     
-    # Camarilla equations
-    # Pivot = (High + Low + Close) / 3
-    # Range = High - Low
-    # H4 = Close + Range * 1.1 / 2
-    # H3 = Close + Range * 1.1 / 4
-    # H2 = Close + Range * 1.1 / 6
-    # H1 = Close + Range * 1.1 / 12
-    # L1 = Close - Range * 1.1 / 12
-    # L2 = Close - Range * 1.1 / 6
-    # L3 = Close - Range * 1.1 / 4
-    # L4 = Close - Range * 1.1 / 2
+    upper_band = highest_high
+    lower_band = lowest_low
+    mid_band = (upper_band + lower_band) / 2.0
     
-    pivot = (highest_high + lowest_low + prev_close) / 3.0
-    range_val = highest_high - lowest_low
-    
-    h4 = pivot + range_val * 1.1 / 2
-    h3 = pivot + range_val * 1.1 / 4
-    l3 = pivot - range_val * 1.1 / 4
-    l4 = pivot - range_val * 1.1 / 2
+    # ATR for dynamic stoploss (using 4h data)
+    tr_4h1 = np.abs(high[1:] - low[:-1])
+    tr_4h2 = np.abs(high[1:] - close[:-1])
+    tr_4h3 = np.abs(low[1:] - close[:-1])
+    tr_4h = np.maximum(np.maximum(tr_4h1, tr_4h2), tr_4h3)
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
     for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]) or
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.3x 20-period volume SMA
+        # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
         vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-        vol_confirm = vol_1d_aligned[i] > 1.3 * volume_sma_20_1d_aligned[i]
+        vol_confirm = vol_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
         
-        # Trend filter: 1w ADX > 20 indicates strong trend
-        trend_filter = adx_1w_aligned[i] > 20.0
+        # Trend filter: 1w ADX > 25 indicates strong trend
+        trend_filter = adx_1w_aligned[i] > 25.0
         
         # Only trade when both volume confirmation and trend filter are present
         if vol_confirm and trend_filter:
-            # Long breakout: price breaks above Camarilla H3 level
-            if close[i] > h3[i]:
+            # Long breakout: price breaks above Donchian upper band
+            if close[i] > upper_band[i]:
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
                 else:
                     signals[i] = 0.25  # Maintain position
-            # Short breakout: price breaks below Camarilla L3 level
-            elif close[i] < l3[i]:
+            # Short breakout: price breaks below Donchian lower band
+            elif close[i] < lower_band[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
                 else:
                     signals[i] = -0.25  # Maintain position
-            # Exit: price returns to pivot point (within 0.5% of range)
-            elif abs(close[i] - pivot[i]) < range_val[i] * 0.005:
+            # Exit: price returns to mid-band (within 0.1% of band width)
+            elif abs(close[i] - mid_band[i]) < (upper_band[i] - lower_band[i]) * 0.001:
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
-            # Alternative exit: price touches opposite Camarilla level
-            elif (position == 1 and close[i] < l3[i]) or (position == -1 and close[i] > h3[i]):
+            # Alternative exit: ATR-based trailing stop
+            elif position == 1 and close[i] < (highest_high_since_entry - 2.0 * atr_4h[i]):
+                if position != 0:  # Only signal on exit
+                    position = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = 0.0  # Maintain flat
+            elif position == -1 and close[i] > (lowest_low_since_entry + 2.0 * atr_4h[i]):
                 if position != 0:  # Only signal on exit
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.0  # Maintain flat
             else:
-                # Maintain current position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+                # Maintain current position and update tracking levels
+                if position == 1:
+                    # Track highest high since entry for trailing stop
+                    if 'highest_high_since_entry' not in locals():
+                        highest_high_since_entry = high[i]
+                    else:
+                        highest_high_since_entry = max(highest_high_since_entry, high[i])
+                    signals[i] = 0.25
+                elif position == -1:
+                    # Track lowest low since entry for trailing stop
+                    if 'lowest_low_since_entry' not in locals():
+                        lowest_low_since_entry = low[i]
+                    else:
+                        lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
         else:
             # No trade: exit any position if conditions not met
             if position != 0:
                 position = 0
+                # Reset tracking variables
+                if 'highest_high_since_entry' in locals():
+                    del highest_high_since_entry
+                if 'lowest_low_since_entry' in locals():
+                    del lowest_low_since_entry
                 signals[i] = 0.0
             else:
                 signals[i] = 0.0
