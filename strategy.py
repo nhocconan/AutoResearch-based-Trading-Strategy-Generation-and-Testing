@@ -3,89 +3,58 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout + 1d volume confirmation + chop regime filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.8x 20-period average AND chop < 61.8 (trending)
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.8x 20-period average AND chop < 61.8 (trending)
-# - Exit when price crosses Camarilla H4/L4 levels (strong reversal) or chop > 61.8 (range)
+# Hypothesis: 6h Williams %R mean reversion with 1d/1w trend filter
+# - Long when Williams %R(14) < -80 (oversold) AND 1d close > 1w EMA(50) (bullish regime)
+# - Short when Williams %R(14) > -20 (overbought) AND 1d close < 1w EMA(50) (bearish regime)
+# - Exit when Williams %R crosses -50 (mean reversion midpoint)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Camarilla pivots from 1d provide institutional support/resistance levels
-# - Volume confirmation ensures breakout validity
-# - Chop filter avoids false signals in ranging markets
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Williams %R captures extreme momentum exhaustion
+# - 1w EMA(50) filter ensures we trade with the higher timeframe trend
+# - Mean reversion exit reduces whipsaw in ranging markets
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "6h_1d_1w_williamsr_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # Pre-compute 12h price data
+    # Pre-compute 6h Williams %R (14)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Pre-compute 12h chop regime (14-period)
-    def true_range(h, l, c_prev):
-        tr1 = h - l
-        tr2 = np.abs(h - c_prev)
-        tr3 = np.abs(l - c_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate True Range for chop
-    close_prev = np.roll(close, 1)
-    close_prev[0] = close[0]
-    tr = true_range(high, low, close_prev)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate chop: log(sum(ATR)/log(n)*max(high-low)) * 100
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    hhll = pd.Series(high - low).rolling(window=14, min_periods=14).max().values
-    chop = np.where((atr_sum > 0) & (hhll > 0), 
-                    np.log10(atr_sum / hhll) / np.log10(14) * 100, 50)
-    
-    # Pre-compute 12h volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
-    
-    # Pre-compute 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d close for regime filter
     close_1d = df_1d['close'].values
     
-    # Camarilla levels calculation
-    # H4 = close + 1.5*(high-low)*1.1/2
-    # H3 = close + 1.25*(high-low)*1.1/2
-    # L3 = close - 1.25*(high-low)*1.1/2
-    # L4 = close - 1.5*(high-low)*1.1/2
-    hl_range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + (1.5 * hl_range_1d * 1.1 / 2)
-    camarilla_h3 = close_1d + (1.25 * hl_range_1d * 1.1 / 2)
-    camarilla_l3 = close_1d - (1.25 * hl_range_1d * 1.1 / 2)
-    camarilla_l4 = close_1d - (1.5 * hl_range_1d * 1.1 / 2)
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align HTF indicators to 6h timeframe
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(chop[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(close_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -95,28 +64,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla H3 AND volume spike AND chop < 61.8 (trending)
-            if (close[i] > camarilla_h3_aligned[i] and 
-                volume_spike[i] and 
-                chop[i] < 61.8):
+            # Long conditions: Williams %R oversold AND bullish regime (1d close > 1w EMA50)
+            if (williams_r[i] < -80 and 
+                close_1d_aligned[i] > ema_50_1w_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla L3 AND volume spike AND chop < 61.8 (trending)
-            elif (close[i] < camarilla_l3_aligned[i] and 
-                  volume_spike[i] and 
-                  chop[i] < 61.8):
+            # Short conditions: Williams %R overbought AND bearish regime (1d close < 1w EMA50)
+            elif (williams_r[i] > -20 and 
+                  close_1d_aligned[i] < ema_50_1w_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Camarilla H4/L4 OR chop > 61.8 (range)
-            exit_long = (position == 1 and 
-                        (close[i] < camarilla_l4_aligned[i] or chop[i] > 61.8))
-            exit_short = (position == -1 and 
-                         (close[i] > camarilla_h4_aligned[i] or chop[i] > 61.8))
+            # Exit condition: Williams %R crosses -50 (mean reversion midpoint)
+            exit_signal = ((position == 1 and williams_r[i] > -50) or 
+                          (position == -1 and williams_r[i] < -50))
             
-            if exit_long or exit_short:
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
