@@ -93,6 +93,10 @@ def generate_signals(prices):
     tr_4h = np.concatenate([[np.nan], tr_4h])
     atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
+    # Track highest/lowest since entry for trailing stop
+    highest_high_since_entry = np.full(n, np.nan)
+    lowest_low_since_entry = np.full(n, np.nan)
+    
     for i in range(lookback, n):
         # Skip if any required data is invalid
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
@@ -115,55 +119,43 @@ def generate_signals(prices):
                 if position != 1:  # Only signal on new long entry
                     position = 1
                     signals[i] = 0.25
+                    highest_high_since_entry[i] = high[i]
                 else:
-                    signals[i] = 0.25  # Maintain position
+                    signals[i] = 0.25
+                    highest_high_since_entry[i] = max(highest_high_since_entry[i-1] if i > 0 else high[i], high[i])
             # Short breakout: price breaks below Donchian lower band
             elif close[i] < lower_band[i]:
                 if position != -1:  # Only signal on new short entry
                     position = -1
                     signals[i] = -0.25
+                    lowest_low_since_entry[i] = low[i]
                 else:
-                    signals[i] = -0.25  # Maintain position
-            # Alternative exit: ATR-based trailing stop
-            elif position == 1 and close[i] < (highest_high_since_entry - 2.5 * atr_4h[i]):
-                if position != 0:  # Only signal on exit
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.0  # Maintain flat
-            elif position == -1 and close[i] > (lowest_low_since_entry + 2.5 * atr_4h[i]):
-                if position != 0:  # Only signal on exit
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.0  # Maintain flat
-            else:
-                # Maintain current position and update tracking levels
-                if position == 1:
-                    # Track highest high since entry for trailing stop
-                    if 'highest_high_since_entry' not in locals():
-                        highest_high_since_entry = high[i]
-                    else:
-                        highest_high_since_entry = max(highest_high_since_entry, high[i])
-                    signals[i] = 0.25
-                elif position == -1:
-                    # Track lowest low since entry for trailing stop
-                    if 'lowest_low_since_entry' not in locals():
-                        lowest_low_since_entry = low[i]
-                    else:
-                        lowest_low_since_entry = min(lowest_low_since_entry, low[i])
                     signals[i] = -0.25
+                    lowest_low_since_entry[i] = min(lowest_low_since_entry[i-1] if i > 0 else low[i], low[i])
+            else:
+                # Maintain position and update tracking levels
+                if position == 1:
+                    signals[i] = 0.25
+                    highest_high_since_entry[i] = max(highest_high_since_entry[i-1] if i > 0 else high[i], high[i])
+                elif position == -1:
+                    signals[i] = -0.25
+                    lowest_low_since_entry[i] = min(lowest_low_since_entry[i-1] if i > 0 else low[i], low[i])
                 else:
+                    signals[i] = 0.0
+            
+            # Check for ATR trailing stop exit
+            if position == 1 and not np.isnan(highest_high_since_entry[i]):
+                if close[i] < (highest_high_since_entry[i] - 2.5 * atr_4h[i]):
+                    position = 0
+                    signals[i] = 0.0
+            elif position == -1 and not np.isnan(lowest_low_since_entry[i]):
+                if close[i] > (lowest_low_since_entry[i] + 2.5 * atr_4h[i]):
+                    position = 0
                     signals[i] = 0.0
         else:
             # No trade: exit any position if conditions not met
             if position != 0:
                 position = 0
-                # Reset tracking variables
-                if 'highest_high_since_entry' in locals():
-                    del highest_high_since_entry
-                if 'lowest_low_since_entry' in locals():
-                    del lowest_low_since_entry
                 signals[i] = 0.0
             else:
                 signals[i] = 0.0
