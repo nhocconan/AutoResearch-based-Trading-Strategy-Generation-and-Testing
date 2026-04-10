@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX trend filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and 1w ADX > 25
 # - Long when price breaks above Donchian upper band AND 1d volume > 1.5x 20-period volume SMA AND 1w ADX > 25
 # - Short when price breaks below Donchian lower band AND 1d volume > 1.5x 20-period volume SMA AND 1w ADX > 25
-# - Exit: price returns to Donchian midpoint (mid-band) or ATR-based trailing stop
+# - Exit: price returns to Donchian midpoint (mid-band) or ATR-based trailing stop (2*ATR)
 # - Uses 4h for price action (Donchian channels), 1d for volume confirmation, 1w for trend strength filter
 # - Donchian breakouts capture strong momentum moves; volume confirms breakout validity; ADX filters weak/choppy markets
 # - Tight entry conditions target 30-60 trades/year to minimize fee drag while maintaining edge
