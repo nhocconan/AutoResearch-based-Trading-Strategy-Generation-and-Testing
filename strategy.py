@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR filter and volume confirmation
-# - Long when price breaks above 20-period Donchian high AND ATR(14) > ATR(50) (expanding volatility)
-# - Short when price breaks below 20-period Donchian low AND ATR(14) > ATR(50)
-# - Volume confirmation: 12h volume > 1.5x 20-period 12h volume SMA
+# Hypothesis: 4h Donchian(20) breakout with 12h ATR regime filter and volume confirmation
+# - Long when price breaks above 20-period Donchian high AND 12h ATR(14) > 12h ATR(50) (expanding volatility)
+# - Short when price breaks below 20-period Donchian low AND 12h ATR(14) > 12h ATR(50)
+# - Volume confirmation: 4h volume > 1.5x 20-period 4h volume SMA
 # - Exit: Donchian midpoint reversion or opposite breakout with volume
 # - Position sizing: 0.25 discrete level
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - ATR filter ensures trades occur during volatile regimes, reducing whipsaw in ranging markets
-# - 12h timeframe reduces trade frequency vs 4h, minimizing fee drag while capturing multi-day trends
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Uses 12h ATR for regime filter to avoid intrabar look-ahead and align with HTF volatility
 
-name = "12h_donchian_atr_volume_v1"
-timeframe = "12h"
+name = "4h_donchian_atr_volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,13 +36,24 @@ def generate_signals(prices):
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Calculate ATR(14) and ATR(50) for volatility regime filter
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Load 12h data ONCE before loop for ATR regime filter (Rule 1 compliance)
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate ATR(14) and ATR(50) on 12h timeframe
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    tr1 = pd.Series(high_12h - low_12h)
+    tr2 = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
+    tr3 = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    atr_50_12h = pd.Series(tr_12h).rolling(window=50, min_periods=50).mean().values
+    
+    # Align 12h ATR to 4h timeframe (completed 12h bar only)
+    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    atr_50_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_50_12h)
     
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,14 +64,15 @@ def generate_signals(prices):
     for i in range(donchian_period, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]) or
-            np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or np.isnan(volume_sma_20[i])):
+            np.isnan(atr_14_12h_aligned[i]) or np.isnan(atr_50_12h_aligned[i]) or 
+            np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: ATR(14) > ATR(50) (expanding volatility regime)
-        vol_regime = atr_14[i] > atr_50[i]
+        # Volatility filter: 12h ATR(14) > 12h ATR(50) (expanding volatility regime)
+        vol_regime = atr_14_12h_aligned[i] > atr_50_12h_aligned[i]
         
-        # Volume confirmation: 12h volume > 1.5x 20-period volume SMA
+        # Volume confirmation: 4h volume > 1.5x 20-period volume SMA
         vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
         # Donchian breakout signals
