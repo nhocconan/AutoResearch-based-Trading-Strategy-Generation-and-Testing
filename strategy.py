@@ -6,14 +6,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR filter
 # - Primary signal: Price breaks above/below Donchian(20) channel on 4h
 # - Volume filter: 1d volume > 1.8x 20-period average volume (strong institutional participation)
-# - ATR filter: 1d ATR(14) < 0.035 * price (low volatility environment for cleaner breakouts)
-# - Position size: 0.25 discrete level to minimize fee churn
-# - Stoploss: 2.0x ATR(20) on 4h
+# - ATR filter: 1d ATR(14) < 0.035 * price (low volatility for cleaner breakouts)
+# - Position size: 0.28 discrete level to balance return and fee drag
+# - Stoploss: 2.2x ATR(20) on 4h
 # - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
 # - Works in bull/bear: Breakouts capture strong moves; filters avoid chop/false signals
-# - BTC/ETH focus: Uses volume spike and volatility filters proven effective on major pairs
 
-name = "4h_1d_donchian_volume_atr_v1"
+name = "4h_1d_donchian_volume_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -77,19 +76,19 @@ def generate_signals(prices):
         
         if position == 1:  # Long position
             # Exit: Donchian mean reversion OR stoploss hit
-            if close_4h[i] < donchian_low[i] or close_4h[i] < entry_price - 2.0 * atr_20[i]:
+            if close_4h[i] < donchian_low[i] or close_4h[i] < entry_price - 2.2 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 
         elif position == -1:  # Short position
             # Exit: Donchian mean reversion OR stoploss hit
-            if close_4h[i] > donchian_high[i] or close_4h[i] > entry_price + 2.0 * atr_20[i]:
+            if close_4h[i] > donchian_high[i] or close_4h[i] > entry_price + 2.2 * atr_20[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
         else:  # Flat
             # Look for Donchian breakouts with volume and volatility filters
             if vol_spike_aligned[i] and atr_filter_aligned[i]:
@@ -97,11 +96,11 @@ def generate_signals(prices):
                 if close_4h[i] > donchian_high[i]:
                     position = 1
                     entry_price = close_4h[i]
-                    signals[i] = 0.25
+                    signals[i] = 0.28
                 # Short: price breaks below Donchian low
                 elif close_4h[i] < donchian_low[i]:
                     position = -1
                     entry_price = close_4h[i]
-                    signals[i] = -0.25
+                    signals[i] = -0.28
     
     return signals
