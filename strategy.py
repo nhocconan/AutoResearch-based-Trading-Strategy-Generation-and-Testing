@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (close > open) and 1d ADX(20) regime filter
-# - Primary: 4h Donchian breakout captures momentum bursts
-# - Volume filter: 12h bar close > open confirms buying/selling pressure on breakout bar
-# - Regime filter: 1d ADX > 20 ensures trending market (avoids whipsaws in ranging markets)
-# - Exit: Price returns to Donchian midpoint (mean reversion within the channel)
-# - Position sizing: 0.25 discrete level to minimize fee churn
-# - Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe
-# - Works in bull/bear: Donchian adapts to volatility, volume confirms conviction, ADX filters weak trends
+# Hypothesis: 1h Camarilla pivot breakout with 4h volume spike and 1d ADX regime filter
+# - Primary: 1h price breaking above/below Camarilla H3/L3 levels captures intraday momentum
+# - Volume filter: 4h volume > 1.5x 20-period volume MA confirms participation
+# - Regime filter: 1d ADX(14) > 25 ensures strong trending market (avoids weak trends and ranging)
+# - Exit: Price reverses back to Camarilla H4/L4 levels
+# - Position sizing: 0.20 (discrete level to minimize fee churn)
+# - Session filter: 08-20 UTC to reduce noise trades
+# - Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe
+# - Works in bull/bear: Camarilla adapts to volatility, volume confirms strength, ADX filters weak trends
 
-name = "4h_12h_1d_donchian_volume_adx_v2"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_volume_adx_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,9 +23,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    if len(df_4h) < 30 or len(df_1d) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -32,23 +33,34 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
     
     # Pre-compute HTF data
-    close_12h = df_12h['close'].values
-    open_12h = df_12h['open'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0
+    # Calculate 1h Camarilla pivot levels (based on previous day)
+    # H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    # H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low)
+    # We use daily high/low/close from 1d timeframe
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
     
-    # Calculate 12h volume bull/bear: close > open = bullish volume
-    volume_bull_12h = close_12h > open_12h
-    volume_bull_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_bull_12h.astype(float))
+    # Align Camarilla levels to 1h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Calculate 4h volume spike filter: volume > 1.5x 20-period volume MA
+    volume_ma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_ma_20_4h)
     
     # Calculate 1d ADX(14) for regime filter
     high_diff_1d = high_1d - np.roll(high_1d, 1)
@@ -80,49 +92,61 @@ def generate_signals(prices):
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(volume_bull_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(volume_ma_20_4h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: 12h bar must show conviction (close > open for long, close < open for short)
-        vol_bull = volume_bull_12h_aligned[i] > 0.5  # True if bullish volume
-        vol_bear = volume_bull_12h_aligned[i] < 0.5  # True if bearish volume
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Regime filter: ADX > 20 to ensure trending conditions
-        strong_trend = adx_1d_aligned[i] > 20
+        if not in_session:
+            signals[i] = 0.0
+            continue
+        
+        # Volume filter: current 4h volume > 1.5x 20-period volume MA
+        volume_4h_current = align_htf_to_ltf(prices, df_4h, volume_4h)
+        vol_spike = volume_4h_current[i] > 1.5 * volume_ma_20_4h_aligned[i]
+        
+        # Regime filter: ADX > 25 to ensure strong trending conditions
+        strong_trend = adx_1d_aligned[i] > 25
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper band + bullish volume + strong trend
-            if (close[i] > highest_high[i] and 
-                vol_bull and strong_trend):
+            # Long entry: price breaks above Camarilla H3 + vol spike + strong trend + session
+            if (close[i] > camarilla_h3_aligned[i] and 
+                vol_spike and strong_trend):
                 position = 1
-                signals[i] = 0.25
-            # Short entry: price breaks below Donchian lower band + bearish volume + strong trend
-            elif (close[i] < lowest_low[i] and 
-                  vol_bear and strong_trend):
+                signals[i] = 0.20
+            # Short entry: price breaks below Camarilla L3 + vol spike + strong trend + session
+            elif (close[i] < camarilla_l3_aligned[i] and 
+                  vol_spike and strong_trend):
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: price reverses back to Donchian midpoint
+            # Exit: price reverses back to Camarilla H4/L4 levels
             if position == 1:  # Long position
-                if close[i] < donchian_mid[i]:  # Exit when price crosses below midpoint
+                if close[i] < camarilla_h4_aligned[i]:  # Exit when price crosses below H4
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             else:  # position == -1 (Short position)
-                if close[i] > donchian_mid[i]:  # Exit when price crosses above midpoint
+                if close[i] > camarilla_l4_aligned[i]:  # Exit when price crosses above L4
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
