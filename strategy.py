@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot breakout with 4h volume spike and chop regime filter
-# - Long when price breaks above Camarilla H3 level + 4h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8 (range regime)
-# - Short when price breaks below Camarilla L3 level + 4h volume > 2.0x 20-period volume SMA + Chop(14) > 61.8
-# - Exit: price returns to Camarilla pivot point (mean reversion within range)
-# - Position sizing: 0.20 discrete level
-# - Camarilla levels derived from prior 4h bar provide structure in ranging markets
-# - Volume confirms institutional participation, chop filter ensures we trade in ranging markets
-# - Works in bull/bear: mean reversion at pivot levels works in all regimes, chop filter avoids strong trends
-# - 1h timeframe targets 15-37 trades/year with strict entry conditions to minimize fee drag
-# - Session filter (08-20 UTC) to reduce noise trades
+# Hypothesis: 6h Williams Fractal breakout with 1d ADX trend filter and 1w volume confirmation
+# - Long when price breaks above latest bearish fractal (swing high) + 1d ADX > 25 (trending) + 1w volume > 1.5x 20-period volume SMA
+# - Short when price breaks below latest bullish fractal (swing low) + 1d ADX > 25 + 1w volume > 1.5x 20-period volume SMA
+# - Exit: price returns to midpoint of last fractal pair (mean reversion within swing)
+# - Position sizing: 0.25 discrete level
+# - Williams Fractals identify significant swing points, ADX filters for trending markets, volume confirms institutional participation
+# - Works in bull/bear: breakouts work in strong trends, mean reversion exit works in ranging periods
+# - 6h timeframe targets 12-37 trades/year with strict entry conditions to minimize fee drag
 
-name = "1h_4h_camarilla_vol_chop_v1"
-timeframe = "1h"
+name = "6h_1w_1d_fractal_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,8 +22,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -37,89 +36,115 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Camarilla pivot levels (based on prior 4h bar)
-    # Camarilla formula: H4 = close + 1.1*(high-low)*1.1/2, H3 = close + 1.1*(high-low)*1.1/4
-    # L3 = close - 1.1*(high-low)*1.1/4, L4 = close - 1.1*(high-low)*1.1/2
-    # Pivot = (high + low + close) / 3
-    hl_range_4h = df_4h['high'].values - df_4h['low'].values
-    camarilla_pivot = (df_4h['high'].values + df_4h['low'].values + df_4h['close'].values) / 3
-    camarilla_h3 = camarilla_pivot + 1.1 * hl_range_4h * 1.1 / 4
-    camarilla_l3 = camarilla_pivot - 1.1 * hl_range_4h * 1.1 / 4
-    
-    # Align Camarilla levels to 1h timeframe (using completed 4h bar)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pivot)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
-    
-    # Calculate 4h Chopiness Index (14-period) for regime filter
+    # Calculate 1d ADX(14) for trend filter
     # True Range
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
                                 np.abs(low - np.roll(close, 1))))
     tr1[0] = high[0] - low[0]
-    # Sum of TR over period
-    sum_tr = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over period
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Chop formula: 100 * log10(sum_TR / (HH - LL)) / log10(N)
-    # Avoid division by zero and log of zero/negative
-    hl_range = hh - ll
-    chop = np.where((hl_range > 0) & (sum_tr > 0), 
-                    100 * np.log10(sum_tr / hl_range) / np.log10(14), 
-                    50)  # default to neutral when invalid
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smoothed TR, +DM, -DM
+    atr = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / np.where(atr != 0, atr, 1e-10)
+    minus_di = 100 * minus_dm_smooth / np.where(atr != 0, atr, 1e-10)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h volume SMA(20) for confirmation
-    volume_4h = df_4h['volume'].values
-    volume_sma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_sma_20_4h)
+    # Align 1d ADX to 6h timeframe (using completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 1w volume SMA(20) for confirmation
+    volume_1w = df_1w['volume'].values
+    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
+    
+    # Calculate Williams Fractals on 1d data (requires 5-bar window: n-2, n-1, n, n+1, n+2)
+    # Bearish fractal (swing high): high[n] > high[n-1] and high[n] > high[n-2] and high[n] > high[n+1] and high[n] > high[n+2]
+    # Bullish fractal (swing low): low[n] < low[n-1] and low[n] < low[n-2] and low[n] < low[n+1] and low[n] < low[n+2]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
+    
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Align fractals to 6h timeframe with extra delay (fractals need 2 extra 1d bars for confirmation)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # Track latest confirmed fractal levels
+    latest_bearish = np.full(n, np.nan)
+    latest_bullish = np.full(n, np.nan)
+    last_bearish = np.nan
+    last_bullish = np.nan
+    
+    for i in range(n):
+        if not np.isnan(bearish_fractal_aligned[i]):
+            last_bearish = bearish_fractal_aligned[i]
+        if not np.isnan(bullish_fractal_aligned[i]):
+            last_bullish = bullish_fractal_aligned[i]
+        latest_bearish[i] = last_bearish
+        latest_bullish[i] = last_bullish
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_pivot_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_sma_20_4h_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(volume_sma_20_1w_aligned[i]) or 
+            np.isnan(latest_bearish[i]) or np.isnan(latest_bullish[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        # Get current 1w volume for volume spike confirmation
+        vol_1w_current = align_htf_to_ltf(prices, df_1w, df_1w['volume'].values)
         
-        # Get current 4h volume for volume spike confirmation
-        vol_4h_current = align_htf_to_ltf(prices, df_4h, df_4h['volume'].values)
+        # Volume confirmation: current 1w volume > 1.5x 20-period SMA (volume spike)
+        vol_confirm = vol_1w_current[i] > 1.5 * volume_sma_20_1w_aligned[i]
         
-        # Volume confirmation: current 4h volume > 2.0x 20-period SMA (volume spike)
-        vol_confirm = vol_4h_current[i] > 2.0 * volume_sma_20_4h_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market (favorable for breakouts)
+        trending_market = adx_aligned[i] > 25
         
-        # Regime filter: Chop > 61.8 indicates ranging market (favorable for mean reversion at pivot levels)
-        ranging_market = chop[i] > 61.8
+        # Fractal breakout signals
+        breakout_up = close[i] > latest_bearish[i]   # Price breaks above latest bearish fractal (swing high)
+        breakout_down = close[i] < latest_bullish[i] # Price breaks below latest bullish fractal (swing low)
         
-        # Camarilla breakout signals
-        breakout_up = close[i] > camarilla_h3_aligned[i]   # Price breaks above H3 level
-        breakout_down = close[i] < camarilla_l3_aligned[i] # Price breaks below L3 level
-        return_to_pivot = abs(close[i] - camarilla_pivot_aligned[i]) < (camarilla_h3_aligned[i] - camarilla_l3_aligned[i]) * 0.15  # Within 15% of pivot
+        # Exit: price returns to midpoint of last fractal pair (mean reversion within swing)
+        # Only calculate midpoint if both fractals are available
+        if not np.isnan(latest_bearish[i]) and not np.isnan(latest_bullish[i]):
+            fractal_midpoint = (latest_bearish[i] + latest_bullish[i]) / 2
+            return_to_midpoint = abs(close[i] - fractal_midpoint) < (latest_bearish[i] - latest_bullish[i]) * 0.2  # Within 20% of swing range
+        else:
+            return_to_midpoint = False
         
-        # Entry conditions: Camarilla breakout with volume and regime confirmation
-        long_entry = breakout_up and vol_confirm and ranging_market
-        short_entry = breakout_down and vol_confirm and ranging_market
+        # Entry conditions: Fractal breakout with volume and trend confirmation
+        long_entry = breakout_up and vol_confirm and trending_market
+        short_entry = breakout_down and vol_confirm and trending_market
         
-        # Exit conditions: price returns to Camarilla pivot point (mean reversion)
-        long_exit = return_to_pivot  # Exit long when price returns to pivot
-        short_exit = return_to_pivot  # Exit short when price returns to pivot
+        # Exit conditions: price returns to midpoint of fractal pair
+        long_exit = return_to_midpoint  # Exit long when price returns to midpoint
+        short_exit = return_to_midpoint  # Exit short when price returns to midpoint
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif short_entry:
                 position = -1
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         elif position == 1:  # Long position - look for exit
@@ -127,12 +152,12 @@ def generate_signals(prices):
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         else:  # position == -1 (Short position) - look for exit
             if short_exit:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
