@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w ADX trend filter
-# - Long when price breaks above 4h Donchian upper band AND 1d volume > 1.3x 20-period volume SMA AND 1w ADX > 25
-# - Short when price breaks below 4h Donchian lower band AND 1d volume > 1.3x 20-period volume SMA AND 1w ADX > 25
-# - Exit: price retreats to midpoint of Donchian channel OR ADX drops below 20 (trend weakening)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above 12h Camarilla R4 level AND 1d volume > 1.2x 20-period volume SMA AND 1w close > 1w EMA20
+# - Short when price breaks below 12h Camarilla S4 level AND 1d volume > 1.2x 20-period volume SMA AND 1w close < 1w EMA20
+# - Exit: price retreats to Camarilla pivot point (PP) or volume drops below average
 # - Position sizing: 0.25 discrete level to minimize fee drag
-# - Target: 15-40 trades/year on 4h timeframe to stay within fee drag limits
-# - Uses Donchian structure from 4h timeframe, volume confirmation from 1d, trend filter from 1w
+# - Target: 12-37 trades/year on 12h timeframe to stay within fee drag limits
+# - Uses Camarilla levels from 1d timeframe for structure, 12h for execution timing
 
-name = "4h_1d_1w_donchian_volume_adx_v2"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -35,90 +35,67 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 4h Donchian channel (20-period)
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll_max
-    donchian_lower = low_roll_min
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_pp = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    camarilla_r4 = camarilla_pp + camarilla_range * 1.1 / 2.0
+    camarilla_s4 = camarilla_pp - camarilla_range * 1.1 / 2.0
+    
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Calculate 1w EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate 1w close for trend comparison
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
     
     # Calculate 1d volume SMA for confirmation
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Calculate 1w ADX for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 12h volume SMA for confirmation
+    volume_sma_20_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        smoothed = np.zeros_like(values)
-        smoothed[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-        return smoothed
-    
-    atr_period = 14
-    atr = wilders_smoothing(tr, atr_period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, atr_period)
-    
-    # Align HTF indicators to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    for i in range(60, n):  # Start after warmup for indicators
+    for i in range(40, n):  # Start after warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(close_1w_aligned[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_sma_20_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 1.3x 20-period volume SMA
-        # Get 1d volume for current 4h bar (approximate by using aligned index)
-        vol_confirm = volume[i] > 1.3 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 12h volume > 1.2x 20-period volume SMA AND 1d volume > 1.2x 20-period volume SMA
+        vol_confirm_12h = volume[i] > 1.2 * volume_sma_20_12h[i]
+        vol_confirm_1d = volume_1d[i // 2] > 1.2 * volume_sma_20_1d_aligned[i] if i // 2 < len(volume_1d) else False
+        vol_confirm = vol_confirm_12h and vol_confirm_1d
         
-        # Trend filter: 1w ADX > 25 indicates strong trend
-        trend_strong = adx_aligned[i] > 25
-        trend_weakening = adx_aligned[i] < 20  # Exit when trend weakens
+        # Trend filter: 1w close vs 1w EMA20
+        trend_bullish = close_1w_aligned[i] > ema_20_1w_aligned[i]
+        trend_bearish = close_1w_aligned[i] < ema_20_1w_aligned[i]
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # Break above previous upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # Break below previous lower band
+        # Camarilla breakout signals
+        breakout_up = close[i] > camarilla_r4_aligned[i-1]  # Break above previous R4
+        breakout_down = close[i] < camarilla_s4_aligned[i-1]  # Break below previous S4
         
-        # Exit conditions: price retreats to midpoint OR trend weakening
-        exit_long = close[i] < donchian_mid[i] or trend_weakening
-        exit_short = close[i] > donchian_mid[i] or trend_weakening
+        # Exit conditions: price retreats to pivot point or loss of volume confirmation
+        exit_long = close[i] < camarilla_pp_aligned[i] or not vol_confirm
+        exit_short = close[i] > camarilla_pp_aligned[i] or not vol_confirm
         
         if position == 0:  # Flat - look for entry
-            if breakout_up and vol_confirm and trend_strong:
+            if breakout_up and trend_bullish and vol_confirm:
                 position = 1
                 signals[i] = 0.25
-            elif breakout_down and vol_confirm and trend_strong:
+            elif breakout_down and trend_bearish and vol_confirm:
                 position = -1
                 signals[i] = -0.25
             else:
