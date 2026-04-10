@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume spike and ADX(14) regime filter
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ADX(14) regime filter
 # - Long when price breaks above 20-period Donchian upper + 1d volume > 2.0x 20-period volume SMA + ADX < 25 (range/low trend)
 # - Short when price breaks below 20-period Donchian lower + 1d volume > 2.0x 20-period volume SMA + ADX < 25
 # - Exit: price returns to 20-period Donchian midpoint (mean reversion within channel)
 # - Position sizing: 0.25 discrete level
 # - Donchian breakouts capture momentum, volume confirms participation, ADX filter avoids strong trends where breakouts fail
 # - Works in bull/bear: breakouts effective in trending markets, ADX filter prevents trading against strong counter-trend moves
-# - 12h timeframe targets 20-40 trades/year with strict entry conditions to minimize fee drag
+# - 4h timeframe targets 75-200 trades over 4 years (19-50/year) with strict entry conditions to minimize fee drag
 
-name = "12h_1d_donchian_volume_adx_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_adx_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,14 +35,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h Donchian Channel(20)
+    # Calculate 4h Donchian Channel(20)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = highest_high
     donchian_lower = lowest_low
     donchian_mid = (donchian_upper + donchian_lower) / 2.0
     
-    # Calculate 12h ADX(14) for regime filter (avoid strong trends)
+    # Calculate 4h ADX(14) for regime filter (avoid strong trends)
     # True Range
     tr1 = np.maximum(high - low, 
                      np.maximum(np.abs(high - np.roll(close, 1)), 
@@ -73,16 +73,18 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
+    # Current 1d volume for spike detection (aligned to LTF)
+    volume_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+    
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_sma_20_1d_aligned[i])):
+            np.isnan(adx[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(volume_1d_current[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: current 1d volume > 2.0x 20-period SMA (volume spike)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        vol_confirm = volume_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
         # Regime filter: ADX < 25 indicates ranging/low trend market (favorable for breakout mean reversion)
         ranging_market = adx[i] < 25
