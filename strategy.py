@@ -3,25 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power + 1d ADX regime filter
-# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# - Entry: Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d ADX < 25 (range regime)
-#          Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d ADX < 25 (range regime)
-# - Exit: Close-based reversal - exit long when Bull Power <= 0, exit short when Bear Power >= 0
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume spike filter and 1d choppiness regime filter
+# - Entry: Long when price breaks above Camarilla H3 + 1d volume > 2.0x 20-period average + 1d Choppiness Index > 61.8 (range regime)
+#          Short when price breaks below Camarilla L3 + 1d volume > 2.0x 20-period average + 1d Choppiness Index > 61.8 (range regime)
+# - Exit: Close-based reversal - exit long when price < Camarilla H3 level, exit short when price > Camarilla L3 level
 # - Position sizing: 0.25 (discrete levels to minimize fee churn)
-# - Uses 13-period EMA for Elder Ray calculation, 1d ADX < 25 to filter for ranging markets where Elder Ray works best
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 300 total
-# - Elder Ray measures bull/bear power relative to EMA, effective in ranging markets
-# - 1d ADX < 25 indicates ranging market (ideal for Elder Ray mean reversion)
-# - 6h timeframe balances signal quality with controlled trade frequency
+# - Uses Camarilla pivot levels from daily data for structure, daily volume spike for confirmation of participation,
+#   and daily Choppiness Index to filter for range-bound markets where mean reversion at pivots works best
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 200 total
+# - Choppiness Index > 61.8 indicates ranging market (ideal for Camarilla mean reversion), < 38.2 indicates trending
+# - Volume spike ensures genuine participation at breakout, reducing false signals
+# - 12h timeframe provides sufficient signal quality while controlling trade frequency
 
-name = "6h_1d_elderray_power_regime_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -29,25 +29,33 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    close_6h = prices['close'].values
+    # Pre-compute 12h OHLC
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    close_12h = prices['close'].values
     
     # Pre-compute 1d data for indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 6h EMA(13) for Elder Ray
-    close_6h_series = pd.Series(close_6h)
-    ema_13_6h = close_6h_series.ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Calculate 1d Camarilla levels (based on previous day)
+    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # Calculate 6h Elder Ray Power
-    bull_power = high_6h - ema_13_6h  # Bull Power = High - EMA
-    bear_power = low_6h - ema_13_6h   # Bear Power = Low - EMA
+    camarilla_h3 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 4
+    camarilla_l3 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 4
     
-    # Calculate 1d ADX (14-period) for regime filter
+    # Calculate 1d volume moving average (20-period)
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d Choppiness Index (14-period)
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -57,74 +65,72 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    # Sum of TR over period
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Highest high and lowest low over period
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Smoothed TR, +DM, -DM
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
+    # Choppiness Index = 100 * log10(sum(tr) / (hh - ll)) / log10(period)
     # Avoid division by zero
-    plus_di_14 = np.where(tr_14 != 0, 100 * plus_dm_14 / tr_14, 0)
-    minus_di_14 = np.where(tr_14 != 0, 100 * minus_dm_14 / tr_14, 0)
+    range_hl = hh_1d - ll_1d
+    choppiness = np.zeros_like(sum_tr)
+    mask = (range_hl > 0) & (~np.isnan(sum_tr)) & (~np.isnan(range_hl))
+    choppiness[mask] = 100 * np.log10(sum_tr[mask] / range_hl[mask]) / np.log10(14)
     
-    # DX and ADX
-    dx = np.where((plus_di_14 + minus_di_14) != 0, 
-                  100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14), 
-                  0)
-    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align all HTF data to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    # Align all HTF data to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
+    choppiness_aligned = align_htf_to_ltf(prices, df_1d, choppiness)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(volume_ma_aligned[i]) or np.isnan(choppiness_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: ADX < 25 indicates ranging market (good for Elder Ray mean reversion)
-        regime_filter = adx_aligned[i] < 25
+        # Get current 12h close
+        close_price = close_12h[i]
+        
+        # Get current 1d volume for confirmation
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+        volume_confirmation = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
+        
+        # Choppiness filter: > 61.8 indicates ranging market (good for mean reversion at pivots)
+        chop_filter = choppiness_aligned[i] > 61.8
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: Bull Power > 0 AND Bear Power rising (less negative) AND ranging market
-            if (bull_power_aligned[i] > 0 and 
-                i > 0 and bear_power_aligned[i] > bear_power_aligned[i-1] and  # Bear Power rising
-                regime_filter):
+            # Long entry: price breaks above Camarilla H3 + volume confirmation + ranging market
+            if (close_price > camarilla_h3_aligned[i] and 
+                volume_confirmation and 
+                chop_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Bear Power < 0 AND Bull Power falling (less positive) AND ranging market
-            elif (bear_power_aligned[i] < 0 and 
-                  i > 0 and bull_power_aligned[i] < bull_power_aligned[i-1] and  # Bull Power falling
-                  regime_filter):
+            # Short entry: price breaks below Camarilla L3 + volume confirmation + ranging market
+            elif (close_price < camarilla_l3_aligned[i] and 
+                  volume_confirmation and 
+                  chop_filter):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit long when Bull Power <= 0
-            # Exit short when Bear Power >= 0
+            # Exit long when price < Camarilla H3 level
+            # Exit short when price > Camarilla L3 level
             if position == 1:
-                if bull_power_aligned[i] <= 0:
+                if close_price < camarilla_h3_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if bear_power_aligned[i] >= 0:
+                if close_price > camarilla_l3_aligned[i]:
                     position = 0
                     signals[i] = 0.0
                 else:
