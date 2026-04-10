@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Long when price breaks above H3 (bullish Camarilla level) AND 1w EMA(21) > EMA(55) (bullish trend) AND 1d volume > 1.8x 20-bar avg
-# - Short when price breaks below L3 (bearish Camarilla level) AND 1w EMA(21) < EMA(55) (bearish trend) AND 1d volume > 1.8x 20-bar avg
-# - Exit when price returns to Pivot Point (mean reversion to equilibrium)
+# Hypothesis: 6h Williams Alligator + Elder Ray + volume confirmation
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price
+# - Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+# - Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND volume > 1.5x 20-bar avg
+# - Short when: Jaw > Teeth > Lips (bearish alignment) AND Bear Power > 0 AND volume > 1.5x 20-bar avg
+# - Exit when Alligator alignment breaks (Lips crosses Teeth or Teeth crosses Jaw)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Camarilla pivot levels provide high-probability reversal zones derived from prior day's range
-# - 1w EMA filter ensures alignment with weekly trend to avoid counter-trend trades
-# - Volume confirmation filters low-conviction breakouts
-# - Target: 15-25 trades/year on 1d timeframe (60-100 total over 4 years)
-# - Works in both bull and bear markets: breakouts capture momentum, pivot reversion captures pullbacks
+# - Alligator identifies trend phase, Elder Ray measures power behind move, volume confirms conviction
+# - Works in both bull and bear markets: Alligator catches trends, Elder Ray filters weak moves
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "1d_1w_camarilla_pivot_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_12h_alligator_elder_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,64 +24,72 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w EMA trend filter: EMA(21) vs EMA(55)
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_55_1w = pd.Series(close_1w).ewm(span=55, min_periods=55, adjust=False).mean().values
-    ema_bullish_1w = ema_21_1w > ema_55_1w
-    ema_bearish_1w = ema_21_1w < ema_55_1w
+    # Pre-compute Williams Alligator on 12h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    median_12h = (high_12h + low_12h) / 2.0
     
-    # Pre-compute 1d volume confirmation: > 1.8x 20-period average
-    volume_1d = prices['volume'].values
-    volume_20_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.8 * volume_20_avg_1d)
+    jaw_12h = pd.Series(median_12h).rolling(window=13, min_periods=13).mean()
+    jaw_12h = jaw_12h.shift(8)  # 8 periods ahead
+    teeth_12h = pd.Series(median_12h).rolling(window=8, min_periods=8).mean()
+    teeth_12h = teeth_12h.shift(5)  # 5 periods ahead
+    lips_12h = pd.Series(median_12h).rolling(window=5, min_periods=5).mean()
+    lips_12h = lips_12h.shift(3)  # 3 periods ahead
     
-    # Align HTF indicators to 1d timeframe
-    ema_bullish_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_bullish_1w)
-    ema_bearish_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_bearish_1w)
+    jaw_12h_vals = jaw_12h.values
+    teeth_12h_vals = teeth_12h.values
+    lips_12h_vals = lips_12h.values
     
-    # Pre-compute 1d Camarilla pivot levels from prior day's OHLC
+    # Bullish alignment: Lips > Teeth > Jaw
+    bullish_align_12h = (lips_12h_vals > teeth_12h_vals) & (teeth_12h_vals > jaw_12h_vals)
+    # Bearish alignment: Jaw > Teeth > Lips
+    bearish_align_12h = (jaw_12h_vals > teeth_12h_vals) & (teeth_12h_vals > lips_12h_vals)
+    
+    # Pre-compute Elder Ray on 12h: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema13_12h = pd.Series(close_12h).ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power_12h = high_12h - ema13_12h
+    bear_power_12h = ema13_12h - low_12h
+    
+    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
+    volume_12h = df_12h['volume'].values
+    volume_20_avg_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike_12h = volume_12h > (1.5 * volume_20_avg_12h)
+    
+    # Align HTF indicators to 6h timeframe
+    bullish_align_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_align_12h)
+    bearish_align_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_align_12h)
+    bull_power_12h_aligned = align_htf_to_ltf(prices, df_12h, bull_power_12h)
+    bear_power_12h_aligned = align_htf_to_ltf(prices, df_12h, bear_power_12h)
+    vol_spike_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_spike_12h)
+    
+    # Pre-compute EMA13 on 6h for Elder Ray (using same EMA13 as reference)
+    close = prices['close'].values
+    ema13_6h = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    
+    # Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = EMA13 - Low
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    bull_power_6h = high - ema13_6h
+    bear_power_6h = ema13_6h - low
     
-    # Shift by 1 to use prior day's data (no look-ahead)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # First bar has no prior day
-    
-    # Calculate pivot point and Camarilla levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    h3 = pivot + (range_hl * 1.1 / 4)  # Resistance level 3
-    l3 = pivot - (range_hl * 1.1 / 4)  # Support level 3
-    h4 = pivot + (range_hl * 1.1 / 2)  # Resistance level 4 (stoploss reference)
-    l4 = pivot - (range_hl * 1.1 / 2)  # Support level 4 (stoploss reference)
-    
-    # Breakout conditions
-    breakout_long = (close > h3) & ~np.isnan(h3)  # Price closes above H3
-    breakout_short = (close < l3) & ~np.isnan(l3)  # Price closes below L3
-    
-    # Exit conditions: price returns to pivot point (within 0.1% of pivot)
-    exit_long = (close <= pivot * 1.001) & ~np.isnan(pivot)
-    exit_short = (close >= pivot * 0.999) & ~np.isnan(pivot)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup for volume avg
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_bullish_1w_aligned[i]) or np.isnan(ema_bearish_1w_aligned[i]) or
-            np.isnan(vol_spike_1d[i]) or np.isnan(breakout_long[i]) or
-            np.isnan(breakout_short[i]) or np.isnan(exit_long[i]) or
-            np.isnan(exit_short[i])):
+        if (np.isnan(bullish_align_12h_aligned[i]) or np.isnan(bearish_align_12h_aligned[i]) or
+            np.isnan(bull_power_12h_aligned[i]) or np.isnan(bear_power_12h_aligned[i]) or
+            np.isnan(vol_spike_12h_aligned[i]) or np.isnan(bull_power_6h[i]) or
+            np.isnan(bear_power_6h[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -91,27 +99,35 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new breakout entries
-            # Long when price breaks above H3 AND 1w bullish trend AND volume spike
-            if (breakout_long[i] and 
-                ema_bullish_1w_aligned[i] and 
-                vol_spike_1d[i]):
+        # Apply session filter
+        if not in_session[i]:
+            # Outside session: flatten position
+            position = 0
+            signals[i] = 0.0
+            continue
+        
+        if position == 0:  # Flat - look for new entries
+            # Long when: 12h bullish alignment AND 12h bull power > 0 AND 6h bull power > 0 AND volume spike
+            if (bullish_align_12h_aligned[i] and 
+                bull_power_12h_aligned[i] > 0 and 
+                bull_power_6h[i] > 0 and 
+                vol_spike_12h_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when price breaks below L3 AND 1w bearish trend AND volume spike
-            elif (breakout_short[i] and 
-                  ema_bearish_1w_aligned[i] and 
-                  vol_spike_1d[i]):
+            # Short when: 12h bearish alignment AND 12h bear power > 0 AND 6h bear power > 0 AND volume spike
+            elif (bearish_align_12h_aligned[i] and 
+                  bear_power_12h_aligned[i] > 0 and 
+                  bear_power_6h[i] > 0 and 
+                  vol_spike_12h_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot point
-            # Exit when price returns to pivot (mean reversion)
-            if position == 1 and exit_long[i]:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and exit_short[i]:
+        else:  # Have position - look for exit when Alligator alignment breaks
+            # Exit when 12h Alligator alignment breaks (either bullish or bearish)
+            exit_signal = not (bullish_align_12h_aligned[i] or bearish_align_12h_aligned[i])
+            
+            if exit_signal:
                 position = 0
                 signals[i] = 0.0
             else:
