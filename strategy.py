@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and 1w ADX trend filter
-# - Long when Williams %R(14) < -80 (oversold) with volume > 1.5x 20-day EMA and 1w ADX > 20
-# - Short when Williams %R(14) > -20 (overbought) with volume > 1.5x 20-day EMA and 1w ADX > 20
-# - Exit: ATR trailing stop (2.0x ATR) or Williams %R crosses back above -50 (long) or below -50 (short)
-# - Position sizing: 0.25 discrete level
-# - Targets ~20-30 trades/year on 4h timeframe. Williams %R captures extreme momentum,
-#   volume confirmation avoids fakeouts, 1w ADX ensures trending environment for better follow-through.
-#   Works in bull/bear: mean reversion from extremes with trend filter improves win rate.
+# Hypothesis: 4h Bollinger Band breakout with 1d volume spike and 1w ADX regime filter
+# - Long when close breaks above upper BB(20,2) with volume > 1.3x 20-day EMA and 1w ADX > 25
+# - Short when close breaks below lower BB(20,2) with volume > 1.3x 20-day EMA and 1w ADX > 25
+# - Exit: ATR trailing stop (2.5x ATR) or price reverts to middle BB
+# - Position sizing: 0.30 discrete level
+# - Targets ~25-35 trades/year on 4h timeframe. BB breakouts capture volatility expansion,
+#   volume confirmation avoids fakeouts, 1w ADX > 25 ensures strong trending environment.
+#   Works in bull/bear: breakouts work in both directions with trend filter improving win rate.
 
-name = "4h_1d_1w_williamsr_volume_adx_v1"
+name = "4h_1d_1w_bb_breakout_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -47,11 +47,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    # Calculate Williams %R(14) on 4h
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate Bollinger Bands(20,2) on 4h
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
     
     # Calculate 1d volume EMA for confirmation (20-period)
     volume_ema_20_1d = pd.Series(volume_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -96,35 +97,36 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_ema_20_1d_aligned[i]) or
-            np.isnan(adx_1w_aligned[i]) or np.isnan(atr_4h[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i]) or
+            np.isnan(volume_ema_20_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]) or
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
         # Get current 1d volume for confirmation (aligned to 4h)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 1.5 * volume_ema_20_1d_aligned[i]
+        vol_confirm = vol_1d_current[i] > 1.3 * volume_ema_20_1d_aligned[i]
         
-        # Trend filter: 1w ADX > 20 indicates trending market
-        trend_filter = adx_1w_aligned[i] > 20
+        # Regime filter: 1w ADX > 25 indicates strong trending market
+        regime_filter = adx_1w_aligned[i] > 25
         
         # Entry conditions
-        long_entry = (williams_r[i] < -80 and  # Oversold
+        long_entry = (close[i] > bb_upper[i] and  # Break above upper BB
                      vol_confirm and 
-                     trend_filter)
-        short_entry = (williams_r[i] > -20 and  # Overbought
+                     regime_filter)
+        short_entry = (close[i] < bb_lower[i] and  # Break below lower BB
                       vol_confirm and 
-                      trend_filter)
+                      regime_filter)
         
         if position == 0:  # Flat - look for entry
             if long_entry:
                 position = 1
-                signals[i] = 0.25
+                signals[i] = 0.30
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
             elif short_entry:
                 position = -1
-                signals[i] = -0.25
+                signals[i] = -0.30
                 highest_since_entry = close[i]
                 lowest_since_entry = close[i]
             else:
@@ -134,24 +136,24 @@ def generate_signals(prices):
             if position == 1:
                 highest_since_entry = max(highest_since_entry, close[i])
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                # ATR trailing stop: exit if price drops 2.0*ATR from high
-                # or Williams %R crosses back above -50 (momentum shift)
-                if (close[i] < highest_since_entry - 2.0 * atr_4h[i] or  # trailing stop
-                    williams_r[i] > -50):         # momentum shift exit
+                # ATR trailing stop: exit if price drops 2.5*ATR from high
+                # or price reverts to middle BB (mean reversion)
+                if (close[i] < highest_since_entry - 2.5 * atr_4h[i] or  # trailing stop
+                    close[i] <= bb_middle[i]):         # BB mean reversion exit
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             else:  # position == -1 (Short position)
                 highest_since_entry = max(highest_since_entry, close[i])
                 lowest_since_entry = min(lowest_since_entry, close[i])
-                # ATR trailing stop: exit if price rises 2.0*ATR from low
-                # or Williams %R crosses back below -50 (momentum shift)
-                if (close[i] > lowest_since_entry + 2.0 * atr_4h[i] or  # trailing stop
-                    williams_r[i] < -50):         # momentum shift exit
+                # ATR trailing stop: exit if price rises 2.5*ATR from low
+                # or price reverts to middle BB (mean reversion)
+                if (close[i] > lowest_since_entry + 2.5 * atr_4h[i] or  # trailing stop
+                    close[i] >= bb_middle[i]):         # BB mean reversion exit
                     position = 0
                     signals[i] = 0.0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
