@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels + 12h volume spike + 12h ADX trend filter
-# - Primary signal: Price touches Camarilla H3/L3 levels from prior 12h session
-# - Volume confirmation: 12h volume > 1.3x 24-period average volume (ensures participation)
-# - Trend filter: 12h ADX > 25 (trending market) enables breakout continuation
-# - In strong trends (ADX > 25): breakouts continue; in weak trends (ADX < 20): mean reversion at H4/L4
-# - Position size: 0.25 discrete level to minimize fee churn
-# - Target: 20-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
-# - ATR-based stoploss: exit when price moves against position by 2.0x ATR(14)
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and session filter
+# - Primary signal: Price breaks above/below Camarilla H3/L3 levels on 1h
+# - Trend filter: 4h EMA(50) slope > 0 for longs, < 0 for shorts (only trade with trend)
+# - Session filter: Trade only between 08:00-20:00 UTC to avoid low-liquidity hours
+# - Works in bull/bear: Trend filter ensures we only take trades in direction of 4h momentum
+# - Position size: 0.20 discrete level to minimize fee churn
+# - Target: 15-35 trades/year (60-140 total over 4 years) per 1h strategy guidelines
 
-name = "4h_12h_camarilla_volume_adx_v1"
-timeframe = "4h"
+name = "1h_4h_camarilla_ema_trend_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,144 +21,79 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 60:
         return np.zeros(n)
     
-    # Pre-compute 12h volume spike filter
-    volume_12h = df_12h['volume'].values
-    avg_volume_24 = pd.Series(volume_12h).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume_12h > (1.3 * avg_volume_24)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike)
+    # Pre-compute 4h EMA(50) and its slope for trend filter
+    close_4h = df_4h['close'].values
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slope = ema_50 - np.roll(ema_50, 1)  # current - previous
+    ema_slope[0] = 0
+    ema_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_slope)
     
-    # Pre-compute 12h ADX(14)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute session filter (08:00-20:00 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Pre-compute 1h Camarilla levels (based on previous day's OHLC)
+    # We need daily OHLC for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_12h - np.roll(high_12h, 1)
-    down_move = np.roll(low_12h, 1) - low_12h
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Smoothed TR, +DM, -DM
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Camarilla levels: H3/L3 = C +/- (H-L)*1.1/2
+    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # Pre-compute 12h Camarilla levels (based on prior 12h bar's OHLC)
-    # Camarilla: H4 = C + 1.1*(H-L)*1.1/2, L4 = C - 1.1*(H-L)*1.1/2
-    #            H3 = C + 1.1*(H-L)*1.1/4, L3 = C - 1.1*(H-L)*1.1/4
-    #            H2 = C + 1.1*(H-L)*1.1/6, L2 = C - 1.1*(H-L)*1.1/6
-    #            H1 = C + 1.1*(H-L)*1.1/12, L1 = C - 1.1*(H-L)*1.1/12
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Calculate Camarilla levels for each 12h bar
-    camarilla_h3 = np.zeros_like(close_12h)
-    camarilla_l3 = np.zeros_like(close_12h)
-    camarilla_h4 = np.zeros_like(close_12h)
-    camarilla_l4 = np.zeros_like(close_12h)
-    
-    for i in range(len(close_12h)):
-        if i == 0:
-            camarilla_h3[i] = camarilla_l3[i] = camarilla_h4[i] = camarilla_l4[i] = close_12h[i]
-        else:
-            rng = high_12h[i-1] - low_12h[i-1]
-            camarilla_h3[i] = close_12h[i-1] + 1.1 * rng * 1.1 / 4
-            camarilla_l3[i] = close_12h[i-1] - 1.1 * rng * 1.1 / 4
-            camarilla_h4[i] = close_12h[i-1] + 1.1 * rng * 1.1 / 2
-            camarilla_l4[i] = close_12h[i-1] - 1.1 * rng * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-    
-    # Pre-compute 4h ATR(14) for stoploss
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    
-    tr_4h1 = high_4h - low_4h
-    tr_4h2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr_4h3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
-    tr_4h[0] = tr_4h1[0]
-    atr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # Align Camarilla levels to 1h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    for i in range(100, n):
-        # Skip if any required data is invalid
+    for i in range(60, n):  # Start after warmup for EMA
+        # Skip if any required data is invalid or outside session
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_spike_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(atr_14[i])):
+            np.isnan(ema_slope_aligned[i]) or not session_filter[i]):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: mean reversion at H4 OR stoploss hit
-            if close_4h[i] >= camarilla_h4_aligned[i] * 0.999 or close_4h[i] < entry_price - 2.0 * atr_14[i]:
+            # Exit: price reversion to Camarilla H3 level or trend change
+            if prices['close'].iloc[i] <= camarilla_h3_aligned[i] or ema_slope_aligned[i] <= 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 
         elif position == -1:  # Short position
-            # Exit: mean reversion at L4 OR stoploss hit
-            if close_4h[i] <= camarilla_l4_aligned[i] * 1.001 or close_4h[i] > entry_price + 2.0 * atr_14[i]:
+            # Exit: price reversion to Camarilla L3 level or trend change
+            if prices['close'].iloc[i] >= camarilla_l3_aligned[i] or ema_slope_aligned[i] >= 0:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:  # Flat
-            # Look for Camarilla level touches with volume spike and ADX filter
-            # In strong trends (ADX > 25): breakout continuation from H3/L3
-            # In weak trends (ADX < 20): mean reversion at H4/L4
-            if volume_spike_aligned[i]:
-                if adx_aligned[i] > 25:  # strong trend - breakout continuation
-                    # Long: price breaks above H3
-                    if close_4h[i] > camarilla_h3_aligned[i]:
-                        position = 1
-                        entry_price = close_4h[i]
-                        signals[i] = 0.25
-                    # Short: price breaks below L3
-                    elif close_4h[i] < camarilla_l3_aligned[i]:
-                        position = -1
-                        entry_price = close_4h[i]
-                        signals[i] = -0.25
-                elif adx_aligned[i] < 20:  # weak trend - mean reversion
-                    # Long: price touches L4 (support)
-                    if close_4h[i] <= camarilla_l4_aligned[i] * 1.001:
-                        position = 1
-                        entry_price = close_4h[i]
-                        signals[i] = 0.25
-                    # Short: price touches H4 (resistance)
-                    elif close_4h[i] >= camarilla_h4_aligned[i] * 0.999:
-                        position = -1
-                        entry_price = close_4h[i]
-                        signals[i] = -0.25
+            # Look for Camarilla breakouts with trend confirmation
+            # Long: price breaks above H3 with upward 4h EMA slope
+            if (prices['close'].iloc[i] > camarilla_h3_aligned[i] and 
+                ema_slope_aligned[i] > 0):
+                position = 1
+                entry_price = prices['close'].iloc[i]
+                signals[i] = 0.20
+            # Short: price breaks below L3 with downward 4h EMA slope
+            elif (prices['close'].iloc[i] < camarilla_l3_aligned[i] and 
+                  ema_slope_aligned[i] < 0):
+                position = -1
+                entry_price = prices['close'].iloc[i]
+                signals[i] = -0.20
     
     return signals
