@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR regime filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.3x 20-period average AND daily ATR(14) > 0.5 * 20-period ATR mean
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.3x 20-period average AND daily ATR(14) > 0.5 * 20-period ATR mean
-# - Exit when price crosses Camarilla H4/L4 levels (strong reversal) or ATR regime filter fails
+# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume confirmation
+# - Long when Williams %R(14) crosses above -80 (oversold) AND 1d close > 1d EMA(200) AND 4h volume > 1.2x 20-period average
+# - Short when Williams %R(14) crosses below -20 (overbought) AND 1d close < 1d EMA(200) AND 4h volume > 1.2x 20-period average
+# - Exit when Williams %R crosses -50 (mean reversion midpoint)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Camarilla pivots provide intraday support/resistance; volume confirms breakout validity
-# - ATR regime filter ensures sufficient volatility for meaningful moves
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Williams %R identifies extreme momentum exhaustion points
+# - Daily EMA(200) filter ensures we trade with the long-term trend
+# - Volume confirmation reduces false signals
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
 
-name = "12h_1d_camarilla_volume_atr_v1"
-timeframe = "12h"
+name = "4h_1d_williamsr_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,91 +24,65 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC
+    # Pre-compute 4h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 12h Camarilla pivot levels (based on previous day)
-    def calculate_camarilla(h_prev, l_prev, c_prev):
-        range_prev = h_prev - l_prev
-        H4 = c_prev + range_prev * 1.1 / 2
-        H3 = c_prev + range_prev * 1.1 / 4
-        H2 = c_prev + range_prev * 1.1 / 6
-        H1 = c_prev + range_prev * 1.1 / 12
-        L1 = c_prev - range_prev * 1.1 / 12
-        L2 = c_prev - range_prev * 1.1 / 6
-        L3 = c_prev - range_prev * 1.1 / 4
-        L4 = c_prev - range_prev * 1.1 / 2
-        return H3, L3, H4, L4
+    # Pre-compute 4h Williams %R (14-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.max(arr[i - window + 1:i + 1])
+        return result
     
-    # Shift previous day's OHLC to align with current 12h bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.min(arr[i - window + 1:i + 1])
+        return result
     
-    camarilla_H3 = np.full_like(close_1d, np.nan, dtype=float)
-    camarilla_L3 = np.full_like(close_1d, np.nan, dtype=float)
-    camarilla_H4 = np.full_like(close_1d, np.nan, dtype=float)
-    camarilla_L4 = np.full_like(close_1d, np.nan, dtype=float)
+    highest_high = rolling_max(high, 14)
+    lowest_low = rolling_min(low, 14)
+    williams_r = np.full_like(close, np.nan, dtype=float)
+    for i in range(13, len(close)):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # Avoid division by zero
     
-    for i in range(1, len(close_1d)):
-        H3, L3, H4, L4 = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-        camarilla_H3[i] = H3
-        camarilla_L3[i] = L3
-        camarilla_H4[i] = H4
-        camarilla_L4[i] = L4
-    
-    # Pre-compute 12h ATR (14-period) for regime filter
-    def true_range(h, l, c_prev):
-        tr1 = h - l
-        tr2 = np.abs(h - c_prev)
-        tr3 = np.abs(l - c_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    tr = np.zeros_like(high)
-    tr[0] = high[0] - low[0]
-    for i in range(1, len(high)):
-        tr[i] = true_range(high[i], low[i], close[i-1])
-    
-    atr = np.zeros_like(tr)
-    atr[13] = np.mean(tr[1:15])  # First ATR value
-    for i in range(14, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Pre-compute 12h ATR mean (20-period) for regime filter threshold
+    # Pre-compute 4h volume moving average (20-period)
     def rolling_mean(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
             result[i] = np.mean(arr[i - window + 1:i + 1])
         return result
     
-    atr_mean_20 = rolling_mean(atr, 20)
-    atr_regime = atr > (0.5 * atr_mean_20)  # ATR regime filter: current ATR > 50% of 20-period mean
+    vol_ma_4h = rolling_mean(volume, 20)
     
-    # Pre-compute 1d volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = rolling_mean(volume_1d, 20)
+    # Pre-compute 1d EMA(200)
+    close_1d = df_1d['close'].values
+    ema_200_1d = np.full_like(close_1d, np.nan, dtype=float)
+    if len(close_1d) >= 200:
+        # Seed with SMA
+        ema_200_1d[199] = np.mean(close_1d[:200])
+        # EMA calculation
+        for i in range(200, len(close_1d)):
+            ema_200_1d[i] = (close_1d[i] * 2 + ema_200_1d[i-1] * 198) / 200
     
-    # Align HTF indicators to 12h timeframe
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align HTF indicators to 4h timeframe
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
-            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ma_4h[i]) or np.isnan(ema_200_1d_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -116,29 +91,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Volume spike condition (1d volume > 1.3x 20-period average)
-        vol_spike = volume_1d[i] > 1.3 * vol_ma_1d_aligned[i] if not np.isnan(vol_ma_1d_aligned[i]) else False
+        # Volume spike condition
+        vol_spike = volume[i] > 1.2 * vol_ma_4h[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Camarilla H3 breakout AND volume spike AND ATR regime
-            if (close[i] > camarilla_H3_aligned[i] and vol_spike and atr_regime[i]):
+            # Long conditions: Williams %R crosses above -80 AND volume spike AND 1d uptrend
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and vol_spike and 
+                close > ema_200_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Camarilla L3 breakdown AND volume spike AND ATR regime
-            elif (close[i] < camarilla_L3_aligned[i] and vol_spike and atr_regime[i]):
+            # Short conditions: Williams %R crosses below -20 AND volume spike AND 1d downtrend
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and vol_spike and 
+                  close < ema_200_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Camarilla H4/L4 levels (strong reversal)
-            exit_long = (position == 1 and close[i] > camarilla_H4_aligned[i])
-            exit_short = (position == -1 and close[i] < camarilla_L4_aligned[i])
+            # Exit conditions: Williams %R crosses -50 (mean reversion midpoint)
+            exit_long = (position == 1 and williams_r[i] < -50 and williams_r[i-1] >= -50)
+            exit_short = (position == -1 and williams_r[i] > -50 and williams_r[i-1] <= -50)
             
-            # Optional: exit if ATR regime filter fails (low volatility environment)
-            regime_exit = not atr_regime[i]
-            
-            if exit_long or exit_short or regime_exit:
+            if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
@@ -153,4 +127,16 @@ def rolling_mean(arr, window):
     result = np.full_like(arr, np.nan, dtype=float)
     for i in range(window - 1, len(arr)):
         result[i] = np.mean(arr[i - window + 1:i + 1])
+    return result
+
+def rolling_max(arr, window):
+    result = np.full_like(arr, np.nan, dtype=float)
+    for i in range(window - 1, len(arr)):
+        result[i] = np.max(arr[i - window + 1:i + 1])
+    return result
+
+def rolling_min(arr, window):
+    result = np.full_like(arr, np.nan, dtype=float)
+    for i in range(window - 1, len(arr)):
+        result[i] = np.min(arr[i - window + 1:i + 1])
     return result
