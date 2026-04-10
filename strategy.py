@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with 1w HMA filter and volume confirmation
-# - Long when 1d price > KAMA(ER=10) AND 1w HMA(21) rising AND 1d volume > 1.5x 20-period average
-# - Short when 1d price < KAMA(ER=10) AND 1w HMA(21) falling AND 1d volume > 1.5x 20-period average
-# - Exit when price crosses back below/above KAMA OR 1w HMA flattens
+# Hypothesis: 12h Donchian channel breakout with volume confirmation and 1d choppiness regime filter
+# - Long when price breaks above 20-period Donchian upper band AND volume > 1.5x 20-period average AND 1d chop > 61.8 (ranging market)
+# - Short when price breaks below 20-period Donchian lower band AND volume > 1.5x 20-period average AND 1d chop > 61.8
+# - Exit when price returns to Donchian middle (median of upper/lower) OR chop < 38.2 (trending market)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - KAMA adapts to market noise, reducing whipsaw in ranging markets
-# - 1w HMA provides higher timeframe trend filter to avoid counter-trend trades
-# - Volume confirmation ensures institutional participation
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Donchian breakouts capture sustained moves; chop filter avoids whipsaws in strong trends
+# - Volume confirmation reduces false breakouts
+# - Works in both bull/bear by trading mean reversion in ranging markets (chop > 61.8)
 
-name = "1d_1w_kama_hma_volume_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_chop_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,100 +23,73 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLC and volume
+    # Pre-compute 12h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 1d volume confirmation (20-period average)
+    # Pre-compute 12h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 1d KAMA ( Kaufman Adaptive Moving Average )
-    # KAMA uses Efficiency Ratio (ER) to adapt smoothing constant
-    def kama(close, er_period=10, fast_sc=2, slow_sc=30):
-        """Kaufman Adaptive Moving Average"""
-        # Calculate Change and Volatility
-        change = np.abs(np.diff(close, 1))
-        change = np.insert(change, 0, 0)  # First element is 0
-        
-        volatility = np.zeros_like(close)
-        for i in range(er_period, len(close)):
-            volatility[i] = np.sum(np.abs(np.diff(close[i-er_period+1:i+1])))
-        
-        # Avoid division by zero
-        volatility = np.where(volatility == 0, 1, volatility)
-        
-        # Efficiency Ratio
-        er = np.where(volatility > 0, change / volatility, 0)
-        
-        # Smoothing Constant
-        sc = np.square(er * (fast_sc - slow_sc) + slow_sc)
-        
-        # KAMA calculation
-        kama_values = np.zeros_like(close)
-        kama_values[0] = close[0]
-        for i in range(1, len(close)):
-            kama_values[i] = kama_values[i-1] + sc[i] * (close[i] - kama_values[i-1])
-        
-        return kama_values
+    # Pre-compute 12h Donchian channels (20-period)
+    donch_hi = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_lo = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_hi + donch_lo) / 2.0
     
-    kama_1d = kama(close, er_period=10, fast_sc=2, slow_sc=30)
+    # Pre-compute 1d Choppiness Index (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute 1w HMA (Hull Moving Average)
-    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(values, period):
-        """Weighted Moving Average"""
-        if len(values) < period:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(values, weights, mode='valid') / weights.sum()
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    def hma(values, period):
-        """Hull Moving Average"""
-        if len(values) < period:
-            return np.full_like(values, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        
-        wma_full = wma(values, period)
-        wma_half = wma(values, half_period)
-        
-        # 2 * WMA(n/2) - WMA(n)
-        raw_hma = 2 * wma_half - wma_full
-        
-        # WMA(sqrt(n)) of the result
-        hma_values = wma(raw_hma, sqrt_period)
-        
-        # Pad with NaN to match original length
-        result = np.full_like(values, np.nan)
-        result[period-1:] = hma_values
-        return result
+    # ATR(14) - using Wilder's smoothing
+    atr_1d = np.zeros_like(tr)
+    if len(tr) >= 14:
+        atr_1d[13] = np.mean(tr[1:14])
+        for i in range(14, len(tr)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    close_1w = df_1w['close'].values
-    hma_1w = hma(close_1w, 21)
+    # Sum of TR over 14 periods
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate HMA slope (rising/falling)
-    hma_slope = np.diff(hma_1w, prepend=hma_1w[0])
-    hma_rising = hma_slope > 0
-    hma_falling = hma_slope < 0
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Align HTF indicators to 1d timeframe
-    hma_rising_aligned = align_htf_to_ltf(prices, df_1w, hma_rising)
-    hma_falling_aligned = align_htf_to_ltf(prices, df_1w, hma_falling)
+    # Choppiness Index: 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    # Avoid division by zero
+    range_14 = hh_14 - ll_14
+    chop = np.zeros_like(sum_tr_14)
+    mask = (range_14 > 0) & (sum_tr_14 > 0)
+    chop[mask] = 100 * np.log10(sum_tr_14[mask] / range_14[mask]) / np.log10(14)
+    
+    # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending
+    chop_regime_ranging = chop > 61.8
+    
+    # Align HTF indicators to 12h timeframe
+    chop_regime_ranging_aligned = align_htf_to_ltf(prices, df_1d, chop_regime_ranging)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_1d[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(hma_rising_aligned[i]) or np.isnan(hma_falling_aligned[i])):
+        if (np.isnan(donch_hi[i]) or np.isnan(donch_lo[i]) or np.isnan(donch_mid[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop_regime_ranging_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -126,24 +99,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price > KAMA AND 1w HMA rising AND volume spike
-            if (close[i] > kama_1d[i] and 
-                hma_rising_aligned[i] and 
-                volume_spike[i]):
+            # Long conditions: price > Donchian high AND volume spike AND ranging regime
+            if (close[i] > donch_hi[i] and 
+                volume_spike[i] and 
+                chop_regime_ranging_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price < KAMA AND 1w HMA falling AND volume spike
-            elif (close[i] < kama_1d[i] and 
-                  hma_falling_aligned[i] and 
-                  volume_spike[i]):
+            # Short conditions: price < Donchian low AND volume spike AND ranging regime
+            elif (close[i] < donch_lo[i] and 
+                  volume_spike[i] and 
+                  chop_regime_ranging_aligned[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses back below/above KAMA OR 1w HMA flattens
-            exit_long = (position == 1 and (close[i] <= kama_1d[i] or not hma_rising_aligned[i]))
-            exit_short = (position == -1 and (close[i] >= kama_1d[i] or not hma_falling_aligned[i]))
+            # Exit conditions: price returns to Donchian mid OR chop < 38.2 (trending regime)
+            exit_long = (position == 1 and 
+                        (close[i] <= donch_mid[i] or not chop_regime_ranging_aligned[i]))
+            exit_short = (position == -1 and 
+                         (close[i] >= donch_mid[i] or not chop_regime_ranging_aligned[i]))
             
             if exit_long or exit_short:
                 position = 0
