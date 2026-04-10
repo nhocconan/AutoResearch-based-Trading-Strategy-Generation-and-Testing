@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and 1d ADX regime filter
-# - Long when price breaks above Camarilla H3 level AND 1d volume > 1.3x 20-period average AND 1d ADX > 25 (trending)
-# - Short when price breaks below Camarilla L3 level AND 1d volume > 1.3x 20-period average AND 1d ADX > 25
-# - Exit when price returns to Camarilla PIVOT or reverses to opposite H4/L4
+# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume confirmation and 1d ADX > 25 (trending regime)
+# - Long when price breaks above Camarilla H3 AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
+# - Short when price breaks below Camarilla L3 AND 1d volume > 1.5x 20-period average AND 1d ADX > 25
+# - Exit when price returns to Camarilla PIVOT level
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Camarilla levels derived from 1d OHLC provide institutional support/resistance structure
-# - Volume confirmation reduces false breakouts
-# - Daily ADX filter ensures we trade only when higher timeframe is trending (avoids chop)
+# - Camarilla levels from 1d OHLC provide institutional support/resistance
+# - Volume confirmation reduces false breakouts in choppy markets
+# - Daily ADX filter ensures we trade only when higher timeframe is trending (avoids ranging markets)
 # - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
 
-name = "12h_1d_camarilla_breakout_v1"
+name = "12h_1d_camarilla_breakout_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,7 +27,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC
+    # Pre-compute 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -38,10 +38,8 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2.0
     camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4.0
     camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4.0
-    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2.0
     camarilla_pivot = (prev_high + prev_low + prev_close) / 3.0
     
     # Pre-compute 1d volume average (20-period)
@@ -50,7 +48,7 @@ def generate_signals(prices):
     for i in range(19, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i - 19:i + 1])
     
-    # Pre-compute 1d ADX(14)
+    # Pre-compute 1d ADX(14) using Wilder's smoothing
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -109,8 +107,6 @@ def generate_signals(prices):
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
@@ -130,13 +126,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
+        # Volume spike condition (1.5x average) - calculated on 12h data
+        vol_ma_12h = np.full_like(volume, np.nan, dtype=float)
+        start_idx = max(0, i - 19)
+        if i >= 19:
+            vol_ma_12h[i] = np.mean(volume[start_idx:i+1])
+        vol_spike = not np.isnan(vol_ma_12h[i]) and volume[i] > 1.5 * vol_ma_12h[i]
+        
         if position == 0:  # Flat - look for new entries
-            # Volume spike condition (1.3x average)
-            vol_ma_12h = np.full_like(volume, np.nan, dtype=float)
-            for j in range(19, i+1):
-                vol_ma_12h[j] = np.mean(volume[j-19:j+1])
-            vol_spike = not np.isnan(vol_ma_12h[i]) and volume[i] > 1.3 * vol_ma_12h[i]
-            
             # Long conditions: price > H3 AND volume spike AND 1d trending (ADX > 25)
             if (close[i] > camarilla_h3_aligned[i] and vol_spike and adx_1d_aligned[i] > 25):
                 position = 1
@@ -148,11 +145,11 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price returns to pivot or reverses to opposite H4/L4
-            exit_long = (position == 1 and (close[i] < camarilla_pivot_aligned[i] or close[i] > camarilla_h4_aligned[i]))
-            exit_short = (position == -1 and (close[i] > camarilla_pivot_aligned[i] or close[i] < camarilla_l4_aligned[i]))
-            
-            if exit_long or exit_short:
+            # Exit when price returns to pivot level
+            if position == 1 and close[i] < camarilla_pivot_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and close[i] > camarilla_pivot_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
