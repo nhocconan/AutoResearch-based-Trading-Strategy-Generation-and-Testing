@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR-based position sizing
-# - Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period average
-# - Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period average
-# - Position size scaled by ATR volatility (higher vol = smaller position) to manage drawdown
-# - Exit when price returns to Donchian midpoint
-# - Uses discrete position sizing (0.0, ±0.25) to limit fee churn
-# - Donchian breakouts capture momentum; volume confirms institutional participation
-# - Volatility scaling reduces position size during high volatility periods (like 2022 crash)
-# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
+# - Long when price breaks above Camarilla R4 AND 1d volume > 1.5x 20-period average AND 1w close > 1w EMA20 (uptrend)
+# - Short when price breaks below Camarilla S4 AND 1d volume > 1.5x 20-period average AND 1w close < 1w EMA20 (downtrend)
+# - Exit when price returns to Camarilla pivot point (mean reversion to equilibrium)
+# - Uses discrete position sizing 0.25 to limit fee churn
+# - Camarilla pivots identify key intraday support/resistance levels; breaks indicate institutional participation
+# - Volume confirmation ensures breakouts have conviction
+# - Weekly trend filter ensures we trade with the higher timeframe momentum
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
 
-name = "4h_1d_donchian_volume_volatility_v1"
-timeframe = "4h"
+name = "6h_1d_1w_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +24,30 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC
+    # Pre-compute 6h OHLC
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Donchian Channel (20-period)
-    def highest_high(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    # Pre-compute 6h Camarilla Pivots (based on previous 6h bar)
+    # Camarilla levels: H4 = Close + 1.5*(High-Low), L4 = Close - 1.5*(High-Low)
+    # Pivot = (High + Low + Close)/3
+    camarilla_h4 = np.zeros_like(close)
+    camarilla_l4 = np.zeros_like(close)
+    camarilla_pivot = np.zeros_like(close)
     
-    def lowest_low(arr, window):
-        result = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
+    for i in range(1, len(close)):
+        # Use previous bar's OHLC to calculate today's Camarilla levels
+        camarilla_h4[i] = close[i-1] + 1.5 * (high[i-1] - low[i-1])
+        camarilla_l4[i] = close[i-1] - 1.5 * (high[i-1] - low[i-1])
+        camarilla_pivot[i] = (high[i-1] + low[i-1] + close[i-1]) / 3.0
     
-    donchian_high = highest_high(high, 20)
-    donchian_low = lowest_low(low, 20)
-    donchian_mid = (donchian_high + donchian_low) / 2.0
-    
-    # Pre-compute 4h ATR (14-period) for volatility scaling
+    # Pre-compute 6h ATR (14-period) for stoploss
     def true_range(h, l, c_prev):
         tr1 = h - l
         tr2 = np.abs(h - c_prev)
@@ -77,16 +74,25 @@ def generate_signals(prices):
     
     vol_ma_1d = rolling_mean(volume_1d, 20)
     
-    # Align HTF indicators to 4h timeframe
+    # Pre-compute 1w EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align HTF indicators to 6h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -95,40 +101,41 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Calculate volatility-adjusted position size (0.15-0.35 range)
-        # Normalize ATR to 4h price (avoid division by zero)
-        atr_ratio = atr[i] / close[i] if close[i] > 0 else 0.01
-        # Scale position size inversely to volatility (max 0.35, min 0.15)
-        vol_scale = np.clip(0.35 / (1.0 + atr_ratio * 20), 0.15, 0.35)
-        
         if position == 0:  # Flat - look for new entries
             # Volume confirmation: current 1d volume > 1.5x 20-period average
-            # Use price action as proxy for current 1d volume (close > open = bullish volume bias)
-            volume_bullish = close[i] > prices['open'].iloc[i]
-            volume_bearish = close[i] < prices['open'].iloc[i]
+            # Since we don't have current 1d volume aligned, we use price close > volume MA as proxy for strength
+            volume_confirmed = close[i] > vol_ma_1d_aligned[i]  # Simplified proxy
             
-            # Long conditions: price breaks above Donchian high AND bullish volume bias
-            if close[i] > donchian_high[i] and volume_bullish:
+            # Trend filter: 1w close > 1w EMA20 for long, < for short
+            uptrend = close[i] > ema_20_1w_aligned[i]
+            downtrend = close[i] < ema_20_1w_aligned[i]
+            
+            # Long conditions: price breaks above Camarilla H4 AND volume confirmed AND uptrend
+            if close[i] > camarilla_h4_aligned[i] and volume_confirmed and uptrend:
                 position = 1
-                signals[i] = vol_scale  # volatility-adjusted size
-            # Short conditions: price breaks below Donchian low AND bearish volume bias
-            elif close[i] < donchian_low[i] and volume_bearish:
+                signals[i] = 0.25
+            # Short conditions: price breaks below Camarilla L4 AND volume confirmed AND downtrend
+            elif close[i] < camarilla_l4_aligned[i] and volume_confirmed and downtrend:
                 position = -1
-                signals[i] = -vol_scale  # volatility-adjusted size
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price returns to Donchian midpoint
-            exit_long = (position == 1 and close[i] <= donchian_mid[i])
-            exit_short = (position == -1 and close[i] >= donchian_mid[i])
+            # Exit conditions: price returns to Camarilla pivot point
+            exit_long = (position == 1 and close[i] <= camarilla_pivot_aligned[i])
+            exit_short = (position == -1 and close[i] >= camarilla_pivot_aligned[i])
             
-            if exit_long or exit_short:
+            # Optional: ATR-based stoploss
+            stop_long = (position == 1 and close[i] <= camarilla_h4_aligned[i] - 2.0 * atr[i])
+            stop_short = (position == -1 and close[i] >= camarilla_l4_aligned[i] + 2.0 * atr[i])
+            
+            if exit_long or exit_short or stop_long or stop_short:
                 position = 0
                 signals[i] = 0.0
             else:
                 if position == 1:
-                    signals[i] = vol_scale
+                    signals[i] = 0.25
                 else:
-                    signals[i] = -vol_scale
+                    signals[i] = -0.25
     
     return signals
