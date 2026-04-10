@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d ATR filter and volume confirmation
-# - Long when Alligator jaws (13-period SMMA) cross below teeth (8-period SMMA) AND price > lips (5-period SMMA) AND 1d ATR(14) < median ATR AND volume > 1.5x 20-period average volume
-# - Short when Alligator jaws cross above teeth AND price < lips AND 1d ATR(14) < median ATR AND volume > 1.5x 20-period average volume
-# - Exit when price crosses back below lips (for long) or above lips (for short)
+# Hypothesis: 4h Donchian channel breakout with 1d ATR filter and volume confirmation
+# - Long when price breaks above 20-period Donchian upper channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
+# - Short when price breaks below 20-period Donchian lower channel AND 1d ATR(14) < 20-period median ATR AND volume > 1.5x 20-period average volume
+# - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Williams Alligator identifies trend direction with smoothed moving averages
-# - ATR filter ensures we trade during low volatility periods when trends are more reliable
-# - Volume confirmation reduces false signals
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Donchian channels identify clear breakouts with defined risk levels
+# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# - Volume confirmation reduces false breakouts
+# - Works in both bull and bear markets by capturing breakouts in the direction of the trend
 
-name = "12h_1d_alligator_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,30 +28,29 @@ def generate_signals(prices):
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC and volume
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Smoothed Moving Average (SMMA) - Williams Alligator
-    def smma(arr, period):
+    # Pre-compute 4h Donchian channels (20-period)
+    def rolling_max(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_PRICE) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        for i in range(window - 1, len(arr)):
+            result[i] = np.max(arr[i - window + 1:i + 1])
         return result
     
-    # Alligator lines: Jaw (13), Teeth (8), Lips (5)
-    jaw = smma(close, 13)   # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window - 1, len(arr)):
+            result[i] = np.min(arr[i - window + 1:i + 1])
+        return result
     
-    # Pre-compute 12h volume confirmation (20-period average)
+    upper_channel = rolling_max(high, 20)
+    lower_channel = rolling_min(low, 20)
+    
+    # Pre-compute 4h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -68,7 +68,7 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR(14) using Wilder's smoothing
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
     atr_1d = np.zeros_like(tr)
     atr_1d[13] = np.mean(tr[1:14])  # First ATR value
     for i in range(14, len(tr)):
@@ -78,7 +78,7 @@ def generate_signals(prices):
     atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
     low_vol_regime = atr_1d < atr_median_20
     
-    # Align HTF indicators to 12h timeframe
+    # Align HTF indicators to 4h timeframe
     low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
@@ -86,7 +86,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -97,16 +97,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: jaws below teeth AND price > lips AND low volatility regime AND volume spike
-            if (jaw[i] < teeth[i] and 
-                close[i] > lips[i] and 
+            # Long conditions: price breaks above upper channel AND low volatility regime AND volume spike
+            if (close[i] > upper_channel[i] and 
                 low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: jaws above teeth AND price < lips AND low volatility regime AND volume spike
-            elif (jaw[i] > teeth[i] and 
-                  close[i] < lips[i] and 
+            # Short conditions: price breaks below lower channel AND low volatility regime AND volume spike
+            elif (close[i] < lower_channel[i] and 
                   low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
@@ -114,9 +112,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses back below lips (for long) or above lips (for short)
-            exit_long = (position == 1 and close[i] < lips[i])
-            exit_short = (position == -1 and close[i] > lips[i])
+            # Exit conditions: price crosses back inside the Donchian channel
+            exit_long = (position == 1 and close[i] < upper_channel[i])
+            exit_short = (position == -1 and close[i] > lower_channel[i])
             
             if exit_long or exit_short:
                 position = 0
