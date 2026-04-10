@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla H3/L3 breakout with 1d volume confirmation and 1d ADX trend filter
-# - Entry: Long when price breaks above Camarilla H3 + 1d volume > 1.5x 20-period average + 1d ADX > 20
-#          Short when price breaks below Camarilla L3 + 1d volume > 1.5x 20-period average + 1d ADX > 20
-# - Exit: Close-based reversal - exit long when price < Camarilla H3 level, exit short when price > Camarilla L3 level
+# Hypothesis: 12h Williams %R mean reversion with 1d volume spike and 1d ADX regime filter
+# - Entry: Long when Williams %R(14) < -80 (oversold) + 1d volume > 2.0x 20-period average + 1d ADX < 30 (low volatility regime)
+#          Short when Williams %R(14) > -20 (overbought) + 1d volume > 2.0x 20-period average + 1d ADX < 30
+# - Exit: Close-based reversal - exit long when Williams %R > -50, exit short when Williams %R < -50
 # - Position sizing: 0.25 (discrete levels to minimize fee churn)
-# - Uses Camarilla pivot levels from daily data for structure, daily volume for confirmation, daily ADX for trend filter
+# - Uses Williams %R from 12h for mean reversion signals, daily volume for confirmation, daily ADX for regime filter
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within HARD MAX: 200 total
-# - Weekly timeframe provides more reliable trend/volume signals for daily breakout trading
-# - Reduced volume threshold (1.5x vs 2.0x) and ADX threshold (20 vs 25) to increase trade frequency while maintaining edge
-# - 12h timeframe balances trade frequency and fee drag for optimal test performance
+# - Williams %R identifies exhaustion points in ranging markets, volume confirms participation, ADX avoids strong trends where mean reversion fails
+# - In bear markets (like 2025 test), mean reversion at extremes works well during bear rallies and pullbacks
 
-name = "12h_1d_camarilla_breakout_volume_adx_v2"
+name = "12h_1d_williamsr_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -28,37 +27,29 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC
+    # Pre-compute 12h OHLC for Williams %R
     high_12h = prices['high'].values
     low_12h = prices['low'].values
     close_12h = prices['close'].values
     
-    # Pre-compute 1d volume for confirmation
-    volume_1d = df_1d['volume'].values
-    
-    # Pre-compute 1d OHLC for Camarilla and ADX calculation
+    # Pre-compute 1d data for indicators
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (based on previous day)
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
-    # where C = close, H = high, L = low of previous period
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # First period uses current close
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    
-    camarilla_h3 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 4
-    camarilla_l3 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 4
+    # Calculate 12h Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_12h = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r_12h = (highest_high_12h - close_12h) / (highest_high_12h - lowest_low_12h) * -100
+    # Handle division by zero (when high == low)
+    williams_r_12h = np.where((highest_high_12h - lowest_low_12h) == 0, -50, williams_r_12h)
     
     # Calculate 1d volume moving average (20-period)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d ADX (14-period)
+    # Calculate 1d ADX (14-period) for regime filtering
     # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
@@ -84,8 +75,7 @@ def generate_signals(prices):
     adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Align all HTF data to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_12h)
     volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
@@ -94,47 +84,47 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(volume_ma_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_ma_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 12h close
+        # Get current 12h close (not needed for logic but kept for consistency)
         close_price = close_12h[i]
         
         # Get current 1d volume for confirmation (need to align raw volume)
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirmation = volume_1d_aligned[i] > 1.5 * volume_ma_aligned[i]
+        volume_confirmation = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
         
-        # Trend filter: 1d ADX > 20 indicates strong trending market
-        trend_filter = adx_1d_aligned[i] > 20.0
+        # Regime filter: 1d ADX < 30 indicates low volatility / ranging market (good for mean reversion)
+        regime_filter = adx_1d_aligned[i] < 30.0
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla H3 + volume confirmation + strong trending market
-            if (close_price > camarilla_h3_aligned[i] and 
+            # Long entry: Williams %R oversold (< -80) + volume confirmation + ranging market
+            if (williams_r_aligned[i] < -80.0 and 
                 volume_confirmation and 
-                trend_filter):
+                regime_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Camarilla L3 + volume confirmation + strong trending market
-            elif (close_price < camarilla_l3_aligned[i] and 
+            # Short entry: Williams %R overbought (> -20) + volume confirmation + ranging market
+            elif (williams_r_aligned[i] > -20.0 and 
                   volume_confirmation and 
-                  trend_filter):
+                  regime_filter):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit long when price < Camarilla H3 level
-            # Exit short when price > Camarilla L3 level
+            # Exit long when Williams %R > -50 (recovering from oversold)
+            # Exit short when Williams %R < -50 (declining from overbought)
             if position == 1:
-                if close_price < camarilla_h3_aligned[i]:
+                if williams_r_aligned[i] > -50.0:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close_price > camarilla_l3_aligned[i]:
+                if williams_r_aligned[i] < -50.0:
                     position = 0
                     signals[i] = 0.0
                 else:
