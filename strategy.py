@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h TRIX momentum with 1d trend filter and volume confirmation
-# - Long when TRIX crosses above zero AND 1d close > 1d SMA(50) AND volume > 1.3x 20-period volume SMA
-# - Short when TRIX crosses below zero AND 1d close < 1d SMA(50) AND volume > 1.3x 20-period volume SMA
-# - Exit: opposite TRIX cross OR ATR trailing stop (2.0x ATR)
-# - Uses 1d for trend bias (above/below 50-day SMA) and 12h for precise momentum entry
+# Hypothesis: 4h Donchian channel breakout with 12h trend filter and volume confirmation
+# - Long when price breaks above 20-period Donchian upper band AND 12h close > 12h open (bullish 12h candle) AND volume > 1.3x 20-period volume SMA
+# - Short when price breaks below 20-period Donchian lower band AND 12h close < 12h open (bearish 12h candle) AND volume > 1.3x 20-period volume SMA
+# - Exit: ATR trailing stop (2.0x ATR) or Donchian middle band reversion
+# - Uses 12h for trend bias (more reliable than 1d for 4h entries) and 4h for precise Donchian breakout timing
 # - Session filter: 08-20 UTC to avoid low-volume Asian session noise
 # - Position sizing: 0.25 discrete level to control drawdown and minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while maintaining statistical significance
-# - TRIX is excellent at catching momentum shifts in both bull and bear markets, especially when combined with trend filter
+# - Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag while maintaining statistical significance
+# - Donchian breakouts provide clear structure that works in both bull and bear markets when combined with trend and volume filters
 
-name = "12h_1d_trix_momentum_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -32,48 +32,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop (MTF rule compliance)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return signals
     
-    # Calculate 1d SMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    # Bullish 1d trend: close > SMA50
-    bullish_1d = close_1d > sma_50_1d
-    bearish_1d = close_1d < sma_50_1d
-    # Align to 12h timeframe with proper delay (completed 1d bar only)
-    bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, bullish_1d)
-    bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, bearish_1d)
+    # Calculate 12h candle direction (bullish/bearish) for trend filter
+    close_12h = df_12h['close'].values
+    open_12h = df_12h['open'].values
+    # Bullish 12h candle: close > open
+    bullish_12h = close_12h > open_12h
+    bearish_12h = close_12h < open_12h
+    # Align to 4h timeframe with proper delay (completed 12h bar only)
+    bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_12h)
+    bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_12h)
     
     # Pre-compute session filter (08-20 UTC)
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate TRIX(12) on 12h timeframe
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then % change
-    ema1 = pd.Series(close).ewm(span=12, min_periods=12, adjust=False).mean()
-    ema2 = ema1.ewm(span=12, min_periods=12, adjust=False).mean()
-    ema3 = ema2.ewm(span=12, min_periods=12, adjust=False).mean()
-    trix = pd.Series(ema3).pct_change() * 100  # Convert to percentage
-    trix_values = trix.values
-    trix_prev = np.roll(trix_values, 1)
-    trix_prev[0] = np.nan
-    # TRIX cross above/below zero
-    trix_cross_up = (trix_values > 0) & (trix_prev <= 0)
-    trix_cross_down = (trix_values < 0) & (trix_prev >= 0)
     
     # Calculate ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan  # First value has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate 20-period volume SMA for confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 20-period Donchian channels for 4h
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
     # Track highest high since entry for trailing stop (long)
     # Track lowest low since entry for trailing stop (short)
@@ -88,22 +79,26 @@ def generate_signals(prices):
             
         # Skip if any required data is invalid
         if (np.isnan(atr[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(bullish_1d_aligned[i]) or np.isnan(bearish_1d_aligned[i]) or
-            np.isnan(trix_values[i]) or np.isnan(trix_prev[i])):
+            np.isnan(bullish_12h_aligned[i]) or np.isnan(bearish_12h_aligned[i]) or
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 12h volume > 1.3x 20-period volume SMA
+        # Volume confirmation: 4h volume > 1.3x 20-period volume SMA
         vol_confirm = volume[i] > 1.3 * volume_sma_20[i]
         
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_upper[i-1]  # Break above upper band
+        breakout_down = close[i] < donchian_lower[i-1]  # Break below lower band
+        
         if position == 0:  # Flat - look for entry
-            # Long: TRIX crosses above zero AND 1d bullish trend AND volume confirmation
-            if trix_cross_up[i] and bullish_1d_aligned[i] and vol_confirm:
+            # Long: price breaks above upper band AND 12h bullish AND volume confirmation
+            if breakout_up and bullish_12h_aligned[i] and vol_confirm:
                 position = 1
                 signals[i] = 0.25
                 highest_since_entry[i] = high[i]  # Initialize trailing stop
-            # Short: TRIX crosses below zero AND 1d bearish trend AND volume confirmation
-            elif trix_cross_down[i] and bearish_1d_aligned[i] and vol_confirm:
+            # Short: price breaks below lower band AND 12h bearish AND volume confirmation
+            elif breakout_down and bearish_12h_aligned[i] and vol_confirm:
                 position = -1
                 signals[i] = -0.25
                 lowest_since_entry[i] = low[i]  # Initialize trailing stop
@@ -120,8 +115,8 @@ def generate_signals(prices):
             # ATR trailing stop: exit if price drops 2.0*ATR below highest high since entry
             trailing_stop = highest_since_entry[i] - 2.0 * atr[i]
             
-            # Exit conditions: trailing stop hit OR opposite TRIX cross
-            exit_condition = (close[i] < trailing_stop) or trix_cross_down[i]
+            # Exit conditions: trailing stop hit OR reversion to middle band
+            exit_condition = (close[i] < trailing_stop) or (close[i] < donchian_middle[i])
             
             if exit_condition:
                 position = 0
@@ -141,8 +136,8 @@ def generate_signals(prices):
             # ATR trailing stop: exit if price rises 2.0*ATR above lowest low since entry
             trailing_stop = lowest_since_entry[i] + 2.0 * atr[i]
             
-            # Exit conditions: trailing stop hit OR opposite TRIX cross
-            exit_condition = (close[i] > trailing_stop) or trix_cross_up[i]
+            # Exit conditions: trailing stop hit OR reversion to middle band
+            exit_condition = (close[i] > trailing_stop) or (close[i] > donchian_middle[i])
             
             if exit_condition:
                 position = 0
