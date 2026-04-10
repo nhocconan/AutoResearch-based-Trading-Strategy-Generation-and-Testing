@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 12h volume confirmation and choppiness regime filter
-# - Primary: 4h price breaks above/below Camarilla H3/L3 levels from prior completed 1d candle
-# - Volume filter: 12h volume > 1.5x 20-period volume MA to ensure institutional participation
-# - Regime filter: Choppiness Index(14) < 38.2 (trending market) to avoid false breakouts in chop
-# - Exit: Price returns to Camarilla pivot point (mean reversion)
+# Hypothesis: 4h Williams %R mean reversion with 12h volume confirmation and chop regime filter
+# - Primary: 4h Williams %R(14) < -80 for long, > -20 for short (extreme oversold/overbought)
+# - Volume filter: 12h volume > 1.3x 20-period volume MA to confirm institutional interest
+# - Regime filter: Choppiness Index(14) > 61.8 (ranging market) for mean reversion to work
+# - Exit: Williams %R returns to -50 level (mean reversion)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Camarilla captures key levels, chop filter avoids whipsaws in ranging markets
+# - Works in bull/bear: Williams %R captures extremes, chop filter ensures mean reversion environment
 # - Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe
 
-name = "4h_12h_camarilla_breakout_volume_chop_v1"
+name = "4h_12h_williamsr_meanrev_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,9 +22,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
     df_12h = get_htf_data(prices, '12h')
-    if len(df_1d) < 30 or len(df_12h) < 10:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
     # Pre-compute primary timeframe data
@@ -34,24 +33,19 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Pre-compute HTF data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_12h = df_12h['volume'].values
     
-    # Calculate Camarilla pivot levels from prior completed 1d candle
-    # Camarilla: H3 = close + 1.1*(high-low)/2, L3 = close - 1.1*(high-low)/2, Pivot = (high+low+close)/3
-    high_low_range = high_1d - low_1d
-    camarilla_h3 = close_1d + (1.1 * high_low_range / 2)
-    camarilla_l3 = close_1d - (1.1 * high_low_range / 2)
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3
+    # Calculate Williams %R(14) on 4h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Align Camarilla levels to ensure we use completed 1d bars only
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    # Avoid division by zero
+    hl_range = highest_high - lowest_low
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
     
-    # Calculate 12h volume confirmation: volume > 1.5x 20-period volume MA
+    williams_r = -100 * ((highest_high - close) / hl_range)
+    
+    # Calculate 12h volume confirmation: volume > 1.3x 20-period volume MA
     volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
     
@@ -75,46 +69,45 @@ def generate_signals(prices):
     range_hl = np.where(range_hl == 0, 1e-10, range_hl)
     
     chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
-    chop_filter = chop < 38.2  # Chop < 38.2 indicates trending market
+    chop_filter = chop > 61.8  # Chop > 61.8 indicates ranging market (good for mean reversion)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(volume_ma_20_12h_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(volume_ma_20_12h_aligned[i]) or 
             np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Align 12h volume data for current bar
         volume_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)
-        vol_confirm = volume_12h_current[i] > 1.5 * volume_ma_20_12h_aligned[i]
+        vol_confirm = volume_12h_current[i] > 1.3 * volume_ma_20_12h_aligned[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla H3 + vol confirmation + chop filter
-            if (close[i] > camarilla_h3_aligned[i] and 
+            # Long entry: Williams %R < -80 (oversold) + vol confirmation + chop filter
+            if (williams_r[i] < -80 and 
                 vol_confirm and chop_filter[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Camarilla L3 + vol confirmation + chop filter
-            elif (close[i] < camarilla_l3_aligned[i] and 
+            # Short entry: Williams %R > -20 (overbought) + vol confirmation + chop filter
+            elif (williams_r[i] > -20 and 
                   vol_confirm and chop_filter[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to Camarilla pivot (mean reversion)
-            # Exit: price returns to Camarilla pivot point (mean reversion)
+        else:  # Have position - look for exit to Williams %R = -50 (mean reversion)
+            # Exit: Williams %R returns to -50 level (mean reversion)
             if position == 1:  # Long position
-                if close[i] >= camarilla_pivot_aligned[i]:
+                if williams_r[i] >= -50:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] <= camarilla_pivot_aligned[i]:
+                if williams_r[i] <= -50:
                     position = 0
                     signals[i] = 0.0
                 else:
