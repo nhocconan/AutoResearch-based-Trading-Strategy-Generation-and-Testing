@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d ATR-volume spike filter + ATR trailing stop
-# - Donchian(20) from 4h provides clear breakout structure effective in bull/bear markets
-# - 1d ATR-volume (>2.0x 20-day average) confirms institutional participation and reduces false breakouts
-# - ATR(14) trailing stop (2.5x) adapts to volatility and manages risk
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike filter
+# - Williams %R(14) identifies overbought/oversold conditions on 4h
+# - Extreme readings (%R < -80 for long, %R > -20 for short) signal mean reversion opportunities
+# - 1d volume spike (>2.0x 20-day average volume) confirms institutional participation
+# - ATR(14) trailing stop (2.0x) adapts to volatility and manages risk
 # - Discrete position sizing (0.25) minimizes fee churn
-# - Target: 20-35 trades/year (80-140 total over 4 years) to avoid fee drag
+# - Target: 25-40 trades/year (100-160 total over 4 years) to avoid fee drag
+# - Works in both bull and bear markets by fading extremes during volatility spikes
 
-name = "4h_1d_donchian_volume_v3"
+name = "4h_1d_williamsr_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,37 +26,22 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLC for ATR-volume calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d volume and its moving average
     volume_1d = df_1d['volume'].values
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    # Calculate 1d True Range
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1_1d[0] = np.nan
-    tr2_1d[0] = np.nan
-    tr3_1d[0] = np.nan
-    tr_1d = np.maximum.reduce([tr1_1d, tr2_1d, tr3_1d])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # 1d ATR volume: volume / ATR (normalizes volume by volatility)
-    atr_volume_1d = volume_1d / atr_1d
-    atr_volume_ma_20_1d = pd.Series(atr_volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align HTF indicators to LTF
-    atr_volume_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_volume_ma_20_1d)
-    
-    # Pre-compute 4h Donchian channels (20-period)
+    # Pre-compute 4h Williams %R (14-period)
     high_4h = prices['high'].values
     low_4h = prices['low'].values
     close_4h = prices['close'].values
     
-    # Donchian upper/lower (20-period high/low)
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    diff = highest_high - lowest_low
+    williams_r = np.where(diff != 0, -100 * (highest_high - close_4h) / diff, -50)
     
     # Pre-compute 4h ATR for trailing stop (14-period)
     tr1 = high_4h - low_4h
@@ -74,8 +61,9 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_volume_ma_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(williams_r[i]) or np.isnan(atr[i]) or 
+            np.isnan(volume_ma_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -84,28 +72,25 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        # Get current 1d ATR volume for filter (aligned)
-        atr_volume_1d_current = atr_volume_1d
-        atr_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_volume_1d_current)
+        # Get current 1d volume for filter (use raw volume, not ATR-normalized)
+        volume_1d_current = volume_1d
+        volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
         
-        # Volume confirmation: current 1d ATR volume > 2.0x 20-day average
-        volume_confirm = atr_volume_1d_aligned[i] > 2.0 * atr_volume_ma_aligned[i]
+        # Volume confirmation: current 1d volume > 2.0x 20-day average
+        volume_confirm = volume_1d_aligned[i] > 2.0 * volume_ma_aligned[i]
         
         close_price = close_4h[i]
-        
-        # Donchian breakout conditions
-        long_breakout = close_price > donchian_upper[i]
-        short_breakout = close_price < donchian_lower[i]
+        williams_r_current = williams_r[i]
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Long breakout AND volume confirmation
-            if long_breakout and volume_confirm:
+            # Long conditions: Williams %R oversold (< -80) AND volume confirmation
+            if williams_r_current < -80.0 and volume_confirm:
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 highest_since_entry = prices['high'].iloc[i]
                 signals[i] = 0.25
-            # Short conditions: Short breakout AND volume confirmation
-            elif short_breakout and volume_confirm:
+            # Short conditions: Williams %R overbought (> -20) AND volume confirmation
+            elif williams_r_current > -20.0 and volume_confirm:
                 position = -1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 lowest_since_entry = prices['low'].iloc[i]
@@ -116,13 +101,13 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position == 1:
                 highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-                # ATR trailing stop: exit when price drops 2.5*ATR from highest point
-                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.5 * atr[i]
+                # ATR trailing stop: exit when price drops 2.0*ATR from highest point
+                trailing_stop = prices['close'].iloc[i] < highest_since_entry - 2.0 * atr[i]
                 exit_condition = trailing_stop
             else:  # position == -1
                 lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-                # ATR trailing stop: exit when price rises 2.5*ATR from lowest point
-                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.5 * atr[i]
+                # ATR trailing stop: exit when price rises 2.0*ATR from lowest point
+                trailing_stop = prices['close'].iloc[i] > lowest_since_entry + 2.0 * atr[i]
                 exit_condition = trailing_stop
             
             if exit_condition:
