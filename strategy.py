@@ -4,13 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-# - Primary signal: 4h close breaks above/below Donchian(20) channels
+# - Primary signal: Price breaks above/below 20-period Donchian channel on 4h
 # - Trend filter: 1d EMA(50) slope confirms institutional trend direction
-# - Volume filter: 4h volume > 1.5x 20-period average for momentum validation
+# - Volume filter: 4h volume > 1.5x 20-period average to avoid breakouts on low volume
 # - Position size: 0.25 discrete level to minimize fee churn
 # - Stoploss: 2.0x ATR(14) on 4h
-# - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
-# - Works in bull/bear: Donchian captures breakouts; EMA filter avoids counter-trend trades in bear markets
+# - Works in bull/bear: Donchian captures breakouts; EMA filter avoids counter-trend trades
+# - Target: 20-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
 
 name = "4h_1d_donchian_ema_volume_v1"
 timeframe = "4h"
@@ -70,7 +70,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # Long position
-            # Exit: close breaks below Donchian lower OR stoploss hit
+            # Exit: Price breaks below Donchian lower OR stoploss hit
             if close_4h[i] < lowest_low[i] or close_4h[i] < entry_price - 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
@@ -78,7 +78,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: close breaks above Donchian upper OR stoploss hit
+            # Exit: Price breaks above Donchian upper OR stoploss hit
             if close_4h[i] > highest_high[i] or close_4h[i] > entry_price + 2.0 * atr_14[i]:
                 position = 0
                 signals[i] = 0.0
@@ -87,12 +87,12 @@ def generate_signals(prices):
         else:  # Flat
             # Look for Donchian breakout with trend and volume filters
             if vol_spike[i]:
-                # Long: close breaks above Donchian upper in uptrend
+                # Long: Price breaks above Donchian upper in uptrend
                 if close_4h[i] > highest_high[i] and ema_slope_pos_aligned[i]:
                     position = 1
                     entry_price = close_4h[i]
                     signals[i] = 0.25
-                # Short: close breaks below Donchian lower in downtrend
+                # Short: Price breaks below Donchian lower in downtrend
                 elif close_4h[i] < lowest_low[i] and ema_slope_neg_aligned[i]:
                     position = -1
                     entry_price = close_4h[i]
