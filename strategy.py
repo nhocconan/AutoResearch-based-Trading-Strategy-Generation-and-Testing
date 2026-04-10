@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla H3/L3 breakout with 1w volume spike and 1w ADX trend filter
-# - Entry: Long when price breaks above Camarilla H3 + 1w volume > 2.0x 20-period average + 1w ADX > 25
-#          Short when price breaks below Camarilla L3 + 1w volume > 2.0x 20-period average + 1w ADX > 25
-# - Exit: Close-based reversal - exit long when price < Camarilla H3 level, exit short when price > Camarilla L3 level
+# Hypothesis: 1d Williams %R mean reversion with 1w volume spike and 1w ADX trend filter
+# - Entry: Long when Williams %R < -80 (oversold) + 1w volume > 1.8x 20-period average + 1w ADX > 20
+#          Short when Williams %R > -20 (overbought) + 1w volume > 1.8x 20-period average + 1w ADX > 20
+# - Exit: Close-based reversal - exit long when Williams %R > -50, exit short when Williams %R < -50
 # - Position sizing: 0.25 (discrete levels to minimize fee churn)
-# - Uses Camarilla pivot levels from weekly data for structure, weekly volume for confirmation, weekly ADX for trend filter
+# - Uses Williams %R from daily data for mean reversion signals, weekly volume for confirmation, weekly ADX for trend filter
 # - Target: 7-25 trades/year (30-100 total over 4 years) to stay within HARD MAX: 150 total
-# - Designed for 1d timeframe with strict volume confirmation (2.0x) and stronger trend filter (ADX>25) to reduce false breakouts
-# - Weekly timeframe provides more reliable trend/volume signals for daily breakout trading
+# - Designed for 1d timeframe with strict volume confirmation (1.8x) and moderate trend filter (ADX>20) to capture reversals in trending markets
+# - Weekly timeframe provides reliable trend/volume confirmation for daily mean reversion trading
+# - Williams %R is effective in both bull and bear markets as it identifies extreme price levels
 
-name = "1d_1w_camarilla_breakout_volume_adx_v1"
+name = "1d_1w_williamsr_volume_adx_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -27,7 +28,7 @@ def generate_signals(prices):
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d OHLC
+    # Pre-compute 1d OHLC for Williams %R
     high_1d = prices['high'].values
     low_1d = prices['low'].values
     close_1d = prices['close'].values
@@ -35,24 +36,18 @@ def generate_signals(prices):
     # Pre-compute 1w volume for confirmation
     volume_1w = df_1w['volume'].values
     
-    # Pre-compute 1w OHLC for Camarilla and ADX calculation
+    # Pre-compute 1w OHLC for ADX calculation
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w Camarilla levels (based on previous week)
-    # Camarilla levels: H4, H3, H2, H1, L1, L2, L3, L4
-    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
-    # where C = close, H = high, L = low of previous period
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = close_1w[0]  # First period uses current close
-    prev_high_1w[0] = high_1w[0]
-    prev_low_1w[0] = low_1w[0]
-    
-    camarilla_h3 = prev_close_1w + (prev_high_1w - prev_low_1w) * 1.1 / 4
-    camarilla_l3 = prev_close_1w - (prev_high_1w - prev_low_1w) * 1.1 / 4
+    # Calculate 1d Williams %R (14-period)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d) * -100
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r)
     
     # Calculate 1w volume moving average (20-period)
     volume_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
@@ -83,40 +78,41 @@ def generate_signals(prices):
     adx_1w = pd.Series(dx_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # Align all HTF data to 1d timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    williams_r_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close_1d}), williams_r)  # Dummy df for alignment
     volume_ma_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_20_1w)
     adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Also need to align raw 1w volume for confirmation check
+    volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(volume_1w_aligned[i]) or 
             np.isnan(volume_ma_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d close
-        close_price = close_1d[i]
+        # Get current Williams %R value
+        wr_value = williams_r_aligned[i]
         
-        # Get current 1w volume for confirmation (need to align raw volume)
-        volume_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
-        volume_confirmation = volume_1w_aligned[i] > 2.0 * volume_ma_aligned[i]
+        # Volume confirmation: current 1w volume > 1.8x 20-period average
+        volume_confirmation = volume_1w_aligned[i] > 1.8 * volume_ma_aligned[i]
         
-        # Trend filter: 1w ADX > 25 indicates strong trending market
-        trend_filter = adx_1w_aligned[i] > 25.0
+        # Trend filter: 1w ADX > 20 indicates sufficient trending market
+        trend_filter = adx_1w_aligned[i] > 20.0
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Camarilla H3 + volume confirmation + strong trending market
-            if (close_price > camarilla_h3_aligned[i] and 
+            # Long entry: Williams %R < -80 (oversold) + volume confirmation + trend filter
+            if (wr_value < -80.0 and 
                 volume_confirmation and 
                 trend_filter):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Camarilla L3 + volume confirmation + strong trending market
-            elif (close_price < camarilla_l3_aligned[i] and 
+            # Short entry: Williams %R > -20 (overbought) + volume confirmation + trend filter
+            elif (wr_value > -20.0 and 
                   volume_confirmation and 
                   trend_filter):
                 position = -1
@@ -124,16 +120,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit long when price < Camarilla H3 level
-            # Exit short when price > Camarilla L3 level
+            # Exit long when Williams %R > -50 (recovering from oversold)
+            # Exit short when Williams %R < -50 (declining from overbought)
             if position == 1:
-                if close_price < camarilla_h3_aligned[i]:
+                if wr_value > -50.0:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1
-                if close_price > camarilla_l3_aligned[i]:
+                if wr_value < -50.0:
                     position = 0
                     signals[i] = 0.0
                 else:
