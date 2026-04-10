@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h ATR-based volume spike and 1d ADX regime filter
-# - Primary: 4h price breaking above/below 20-period Donchian channel captures strong momentum
-# - Volume filter: 12h ATR(14) > 1.5x 20-period ATR MA confirms volatility expansion (institutional participation)
-# - Regime filter: 1d ADX(14) > 25 ensures strong trending market (avoids weak trends and ranging)
-# - Exit: Price reverses back to the midpoint of the Donchian channel
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 80-160 total trades over 4 years (20-40/year) for 4h timeframe
-# - Works in bull/bear: Donchian adapts to volatility, ATR confirms strength, ADX filters weak trends
+# Hypothesis: 4h Donchian(20) breakout with 12h volume spike (close > open) and 1d ADX(20) regime filter
+# - Primary: 4h Donchian breakout captures momentum bursts
+# - Volume filter: 12h bar close > open confirms buying/selling pressure on breakout bar
+# - Regime filter: 1d ADX > 20 ensures trending market (avoids whipsaws in ranging markets)
+# - Exit: Price returns to Donchian midpoint (mean reversion within the channel)
+# - Position sizing: 0.25 discrete level to minimize fee churn
+# - Target: 100-180 total trades over 4 years (25-45/year) for 4h timeframe
+# - Works in bull/bear: Donchian adapts to volatility, volume confirms conviction, ADX filters weak trends
 
-name = "4h_12h_1d_donchian_atr_adx_v1"
+name = "4h_12h_1d_donchian_volume_adx_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,32 +32,23 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values
     
     # Pre-compute HTF data
     close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_1d = df_1d['close'].values
+    open_12h = df_12h['open'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate 4h Donchian channel (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (highest_high + lowest_low) / 2.0
     
-    # Calculate 12h ATR(14) for volatility-based volume filter
-    high_diff_12h = high_12h - np.roll(high_12h, 1)
-    low_diff_12h = np.roll(low_12h, 1) - low_12h
-    close_diff_12h = np.roll(close_12h, 1) - close_12h
-    high_diff_12h[0] = 0
-    low_diff_12h[0] = 0
-    close_diff_12h[0] = 0
-    
-    tr_12h = np.maximum(high_diff_12h, np.maximum(low_diff_12h, np.abs(close_diff_12h)))
-    atr_14_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_ma_20_12h = pd.Series(atr_14_12h).rolling(window=20, min_periods=20).mean().values
-    atr_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ma_20_12h)
+    # Calculate 12h volume bull/bear: close > open = bullish volume
+    volume_bull_12h = close_12h > open_12h
+    volume_bull_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_bull_12h.astype(float))
     
     # Calculate 1d ADX(14) for regime filter
     high_diff_1d = high_1d - np.roll(high_1d, 1)
@@ -89,35 +80,32 @@ def generate_signals(prices):
     adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Align HTF indicators to 4h timeframe
-    atr_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ma_20_12h)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr_ma_20_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
+            np.isnan(volume_bull_12h_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current 12h ATR(14) > 1.5x 20-period ATR MA (volatility expansion)
-        atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-        vol_expansion = atr_14_12h_aligned[i] > 1.5 * atr_ma_20_12h_aligned[i]
+        # Volume filter: 12h bar must show conviction (close > open for long, close < open for short)
+        vol_bull = volume_bull_12h_aligned[i] > 0.5  # True if bullish volume
+        vol_bear = volume_bull_12h_aligned[i] < 0.5  # True if bearish volume
         
-        # Regime filter: ADX > 25 to ensure strong trending conditions
-        strong_trend = adx_1d_aligned[i] > 25
+        # Regime filter: ADX > 20 to ensure trending conditions
+        strong_trend = adx_1d_aligned[i] > 20
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: price breaks above Donchian upper band + vol expansion + strong trend
+            # Long entry: price breaks above Donchian upper band + bullish volume + strong trend
             if (close[i] > highest_high[i] and 
-                vol_expansion and strong_trend):
+                vol_bull and strong_trend):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: price breaks below Donchian lower band + vol expansion + strong trend
+            # Short entry: price breaks below Donchian lower band + bearish volume + strong trend
             elif (close[i] < lowest_low[i] and 
-                  vol_expansion and strong_trend):
+                  vol_bear and strong_trend):
                 position = -1
                 signals[i] = -0.25
             else:
