@@ -3,47 +3,84 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power with 1d trend filter and volume confirmation
-# - Bull Power = High - EMA13(1d), Bear Power = EMA13(1d) - Low
-# - Long when Bull Power > 0 AND 1d EMA50 rising AND volume > 1.5x 20-bar avg
-# - Short when Bear Power > 0 AND 1d EMA50 falling AND volume > 1.5x 20-bar avg
-# - Exit when opposite power > 0 (reversal signal)
-# - Uses 1d EMA50 for trend filter to avoid counter-trend trades
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
+# - Williams Alligator: Jaw (13-period SMMA, 8-bar offset), Teeth (8-period SMMA, 5-bar offset), Lips (5-period SMMA, 3-bar offset)
+# - Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA200 AND volume > 1.5x 20-bar avg
+# - Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA200 AND volume > 1.5x 20-bar avg
+# - Exit when Alligator lines converge (|Lips - Jaw| < 0.1 * ATR(14)) indicating loss of momentum
+# - Uses 1d EMA200 for higher timeframe trend filter to avoid counter-trend trades
 # - Discrete position sizing (0.25) to minimize fee churn
-# - Target: 12-25 trades/year on 6h timeframe (50-100 total over 4 years)
-# - Elder Ray measures bull/bear power relative to trend; works in both bull and bear markets
+# - Target: 12-30 trades/year on 12h timeframe (50-120 total over 4 years)
 
-name = "6h_1d_elder_ray_power_v2"
-timeframe = "6h"
+name = "12h_1d_alligator_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Pre-compute 1d EMA13 for Elder Ray Power calculation
+    # Pre-compute 1d EMA(200) for trend filter
     close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate Elder Ray Power: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    bull_power = high_1d - ema13_1d
-    bear_power = ema13_1d - low_1d
+    # Pre-compute Williams Alligator on 12h data
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 100:
+        return np.zeros(n)
     
-    # Align HTF Elder Ray Power to LTF
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    median_12h = (df_12h['high'] + df_12h['low']) / 2
+    close_12h = df_12h['close'].values
+    median_12h_vals = median_12h.values
     
-    # Pre-compute 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # SMMA (Smoothed Moving Average) calculation
+    def smma(data, period):
+        if len(data) < period:
+            return np.full(len(data), np.nan)
+        result = np.full(len(data), np.nan)
+        sma = np.mean(data[:period])
+        result[period-1] = sma
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
+    jaw_raw = smma(median_12h_vals, 13)
+    teeth_raw = smma(median_12h_vals, 8)
+    lips_raw = smma(median_12h_vals, 5)
+    
+    # Apply offsets: Jaw +8, Teeth +5, Lips +3
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
+    
+    # Invalidate the rolled values that don't have enough data
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Align Alligator lines to 12h timeframe (no additional delay needed for SMMA)
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # Pre-compute ATR(14) for exit condition
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Pre-compute volume confirmation: > 1.5x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
@@ -52,10 +89,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(volume_20_avg[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -65,32 +103,28 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long when Bull Power > 0 AND 1d uptrend with volume spike
-            if (bull_power_aligned[i] > 0 and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[max(i-1, 0)] and  # 1d EMA50 rising
-                vol_spike.iloc[i]):
+        if position == 0:  # Flat - look for new Alligator alignment entries
+            # Bullish alignment: Lips > Teeth > Jaw
+            bullish = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+            # Bearish alignment: Lips < Teeth < Jaw
+            bearish = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+            
+            # Long when bullish alignment AND price > 1d EMA200 AND volume spike
+            if bullish and (prices['close'].iloc[i] > ema200_1d_aligned[i]) and vol_spike.iloc[i]:
                 position = 1
                 signals[i] = 0.25
-            # Short when Bear Power > 0 AND 1d downtrend with volume spike
-            elif (bear_power_aligned[i] > 0 and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[max(i-1, 0)] and  # 1d EMA50 falling
-                  vol_spike.iloc[i]):
+            # Short when bearish alignment AND price < 1d EMA200 AND volume spike
+            elif bearish and (prices['close'].iloc[i] < ema200_1d_aligned[i]) and vol_spike.iloc[i]:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit on power reversal
-            # Exit when opposite power becomes positive (reversal signal)
-            exit_signal = False
-            if position == 1:  # Long position
-                if bear_power_aligned[i] > 0:  # Bear power turned positive
-                    exit_signal = True
-            elif position == -1:  # Short position
-                if bull_power_aligned[i] > 0:  # Bull power turned positive
-                    exit_signal = True
+        else:  # Have position - look for exit when Alligator converges
+            # Exit when Alligator lines converge (loss of momentum)
+            # Convergence: |Lips - Jaw| < 0.1 * ATR(14)
+            convergence = np.abs(lips_aligned[i] - jaw_aligned[i]) < (0.1 * atr[i])
             
-            if exit_signal:
+            if convergence:
                 position = 0
                 signals[i] = 0.0
             else:
