@@ -5,12 +5,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Camarilla Pivot Breakout with 1d volume spike and ATR regime filter
 # - Primary: 4h timeframe for optimal trade frequency (target: 75-200 trades over 4 years)
-# - HTF: 1d for volatility regime (ATR percentile) and volume confirmation
+# - HTF: 1d for volatility (ATR percentile) and volume confirmation
 # - Long: Price breaks above H3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
 # - Short: Price breaks below L3 Camarilla pivot + 1d ATR > 40th percentile + volume > 1.3x 20-period MA
-# - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4 level
-# - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Works in bull/bear: Camarilla pivots capture breakouts in trends and mean reversion in ranges
+# - Exit: Price reverts to Camarilla Pivot Point (mean reversion) or breaks H4/L4
+# - Position sizing: 0.25 (discrete level)
+# - Works in bull/bear: Camarilla pivots capture mean reversion in ranging markets (2025) and breakouts in trending markets
 
 name = "4h_1d_camarilla_pivot_v1"
 timeframe = "4h"
