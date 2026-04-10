@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R mean reversion with 1d volume spike and chop regime filter
-# - Long: Williams %R(14) < -80 (oversold) + 1d volume > 1.8x 20-period MA + 1d chop > 61.8 (range regime)
-# - Short: Williams %R(14) > -20 (overbought) + 1d volume > 1.8x 20-period MA + 1d chop > 61.8
-# - Exit: Williams %R returns to -50 level OR chop < 61.8 (trending regime)
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and chop regime filter
+# - Long: Price breaks above Donchian upper band (20) + 1d volume > 2.0x 20-period MA + 1d chop < 61.8 (trending regime)
+# - Short: Price breaks below Donchian lower band (20) + 1d volume > 2.0x 20-period MA + 1d chop < 61.8
+# - Exit: Price returns to midpoint of Donchian channel OR chop > 61.8 (range regime)
 # - Position sizing: 0.25 discrete level
-# - Works in bull/bear: mean reversion in ranges, volume confirms participation, chop filter avoids false signals in trends
+# - Targets ~20-50 trades/year on 4h timeframe. Uses Donchian structure for breakouts,
+#   volume spike confirms institutional participation, chop filter avoids whipsaws in ranging markets.
+#   Works in bull/bear: breakouts capture strong moves, chop filter adapts to regime.
 
-name = "12h_1d_williamsr_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,11 +41,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate 12h Williams %R (14-period)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Calculate Donchian Channel (20-period) on 4h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Calculate 1d volume MA(20) for spike detection
     volume_ma_20_1d = pd.Series(volume_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -76,49 +77,50 @@ def generate_signals(prices):
     chop_ma_10_1d = pd.Series(chop_1d).ewm(span=10, min_periods=10, adjust=False).mean().values
     chop_ma_10_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_ma_10_1d)
     
-    # Align 1d volume data
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Calculate 4h volume MA(20) for entry confirmation
+    volume_ma_20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or 
-            np.isnan(chop_ma_10_1d_aligned[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
+            np.isnan(chop_ma_10_1d_aligned[i]) or np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 12h volume > 20-period MA
-        volume_ma_20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-        vol_confirm_12h = volume[i] > volume_ma_20[i]
+        # Volume confirmation: current 4h volume > 20-period MA
+        vol_confirm_4h = volume[i] > volume_ma_20[i]
         
-        # 1d volume spike: current volume > 1.8x 20-period MA
-        vol_spike_1d = volume_1d_aligned[i] > 1.8 * volume_ma_20_1d_aligned[i]
+        # 1d volume spike: current volume > 2.0x 20-period MA
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
+        vol_spike_1d = vol_1d_current[i] > 2.0 * volume_ma_20_1d_aligned[i]
         
-        # Chop regime: CHOP > 61.8 = range regime (favor mean reversion)
-        chop_regime = chop_ma_10_1d_aligned[i] > 61.8
+        # Chop regime: CHOP < 61.8 = trending regime (favor breakouts)
+        chop_regime = chop_ma_10_1d_aligned[i] < 61.8
         
-        if position == 0:  # Flat - look for Williams %R extremes
-            # Long entry: Williams %R < -80 (oversold) + vol confirm + vol spike + chop regime
-            if (williams_r[i] < -80 and vol_confirm_12h and 
+        if position == 0:  # Flat - look for Donchian breakouts
+            # Long entry: Price breaks above upper band + vol confirm + vol spike + chop regime
+            if (close[i] > highest_high[i] and vol_confirm_4h and 
                 vol_spike_1d and chop_regime):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: Williams %R > -20 (overbought) + vol confirm + vol spike + chop regime
-            elif (williams_r[i] > -20 and vol_confirm_12h and 
+            # Short entry: Price breaks below lower band + vol confirm + vol spike + chop regime
+            elif (close[i] < lowest_low[i] and vol_confirm_4h and 
                   vol_spike_1d and chop_regime):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Williams %R returns to -50 level OR chop < 61.8 (trending regime)
+            # Exit: Price returns to midpoint OR chop > 61.8 (range regime)
             if position == 1:  # Long position
-                if williams_r[i] >= -50 or chop_ma_10_1d_aligned[i] < 61.8:
+                if close[i] <= donchian_mid[i] or chop_ma_10_1d_aligned[i] >= 61.8:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if williams_r[i] <= -50 or chop_ma_10_1d_aligned[i] < 61.8:
+                if close[i] >= donchian_mid[i] or chop_ma_10_1d_aligned[i] >= 61.8:
                     position = 0
                     signals[i] = 0.0
                 else:
