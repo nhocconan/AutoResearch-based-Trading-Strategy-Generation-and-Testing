@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and 1d chop regime filter
-# - Long when price breaks above Camarilla H3 level + volume > 2.0x 20-period 1d volume SMA + CHOP(14) < 40 (trending)
-# - Short when price breaks below Camarilla L3 level + volume > 2.0x 20-period 1d volume SMA + CHOP(14) < 40 (trending)
-# - Exit: price returns to Camarilla Pivot point (mean reversion to equilibrium)
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR volume spike filter and 1d ADX trend regime
+# - Long when price breaks above 20-period 4h Donchian high + volume > 1.5x 20-period 1d ATR-scaled volume + ADX(14) > 25
+# - Short when price breaks below 20-period 4h Donchian low + volume > 1.5x 20-period 1d ATR-scaled volume + ADX(14) > 25
+# - Exit: price returns to 20-period 4h Donchian midpoint (mean reversion to equilibrium)
 # - Position sizing: 0.25 discrete level
-# - Camarilla levels identify intraday support/resistance from prior day
-# - Volume conviction filters breakouts, chop regime avoids false signals in ranging markets
-# - Works in bull/bear: breakouts in both directions, chop filter ensures trending environment
+# - Donchian channels identify volatility-based support/resistance
+# - ATR-scaled volume confirmation ensures breakouts have conviction
+# - ADX > 25 ensures trending environment to avoid false breakouts in ranging markets
+# - Works in bull/bear: breakouts in both directions, ADX filter ensures trending conditions
 
-name = "4h_1d_camarilla_volume_chop_v2"
+name = "4h_1d_donchian_atr_volume_adx_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,85 +36,88 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Calculate Camarilla pivot levels from prior 1d bar
-    # Camarilla: based on prior day's high, low, close
-    h1 = df_1d['high'].values
-    l1 = df_1d['low'].values
-    c1 = df_1d['close'].values
+    # Calculate 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Prior day's values (shifted by 1 to avoid look-ahead)
-    high_prev = np.roll(h1, 1)
-    low_prev = np.roll(l1, 1)
-    close_prev = np.roll(c1, 1)
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
+    # Calculate 1d ATR (14-period) for volume scaling
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla calculations
-    range_prev = high_prev - low_prev
-    camarilla_pivot = (high_prev + low_prev + close_prev) / 3.0
-    camarilla_h3 = camarilla_pivot + (range_prev * 1.1 / 4.0)
-    camarilla_l3 = camarilla_pivot - (range_prev * 1.1 / 4.0)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar TR
     
-    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1d volume SMA for confirmation (20-period)
+    # Calculate 1d ATR-scaled volume (volume / ATR) and its 20-period SMA
     volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    volume_atr_ratio_1d = volume_1d / atr_1d
+    volume_atr_sma_20_1d = pd.Series(volume_atr_ratio_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Choppiness Index (CHOP) on 1d timeframe
-    # CHOP = 100 * log10(sum(TR over n) / (n * (max_high - min_low))) / log10(n)
-    tr_1d = np.maximum(h1 - l1, np.maximum(np.abs(h1 - np.roll(c1, 1)), np.abs(l1 - np.roll(c1, 1))))
-    tr_1d[0] = h1[0] - l1[0]  # first bar TR
+    # Calculate 1d ADX (14-period) for trend regime filter
+    # +DM and -DM calculation
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # True Range sum over 14 periods
-    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Max high and min low over 14 periods
-    max_high_14 = pd.Series(h1).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(l1).rolling(window=14, min_periods=14).min().values
+    # Smoothed +DM, -DM, and TR
+    tr_atr = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # Choppiness Index formula
-    chop_denominator = 14 * (max_high_14 - min_low_14)
-    chop_ratio = np.where(chop_denominator > 0, tr_sum_14 / chop_denominator, 0)
-    chop_1d = 100 * np.log10(chop_ratio) / np.log10(14)
-    chop_1d = np.where((chop_denominator > 0) & (chop_ratio > 0), chop_1d, 50)  # default to 50 when invalid
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / tr_atr
+    minus_di = 100 * minus_dm_smooth / tr_atr
     
-    # Align CHOP to 4h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align all HTF indicators to 4h timeframe (completed 1d bar only)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    volume_atr_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_atr_sma_20_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(volume_atr_sma_20_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Get current 1d volume for confirmation (aligned to 4h)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d ATR-scaled volume > 1.5x its 20-period SMA
+        vol_atr_ratio_current = align_htf_to_ltf(prices, df_1d, volume_atr_ratio_1d)
+        vol_confirm = vol_atr_ratio_current[i] > 1.5 * volume_atr_sma_20_1d_aligned[i]
         
-        # Regime filter: CHOP < 40 indicates trending market (not choppy/ranging)
-        regime_filter = chop_1d_aligned[i] < 40
+        # Regime filter: ADX > 25 indicates trending market
+        regime_filter = adx_1d_aligned[i] > 25
         
-        # Camarilla breakout entry conditions
-        # Long: price breaks above H3 + volume confirmation + trending regime
-        # Short: price breaks below L3 + volume confirmation + trending regime
-        long_entry = (close[i] > camarilla_h3_aligned[i] and 
+        # Donchian breakout entry conditions
+        # Long: price breaks above Donchian high + volume confirmation + trending regime
+        # Short: price breaks below Donchian low + volume confirmation + trending regime
+        long_entry = (close[i] > donchian_high_aligned[i] and 
                      vol_confirm and 
                      regime_filter)
-        short_entry = (close[i] < camarilla_l3_aligned[i] and 
+        short_entry = (close[i] < donchian_low_aligned[i] and 
                       vol_confirm and 
                       regime_filter)
         
-        # Exit conditions: price returns to Camarilla Pivot point (mean reversion)
-        exit_long = close[i] < camarilla_pivot_aligned[i]
-        exit_short = close[i] > camarilla_pivot_aligned[i]
+        # Exit conditions: price returns to Donchian midpoint (mean reversion)
+        exit_long = close[i] < donchian_mid_aligned[i]
+        exit_short = close[i] > donchian_mid_aligned[i]
         
         if position == 0:  # Flat - look for entry
             if long_entry:
