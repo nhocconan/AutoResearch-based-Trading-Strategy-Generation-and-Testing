@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and ATR stoploss
-# - Primary timeframe: 12h for lower trade frequency (target 12-37 trades/year)
-# - Entry: Price breaks above/below 20-period Donchian channel with volume spike
-# - HTF filter: 1d ADX > 25 to ensure daily trend alignment
-# - Exit: ATR-based trailing stop (3*ATR) or opposite Donchian break
-# - Position sizing: 0.25 discrete to minimize fee churn
-# - Works in bull/bear markets: ADX filter avoids chop, Donchian captures breakouts
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX filter and volume confirmation
+# - Donchian(20) from 4h: breakout above upper channel = long, below lower channel = short
+# - 1d ADX(14) > 25 to ensure daily trend alignment and avoid choppy markets
+# - Volume confirmation: current 4h volume > 1.8x 20-period average to confirm institutional interest
+# - Designed for 4h timeframe: targets 19-50 trades/year (75-200 total over 4 years) to avoid fee drag
+# - Works in bull/bear markets: daily ADX filter ensures we trade with higher timeframe trend
+# - Uses discrete position sizing (0.25) to minimize fee churn
 
-name = "12h_1d_donchian_adx_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -59,79 +59,57 @@ def generate_signals(prices):
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 12h Donchian channels (20-period)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
+    # Pre-compute 4h Donchian channels (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
     
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Donchian upper and lower channels
+    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 12h ATR(14) for stoploss
-    tr_12h1 = high_12h - low_12h
-    tr_12h2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr_12h3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr_12h = np.maximum(tr_12h1, np.maximum(tr_12h2, tr_12h3))
-    tr_12h[0] = tr_12h1[0]
-    atr_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Pre-compute 12h volume confirmation
-    volume_12h = prices['volume'].values
-    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_12h > (1.5 * avg_volume_20)
+    # Pre-compute 4h volume confirmation
+    volume_4h = prices['volume'].values
+    avg_volume_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_4h > (1.8 * avg_volume_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(atr_12h[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_spike[i])):
             signals[i] = 0.0
             continue
         
-        close_price = prices['close'].iloc[i]
-        
         if position == 1:  # Long position
-            # Update highest high since entry
-            highest_since_entry = max(highest_since_entry, prices['high'].iloc[i])
-            # Exit: ATR trailing stop or price breaks below Donchian low
-            if close_price < highest_since_entry - 3.0 * atr_12h[i] or close_price < donchian_low[i]:
+            # Exit: price closes below Donchian lower (breakdown) or upper channel (take profit)
+            if prices['close'].iloc[i] < donchian_lower[i]:
                 position = 0
-                highest_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Update lowest low since entry
-            lowest_since_entry = min(lowest_since_entry, prices['low'].iloc[i])
-            # Exit: ATR trailing stop or price breaks above Donchian high
-            if close_price > lowest_since_entry + 3.0 * atr_12h[i] or close_price > donchian_high[i]:
+            # Exit: price closes above Donchian upper (breakout) or lower channel (take profit)
+            if prices['close'].iloc[i] > donchian_upper[i]:
                 position = 0
-                lowest_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
             # Look for Donchian breakout with trend and volume filters
             if vol_spike[i] and adx_aligned[i] > 25:
-                # Breakout long: price closes above Donchian high
-                if close_price > donchian_high[i]:
+                # Breakout long: price closes above Donchian upper
+                if prices['close'].iloc[i] > donchian_upper[i]:
                     position = 1
-                    entry_price = close_price
-                    highest_since_entry = prices['high'].iloc[i]
-                    lowest_since_entry = prices['low'].iloc[i]
+                    entry_price = prices['close'].iloc[i]
                     signals[i] = 0.25
-                # Breakout short: price closes below Donchian low
-                elif close_price < donchian_low[i]:
+                # Breakout short: price closes below Donchian lower
+                elif prices['close'].iloc[i] < donchian_lower[i]:
                     position = -1
-                    entry_price = close_price
-                    highest_since_entry = prices['high'].iloc[i]
-                    lowest_since_entry = prices['low'].iloc[i]
+                    entry_price = prices['close'].iloc[i]
                     signals[i] = -0.25
     
     return signals
