@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with RSI mean reversion and chop regime filter
-# - Uses 1d timeframe to minimize trade frequency and fee drag
-# - KAMA identifies adaptive trend direction (long when price > KAMA, short when price < KAMA)
-# - RSI(14) provides mean reversion entries within the trend (long when RSI < 30, short when RSI > 70)
-# - Choppiness Index (CHOP) filter avoids whipsaws in ranging markets (only trade when CHOP < 50 = trending)
-# - Weekly HTF trend filter ensures alignment with major trend (only trade in direction of weekly EMA20)
-# - Targets 7-25 trades/year (30-100 total over 4 years) to avoid fee drag
-# - Works in both bull and bear markets: trend filter captures major moves, RSI provides mean reversion entries within trend
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and trend filter
+# - Long when price breaks above Camarilla H3 level with volume > 1.3x average AND daily close > daily EMA50
+# - Short when price breaks below Camarilla L3 level with volume > 1.3x average AND daily close < daily EMA50
+# - Exit when price retreats to Camarilla H4/L4 levels or volume drops below average
+# - Daily trend filter ensures alignment with major trend across market cycles
+# - Volume confirmation prevents false breakouts
+# - Targets 12-37 trades/year (50-150 total over 4 years) to avoid fee drag on 12h timeframe
+# - Camarilla pivots work well in ranging markets; combined with daily trend/volume filters for breakouts
+# - Uses proper MTF data loading to avoid look-ahead and excessive I/O
 
-name = "1d_kama_rsi_chop_trend_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,103 +23,38 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Get the 1d arrays
+    h_1d = df_1d['high'].values
+    l_1d = df_1d['low'].values
+    c_1d = df_1d['close'].values
     
-    # Pre-compute 1d KAMA(14, 2, 30) for trend direction
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # Align them to 12h timeframe (this gives us the values for each 12h bar)
+    h_1d_aligned = align_htf_to_ltf(prices, df_1d, h_1d)
+    l_1d_aligned = align_htf_to_ltf(prices, df_1d, l_1d)
+    c_1d_aligned = align_htf_to_ltf(prices, df_1d, c_1d)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=1))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(change) > 0 else np.array([0.0])
-    # Proper ER calculation for each point
-    er = np.zeros_like(close)
-    for i in range(1, len(close)):
-        if i >= 1:
-            price_change = np.abs(close[i] - close[i-14]) if i >= 14 else np.abs(close[i] - close[0])
-            sum_abs_changes = np.sum(np.abs(np.diff(close[max(0, i-13):i+1]))) if i >= 1 else 0.0
-            er[i] = price_change / (sum_abs_changes + 1e-10)
+    # Pre-compute 1d EMA(50) for trend filter
+    ema50_1d = pd.Series(c_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Smoothing constants
-    fastest = 2.0 / (2 + 1)      # EMA(2)
-    slowest = 2.0 / (30 + 1)     # EMA(30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Pre-compute RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[1:14]) if len(gain) >= 14 else 0
-    avg_loss[13] = np.mean(loss[1:14]) if len(loss) >= 14 else 0
-    
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Neutral before enough data
-    
-    # Pre-compute Choppiness Index(14)
-    atr = np.zeros_like(close)
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0.0], tr])  # First TR is 0
-    
-    # ATR(14) using Wilder's smoothing
-    atr[13] = np.mean(tr[1:14]) if len(tr) >= 14 else 0
-    for i in range(14, len(close)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Calculate highest high and lowest low over 14 periods
-    hh = np.zeros_like(close)
-    ll = np.zeros_like(close)
-    for i in range(len(close)):
-        start_idx = max(0, i-13)
-        hh[i] = np.max(high[start_idx:i+1])
-        ll[i] = np.min(low[start_idx:i+1])
-    
-    # Choppiness Index
-    chop = np.zeros_like(close)
-    for i in range(13, len(close)):
-        if hh[i] > ll[i] and atr[i] > 0:
-            sum_tr = np.sum(tr[max(0, i-12):i+1])
-            chop[i] = 100 * np.log10(sum_tr / (hh[i] - ll[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # Neutral when undefined
-    chop[:13] = 50
-    
-    # Pre-compute volume average for confirmation
+    # Pre-compute volume confirmation: > 1.3x 20-period average
     volume_20_avg = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_spike = prices['volume'] > (1.3 * volume_20_avg)
+    
+    # Pre-compute volume filter: < average volume for exit
+    vol_normal = prices['volume'] < volume_20_avg
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(volume_20_avg[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_20_avg[i]) or 
+            np.isnan(h_1d_aligned[i]) or np.isnan(l_1d_aligned[i]) or np.isnan(c_1d_aligned[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -128,44 +64,78 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new entries
-            # Long entry: price > KAMA (uptrend) AND RSI < 30 (oversold) AND CHOP < 50 (trending) AND weekly uptrend
-            # Volume confirmation: > 1.2x average volume
-            if (close[i] > kama[i] and 
-                rsi[i] < 30 and 
-                chop[i] < 50 and 
-                close[i] > ema20_1w_aligned[i] and
-                prices['volume'].iloc[i] > (1.2 * volume_20_avg[i])):
-                position = 1
-                signals[i] = 0.25
-            # Short entry: price < KAMA (downtrend) AND RSI > 70 (overbought) AND CHOP < 50 (trending) AND weekly downtrend
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 70 and 
-                  chop[i] < 50 and 
-                  close[i] < ema20_1w_aligned[i] and
-                  prices['volume'].iloc[i] > (1.2 * volume_20_avg[i])):
-                position = -1
-                signals[i] = -0.25
-        else:  # Have position - look for exit
-            # Exit conditions:
-            # 1. RSI returns to neutral territory (40-60)
-            # 2. Price crosses KAMA (trend change)
-            # 3. Chop > 60 (choppy/ranging market)
-            if position == 1:  # Long position
-                if (rsi[i] > 40 and rsi[i] < 60) or \
-                   (close[i] < kama[i]) or \
-                   (chop[i] > 60):
-                    position = 0
-                    signals[i] = 0.0
+        # Get previous completed 1d bar values (we need to shift by 1 to avoid look-ahead)
+        # For 12h timeframe, there are 2 bars per 1d bar
+        # So we need to look back 2 positions in the aligned array to get previous day's values
+        
+        if i >= 2:  # Need at least 2 12h bars to get previous day's data
+            # Get index of previous completed 1d bar
+            prev_1d_idx = i - 2
+            
+            if prev_1d_idx >= 0 and not (np.isnan(h_1d_aligned[prev_1d_idx]) or 
+                                        np.isnan(l_1d_aligned[prev_1d_idx]) or 
+                                        np.isnan(c_1d_aligned[prev_1d_idx])):
+                ph = h_1d_aligned[prev_1d_idx]  # Previous day's high
+                pl = l_1d_aligned[prev_1d_idx]  # Previous day's low
+                pc = c_1d_aligned[prev_1d_idx]  # Previous day's close
+                
+                # Calculate Camarilla levels
+                range_val = ph - pl
+                if range_val > 0:
+                    camarilla_h3 = pc + (range_val * 1.1 / 4)
+                    camarilla_l3 = pc - (range_val * 1.1 / 4)
+                    camarilla_h4 = pc + (range_val * 1.1 / 2)
+                    camarilla_l4 = pc - (range_val * 1.1 / 2)
+                    
+                    if position == 0:  # Flat - look for new breakout entries
+                        # Long breakout: price > Camarilla H3 with volume spike AND daily uptrend
+                        if (prices['close'].iloc[i] > camarilla_h3 and 
+                            vol_spike.iloc[i] and 
+                            prices['close'].iloc[i] > ema50_1d_aligned[i]):
+                            position = 1
+                            signals[i] = 0.25
+                        # Short breakdown: price < Camarilla L3 with volume spike AND daily downtrend
+                        elif (prices['close'].iloc[i] < camarilla_l3 and 
+                              vol_spike.iloc[i] and 
+                              prices['close'].iloc[i] < ema50_1d_aligned[i]):
+                            position = -1
+                            signals[i] = -0.25
+                    else:  # Have position - look for exit
+                        # Exit conditions:
+                        # 1. Price retreats to Camarilla H4/L4 levels
+                        # 2. Volume drops below average (loss of momentum)
+                        if position == 1:  # Long position
+                            if (prices['close'].iloc[i] < camarilla_h4 or 
+                                vol_normal.iloc[i]):
+                                position = 0
+                                signals[i] = 0.0
+                            else:
+                                signals[i] = 0.25  # Hold long
+                        elif position == -1:  # Short position
+                            if (prices['close'].iloc[i] > camarilla_l4 or 
+                                vol_normal.iloc[i]):
+                                position = 0
+                                signals[i] = 0.0
+                            else:
+                                signals[i] = -0.25  # Hold short
                 else:
-                    signals[i] = 0.25  # Hold long
-            elif position == -1:  # Short position
-                if (rsi[i] > 40 and rsi[i] < 60) or \
-                   (close[i] > kama[i]) or \
-                   (chop[i] > 60):
-                    position = 0
+                    # Hold current position
+                    if position == 0:
+                        signals[i] = 0.0
+                    elif position == 1:
+                        signals[i] = 0.25
+                    else:
+                        signals[i] = -0.25
+            else:
+                # Hold current position
+                if position == 0:
                     signals[i] = 0.0
+                elif position == 1:
+                    signals[i] = 0.25
                 else:
-                    signals[i] = -0.25  # Hold short
+                    signals[i] = -0.25
+        else:
+            # Not enough data yet, hold flat
+            signals[i] = 0.0
     
     return signals
