@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with 1w Williams %R mean reversion and volume confirmation
-# - Long when 1w Williams %R < -80 (oversold) AND 1d KAMA rising (bullish trend) AND 1d volume > 1.5x 20-bar avg
-# - Short when 1w Williams %R > -20 (overbought) AND 1d KAMA falling (bearish trend) AND 1d volume > 1.5x 20-bar avg
-# - Exit when 1w Williams %R returns to -50 (mean reversion to equilibrium)
+# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 (1d) AND 12h EMA(50) > EMA(200) (bullish trend) AND 12h volume > 1.5x 20-bar avg
+# - Short when price breaks below Camarilla L3 (1d) AND 12h EMA(50) < EMA(200) (bearish trend) AND 12h volume > 1.5x 20-bar avg
+# - Exit when price returns to Camarilla pivot point (mean reversion to equilibrium)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - 1w Williams %R captures weekly exhaustion; 1d KAMA ensures alignment with daily trend
+# - Camarilla pivots identify key intraday support/resistance levels; 12h EMA filter ensures alignment with intermediate trend
 # - Volume confirmation avoids low-liquidity false signals
-# - Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years)
-# - Works in both bull and bear markets: mean reversion in ranges, trend filter prevents counter-trend trades
+# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
+# - Works in both bull and bear markets: breakout strategy captures trends, pivot reversion works in ranges
 
-name = "1d_1w_kama_williamsr_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,52 +23,36 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w Williams %R(14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    highest_high_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r_1w = (highest_high_1w - close_1w) / (highest_high_1w - lowest_low_1w) * -100
-    # Handle division by zero (when high == low)
-    williams_r_1w = np.where((highest_high_1w - lowest_low_1w) == 0, -50, williams_r_1w)
+    # Camarilla levels: Pivot = (H+L+C)/3, Range = H-L
+    # H3 = Pivot + 1.1 * Range / 2, L3 = Pivot - 1.1 * Range / 2
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    rng = high_1d - low_1d
+    camarilla_h3 = pivot + 1.1 * rng / 2.0
+    camarilla_l3 = pivot - 1.1 * rng / 2.0
+    camarilla_pivot = pivot  # exit level
     
-    # Williams %R conditions: < -80 oversold, > -20 overbought, exit at -50
-    williams_oversold_1w = williams_r_1w < -80
-    williams_overbought_1w = williams_r_1w > -20
-    williams_exit_1w = np.abs(williams_r_1w + 50) < 2.5  # Within 2.5 of -50
+    # Align 1d Camarilla levels to 12h timeframe (with 1-bar delay for completed 1d bar)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
-    # Align 1w Williams %R to 1d timeframe
-    williams_oversold_1d = align_htf_to_ltf(prices, df_1w, williams_oversold_1w)
-    williams_overbought_1d = align_htf_to_ltf(prices, df_1w, williams_overbought_1w)
-    williams_exit_1d = align_htf_to_ltf(prices, df_1w, williams_exit_1w)
+    # Pre-compute 12h EMA trend filter: EMA(50) vs EMA(200)
+    close_12h = prices['close'].values  # using 12h close for EMA calc
+    ema_50 = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_200 = pd.Series(close_12h).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_bullish = ema_50 > ema_200
+    ema_bearish = ema_50 < ema_200
     
-    # Pre-compute 1d KAMA trend: Efficiency Ratio (ER) = |net change| / sum of absolute changes
-    close_1d = prices['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = pd.Series(change).rolling(window=10, min_periods=10).sum().values
-    net_change = np.abs(close_1d - np.roll(close_1d, 1))
-    net_change[0] = 0
-    er = np.where(volatility > 0, net_change / volatility, 0)
-    # Smoothing constants: fastest EMA(2), slowest EMA(30)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Initialize KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    # KAMA trend: rising when KAMA > KAMA(1), falling when KAMA < KAMA(1)
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
-    kama_rising[0] = False
-    kama_falling[0] = False
-    
-    # Pre-compute 1d volume confirmation: > 1.5x 20-period average
+    # Pre-compute 12h volume confirmation: > 1.5x 20-period average
     volume = prices['volume'].values
     volume_20_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * volume_20_avg)
@@ -78,9 +62,9 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_oversold_1d[i]) or np.isnan(williams_overbought_1d[i]) or
-            np.isnan(williams_exit_1d[i]) or np.isnan(kama_rising[i]) or np.isnan(kama_falling[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema_bullish[i]) or
+            np.isnan(ema_bearish[i]) or np.isnan(vol_spike[i])):
             # Hold current position or flat
             if position == 0:
                 signals[i] = 0.0
@@ -90,24 +74,26 @@ def generate_signals(prices):
                 signals[i] = -0.25
             continue
         
-        if position == 0:  # Flat - look for new mean reversion entries
-            # Long when 1w Williams %R oversold AND 1d KAMA rising AND volume spike
-            if (williams_oversold_1d[i] and 
-                kama_rising[i] and 
+        if position == 0:  # Flat - look for new breakout entries
+            # Long when price breaks above Camarilla H3 AND 12h bullish trend AND volume spike
+            if (prices['close'].iloc[i] > camarilla_h3_aligned[i] and 
+                ema_bullish[i] and 
                 vol_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short when 1w Williams %R overbought AND 1d KAMA falling AND volume spike
-            elif (williams_overbought_1d[i] and 
-                  kama_falling[i] and 
+            # Short when price breaks below Camarilla L3 AND 12h bearish trend AND volume spike
+            elif (prices['close'].iloc[i] < camarilla_l3_aligned[i] and 
+                  ema_bearish[i] and 
                   vol_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to 1w Williams %R = -50 (mean reversion)
-            # Exit when 1w Williams %R returns to equilibrium (-50)
-            exit_signal = williams_exit_1d[i]
+        else:  # Have position - look for exit to Camarilla pivot (mean reversion)
+            # Exit when price returns to Camarilla pivot point
+            long_exit = prices['close'].iloc[i] < camarilla_pivot_aligned[i]
+            short_exit = prices['close'].iloc[i] > camarilla_pivot_aligned[i]
+            exit_signal = (position == 1 and long_exit) or (position == -1 and short_exit)
             
             if exit_signal:
                 position = 0
