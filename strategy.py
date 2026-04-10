@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
-# - Long when price breaks above 20-period Donchian upper channel AND 1d ATR(14) < 1.2 * median ATR(14) of last 20 days AND volume > 1.3x 20-period average volume
-# - Short when price breaks below 20-period Donchian lower channel AND same volatility/volume conditions
-# - Exit when price crosses back inside the Donchian channel
+# Hypothesis: 6h Donchian(20) breakout with 1d ATR filter and volume confirmation
+# - Long when price breaks above 20-period Donchian upper channel AND 1d ATR(14) < median ATR(20) AND volume > 1.5x 20-period average volume
+# - Short when price breaks below 20-period Donchian lower channel AND 1d ATR(14) < median ATR(20) AND volume > 1.5x 20-period average volume
+# - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
-# - Donchian channels provide clear breakout structure with defined risk/reward
-# - ATR regime filter ensures we trade during normal/low volatility when breakouts are more likely to succeed
-# - Volume confirmation reduces false breakouts from low-liquidity spikes
+# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
+# - Donchian channels identify clear breakouts with defined risk levels
+# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# - Volume confirmation reduces false breakouts
+# - Works in both bull and bear markets by capturing volatility expansion after contraction
 
-name = "4h_1d_donchian_atr_volume_v2"
-timeframe = "4h"
+name = "6h_1d_donchian_atr_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,16 +25,16 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 4h OHLC and volume
+    # Pre-compute 6h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 4h Donchian channels (20-period)
+    # Pre-compute 6h Donchian channels (20-period)
     def rolling_max(arr, window):
         result = np.full_like(arr, np.nan, dtype=float)
         for i in range(window - 1, len(arr)):
@@ -49,9 +50,9 @@ def generate_signals(prices):
     upper_channel = rolling_max(high, 20)
     lower_channel = rolling_min(low, 20)
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Pre-compute 6h volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     # Pre-compute 1d ATR(14) for regime filter
     high_1d = df_1d['high'].values
@@ -73,12 +74,12 @@ def generate_signals(prices):
     for i in range(14, len(tr)):
         atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # ATR regime: normal/low volatility when current ATR <= 1.2 * median of last 20 ATR values
+    # ATR regime: low volatility when current ATR < median of last 20 ATR values
     atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
-    normal_vol_regime = atr_1d <= (1.2 * atr_median_20)
+    low_vol_regime = atr_1d < atr_median_20
     
-    # Align HTF indicators to 4h timeframe
-    normal_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, normal_vol_regime)
+    # Align HTF indicators to 6h timeframe
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -86,7 +87,7 @@ def generate_signals(prices):
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
         if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(normal_vol_regime_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -96,15 +97,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above upper channel AND normal volatility regime AND volume spike
+            # Long conditions: price breaks above upper channel AND low volatility regime AND volume spike
             if (close[i] > upper_channel[i] and 
-                normal_vol_regime_aligned[i] and 
+                low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below lower channel AND normal volatility regime AND volume spike
+            # Short conditions: price breaks below lower channel AND low volatility regime AND volume spike
             elif (close[i] < lower_channel[i] and 
-                  normal_vol_regime_aligned[i] and 
+                  low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
