@@ -3,24 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume confirmation
-# - Uses Ichimoku (Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou Span) on 6h
-# - Long when price > cloud AND Tenkan > Kijun (bullish TK cross) AND 1d ADX > 25
-# - Short when price < cloud AND Tenkan < Kijun (bearish TK cross) AND 1d ADX > 25
-# - Volume confirmation: current volume > 1.5x 20-period 6h volume average
-# - Exit when TK cross reverses or price enters cloud
-# - Ichimoku works in all markets: cloud acts as dynamic S/R, TK cross captures momentum
-# - 1d ADX filter ensures we only trade when higher timeframe is trending
-# - Volume confirmation prevents false breakouts in low participation
+# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation
+# - Williams %R(14) on 6h: oversold < -80, overbought > -20
+# - Long when %R crosses above -80 from below AND 1d ADX > 20 (trending or strong range) AND volume > 1.3x 20-period average
+# - Short when %R crosses below -20 from above AND 1d ADX > 20 AND volume > 1.3x 20-period average
+# - Exit when %R crosses opposite threshold (-20 for long exit, -80 for short exit)
+# - Williams %R is a momentum oscillator that identifies overbought/oversold levels
+# - 1d ADX filter ensures we only trade when higher timeframe has sufficient momentum
+# - Volume confirmation prevents false signals in low participation
 # - Target: 12-25 trades/year on 6h (50-100 total over 4 years)
 
-name = "6h_1d_ichimoku_tk_adx_volume_v1"
+name = "6h_1d_williamsr_adx_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -28,45 +27,21 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 6h Ichimoku components
+    # Pre-compute 6h Williams %R(14)
     high_6h = prices['high'].values
     low_6h = prices['low'].values
     close_6h = prices['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period_tenkan = 9
-    highest_high_9 = np.full_like(high_6h, np.nan, dtype=float)
-    lowest_low_9 = np.full_like(low_6h, np.nan, dtype=float)
-    for i in range(period_tenkan - 1, len(high_6h)):
-        highest_high_9[i] = np.max(high_6h[i - period_tenkan + 1:i + 1])
-        lowest_low_9[i] = np.min(low_6h[i - period_tenkan + 1:i + 1])
-    tenkan = (highest_high_9 + lowest_low_9) / 2
+    williams_r = np.full_like(close_6h, np.nan, dtype=float)
+    period = 14
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period_kijun = 26
-    highest_high_26 = np.full_like(high_6h, np.nan, dtype=float)
-    lowest_low_26 = np.full_like(low_6h, np.nan, dtype=float)
-    for i in range(period_kijun - 1, len(high_6h)):
-        highest_high_26[i] = np.max(high_6h[i - period_kijun + 1:i + 1])
-        lowest_low_26[i] = np.min(low_6h[i - period_kijun + 1:i + 1])
-    kijun = (highest_high_26 + lowest_low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 plotted 26 periods ahead
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 plotted 26 periods ahead
-    period_senkou_b = 52
-    highest_high_52 = np.full_like(high_6h, np.nan, dtype=float)
-    lowest_low_52 = np.full_like(low_6h, np.nan, dtype=float)
-    for i in range(period_senkou_b - 1, len(high_6h)):
-        highest_high_52[i] = np.max(high_6h[i - period_senkou_b + 1:i + 1])
-        lowest_low_52[i] = np.min(low_6h[i - period_senkou_b + 1:i + 1])
-    senkou_b = (highest_high_52 + lowest_low_52) / 2
-    
-    # Chikou Span (Lagging Span): Close plotted 26 periods behind
-    chikou = np.full_like(close_6h, np.nan, dtype=float)
-    for i in range(len(close_6h) - 26):
-        chikou[i + 26] = close_6h[i]
+    for i in range(period - 1, len(high_6h)):
+        highest_high = np.max(high_6h[i - period + 1:i + 1])
+        lowest_low = np.min(low_6h[i - period + 1:i + 1])
+        if highest_high != lowest_low:
+            williams_r[i] = (highest_high - close_6h[i]) / (highest_high - lowest_low) * -100
+        else:
+            williams_r[i] = -50  # neutral when range is zero
     
     # Pre-compute 1d ADX(14)
     high_1d = df_1d['high'].values
@@ -135,79 +110,54 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    prev_tenkan = np.full(n, np.nan)  # for TK cross detection
-    prev_kijun = np.full(n, np.nan)
+    prev_williams_r = np.full(n, np.nan)  # for crossover detection
     
-    for i in range(100, n):  # Start after warmup
-        # Store previous Tenkan and Kijun for crossover detection
+    for i in range(20, n):  # Start after warmup for volume MA
+        # Store previous Williams %R for crossover detection
         if i > 0:
-            prev_tenkan[i] = tenkan[i-1]
-            prev_kijun[i] = kijun[i-1]
+            prev_williams_r[i] = williams_r[i-1]
         else:
-            prev_tenkan[i] = np.nan
-            prev_kijun[i] = np.nan
+            prev_williams_r[i] = np.nan
         
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
-            np.isnan(senkou_b[i]) or np.isnan(chikou[i]) or np.isnan(adx_1d_aligned[i])):
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                signals[i] = 0.25
-            else:
-                signals[i] = -0.25
+        if np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]):
+            signals[i] = 0.0
             continue
         
-        # Volume spike condition (1.5x average)
+        # Volume condition: current volume > 1.3x 20-period average
         vol_series = prices['volume'].values
-        vol_ma_6h = np.full_like(vol_series, np.nan, dtype=float)
-        for j in range(19, i+1):
-            vol_ma_6h[j] = np.mean(vol_series[j-19:j+1])
-        vol_spike = not np.isnan(vol_ma_6h[i]) and vol_series[i] > 1.5 * vol_ma_6h[i]
-        
-        close_price = close_6h[i]
-        tenkan_now = tenkan[i]
-        kijun_now = kijun[i]
-        tenkan_prev = prev_tenkan[i]
-        kijun_prev = prev_kijun[i]
-        
-        # Determine cloud boundaries (Senkou Span A/B shifted forward)
-        # For current price, we need Senkou values from 26 periods ago
-        senkou_a_now = senkou_a[i-26] if i >= 26 else np.nan
-        senkou_b_now = senkou_b[i-26] if i >= 26 else np.nan
-        
-        if i >= 26 and not np.isnan(senkou_a_now) and not np.isnan(senkou_b_now):
-            cloud_top = max(senkou_a_now, senkou_b_now)
-            cloud_bottom = min(senkou_a_now, senkou_b_now)
-            price_above_cloud = close_price > cloud_top
-            price_below_cloud = close_price < cloud_bottom
-            price_in_cloud = (close_price >= cloud_bottom) and (close_price <= cloud_top)
+        if i >= 19:
+            vol_ma = np.mean(vol_series[i-19:i+1])
+            vol_condition = vol_series[i] > 1.3 * vol_ma
         else:
-            price_above_cloud = False
-            price_below_cloud = False
-            price_in_cloud = True  # conservative: treat as in cloud if not enough data
+            vol_condition = False  # not enough data for MA
         
-        # TK cross signals
-        tk_bullish_cross = (tenkan_prev <= kijun_prev) and (tenkan_now > kijun_now)
-        tk_bearish_cross = (tenkan_prev >= kijun_prev) and (tenkan_now < kijun_now)
+        williams_now = williams_r[i]
+        williams_prev = prev_williams_r[i]
+        
+        # Williams %R signals
+        williams_bullish_cross = (williams_prev <= -80) and (williams_now > -80)
+        williams_bearish_cross = (williams_prev >= -20) and (williams_now < -20)
+        williams_long_exit = (williams_prev >= -20) and (williams_now < -20)  # cross below -20
+        williams_short_exit = (williams_prev <= -80) and (williams_now > -80)  # cross above -80
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price > cloud AND bullish TK cross AND 1d trending (ADX > 25) AND volume spike
-            if (price_above_cloud and tk_bullish_cross and 
-                adx_1d_aligned[i] > 25 and vol_spike):
+            # Long conditions: %R crosses above -80 AND 1d trending (ADX > 20) AND volume spike
+            if (williams_bullish_cross and 
+                adx_1d_aligned[i] > 20 and vol_condition):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price < cloud AND bearish TK cross AND 1d trending (ADX > 25) AND volume spike
-            elif (price_below_cloud and tk_bearish_cross and 
-                  adx_1d_aligned[i] > 25 and vol_spike):
+            # Short conditions: %R crosses below -20 AND 1d trending (ADX > 20) AND volume spike
+            elif (williams_bearish_cross and 
+                  adx_1d_aligned[i] > 20 and vol_condition):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: TK cross reverses OR price enters cloud
-            exit_long = (position == 1 and (tk_bearish_cross or price_in_cloud))
-            exit_short = (position == -1 and (tk_bullish_cross or price_in_cloud))
+            # Exit conditions: %R crosses opposite threshold
+            exit_long = (position == 1 and williams_long_exit)
+            exit_short = (position == -1 and williams_short_exit)
             
             if exit_long or exit_short:
                 position = 0
