@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and 1d ATR regime filter
-# - Long when price breaks above Camarilla H3 level AND volume > 2.0x 24-period average AND 1d ATR(14) < 24-period median ATR (low volatility regime)
-# - Short when price breaks below Camarilla L3 level AND volume > 2.0x 24-period average AND 1d ATR(14) < 24-period median ATR
-# - Exit when price returns to Camarilla PIVOT level (mean reversion to equilibrium)
+# Hypothesis: 4h Williams Alligator trend with volume confirmation and ATR filter
+# - Long when Alligator jaws < teeth < lips (bullish alignment) AND price > lips AND volume > 1.5x 20-period average AND 1d ATR(14) < 20-period median ATR
+# - Short when Alligator jaws > teeth > lips (bearish alignment) AND price < lips AND volume > 1.5x 20-period average AND 1d ATR(14) < 20-period median ATR
+# - Exit when Alligator alignment breaks (jaws-teeth-lips not in proper order) OR price crosses back below/above teeth
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years)
-# - Camarilla levels provide institutional support/resistance that work in both trending and ranging markets
-# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# - Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years)
+# - Williams Alligator identifies trending markets with smoothed moving averages
 # - Volume confirmation reduces false breakouts
+# - ATR filter ensures we trade during low volatility periods when trends are more reliable
 
-name = "12h_1d_camarilla_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_alligator_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,15 +27,15 @@ def generate_signals(prices):
     if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Pre-compute 12h OHLC and volume
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute 12h volume confirmation (24-period average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Pre-compute 4h volume confirmation (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     # Pre-compute 1d ATR(14) for regime filter
     high_1d = df_1d['high'].values
@@ -57,36 +57,42 @@ def generate_signals(prices):
     for i in range(14, len(tr)):
         atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # ATR regime: low volatility when current ATR < median of last 24 ATR values
-    atr_median_24 = pd.Series(atr_1d).rolling(window=24, min_periods=24).median().values
-    low_vol_regime = atr_1d < atr_median_24
+    # ATR regime: low volatility when current ATR < median of last 20 ATR values
+    atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
+    low_vol_regime = atr_1d < atr_median_20
     
-    # Align HTF indicators to 12h timeframe
+    # Pre-compute 4h Williams Alligator (Smoothed Moving Averages)
+    # Alligator: Jaw (13-period SMMA, shifted 8 bars), Teeth (8-period SMMA, shifted 5 bars), Lips (5-period SMMA, shifted 3 bars)
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Shift the lines as per Alligator specification
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # Align HTF indicators to 4h timeframe
     low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
-    
-    # Pre-compute 12h Camarilla levels from previous period's OHLC
-    # Camarilla levels use previous period's range
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # First bar uses current values
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    camarilla_h3 = pivot + (range_hl * 1.1 / 4)
-    camarilla_l3 = pivot - (range_hl * 1.1 / 4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(pivot[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
@@ -97,24 +103,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above Camarilla H3 AND low volatility regime AND volume spike
-            if (close[i] > camarilla_h3[i] and 
+            # Bullish Alligator alignment: Jaw < Teeth < Lips
+            bullish_alignment = jaw[i] < teeth[i] < lips[i]
+            # Bearish Alligator alignment: Jaw > Teeth > Lips
+            bearish_alignment = jaw[i] > teeth[i] > lips[i]
+            
+            # Long conditions: bullish alignment AND price > lips AND low volatility regime AND volume spike
+            if (bullish_alignment and 
+                close[i] > lips[i] and 
                 low_vol_regime_aligned[i] and 
                 volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below Camarilla L3 AND low volatility regime AND volume spike
-            elif (close[i] < camarilla_l3[i] and 
+            # Short conditions: bearish alignment AND price < lips AND low volatility regime AND volume spike
+            elif (bearish_alignment and 
+                  close[i] < lips[i] and 
                   low_vol_regime_aligned[i] and 
                   volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
-        else:  # Have position - look for exit to pivot (mean reversion)
-            # Exit when price returns to pivot level (mean reversion to equilibrium)
-            exit_long = (position == 1 and close[i] <= pivot[i])
-            exit_short = (position == -1 and close[i] >= pivot[i])
+        else:  # Have position - look for exit
+            # Exit conditions: Alligator alignment breaks OR price crosses back below/above teeth
+            bullish_alignment = jaw[i] < teeth[i] < lips[i]
+            bearish_alignment = jaw[i] > teeth[i] > lips[i]
+            
+            exit_long = (position == 1 and (not bullish_alignment or close[i] < teeth[i]))
+            exit_short = (position == -1 and (not bearish_alignment or close[i] > teeth[i]))
             
             if exit_long or exit_short:
                 position = 0
