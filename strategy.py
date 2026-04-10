@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and 1w trend filter
-# - Primary: 4h price breaking above/below Camarilla pivot levels (H3/L3) from prior 1d session
-# - HTF volume filter: 1d volume > 1.3x 20-period MA for institutional participation
+# Hypothesis: 4h Williams %R mean reversion with 1d volume spike and 1w trend filter
+# - Primary: 4h Williams %R(14) below -80 for oversold long, above -20 for overbought short
+# - HTF volume filter: 1d volume > 1.5x 20-period MA for institutional participation
 # - HTF trend filter: 1w close > 1w EMA50 for long bias, < EMA50 for short bias
-# - Entry: Long when close > H3 + volume filter + 1w uptrend; Short when close < L3 + volume filter + 1w downtrend
-# - Exit: Price retouches the pivot point (mean of H3/L3)
+# - Entry: Long when Williams %R < -80 + volume filter + 1w uptrend; Short when Williams %R > -20 + volume filter + 1w downtrend
+# - Exit: Williams %R crosses above -50 for long exit, below -50 for short exit
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
 # - Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe
-# - Works in bull/bear: Camarilla adapts to volatility, volume confirms validity, 1w trend ensures alignment with higher timeframe momentum
+# - Works in bull/bear: Williams %R captures mean reversion in ranging markets, volume confirms validity, 1w trend ensures alignment with higher timeframe momentum
 
-name = "4h_1d_1w_camarilla_volume_trend_v1"
+name = "4h_1d_1w_williamsr_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -43,28 +43,16 @@ def generate_signals(prices):
     low_1w = df_1w['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels from prior 1d session (H3, L3, pivot)
-    def calculate_camarilla(high, low, close):
-        # Typical price for pivot calculation
-        typical_price = (high + low + close) / 3.0
-        range_ = high - low
-        # Camarilla levels
-        H3 = close + (range_ * 1.1 / 4)
-        L3 = close - (range_ * 1.1 / 4)
-        pivot = (high + low + close) / 3.0
-        return H3, L3, pivot
+    # Calculate Williams %R(14) on 4h
+    def calculate_williams_r(high, low, close, lookback=14):
+        highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+        lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+        # Handle division by zero when highest_high == lowest_low
+        wr = np.where((highest_high - lowest_low) == 0, -50, wr)
+        return wr
     
-    # Calculate Camarilla on prior 1d session (shifted by 1 to avoid look-ahead)
-    H3_1d, L3_1d, pivot_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    # Shift by 1 to use only prior completed 1d session for level calculation
-    H3_1d = np.concatenate([np.full(1, np.nan), H3_1d[:-1]])
-    L3_1d = np.concatenate([np.full(1, np.nan), L3_1d[:-1]])
-    pivot_1d = np.concatenate([np.full(1, np.nan), pivot_1d[:-1]])
-    
-    # Align Camarilla levels to 4h timeframe
-    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    wr_4h = calculate_williams_r(high, low, close, 14)
     
     # Calculate 1d volume MA(20)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -83,41 +71,40 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or
-            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(wr_4h[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
             not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
+        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
         # Trend filter: 1w close > EMA50 for uptrend, < EMA50 for downtrend
         trend_up = close_1w[-1] > ema_50_1w[-1] if len(close_1w) > 0 else False
         trend_down = close_1w[-1] < ema_50_1w[-1] if len(close_1w) > 0 else False
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: close > H3 + volume confirmation + 1w uptrend
-            if (close[i] > H3_1d_aligned[i] and volume_confirm and trend_up):
+            # Long entry: Williams %R < -80 (oversold) + volume confirmation + 1w uptrend
+            if (wr_4h[i] < -80 and volume_confirm and trend_up):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: close < L3 + volume confirmation + 1w downtrend
-            elif (close[i] < L3_1d_aligned[i] and volume_confirm and trend_down):
+            # Short entry: Williams %R > -20 (overbought) + volume confirmation + 1w downtrend
+            elif (wr_4h[i] > -20 and volume_confirm and trend_down):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Price retouches the pivot point
+            # Exit: Williams %R crosses above -50 for long, below -50 for short
             if position == 1:  # Long position
-                if close[i] <= pivot_1d_aligned[i]:
+                if wr_4h[i] > -50:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] >= pivot_1d_aligned[i]:
+                if wr_4h[i] < -50:
                     position = 0
                     signals[i] = 0.0
                 else:
