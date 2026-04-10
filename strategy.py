@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d trend filter, volume confirmation, and ATR stoploss
-# - Long when price breaks above Camarilla H3 level from prior 1d in 1d uptrend (close > EMA50) with volume > 1.8x 20-bar avg
-# - Short when price breaks below Camarilla L3 level from prior 1d in 1d downtrend (close < EMA50) with volume spike
+# Hypothesis: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Camarilla H3 level in 1d uptrend (close > EMA50) with volume > 1.8x 20-bar avg
+# - Short when price breaks below Camarilla L3 level in 1d downtrend (close < EMA50) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets ~20 trades/year (80 total over 4 years) to avoid fee drag
+# - Targets ~25 trades/year (100 total over 4 years) to avoid fee drag
 # - 1d trend filter reduces false breakouts in ranging markets
-# - ATR-based stoploss to limit drawdown
-# - Camarilla levels derived from prior 1d OHLC (no look-ahead)
+# - Camarilla levels derived from previous 1d bar (H3, L3, H4, L4)
+# - Exit on opposite Camarilla level touch (L3 for long, H3 for short) or ATR stop
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,15 +41,23 @@ def generate_signals(prices):
     vol_spike_1d = volume_1d > (1.8 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Calculate Camarilla levels from prior 1d OHLC (no look-ahead)
-    # H3 = close + 1.1*(high-low)*1.1/4 = close + 1.1*(high-low)*0.275
-    # L3 = close - 1.1*(high-low)*0.275
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) * 0.275
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) * 0.275
+    # Calculate Camarilla levels from previous 1d bar
+    # H4 = close + 1.1*(high-low)*1.1/2
+    # H3 = close + 1.1*(high-low)*1.1/4
+    # L3 = close - 1.1*(high-low)*1.1/4
+    # L4 = close - 1.1*(high-low)*1.1/2
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 4
+    camarilla_h4 = close_1d + 1.1 * (high_1d - low_1d) * 1.1 / 2
+    camarilla_l4 = close_1d - 1.1 * (high_1d - low_1d) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Pre-compute ATR for stoploss (using 12h data)
+    # Pre-compute ATR for stoploss (using 4h data)
     high_low = prices['high'] - prices['low']
     high_close = np.abs(prices['high'] - prices['close'].shift(1))
     low_close = np.abs(prices['low'] - prices['close'].shift(1))
@@ -65,14 +73,15 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(atr_14[i])):
+            np.isnan(atr_14[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # ATR-based stoploss
-            if prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14[i]:
+            # Exit conditions: ATR stoploss OR price touches L3 level
+            if (prices['close'].iloc[i] < entry_price - atr_stop_multiplier * atr_14[i] or
+                prices['close'].iloc[i] <= camarilla_l3_aligned[i]):
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
@@ -80,22 +89,23 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # ATR-based stoploss
-            if prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14[i]:
+            # Exit conditions: ATR stoploss OR price touches H3 level
+            if (prices['close'].iloc[i] > entry_price + atr_stop_multiplier * atr_14[i] or
+                prices['close'].iloc[i] >= camarilla_h3_aligned[i]):
                 position = 0
                 entry_price = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Long signal: price breaks above Camarilla H3 in 1d uptrend with volume spike
+            # Long signal: price breaks above H3 level in 1d uptrend with volume spike
             if (prices['close'].iloc[i] > camarilla_h3_aligned[i] and 
                 prices['close'].iloc[i] > ema_50_1d_aligned[i] and 
                 vol_spike_1d_aligned[i]):
                 position = 1
                 entry_price = prices['open'].iloc[i+1] if i+1 < n else prices['close'].iloc[i]
                 signals[i] = 0.25
-            # Short signal: price breaks below Camarilla L3 in 1d downtrend with volume spike
+            # Short signal: price breaks below L3 level in 1d downtrend with volume spike
             elif (prices['close'].iloc[i] < camarilla_l3_aligned[i] and 
                   prices['close'].iloc[i] < ema_50_1d_aligned[i] and 
                   vol_spike_1d_aligned[i]):
