@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h ADX regime filter
-# - Long when Bull Power > 0 AND Bear Power < 0 AND 12h ADX > 25 (strong trend)
-# - Short when Bear Power < 0 AND Bull Power > 0 AND 12h ADX > 25 (strong trend)
-# - Exit when Bull Power and Bear Power converge (both near zero) OR ADX < 20 (weak trend)
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR regime filter and volume confirmation
+# - Long when price breaks above 20-period Donchian upper channel AND 1d ATR < 20-period median ATR AND volume > 1.5x 20-period average volume
+# - Short when price breaks below 20-period Donchian lower channel AND 1d ATR < 20-period median ATR AND volume > 1.5x 20-period average volume
+# - Exit when price crosses back inside the Donchian channel (between upper and lower bands)
 # - Uses discrete position sizing 0.25 to limit fee churn
-# - Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years)
-# - Elder Ray measures bull/bear power relative to EMA13, effective in trending markets
-# - ADX filter ensures we only trade when trend is strong enough to sustain moves
-# - Works in both bull (long bias) and bear (short bias) markets via ADX regime
+# - Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years)
+# - Donchian channels identify clear breakouts with defined risk levels
+# - ATR filter ensures we trade during low volatility periods when breakouts are more reliable
+# - Volume confirmation reduces false breakouts
+# - Works in both bull and bear markets by capturing volatility expansion after contraction
 
-name = "6h_12h_elder_ray_adx_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_atr_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,82 +24,59 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Pre-compute 6h OHLC
+    # Pre-compute 4h OHLC and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Pre-compute 6h EMA(13) for Elder Ray
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Pre-compute 4h Donchian channels (20-period) with min_periods
+    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Pre-compute 4h volume confirmation (20-period average) with min_periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Pre-compute 12h ADX(14) for regime filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1d ATR(14) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = 0
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First bar has no previous close
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # ATR(14) using Wilder's smoothing
-    atr_12h = np.zeros_like(tr)
-    atr_12h[13] = np.mean(tr[1:14])  # First ATR value
-    for i in range(14, len(tr)):
-        atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
+    atr_1d = np.zeros_like(tr)
+    if len(tr) >= 14:
+        atr_1d[13] = np.mean(tr[1:14])  # First ATR value
+        for i in range(14, len(tr)):
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Directional Movement
-    up_move = high_12h - np.roll(high_12h, 1)
-    down_move = np.roll(low_12h, 1) - low_12h
-    up_move[0] = 0
-    down_move[0] = 0
+    # ATR regime: low volatility when current ATR < median of last 20 ATR values
+    atr_median_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).median().values
+    low_vol_regime = atr_1d < atr_median_20
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM and ATR
-    def WilderSmooth(arr, period):
-        result = np.zeros_like(arr)
-        result[period-1] = np.mean(arr[1:period+1])
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    tr14 = WilderSmooth(tr, 14)
-    plus_dm14 = WilderSmooth(plus_dm, 14)
-    minus_dm14 = WilderSmooth(minus_dm, 14)
-    
-    # DI and ADX
-    plus_di14 = 100 * plus_dm14 / tr14
-    minus_di14 = 100 * minus_dm14 / tr14
-    dx = np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100
-    dx[~np.isfinite(dx)] = 0
-    
-    adx_12h = WilderSmooth(dx, 14)
-    
-    # Align HTF indicators to 6h timeframe
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Align HTF indicators to 4h timeframe
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(low_vol_regime_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -108,27 +86,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: Bull Power > 0 AND Bear Power < 0 AND strong trend (ADX > 25)
-            if (bull_power[i] > 0 and 
-                bear_power[i] < 0 and 
-                adx_12h_aligned[i] > 25):
+            # Long conditions: price breaks above upper channel AND low volatility regime AND volume spike
+            if (close[i] > upper_channel[i] and 
+                low_vol_regime_aligned[i] and 
+                volume_spike[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: Bear Power < 0 AND Bull Power > 0 AND strong trend (ADX > 25)
-            elif (bear_power[i] < 0 and 
-                  bull_power[i] > 0 and 
-                  adx_12h_aligned[i] > 25):
+            # Short conditions: price breaks below lower channel AND low volatility regime AND volume spike
+            elif (close[i] < lower_channel[i] and 
+                  low_vol_regime_aligned[i] and 
+                  volume_spike[i]):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: Power convergence OR weak trend (ADX < 20)
-            power_convergence = (abs(bull_power[i]) < 0.1 * close[i] and 
-                                abs(bear_power[i]) < 0.1 * close[i])
-            weak_trend = adx_12h_aligned[i] < 20
+            # Exit conditions: price crosses back inside the Donchian channel
+            exit_long = (position == 1 and close[i] < upper_channel[i])
+            exit_short = (position == -1 and close[i] > lower_channel[i])
             
-            if power_convergence or weak_trend:
+            if exit_long or exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
