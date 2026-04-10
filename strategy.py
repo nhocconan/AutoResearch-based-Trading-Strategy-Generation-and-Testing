@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ATR trailing stop
-# - Donchian(20) from 4h provides clear breakout structure
-# - 1d volume spike (>2.0x 20-day ATR-volume average) confirms institutional participation
+# Hypothesis: 4h Donchian(20) breakout + 1d ATR-volume spike + ATR trailing stop
+# - Donchian(20) from 4h provides clear breakout structure (works in bull/bear)
+# - 1d ATR-volume (>2.0x 20-day average) confirms institutional participation
 # - ATR(14) trailing stop (2.5x) adapts to volatility and manages risk
 # - Discrete position sizing (0.25) minimizes fee churn
-# - Target: 25-40 trades/year (100-160 total over 4 years) to avoid fee drag
-# - Works in bull/bear: Donchian adapts to volatility, volume filter avoids false breakouts
+# - Target: 20-35 trades/year (80-140 total over 4 years) to avoid fee drag
+# - Volume filter reduces false breakouts, improving win rate
 
-name = "4h_1d_donchian_volume_v1"
+name = "4h_1d_donchian_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
