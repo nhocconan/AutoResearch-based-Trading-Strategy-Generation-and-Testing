@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# - Primary: 4h price breaking above/below Camarilla H3/L3 levels from prior 1d
-# - HTF filter: 1d volume > 1.3x 20-period MA for institutional participation
-# - Regime filter: 1d Choppiness Index(14) < 38.2 to ensure trending market (avoid chop)
-# - Entry: Long when close > H3 + volume filter + trending regime; Short when close < L3 + volume filter + trending regime
-# - Exit: Price crosses prior day's close (mean reversion to equilibrium) or regime shifts to chop
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and chop regime filter
+# - Primary: 4h price breaking above/below 20-period Donchian channels
+# - HTF filter: 1d volume > 1.5x 20-period MA for institutional participation
+# - Regime filter: 1d Choppiness Index(14) between 38.2 and 61.8 to avoid extreme chop/trend exhaustion
+# - Entry: Long when close > upper Donchian + volume filter + chop regime; Short when close < lower Donchian + volume filter + chop regime
+# - Exit: Close crosses 10-period EMA (mean reversion) or chop regime shifts to extreme (>61.8 or <38.2)
 # - Position sizing: 0.25 (discrete level to minimize fee churn)
-# - Target: 80-160 total trades over 4 years (20-40/year) for 4h timeframe
-# - Works in bull/bear: Camarilla pivots act as support/resistance in all regimes, volume confirms breakout validity, chop filter avoids false signals
+# - Target: 100-200 total trades over 4 years (25-50/year) for 4h timeframe
+# - Works in bull/bear: Donchian breakouts capture sustained moves, volume confirms validity, chop filter avoids false signals in ranging markets
 
-name = "4h_1d_camarilla_breakout_volume_chop_v1"
+name = "4h_1d_donchian_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,24 +39,16 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla levels (H3, L3) from prior day
-    def calculate_camarilla(high, low, close):
-        # Camarilla levels based on prior day's range
-        range_ = high - low
-        H3 = close + range_ * 1.1 / 4
-        L3 = close - range_ * 1.1 / 4
-        return H3, L3
+    # Calculate primary Donchian channels (20-period)
+    def calculate_donchian(high, low, window=20):
+        upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        return upper, lower
     
-    # Shift by 1 to use prior day's levels (no look-ahead)
-    camarilla_H3_raw = np.full_like(close_1d, np.nan)
-    camarilla_L3_raw = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        H3, L3 = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-        camarilla_H3_raw[i] = H3
-        camarilla_L3_raw[i] = L3
+    donchian_upper, donchian_lower = calculate_donchian(high, low)
     
-    camarilla_H3 = align_htf_to_ltf(prices, df_1d, camarilla_H3_raw)
-    camarilla_L3 = align_htf_to_ltf(prices, df_1d, camarilla_L3_raw)
+    # Calculate 10-period EMA for exit
+    ema_10 = pd.Series(close).ewm(span=10, min_periods=10, adjust=False).mean().values
     
     # Calculate 1d volume MA(20)
     volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
@@ -78,8 +70,12 @@ def generate_signals(prices):
         hh = pd.Series(high).rolling(window=window, min_periods=window).max().values
         ll = pd.Series(low).rolling(window=window, min_periods=window).min().values
         
+        # Avoid division by zero
+        denominator = hh - ll
+        denominator = np.where(denominator == 0, 1e-10, denominator)
+        
         # Choppiness Index
-        chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(window)
+        chop = 100 * np.log10(tr_sum / denominator) / np.log10(window)
         return chop
     
     chop_1d = calculate_choppiness(high_1d, low_1d, close_1d)
@@ -94,46 +90,40 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(camarilla_H3[i]) or np.isnan(camarilla_L3[i]) or
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
             np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period MA
+        # Volume confirmation: current 1d volume > 1.5x 20-period MA
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-        volume_confirm = volume_1d_aligned[i] > 1.3 * volume_ma_20_1d_aligned[i]
+        volume_confirm = volume_1d_aligned[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
-        # Regime filter: chop < 38.2 = trending market
-        trending_regime = chop_1d_aligned[i] < 38.2
-        # Chop regime: chop > 61.8 = ranging market (exit signal)
-        chop_regime = chop_1d_aligned[i] > 61.8
+        # Regime filter: chop between 38.2 and 61.8 to avoid extreme chop/trend exhaustion
+        chop_regime_ok = (chop_1d_aligned[i] >= 38.2) & (chop_1d_aligned[i] <= 61.8)
+        chop_extreme = (chop_1d_aligned[i] < 38.2) | (chop_1d_aligned[i] > 61.8)
         
         if position == 0:  # Flat - look for new entries
-            # Long entry: close > H3 + volume confirmation + trending regime
-            if (close[i] > camarilla_H3[i] and volume_confirm and trending_regime):
+            # Long entry: close > upper Donchian + volume confirmation + chop regime OK
+            if (close[i] > donchian_upper[i] and volume_confirm and chop_regime_ok):
                 position = 1
                 signals[i] = 0.25
-            # Short entry: close < L3 + volume confirmation + trending regime
-            elif (close[i] < camarilla_L3[i] and volume_confirm and trending_regime):
+            # Short entry: close < lower Donchian + volume confirmation + chop regime OK
+            elif (close[i] < donchian_lower[i] and volume_confirm and chop_regime_ok):
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit: Price crosses prior day's close OR regime shifts to chop
-            prior_close_1d = np.full_like(close_1d, np.nan)
-            for i_1d in range(1, len(close_1d)):
-                prior_close_1d[i_1d] = close_1d[i_1d-1]
-            prior_close_aligned = align_htf_to_ltf(prices, df_1d, prior_close_1d)
-            
+            # Exit: Close crosses 10-period EMA OR chop regime shifts to extreme
             if position == 1:  # Long position
-                if close[i] < prior_close_aligned[i] or chop_regime:
+                if close[i] < ema_10[i] or chop_extreme:
                     position = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = 0.25
             else:  # position == -1 (Short position)
-                if close[i] > prior_close_aligned[i] or chop_regime:
+                if close[i] > ema_10[i] or chop_extreme:
                     position = 0
                     signals[i] = 0.0
                 else:
