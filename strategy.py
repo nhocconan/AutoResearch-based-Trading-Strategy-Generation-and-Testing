@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and choppiness regime filter
-# - Long when price breaks above 20-period Donchian high + 1d volume > 2.0x 20-period volume SMA + CHOP > 61.8 (range market)
-# - Short when price breaks below 20-period Donchian low + 1d volume > 2.0x 20-period volume SMA + CHOP > 61.8 (range market)
-# - Exit: price returns to opposite Donchian level
+# Hypothesis: 4h Donchian breakout with 1d ATR-based volume spike and choppiness regime filter
+# - Long when price breaks above 20-period Donchian high + 1d volume > 1.5x ATR(20)-scaled volume average + CHOP > 61.8 (range market)
+# - Short when price breaks below 20-period Donchian low + same volume/CHOP conditions
+# - Exit: price returns to midpoint of Donchian channel
 # - Position sizing: 0.25 discrete level
-# - Works in bull/bear: Donchian adapts to volatility, volume spike confirms institutional interest, CHOP filter avoids trending markets where breakouts fail
+# - Uses ATR-scaled volume threshold for adaptive confirmation (works in both high/low vol regimes)
 # - 4h timeframe targets 20-50 trades/year with strict entry conditions
 
-name = "4h_1d_donchian_volume_chop_v1"
+name = "4h_1d_donchian_atr_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,48 +37,60 @@ def generate_signals(prices):
     # Calculate 20-period Donchian channels on 4h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
     
-    # Calculate 1d volume SMA(20) for confirmation
+    # Calculate 1d ATR(20) for adaptive volume threshold
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range calculation
+    tr1 = np.maximum(high_1d - low_1d, 
+                     np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), 
+                                np.abs(low_1d - np.roll(close_1d, 1))))
+    tr1[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr1).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1d volume average scaled by ATR (adaptive threshold)
     volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_threshold_1d = vol_avg_1d * (atr_1d / np.mean(atr_1d[-100:]) if len(atr_1d) >= 100 else 1.0)
+    vol_threshold_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_threshold_1d)
     
     # Calculate Choppiness Index on 1d (14-period)
-    # True Range
-    tr1 = np.maximum(df_1d['high'] - df_1d['low'], 
-                     np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)), 
-                                np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
-    tr1[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
-    # Sum of TR over 14 periods
     tr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
     hh = df_1d['high'].rolling(window=14, min_periods=14).max().values
     ll = df_1d['low'].rolling(window=14, min_periods=14).min().values
-    # Choppiness Index: 100 * log10(sum(tr1)/(hh-ll)) / log10(14)
-    chop_raw = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    # Avoid division by zero
+    range_hl = hh - ll
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop_raw = 100 * np.log10(tr_sum / range_hl) / np.log10(14)
     chop = align_htf_to_ltf(prices, df_1d, chop_raw)
+    
+    # Current 1d volume (aligned)
+    vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop[i])):
+            np.isnan(vol_threshold_1d_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(vol_1d_current[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current 1d volume > 2.0x 20-period SMA (spike)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-        vol_confirm = vol_1d_current[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > ATR-scaled threshold (adaptive spike)
+        vol_confirm = vol_1d_current[i] > vol_threshold_1d_aligned[i]
         
-        # Regime filter: CHOP > 61.8 indicates ranging market (good for mean reversion breakouts)
+        # Regime filter: CHOP > 61.8 indicates ranging market (good for breakout mean reversion)
         ranging_market = chop[i] > 61.8
         
         # Breakout conditions
         long_breakout = close[i] > donchian_high[i]
         short_breakout = close[i] < donchian_low[i]
         
-        # Exit conditions: return to opposite Donchian level
-        long_exit = close[i] < donchian_low[i]
-        short_exit = close[i] > donchian_high[i]
+        # Exit conditions: return to midpoint of Donchian channel
+        long_exit = close[i] < donchian_mid[i]
+        short_exit = close[i] > donchian_mid[i]
         
         # Entry conditions
         long_entry = long_breakout and vol_confirm and ranging_market
