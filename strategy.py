@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1w trend filter and ATR volatility regime
-# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# - Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) in 1w uptrend (close > EMA34) with ATR(14) > ATR(50) (expanding volatility)
-# - Short when Bear Power > 0 AND Bull Power < 0 (bearish momentum) in 1w downtrend (close < EMA34) with ATR(14) > ATR(50)
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above Donchian(20) high in 1d uptrend (close > EMA50) with volume > 2.0x 20-bar avg
+# - Short when price breaks below Donchian(20) low in 1d downtrend (close < EMA50) with volume spike
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
-# - 1w trend filter ensures alignment with major market structure
-# - ATR regime filter avoids choppy markets where Elder Ray gives false signals
-# - Works in both bull and bear markets by following 1w trend
+# - Targets ~25 trades/year (100 total over 4 years) to avoid fee drag
+# - 1d trend filter reduces false signals in counter-trend markets
+# - Donchian breakout captures strong momentum moves
+# - Volume confirmation ensures institutional participation
 
-name = "6h_1w_elderray_atrregime_trend_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,78 +22,60 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Pre-compute 1w indicators
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Pre-compute 1d indicators
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w EMA(34) for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 6h indicators
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    # 1d volume confirmation: > 2.0x 20-period average
+    avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * avg_volume_20_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # 6h EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
-    
-    # 6h ATR(14) and ATR(50) for volatility regime
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # Volatility regime: expanding (ATR14 > ATR50)
-    vol_expanding = atr_14 > atr_50
+    # Pre-compute Donchian channels on 4h data
+    highest_high_20 = prices['high'].rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = prices['low'].rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]) or 
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:  # Flat - look for new entries
-            # Long signal: Bullish momentum in 1w uptrend with expanding volatility
-            if (bull_power[i] > 0 and bear_power[i] < 0 and 
-                close[i] > ema_34_1w_aligned[i] and vol_expanding[i]):
+            # Long signal: Donchian breakout above in 1d uptrend with volume spike
+            if (prices['close'].iloc[i] > highest_high_20[i] and 
+                prices['close'].iloc[i] > ema_50_1d_aligned[i] and 
+                vol_spike_1d_aligned[i]):
                 position = 1
                 signals[i] = 0.25
-            # Short signal: Bearish momentum in 1w downtrend with expanding volatility
-            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
-                  close[i] < ema_34_1w_aligned[i] and vol_expanding[i]):
+            # Short signal: Donchian breakout below in 1d downtrend with volume spike
+            elif (prices['close'].iloc[i] < lowest_low_20[i] and 
+                  prices['close'].iloc[i] < ema_50_1d_aligned[i] and 
+                  vol_spike_1d_aligned[i]):
                 position = -1
                 signals[i] = -0.25
         else:  # Have position - look for exit
-            # Exit when momentum diverges or volatility contracts
-            if position == 1:  # Long
-                if (bull_power[i] <= 0 or bear_power[i] >= 0 or not vol_expanding[i]):
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = 0.25
-            else:  # Short
-                if (bear_power[i] <= 0 or bull_power[i] >= 0 or not vol_expanding[i]):
-                    position = 0
-                    signals[i] = 0.0
-                else:
-                    signals[i] = -0.25
+            # Exit when price returns to opposite Donchian level
+            if position == 1 and prices['close'].iloc[i] < lowest_low_20[i]:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and prices['close'].iloc[i] > highest_high_20[i]:
+                position = 0
+                signals[i] = 0.0
+            # Hold position otherwise
+            else:
+                signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
