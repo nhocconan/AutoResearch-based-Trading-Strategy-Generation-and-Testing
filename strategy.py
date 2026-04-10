@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume confirmation and 1d ATR filter
+# Hypothesis: 4h Donchian breakout with 12h volume spike and 1d ATR filter
 # - Primary signal: Price breaks above/below Donchian(20) channel on 4h
-# - Volume filter: 1d volume > 1.5x 20-period average volume (strong institutional participation)
-# - ATR filter: 1d ATR(14) < 0.025 * price (low volatility environment for cleaner breakouts)
+# - Volume filter: 12h volume > 1.5x 20-period average volume (strong institutional participation)
+# - ATR filter: 1d ATR(14) < 0.025 * price (low volatility for cleaner breakouts)
 # - Position size: 0.25 discrete level to minimize fee churn
 # - Stoploss: 2.0x ATR(20) on 4h
 # - Target: 19-50 trades/year (75-200 total over 4 years) per 4h strategy guidelines
+# - Long/short symmetry works in both bull and bear markets due to volume+volatility confirmation
 
-name = "4h_1d_donchian_volume_atr_v2"
+name = "4h_12h_1d_donchian_volume_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,15 +22,16 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_12h) < 50 or len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d volume spike filter
-    volume_1d = df_1d['volume'].values
-    avg_volume_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume_1d > (1.5 * avg_volume_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Pre-compute 12h volume spike filter
+    volume_12h = df_12h['volume'].values
+    avg_volume_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_12h > (1.5 * avg_volume_20)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_12h, vol_spike)
     
     # Pre-compute 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
