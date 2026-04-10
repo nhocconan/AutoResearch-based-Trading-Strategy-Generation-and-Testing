@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation (>2.0x 20-bar avg volume)
-# - Long when price breaks above Donchian(20) high in 1d uptrend (close > EMA50) with volume spike
-# - Short when price breaks below Donchian(20) low in 1d downtrend (close < EMA50) with volume spike
-# - Uses discrete position sizing (0.25) to minimize fee churn
-# - Targets ~15-25 trades/year (60-100 total over 4 years) to avoid fee drag
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation (>1.8x 20-bar avg volume)
+# - Long when price breaks above Donchian high in 1d uptrend (close > EMA50) with volume spike
+# - Short when price breaks below Donchian low in 1d downtrend (close < EMA50) with volume spike
+# - ATR-based stoploss (2.5x ATR) to limit drawdown
+# - Discrete position sizing (0.25) to minimize fee churn
+# - Targets ~20-30 trades/year (80-120 total over 4 years) to avoid fee drag
 # - 1d trend filter reduces false breakouts in ranging markets
-# - ATR-based stoploss to limit drawdown
-# - Avoids overtrading by requiring confluence of trend, breakout, and volume
-# - Uses proper MTF data loading (get_htf_data ONCE before loop, align_htf_to_ltf for alignment)
+# - Works in both bull and bear markets by following the 1d trend direction
 
-name = "6h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume_trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,12 +34,12 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d volume confirmation: > 2.0x 20-period average
+    # 1d volume confirmation: > 1.8x 20-period average
     avg_volume_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (2.0 * avg_volume_20_1d)
+    vol_spike_1d = volume_1d > (1.8 * avg_volume_20_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Pre-compute ATR for stoploss (using 6h data)
+    # Pre-compute ATR for stoploss (using 12h data)
     high_low = prices['high'] - prices['low']
     high_close = np.abs(prices['high'] - prices['close'].shift(1))
     low_close = np.abs(prices['low'] - prices['close'].shift(1))
@@ -78,7 +77,7 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:  # Flat
-            # Calculate Donchian(20) levels on 6h data (using previous completed bar)
+            # Calculate Donchian(20) levels on 12h data (using previous completed bar)
             if i >= 20:
                 # Use lookback of 20 completed bars (excluding current)
                 lookback_start = i - 20
