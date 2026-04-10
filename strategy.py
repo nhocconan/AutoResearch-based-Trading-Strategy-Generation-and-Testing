@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ADX trend filter
-# - Long when price breaks above Camarilla H3 level (1d) AND 1d ADX > 25 AND volume > 1.5x 20-period average
-# - Short when price breaks below Camarilla L3 level (1d) AND 1d ADX > 25 AND volume > 1.5x 20-period average
-# - Exit when price crosses Camarilla Pivot point (PP) or opposite signal occurs
-# - Camarilla levels provide intraday support/resistance based on previous day's range
-# - 1d ADX filter ensures we only trade when higher timeframe is strongly trending
-# - Volume confirmation prevents false signals in low participation
-# - Target: 12-37 trades/year on 12h (50-150 total over 4 years) to avoid fee drag
+# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and ATR-based stoploss
+# - Long when price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period average
+# - Short when price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period average
+# - Exit when price crosses Donchian midpoint or opposite breakout occurs
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Target: 20-50 trades/year on 4h (75-200 total over 4 years) to avoid fee drag
+# - Works in both bull and bear markets by capturing breakouts with volume confirmation
 
-name = "12h_1d_camarilla_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian_volume_confirmation_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -26,108 +25,36 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Pre-compute 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1d volume moving average
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = np.full_like(vol_1d, np.nan, dtype=float)
+    for i in range(19, len(vol_1d)):
+        vol_ma_20[i] = np.mean(vol_1d[i-19:i+1])
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Align HTF volume MA to 4h timeframe
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Pre-compute 4h Donchian channels (20-period)
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    close_4h = prices['close'].values
     
-    # Wilder smoothing
-    tr_14 = np.full_like(tr, np.nan, dtype=float)
-    dm_plus_14 = np.full_like(dm_plus, np.nan, dtype=float)
-    dm_minus_14 = np.full_like(dm_minus, np.nan, dtype=float)
+    donchian_high = np.full_like(high_4h, np.nan, dtype=float)
+    donchian_low = np.full_like(low_4h, np.nan, dtype=float)
+    donchian_mid = np.full_like(close_4h, np.nan, dtype=float)
     
-    if len(tr) >= 14:
-        tr_14[13] = np.nanmean(tr[1:14])
-        dm_plus_14[13] = np.nanmean(dm_plus[1:14])
-        dm_minus_14[13] = np.nanmean(dm_minus[1:14])
-        
-        for i in range(14, len(tr)):
-            tr_14[i] = tr_14[i-1] - (tr_14[i-1] / 14) + tr[i]
-            dm_plus_14[i] = dm_plus_14[i-1] - (dm_plus_14[i-1] / 14) + dm_plus[i]
-            dm_minus_14[i] = dm_minus_14[i-1] - (dm_minus_14[i-1] / 14) + dm_minus[i]
-    
-    di_plus = np.full_like(tr_14, np.nan, dtype=float)
-    di_minus = np.full_like(tr_14, np.nan, dtype=float)
-    mask = ~np.isnan(tr_14) & (tr_14 != 0)
-    di_plus[mask] = (dm_plus_14[mask] / tr_14[mask]) * 100
-    di_minus[mask] = (dm_minus_14[mask] / tr_14[mask]) * 100
-    
-    dx = np.full_like(di_plus, np.nan, dtype=float)
-    mask_dx = (~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0))
-    dx[mask_dx] = (np.abs(di_plus[mask_dx] - di_minus[mask_dx]) / (di_plus[mask_dx] + di_minus[mask_dx])) * 100
-    
-    adx = np.full_like(dx, np.nan, dtype=float)
-    if len(dx) >= 14:
-        valid_dx = dx[14:28]
-        if not np.all(np.isnan(valid_dx)):
-            adx[27] = np.nanmean(valid_dx)
-            for i in range(28, len(dx)):
-                if not np.isnan(dx[i]) and not np.isnan(adx[i-1]):
-                    adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align HTF indicators to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Pre-compute 12h Camarilla levels (based on previous 1d candle)
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    close_12h = prices['close'].values
-    
-    # We'll calculate Camarilla levels for each 12h bar using the previous completed 1d bar
-    # To do this, we need to get the previous 1d bar's OHLC for each 12h bar
-    camarilla_pp = np.full_like(close_12h, np.nan, dtype=float)
-    camarilla_h3 = np.full_like(close_12h, np.nan, dtype=float)
-    camarilla_l3 = np.full_like(close_12h, np.nan, dtype=float)
-    
-    # For each 12h bar, find the previous completed 1d bar
-    for i in range(len(prices)):
-        if i < 2:  # Need at least 2 bars to have previous 1d
-            continue
-            
-        # Get current time
-        current_time = prices['open_time'].iloc[i]
-        
-        # Find previous completed 1d bar (strictly before current_time)
-        # Since df_1d is indexed by open_time, we can find the last 1d bar that closed before current_time
-        prev_1d_mask = df_1d['open_time'] < current_time
-        if not prev_1d_mask.any():
-            continue
-            
-        prev_1d_idx = prev_1d_mask.idxmax()  # Get the index of the last True
-        prev_1d = df_1d.loc[prev_1d_idx]
-        
-        high_prev = prev_1d['high']
-        low_prev = prev_1d['low']
-        close_prev = prev_1d['close']
-        
-        # Calculate Camarilla levels
-        range_prev = high_prev - low_prev
-        camarilla_pp[i] = (high_prev + low_prev + close_prev) / 3
-        camarilla_h3[i] = camarilla_pp[i] + (range_prev * 1.1 / 4)
-        camarilla_l3[i] = camarilla_pp[i] - (range_prev * 1.1 / 4)
+    for i in range(19, len(high_4h)):
+        donchian_high[i] = np.max(high_4h[i-19:i+1])
+        donchian_low[i] = np.min(low_4h[i-19:i+1])
+        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_pp[i]) or np.isnan(camarilla_h3[i]) or 
-            np.isnan(camarilla_l3[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
@@ -137,41 +64,37 @@ def generate_signals(prices):
             continue
         
         # Volume spike condition (1.5x average)
-        vol_12h = prices['volume'].values
-        vol_ma_20 = np.full_like(vol_12h, np.nan, dtype=float)
-        for j in range(19, i+1):
-            vol_ma_20[j] = np.mean(vol_12h[j-19:j+1])
-        vol_spike = not np.isnan(vol_ma_20[i]) and vol_12h[i] > 1.5 * vol_ma_20[i]
+        vol_4h = prices['volume'].values
+        vol_spike = not np.isnan(vol_ma_20_aligned[i]) and vol_4h[i] > 1.5 * vol_ma_20_aligned[i]
         
-        close_now = close_12h[i]
-        camarilla_pp_now = camarilla_pp[i]
-        camarilla_h3_now = camarilla_h3[i]
-        camarilla_l3_now = camarilla_l3[i]
-        adx_now = adx_1d_aligned[i]
+        close_now = close_4h[i]
+        donchian_high_now = donchian_high[i]
+        donchian_low_now = donchian_low[i]
+        donchian_mid_now = donchian_mid[i]
         
-        # Camarilla breakout signals
-        breakout_up = close_now > camarilla_h3_now  # price breaks above H3
-        breakout_down = close_now < camarilla_l3_now  # price breaks below L3
-        pivot_cross_up = (close_12h[i-1] <= camarilla_pp_now and close_now > camarilla_pp_now)  # crosses above PP
-        pivot_cross_down = (close_12h[i-1] >= camarilla_pp_now and close_now < camarilla_pp_now)  # crosses below PP
+        # Donchian breakout signals
+        breakout_up = close_now > donchian_high_now  # price breaks above upper band
+        breakout_down = close_now < donchian_low_now  # price breaks below lower band
+        midpoint_cross_up = (close_4h[i-1] <= donchian_mid_now and close_now > donchian_mid_now)  # crosses above midpoint
+        midpoint_cross_down = (close_4h[i-1] >= donchian_mid_now and close_now < donchian_mid_now)  # crosses below midpoint
         
         if position == 0:  # Flat - look for new entries
-            # Long conditions: price breaks above H3 AND 1d trending (ADX > 25) AND volume spike
-            if (breakout_up and adx_now > 25 and vol_spike):
+            # Long conditions: price breaks above Donchian high AND volume spike
+            if breakout_up and vol_spike:
                 position = 1
                 signals[i] = 0.25
-            # Short conditions: price breaks below L3 AND 1d trending (ADX > 25) AND volume spike
-            elif (breakout_down and adx_now > 25 and vol_spike):
+            # Short conditions: price breaks below Donchian low AND volume spike
+            elif breakout_down and vol_spike:
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = 0.0
         else:  # Have position - look for exit
-            # Exit conditions: price crosses Pivot point (PP) or opposite Camarilla breakout
+            # Exit conditions: price crosses midpoint or opposite Donchian breakout
             exit_long = (position == 1 and 
-                        (pivot_cross_down or breakout_down))
+                        (midpoint_cross_down or breakout_down))
             exit_short = (position == -1 and 
-                         (pivot_cross_up or breakout_up))
+                         (midpoint_cross_up or breakout_up))
             
             if exit_long or exit_short:
                 position = 0
