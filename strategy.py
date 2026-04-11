@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_v1"
+name = "4h_12h_camarilla_breakout_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,7 +39,7 @@ def generate_signals(prices):
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Volume confirmation: 4h volume > 3x 50-period average (balanced to avoid overtrading)
+    # Volume confirmation: 4h volume > 2x 50-period average (adjusted for better balance)
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     # Align daily levels to 4h timeframe
@@ -57,7 +57,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 3.0 * vol_ma_50[i]
+        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -105,11 +105,11 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 3x 50-period average.
-# Enters short when price breaks below S4 with volume > 3x 50-period average.
+# Enters long when price breaks above R4 with volume > 2x 50-period average.
+# Enters short when price breaks below S4 with volume > 2x 50-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses volume threshold (3x) and MA length (50) to balance signal quality and trade frequency.
+# Uses volume threshold (2x) and MA length (50) to balance signal quality and trade frequency.
 # Position size set to 0.25 to manage risk in volatile markets.
-# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
+# Target: 20-30 trades per year (80-120 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
 # 4h timeframe provides good balance between signal quality and trade frequency.
