@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_kama_trend_v1"
-timeframe = "4h"
+name = "6h_1d_1w_camarilla_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,103 +19,115 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # KAMA parameters (adaptive moving average)
-    close_1d = df_1d['close'].values
+    # Calculate daily OHLC for Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) and smoothing constants
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
+    # Camarilla pivot calculation (previous day)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Vectorized ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        if i < 10:
-            er[i] = 0
-        else:
-            change_10 = np.abs(close_1d[i] - close_1d[i-10])
-            volatility_10 = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
-            er[i] = change_10 / (volatility_10 + 1e-10)
+    # Resistance and support levels (previous day's data)
+    r3 = close_1d + range_1d * 1.166
+    s3 = close_1d - range_1d * 1.166
+    r4 = close_1d + range_1d * 1.500
+    s4 = close_1d - range_1d * 1.500
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Shift by 1 to use only completed daily bars (previous day's levels)
+    r3 = np.roll(r3, 1)
+    s3 = np.roll(s3, 1)
+    r4 = np.roll(r4, 1)
+    s4 = np.roll(s4, 1)
+    r3[0] = np.nan
+    s3[0] = np.nan
+    r4[0] = np.nan
+    s4[0] = np.nan
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align daily Camarilla levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Shift by 1 to use only completed daily bars
-    kama = np.roll(kama, 1)
-    kama[0] = np.nan
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Align daily KAMA to 4h timeframe
-    kama_4h = align_htf_to_ltf(prices, df_1d, kama)
+    # Weekly ADX for trend strength (14 period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h RSI for overbought/oversold (14 period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate True Range and Directional Movement
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
     
-    # 4h volume filter: volume > 1.3x 20-period average
+    tr_dm_1w = tr_1w[1:]
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm_1w).rolling(window=14, min_periods=14).mean().values
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm_1w).rolling(window=14, min_periods=14).mean().values
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1w = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align weekly ADX to 6h timeframe
+    adx_1w_6h = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # 6h ATR for volatility filter (14 period)
+    tr1_6h = high[1:] - low[1:]
+    tr2_6h = np.abs(high[1:] - close[:-1])
+    tr3_6h = np.abs(low[1:] - close[:-1])
+    tr_6h = np.concatenate([[np.nan], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
+    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    
+    # 6h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 4h ADX for trend strength (14 period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    
-    tr_dm = tr[1:]
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_4h[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(adx_1w_6h[i]) or np.isnan(atr_6h[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation (1.3x average)
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        # Volume confirmation (1.5x average)
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filter: ADX > 20 (moderate trend)
-        trend_filter = adx[i] > 20
+        # Weekly trend filter: ADX > 25 (strong trend filter to reduce trades)
+        trend_filter = adx_1w_6h[i] > 25
         
-        # Long conditions: price above KAMA and RSI < 70 (not overbought)
-        long_signal = volume_confirmed and trend_filter and (price_close > kama_4h[i]) and (rsi[i] < 70)
+        # Long conditions: price breaks above R4 with volume and weekly trend
+        long_signal = volume_confirmed and trend_filter and (price_high > r4_6h[i])
         
-        # Short conditions: price below KAMA and RSI > 30 (not oversold)
-        short_signal = volume_confirmed and trend_filter and (price_close < kama_4h[i]) and (rsi[i] > 30)
+        # Short conditions: price breaks below S4 with volume and weekly trend
+        short_signal = volume_confirmed and trend_filter and (price_low < s4_6h[i])
         
-        # Exit conditions
-        exit_long = position == 1 and (price_close < kama_4h[i] or rsi[i] > 75)
-        exit_short = position == -1 and (price_close > kama_4h[i] or rsi[i] < 25)
+        # Exit when price returns to the weekly pivot level (mean reversion)
+        # Calculate weekly pivot from weekly data
+        pivot_1w = (high_1w + low_1w + close_1w) / 3
+        pivot_1w_shifted = np.roll(pivot_1w, 1)
+        pivot_1w_shifted[0] = np.nan
+        pivot_1w_6h = align_htf_to_ltf(prices, df_1w, pivot_1w_shifted)
+        
+        exit_long = position == 1 and price_close < pivot_1w_6h[i]
+        exit_short = position == -1 and price_close > pivot_1w_6h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -135,12 +147,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily KAMA trend following strategy for 4h timeframe with volume confirmation (>1.3x average volume) and ADX filter (>20).
-# Enters long when 4h price is above daily KAMA (adaptive trend) with volume >1.3x average, ADX>20, and RSI<70.
-# Enters short when price is below daily KAMA with same conditions and RSI>30.
-# Exits when price crosses back below/above KAMA or RSI reaches extreme levels.
-# Uses KAMA to adapt to changing market conditions (fast in trends, slow in ranges).
-# Volume and ADX filters reduce false signals and overtrading.
-# Moderate position size (0.25) balances risk and return.
-# Target: 25-40 trades per year to minimize fee drag while capturing adaptive trends.
-# Works in both bull (trend following) and bear (adaptive to ranging) markets.
+# Hypothesis: 6h Camarilla breakout strategy using weekly ADX for trend filter and daily R4/S4 levels for breakout signals.
+# Enters long when 6h price breaks above daily R4 level (close + 1.500*range) with volume >1.5x average and weekly ADX>25.
+# Enters short when price breaks below daily S4 level (close - 1.500*range) with same conditions.
+# Exits when price returns to the weekly pivot level (mean reversion within the week's range).
+# Uses R4/S4 levels (extreme levels) to reduce false breakouts and increase win rate in trending markets.
+# Weekly ADX filter ensures we only trade in strong weekly trends, avoiding choppy markets.
+# Volume confirmation adds conviction to breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in both bull and bear markets as it adapts to weekly volatility ranges and trends.
