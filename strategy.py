@@ -1,41 +1,26 @@
 #!/usr/bin/env python3
 """
-1h RSI Reversal with 4h Trend and Volume Filter
-Hypothesis: In ranging markets (2025-2026), RSI extremes on 1h combined with 4h trend direction
-provides mean-reversion entries with high win rate. Volume filter ensures momentum confirmation.
-Timeframe: 1h (primary), 4h (trend filter). Target: 60-150 trades over 4 years.
-Works in bull/bear: RSI extremes occur in all regimes; 4h trend filters counter-trend noise.
+6h Donchian(20) Breakout with Weekly Trend Filter
+Hypothesis: Breakouts in the direction of the weekly trend capture strong momentum moves
+while avoiding counter-trend whipsaws. Weekly trend filter reduces false breakouts in ranging
+markets. Works in both bull (breakouts continue up) and bear (breakouts continue down) markets.
+Target: 50-150 trades over 4 years with strict entry conditions.
 """
 
+from typing import Tuple
 import numpy as np
 import pandas as pd
-from typing import Tuple
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_reversal_4h_trend_v1"
-timeframe = "1h"
+name = "6h_donchian_weekly_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Calculate Relative Strength Index."""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    # Wilder's smoothing
-    avg_gain[period] = np.mean(gain[1:period+1])
-    avg_loss[period] = np.mean(loss[1:period+1])
-    
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i]) / period
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_donchian(high: np.ndarray, low: np.ndarray, window: int = 20) -> Tuple[np.ndarray, np.ndarray]:
+    """Calculate Donchian channel upper and lower bands."""
+    upper = pd.Series(high).rolling(window=window, min_periods=window).max().values
+    lower = pd.Series(low).rolling(window=window, min_periods=window).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,18 +33,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False).values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly EMA(50) for trend direction
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = close_1w > ema_50_1w  # True when in uptrend
     
-    # 1h RSI
-    rsi = calculate_rsi(close, 14)
+    # Align weekly trend to 6h timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    
+    # Daily data for volume context (optional filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian channels on 6h data
+    upper, lower = calculate_donchian(high, low, window=20)
     
     # Volume filter: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,39 +60,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(weekly_uptrend_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # RSI extreme conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Donchian breakout conditions
+        breakout_up = close[i] > upper[i]   # Break above upper band
+        breakdown_down = close[i] < lower[i]  # Break below lower band
         
-        # 4h trend filter: price above/below EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Weekly trend filter: only trade in direction of weekly trend
+        weekly_trend_up = weekly_uptrend_aligned[i] > 0.5
+        weekly_trend_down = weekly_uptrend_aligned[i] <= 0.5
         
-        # Entry conditions: RSI extreme + volume + trend alignment
-        long_entry = rsi_oversold and volume_filter and uptrend
-        short_entry = rsi_overbought and volume_filter and downtrend
+        # Entry conditions: breakout in direction of weekly trend + volume
+        long_entry = breakout_up and weekly_trend_up and volume_filter
+        short_entry = breakdown_down and weekly_trend_down and volume_filter
         
-        # Exit conditions: RSI returns to neutral zone
-        long_exit = rsi[i] > 50
-        short_exit = rsi[i] < 50
+        # Exit conditions: return to middle of Donchian channel
+        mid_channel = (upper[i] + lower[i]) / 2
+        long_exit = close[i] < mid_channel
+        short_exit = close[i] > mid_channel
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -108,6 +102,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
