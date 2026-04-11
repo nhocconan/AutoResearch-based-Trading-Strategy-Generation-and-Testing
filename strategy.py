@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-# 4h_1d_cci_trend_volume_v1
-# Strategy: 4h CCI with 1d trend and volume confirmation
-# Timeframe: 4h
+# 6h_1d_cci_trend_volume_v1
+# Strategy: 6h CCI trend-following with 1d volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: CCI identifies overbought/oversold conditions. Combined with 1d trend (EMA50) and volume confirmation, it captures mean-reversion in trending markets. Works in both bull and bear by trading pullbacks in the direction of the 1d trend. Designed for low trade frequency to minimize fee drag.
+# Hypothesis: CCI identifies overbought/oversold conditions with trend persistence. 
+# Combining with 1d volume confirmation filters false signals. Works in bull/bear by 
+# trading extreme CCI readings in direction of 1d trend. Designed for low trade frequency 
+# (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_cci_trend_volume_v1"
-timeframe = "4h"
+name = "6h_1d_cci_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,12 +33,14 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # CCI on 4h (20-period)
+    # CCI on 6h (20-period)
     period = 20
-    tp = (high + low + close) / 3.0
-    sma_tp = pd.Series(tp).rolling(window=period, min_periods=period).mean()
-    mad = pd.Series(tp).rolling(window=period, min_periods=period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (tp - sma_tp) / (0.015 * mad)
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=period, min_periods=period).mean()
+    mad = pd.Series(typical_price).rolling(window=period, min_periods=period).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    )
+    cci = (typical_price - sma_tp) / (0.015 * mad)
     cci_values = cci.values
     
     # 1d EMA50 for trend filter
@@ -77,11 +82,11 @@ def generate_signals(prices):
         elif cci_values[i] > 100 and downtrend and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: CCI crosses back above -100 (for long) or below 100 (for short)
-        elif position == 1 and cci_values[i] > -100:
+        # Exit: CCI crosses back toward zero (mean reversion)
+        elif position == 1 and cci_values[i] > -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and cci_values[i] < 100:
+        elif position == -1 and cci_values[i] < 50:
             position = 0
             signals[i] = 0.0
         else:
