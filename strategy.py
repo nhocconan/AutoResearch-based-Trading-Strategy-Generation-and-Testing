@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_v2
+# 4h_1d_camarilla_breakout_v2
 # Strategy: 4h Camarilla pivot breakout with 1d volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels derived from prior 1d high-low-close act as strong support/resistance.
+# Hypothesis: Camarilla pivot levels from prior 1d act as strong support/resistance.
 # Breakouts above/below these levels with above-average 1d volume indicate institutional participation.
 # Works in bull (breakouts continue) and bear (breakdowns continue) markets.
 # Volume filter reduces false breakouts. Target: 20-50 trades/year.
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
