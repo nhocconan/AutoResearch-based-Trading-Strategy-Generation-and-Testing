@@ -1,78 +1,82 @@
 #!/usr/bin/env python3
 """
-6h_1w_elliott_wave_fib_v1
-Strategy: 6h Elliott Wave-inspired Fibonacci retracement with weekly trend filter
-Timeframe: 6h
+12h_1w_donchian_breakout_volume_trend_v1
+Strategy: 12h Donchian breakout with volume confirmation and 1w trend filter
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Combines Fibonacci retracement levels from weekly swing points with 60-period EMA trend filter on 6h. Enters long at 0.618 Fib support in uptrend, short at 0.382 Fib resistance in downtrend. Uses weekly swing high/low to define the trend leg, avoiding chop. Designed to work in both bull (buy dips) and bear (sell rallies) by following the higher timeframe trend. Low trade frequency expected due to strict Fib + trend confluence.
+Hypothesis: Uses 12h Donchian channel breakouts for entry, filtered by 1-week EMA20 trend direction and volume spikes (>2x average). Designed to capture major trend continuations in both bull and bear markets with low trade frequency. Uses weekly trend as primary filter to avoid counter-trend trades, volume confirmation to ensure breakout validity, and Donchian channels for objective breakout levels. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_elliott_wave_fib_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
+    # Load higher timeframe data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 60-period EMA on 6h for trend filter
-    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
+    # 12h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly swing points: find highest high and lowest low over lookback
-    lookback = 12  # ~3 months of weekly data
-    roll_max = pd.Series(df_1w['high']).rolling(window=lookback, min_periods=lookback).max().values
-    roll_min = pd.Series(df_1w['low']).rolling(window=lookback, min_periods=lookback).min().values
+    # 1-week EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Align weekly swing points to 6h
-    swing_high_aligned = align_htf_to_ltf(prices, df_1w, roll_max)
-    swing_low_aligned = align_htf_to_ltf(prices, df_1w, roll_min)
-    
-    # Calculate Fibonacci levels: 0.382 and 0.618
-    swing_range = swing_high_aligned - swing_low_aligned
-    fib_0382 = swing_low_aligned + 0.382 * swing_range
-    fib_0618 = swing_low_aligned + 0.618 * swing_range
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_60[i]) or np.isnan(swing_high_aligned[i]) or 
-            np.isnan(swing_low_aligned[i]) or np.isnan(fib_0382[i]) or 
-            np.isnan(fib_0618[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 60 EMA
-        uptrend = price_close > ema_60[i]
-        downtrend = price_close < ema_60[i]
+        # Trend filter: price above/below 1-week EMA20
+        uptrend = price_close > ema_20_1w_aligned[i]
+        downtrend = price_close < ema_20_1w_aligned[i]
         
-        # Long at 0.618 Fib support in uptrend
-        long_signal = uptrend and price_close <= fib_0618[i]
+        # Breakout conditions using Donchian channels
+        breakout_up = price_close > donchian_high[i]
+        breakout_down = price_close < donchian_low[i]
         
-        # Short at 0.382 Fib resistance in downtrend
-        short_signal = downtrend and price_close >= fib_0382[i]
+        # Volume confirmation
+        vol_confirmed = vol_spike[i]
         
-        # Exit when price crosses the 60 EMA
-        exit_long = position == 1 and price_close < ema_60[i]
-        exit_short = position == -1 and price_close > ema_60[i]
+        # Long: upward breakout with volume in uptrend
+        long_signal = breakout_up and vol_confirmed and uptrend
+        
+        # Short: downward breakout with volume in downtrend
+        short_signal = breakout_down and vol_confirmed and downtrend
+        
+        # Exit when price returns to the opposite Donchian level
+        exit_long = position == 1 and price_close < donchian_low[i]
+        exit_short = position == -1 and price_close > donchian_high[i]
         
         # Trading logic
         if long_signal and position != 1:
