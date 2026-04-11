@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_ema_crossover_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
+    n = len(prrices)
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,67 +17,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for EMA and trend filter
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMAs for trend filter (50 and 200)
+    # Calculate daily OHLC for Camarilla pivot levels (previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align daily EMAs to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Camarilla pivot calculation (previous day)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate 6h EMA crossover (9 and 21) for entry signals
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Resistance and support levels (previous day's data)
+    r3_1d = close_1d + range_1d * 1.166
+    s3_1d = close_1d - range_1d * 1.166
     
-    # Calculate 6h ATR for volatility filter (14 period)
+    # Shift by 1 to use only completed daily bars (previous day's levels)
+    r3_1d = np.roll(r3_1d, 1)
+    s3_1d = np.roll(s3_1d, 1)
+    r3_1d[0] = np.nan
+    s3_1d[0] = np.nan
+    
+    # Align daily Camarilla levels to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # 4h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 1.3x 20-period average
+    # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above both daily EMAs for long, below both for short
-        uptrend = close[i] > ema_50_1d_aligned[i] and close[i] > ema_200_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i] and close[i] < ema_200_1d_aligned[i]
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
+        volume_current = volume[i]
+        vol_ma = vol_ma_20[i]
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation (1.5x average)
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # EMA crossover signals
-        ema_cross_up = ema_9[i] > ema_21[i] and ema_9[i-1] <= ema_21[i-1]
-        ema_cross_down = ema_9[i] < ema_21[i] and ema_9[i-1] >= ema_21[i-1]
+        # Long conditions: price breaks above R3 with volume
+        long_signal = volume_confirmed and (price_high > r3_4h[i])
+        
+        # Short conditions: price breaks below S3 with volume
+        short_signal = volume_confirmed and (price_low < s3_4h[i])
+        
+        # Exit when price returns to the daily pivot (mean reversion)
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = position == 1 and price_close < pivot_4h[i]
+        exit_short = position == -1 and price_close > pivot_4h[i]
         
         # Trading logic
-        if ema_cross_up and uptrend and volume_confirmed and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif ema_cross_down and downtrend and volume_confirmed and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (ema_9[i] < ema_21[i] or not uptrend):
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (ema_9[i] > ema_21[i] or not downtrend):
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
@@ -85,12 +103,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h EMA crossover strategy with daily trend filter and volume confirmation.
-# Uses 9/21 EMA crossover on 6h timeframe for entry signals.
-# Only takes longs when price is above both daily 50 and 200 EMA (uptrend).
-# Only takes shorts when price is below both daily 50 and 200 EMA (downtrend).
-# Requires volume > 1.3x 20-period average to confirm conviction.
-# Exits when EMA crossover reverses or trend filter fails.
-# Designed to work in both bull and bear markets by following the daily trend.
-# Position size: 0.25 to balance risk and return, limiting drawdown.
-# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4-hour Camarilla pivot breakout strategy using daily pivot levels.
+# Uses daily Camarilla R3/S3 levels (previous day's high/low/close) for intraday structure.
+# Enters long when 4h price breaks above daily R3 with volume >1.5x 4-period average.
+# Enters short when 4h price breaks below daily S3 with volume >1.5x 4-period average.
+# Exits when price returns to the daily pivot level (mean reversion within the day's range).
+# Daily timeframe provides more frequent signals than weekly while maintaining reliability.
+# Volume confirmation filters out low-conviction breakouts.
+# Position size: 0.25 to balance risk and return, limiting drawdown in volatile markets.
+# Designed to work in both bull and bear markets by adapting to daily volatility ranges.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
