@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_volatility_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_reversion_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,46 +17,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1d high, low, close for pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels with proper min_periods
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # 1d pivot and ranges
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Shift by 1 to use only completed 1w bars (no look-ahead)
-    donchian_high = np.roll(donchian_high, 1)
-    donchian_low = np.roll(donchian_low, 1)
-    donchian_high[0] = np.nan
-    donchian_low[0] = np.nan
+    # 1d Camarilla levels - using correct formulas
+    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
+    r4_1d = pivot_1d + (range_1d * 1.1 / 2)
+    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
+    s4_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align 1w Donchian levels to 6h timeframe
-    donchian_high_6h = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_6h = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Shift by 1 to use only completed 1d bars
+    r3_1d = np.roll(r3_1d, 1)
+    r4_1d = np.roll(r4_1d, 1)
+    s3_1d = np.roll(s3_1d, 1)
+    s4_1d = np.roll(s4_1d, 1)
+    r3_1d[0] = np.nan
+    r4_1d[0] = np.nan
+    s3_1d[0] = np.nan
+    s4_1d[0] = np.nan
     
-    # 6h ATR for volatility filter and position sizing
+    # Align 1d levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # 12h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 1.8x 30-period average (selective)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # 12h volume filter: volume > 1.5x 20-period average (selective)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_30[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(r4_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -64,25 +77,25 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        vol_ma = vol_ma_30[i]
+        vol_ma = vol_ma_20[i]
         atr_val = atr[i]
         
         # Volume confirmation: selective threshold
-        volume_confirmed = volume_current > 1.8 * vol_ma
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
         # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_val > 0.008 * price_close  # ATR > 0.8% of price
+        vol_filter = atr_val > 0.005 * price_close  # ATR > 0.5% of price
         
-        # Long conditions: price breaks above 1w Donchian high with volume and vol filter
-        long_signal = volume_confirmed and vol_filter and (price_high > donchian_high_6h[i])
+        # Long conditions: price breaks below S3 (oversold) with volume and vol filter
+        long_signal = volume_confirmed and vol_filter and (price_low < s3_12h[i])
         
-        # Short conditions: price breaks below 1w Donchian low with volume and vol filter
-        short_signal = volume_confirmed and vol_filter and (price_low < donchian_low_6h[i])
+        # Short conditions: price breaks above R3 (overbought) with volume and vol filter
+        short_signal = volume_confirmed and vol_filter and (price_high > r3_12h[i])
         
-        # Exit when price returns to midpoint of 1w Donchian channel
-        donchian_mid = (donchian_high_6h[i] + donchian_low_6h[i]) / 2
-        exit_long = position == 1 and price_close < donchian_mid
-        exit_short = position == -1 and price_close > donchian_mid
+        # Exit when price returns to 1d pivot level
+        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = position == 1 and price_close > pivot_12h[i]
+        exit_short = position == -1 and price_close < pivot_12h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -103,11 +116,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1w Donchian breakouts with volume confirmation capture strong trends
-# while volatility filter prevents whipsaws in low-volatility environments.
-# Enters long when 6h price breaks above 1w Donchian high (20-period) with
-# volume > 1.8x average and ATR > 0.8% of price.
-# Enters short when price breaks below 1w Donchian low with same conditions.
-# Exits when price returns to midpoint of the Donchian channel.
-# Works in both bull (breakouts up) and bear (breakouts down) markets.
-# Target: 15-25 trades/year to minimize fee drag while capturing major moves.
+# Hypothesis: 1d Camarilla levels act as strong support/resistance for 12h price action.
+# Enters long when 12h price breaks below S3 (oversold bounce) with volume confirmation (>1.5x average),
+# and sufficient volatility (ATR > 0.5% of price).
+# Enters short when price breaks above R3 (overbought rejection) with same conditions.
+# Exits when price returns to 1d pivot level, capturing mean reversion.
+# Uses selective volume filter (1.5x) and volatility filter to reduce trades to ~15-25/year.
+# Works in both bull (buying dips) and bear (selling rallies) markets by fading extremes.
