@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Institutional Flow Detector using 1d Volume Weighted Average Price (VWAP) deviation and 1w trend filter.
-# Long when price deviates below 1d VWAP by >1.5σ and 1w trend is up; short when price deviates above 1d VWAP by >1.5σ and 1w trend is down.
-# Uses volume-weighted price deviation to detect institutional accumulation/distribution.
-# 1w trend filter prevents counter-trend trading. Designed for 12-37 trades/year on 12h timeframe.
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d/1w trend filter
+# Long when price breaks above Donchian(20) high + volume > 1.5x average + 1d trend up
+# Short when price breaks below Donchian(20) low + volume > 1.5x average + 1d trend down
+# Exit when price returns to Donchian midpoint or trend reverses
+# Designed for 20-50 trades/year on 4h timeframe with strong trend capture and low turnover
 
-name = "12h_1d_1w_vwap_deviation_trend_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,70 +24,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d VWAP (typical price * volume) / volume
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d_values = vwap_1d.values
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1d VWAP to 12h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
+    # Calculate 20-period average volume for volume filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1d VWAP standard deviation (20-period)
-    typical_price_1d_series = pd.Series(typical_price_1d.values)
-    volume_1d_series = pd.Series(df_1d['volume'].values)
-    vwap_deviation = typical_price_1d_series - vwap_1d
-    vwap_std_20 = vwap_deviation.rolling(window=20, min_periods=20).std().values
-    vwap_std_20_aligned = align_htf_to_ltf(prices, df_1d, vwap_std_20)
-    
-    # Calculate 1w EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after VWAP std period
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_std_20_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price deviation from 1d VWAP in standard deviations
-        price_dev = (close[i] - vwap_1d_aligned[i]) / vwap_std_20_aligned[i] if vwap_std_20_aligned[i] > 0 else 0
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Determine 1w trend direction
-        is_uptrend = close[i] > ema_20_1w_aligned[i]
-        is_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA50
+        is_uptrend = close[i] > ema_50_1d_aligned[i]
+        is_downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: significant deviation from VWAP with trend alignment
-        # Long when price is significantly below VWAP (accumulation) and 1w trend up
-        # Short when price is significantly above VWAP (distribution) and 1w trend down
-        vwap_long_signal = price_dev < -1.5 and is_uptrend
-        vwap_short_signal = price_dev > 1.5 and is_downtrend
+        # Entry conditions
+        donchian_breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
+        donchian_breakdown_down = close[i] < donchian_low[i-1]  # Break below previous period's low
         
-        # Exit conditions: price returns toward VWAP
-        exit_long = price_dev > -0.5  # Return to within 0.5σ of VWAP
-        exit_short = price_dev < 0.5   # Return to within 0.5σ of VWAP
+        long_entry = donchian_breakout_up and volume_filter and is_uptrend
+        short_entry = donchian_breakdown_down and volume_filter and is_downtrend
+        
+        # Exit conditions
+        long_exit = (close[i] < donchian_mid[i]) or (not is_uptrend)  # Return to midpoint or trend change
+        short_exit = (close[i] > donchian_mid[i]) or (not is_downtrend)  # Return to midpoint or trend change
         
         # Priority: entry > exit > hold
-        if vwap_long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif vwap_short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
