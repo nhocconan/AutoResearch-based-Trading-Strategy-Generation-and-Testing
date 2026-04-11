@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,38 +20,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    weekly_range = high_1w - low_1w
+    # Calculate Elder Ray indicators from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Key levels: R4 (resistance) and S4 (support)
-    r4 = close_1w + (weekly_range * 1.1 / 2)
-    s4 = close_1w - (weekly_range * 1.1 / 2)
+    # EMA(13) of daily close
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Exit levels: R3 and S3
-    r3 = close_1w + (weekly_range * 1.1 / 4)
-    s3 = close_1w - (weekly_range * 1.1 / 4)
+    # Bull Power = High - EMA13
+    bull_power_1d = high_1d - ema13_1d
     
-    # Volume confirmation: daily volume > 1.5x 20-period average (moderate to reduce trades)
+    # Bear Power = Low - EMA13
+    bear_power_1d = low_1d - ema13_1d
+    
+    # Align daily values to 6h timeframe
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # 6h EMA(20) for trend filter
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume confirmation: 6h volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align weekly levels to daily timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(ema20_6h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -59,36 +61,36 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation - moderate threshold
+        # Volume confirmation
         vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Breakout conditions using weekly Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above weekly R4
-        breakout_down = price_close < s4_aligned[i]  # Break below weekly S4
+        # Elder Ray conditions
+        bullish = bull_power_aligned[i] > 0 and ema13_aligned[i] > ema20_6h[i]
+        bearish = bear_power_aligned[i] < 0 and ema13_aligned[i] < ema20_6h[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Break above weekly R4 with volume confirmation
-        if breakout_up and vol_confirm:
+        # Long: Bull power positive, EMA13 above EMA20, volume confirmation
+        if bullish and vol_confirm:
             enter_long = True
         
-        # Short: Break below weekly S4 with volume confirmation
-        if breakout_down and vol_confirm:
+        # Short: Bear power negative, EMA13 below EMA20, volume confirmation
+        if bearish and vol_confirm:
             enter_short = True
         
-        # Exit conditions: return to opposite S3/R3 levels
-        exit_long = price_close < s3_aligned[i]  # Return to weekly S3 level
-        exit_short = price_close > r3_aligned[i]  # Return to weekly R3 level
+        # Exit conditions: opposite Elder Ray power or EMA crossover
+        exit_long = bear_power_aligned[i] < 0 or ema13_aligned[i] < ema20_6h[i]
+        exit_short = bull_power_aligned[i] > 0 or ema13_aligned[i] > ema20_6h[i]
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -97,16 +99,16 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 1d Camarilla breakout strategy using weekly pivot levels with volume confirmation.
-# Enters long when price breaks above weekly R4 with volume > 1.5x 20-period average.
-# Enters short when price breaks below weekly S4 with volume > 1.5x 20-period average.
-# Exits when price returns to weekly S3/R3 levels respectively.
-# Uses moderate volume threshold (1.5x) and short MA (20) to achieve 7-25 trades per year.
-# Position size set to 0.30 to balance risk and reward.
-# Target: 7-25 trades per year (28-100 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 1d timeframe reduces noise and weekly Camarilla levels provide institutional reference points.
+# Hypothesis: 6h Elder Ray breakout strategy with EMA trend filter and volume confirmation.
+# Uses daily Elder Ray (Bull/Bear Power) aligned to 6h timeframe to identify institutional bias.
+# Enters long when Bull Power > 0 and daily EMA13 > 6h EMA20 with volume confirmation.
+# Enters short when Bear Power < 0 and daily EMA13 < 6h EMA20 with volume confirmation.
+# Exits when Elder Ray power reverses or EMA13/EMA20 crossover occurs.
+# Volume filter (>1.5x 20-period average) ensures participation during active periods.
+# Position size 0.25 balances risk while allowing meaningful returns.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+# Works in both bull and bear markets by following institutional order flow.
