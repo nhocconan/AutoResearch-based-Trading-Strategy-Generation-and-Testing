@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R + Volume Spike + Chop Regime Filter
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume spike
 # - Williams %R(14): overbought > -20, oversold < -80
-# - Long: Williams %R crosses above -80 from below (oversold bounce) AND volume > 2.0x 24-period average AND chop > 61.8 (range regime)
-# - Short: Williams %R crosses below -20 from above (overbought rejection) AND volume > 2.0x 24-period average AND chop > 61.8 (range regime)
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Williams %R identifies reversal points in ranging markets
-# - Volume spike confirms conviction behind the move
-# - Chop regime filter (EHLERS) ensures we only trade in ranging conditions where mean reversion works
-# - Works in both bull (buy dips) and bear (sell rallies) markets during consolidation phases
+# - Trend filter: price > 1d EMA50 for longs, price < 1d EMA50 for shorts
+# - Volume confirmation: current volume > 2.0x 20-period 6h volume average
+# - Only trade mean reversion in direction of 1d trend (avoid counter-trend traps)
+# - Discrete position sizing: ±0.25 to manage drawdown and reduce fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee limits
+# - Williams %R excels at catching reversals in ranging/bear markets (2025+)
+# - 1d EMA50 filter ensures we only take trades aligned with higher timeframe trend
+# - Volume spike confirms institutional interest behind the move
 
-name = "12h_williamsr_volume_chop_v1"
-timeframe = "12h"
+name = "6h_1d_williamsr_meanrev_volume_v3"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,79 +31,69 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for HTF filters
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d chop regime filter (Ehlers Choppy Index)
-    hl_range_1d = pd.Series(df_1d['high'] - df_1d['low']).rolling(window=14, min_periods=14).sum()
-    true_range_1d = pd.Series(np.maximum(df_1d['high'] - df_1d['low'], 
-                                        np.maximum(np.abs(df_1d['high'] - df_1d['close'].shift(1)),
-                                                  np.abs(df_1d['low'] - df_1d['close'].shift(1))))).rolling(window=14, min_periods=14).sum()
-    chop_1d = 100 * np.log10(hl_range_1d / true_range_1d) / np.log10(14)
-    chop_1d_values = chop_1d.fillna(50).values  # fill NaN with neutral 50
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d_values)
+    # Pre-compute 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Pre-compute 1d volume confirmation (24-period average)
-    volume_1d = df_1d['volume'].values
-    volume_sma_24_1d = pd.Series(volume_1d).rolling(window=24, min_periods=24).mean().values
-    volume_sma_24_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_24_1d)
+    # Pre-compute 6h volume confirmation (20-period average)
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute Williams %R on 12h timeframe
-    highest_high = pd.Series(close).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    # Pre-compute Williams %R on 6h timeframe
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(-50).values  # neutral when undefined
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Williams %R previous value for crossover detection
-    williams_r_prev = np.roll(williams_r, 1)
-    williams_r_prev[0] = williams_r[0]  # first value same as current
-    
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(williams_r_prev[i]) or
-            np.isnan(volume_sma_24_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current price data
+        # Current price and volume data
+        price_current = close[i]
         volume_current = volume[i]
         
-        # Williams %R crossover signals
-        williams_r_cross_up = (williams_r_prev[i] <= -80) and (williams_r[i] > -80)  # crossing above -80 (oversold bounce)
-        williams_r_cross_down = (williams_r_prev[i] >= -20) and (williams_r[i] < -20)  # crossing below -20 (overbought rejection)
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
-        # Volume confirmation: current volume > 2.0x 24-period average
-        vol_confirm = volume_current > 2.0 * volume_sma_24_aligned[i]
+        # 1d trend filter
+        uptrend = price_current > ema50_1d_aligned[i]
+        downtrend = price_current < ema50_1d_aligned[i]
         
-        # Chop regime filter: only trade in ranging markets (chop > 61.8)
-        chop_filter = chop_1d_aligned[i] > 61.8
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_spike = volume_current > 2.0 * volume_sma_20[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Williams %R crosses above -80 (oversold bounce) + volume confirmation + chop regime
-        if williams_r_cross_up and vol_confirm and chop_filter:
+        # Long: oversold + uptrend + volume spike
+        if oversold and uptrend and vol_spike:
             enter_long = True
         
-        # Short: Williams %R crosses below -20 (overbought rejection) + volume confirmation + chop regime
-        if williams_r_cross_down and vol_confirm and chop_filter:
+        # Short: overbought + downtrend + volume spike
+        if overbought and downtrend and vol_spike:
             enter_short = True
         
-        # Exit conditions: opposite Williams %R crossover or loss of regime
+        # Exit conditions: reverse Williams %R condition or loss of trend
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if Williams %R crosses above -20 (overbought) OR chop regime ends
-            williams_r_cross_down_exit = (williams_r_prev[i] >= -20) and (williams_r[i] < -20)
-            exit_long = williams_r_cross_down_exit or (chop_1d_aligned[i] <= 61.8)
+            # Exit long if not oversold OR trend turns down
+            exit_long = (not oversold) or (not uptrend)
         elif position == -1:
-            # Exit short if Williams %R crosses below -80 (oversold) OR chop regime ends
-            williams_r_cross_up_exit = (williams_r_prev[i] <= -80) and (williams_r[i] > -80)
-            exit_short = williams_r_cross_up_exit or (chop_1d_aligned[i] <= 61.8)
+            # Exit short if not overbought OR trend turns up
+            exit_short = (not overbought) or (not downtrend)
         
         # Trading logic
         if enter_long and position != 1:
