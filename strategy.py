@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_cci_extreme_v2
-Strategy: 6h CCI extreme + 12h/1d trend filter + volume confirmation
-Timeframe: 6h
+4h_1d_camarilla_breakout_trend_v1
+Strategy: 4h breakout with 1d trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Buy when 6h CCI < -150 (oversold) with 12h uptrend and volume > 1.5x average; sell when CCI > 150 (overbought) with 12h downtrend and volume confirmation. Uses 1d close > prior 1d close for uptrend definition. Designed to capture mean reversion in ranging markets while avoiding counter-trend trades. Low-frequency design targets 20-50 trades/year to minimize fee drag.
+Hypothesis: Buy when 4h closes above prior 1d R3 with volume confirmation and 1d uptrend; sell when 4h closes below prior 1d S3 with 1d downtrend. Uses 1d Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_cci_extreme_v2"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,40 +27,61 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 6h CCI (20-period)
-    tp = (high + low + close) / 3.0
-    ma = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(np.abs(tp - ma)).rolling(window=20, min_periods=20).mean().values
-    cci = (tp - ma) / (0.015 * mad)
+    # 4h ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 1.5x 20-period average
+    # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d Close trend filter: use prior 1d's close ===
+    # === 1d Close (trend filter: use prior 1d's close) ===
     close_1d = df_1d['close'].values
     close_1d_shifted = np.roll(close_1d, 1)
     close_1d_shifted[0] = np.nan
     close_1d_trend = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
     
-    # === 12h trend filter: use prior 12h close ===
-    close_12h = df_12h['close'].values
-    close_12h_shifted = np.roll(close_12h, 1)
-    close_12h_shifted[0] = np.nan
-    close_12h_trend = align_htf_to_ltf(prices, df_12h, close_12h_shifted)
+    # === 1d Camarilla (entry levels from prior 1d) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Prior 1d's Camarilla levels (use shifted values to avoid look-ahead)
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    close_1d_shift = np.roll(close_1d, 1)
+    high_1d_shift[0] = np.nan
+    low_1d_shift[0] = np.nan
+    close_1d_shift[0] = np.nan
+    
+    pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
+    range_1d = high_1d_shift - low_1d_shift
+    r3_1d = close_1d_shift + range_1d * 1.166
+    s3_1d = close_1d_shift - range_1d * 1.166
+    
+    # Align 1d Camarilla to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Session filter: 08-20 UTC (major sessions)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if any required data is invalid
-        if (np.isnan(cci[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(close_1d_trend[i]) or np.isnan(close_12h_trend[i])):
+    for i in range(50, n):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(close_1d_trend[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
+            not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -68,24 +89,24 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: 6h volume must be elevated
+        # Volume confirmation: 4h volume must be elevated
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filters
+        # Trend filter: price close vs prior 1d close (1d trend)
         uptrend_1d = price_close > close_1d_trend[i]
         downtrend_1d = price_close < close_1d_trend[i]
-        uptrend_12h = price_close > close_12h_trend[i]
-        downtrend_12h = price_close < close_12h_trend[i]
         
-        # Long conditions: CCI < -150 (oversold) + volume + 1d/12h uptrend
-        long_signal = (cci[i] < -150) and volume_confirmed and uptrend_1d and uptrend_12h
+        # Long conditions: 4h closes above prior 1d's R3 with volume + 1d uptrend
+        long_signal = volume_confirmed and (price_close > r3_1d_aligned[i]) and uptrend_1d
         
-        # Short conditions: CCI > 150 (overbought) + volume + 1d/12h downtrend
-        short_signal = (cci[i] > 150) and volume_confirmed and downtrend_1d and downtrend_12h
+        # Short conditions: 4h closes below prior 1d's S3 with volume + 1d downtrend
+        short_signal = volume_confirmed and (price_close < s3_1d_aligned[i]) and downtrend_1d
         
-        # Exit when CCI returns to neutral zone (-50 to 50)
-        exit_long = position == 1 and cci[i] > -50
-        exit_short = position == -1 and cci[i] < 50
+        # Exit when price returns to the 1d pivot (mean reversion within prior 1d's range)
+        pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
+        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = position == 1 and price_close < pivot_1d_aligned[i]
+        exit_short = position == -1 and price_close > pivot_1d_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -105,4 +126,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when 6h CCI < -150 (oversold) with 12h uptrend and volume > 1.5x average; sell when CCI > 150 (overbought) with 12h downtrend and volume confirmation. Uses 1d close > prior 1d close for uptrend definition. Designed to capture mean reversion in ranging markets while avoiding counter-trend trades. Low-frequency design targets 20-50 trades/year to minimize fee drag.
+# Hypothesis: Buy when 4h closes above prior 1d R3 with volume confirmation and 1d uptrend; sell when 4h closes below prior 1d S3 with 1d downtrend. Uses 1d Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 20-50 trades/year to minimize fee drag.
