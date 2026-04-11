@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Strategy: Camarilla pivot levels from 1d with volume confirmation
-# Timeframe: 4h
+# 12h_1d_camarilla_volume_v1
+# Strategy: 12h Camarilla pivot with daily volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels act as strong support/resistance; price rejection at these levels with volume provides high-probability entries. Works in both bull and bear markets by capturing reversals at key levels.
+# Hypothesis: Camarilla pivot levels provide strong intraday support/resistance.
+# Long when price touches L3 with bullish volume confirmation, short when touches H3 with bearish volume.
+# Uses 1d volume spike for confirmation to reduce false signals. Designed for low frequency
+# (15-25 trades/year) to minimize fee drag in volatile markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,71 +30,60 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla formulas:
-    # H4 = close + 1.1 * (high - low) / 2
-    # H3 = close + 1.1 * (high - low) / 4
-    # H2 = close + 1.1 * (high - low) / 6
-    # H1 = close + 1.1 * (high - low) / 12
-    # L1 = close - 1.1 * (high - low) / 12
-    # L2 = close - 1.1 * (high - low) / 6
-    # L3 = close - 1.1 * (high - low) / 4
-    # L4 = close - 1.1 * (high - low) / 2
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    # Previous day's values (shift by 1)
+    phigh = np.roll(high_1d, 1)
+    plow = np.roll(low_1d, 1)
+    pclose = np.roll(close_1d, 1)
+    phigh[0] = phigh[1] if len(phigh) > 1 else phigh[0]
+    plow[0] = plow[1] if len(plow) > 1 else plow[0]
+    pclose[0] = pclose[1] if len(pclose) > 1 else pclose[0]
     
-    # Calculate Camarilla levels
-    H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
-    L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # Camarilla levels
+    range_ = phigh - plow
+    camarilla_L3 = pclose + range_ * 1.1 / 6
+    camarilla_H3 = pclose + range_ * 1.1 / 2
     
-    # Align Camarilla levels to 4h timeframe (1-day delay for previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Align to 12h timeframe
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
     
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_spike = volume > (vol_ma_20 * 1.5)
+    # Volume confirmation: 1d volume spike (>1.5x 20-day average)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean()
+    vol_spike_1d = vol_1d > (vol_ma_20 * 1.5)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(camarilla_L3_aligned[i]) or np.isnan(camarilla_H3_aligned[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long setup: price breaks above H3 with volume spike (bullish breakout)
-        # Short setup: price breaks below L3 with volume spike (bearish breakout)
-        if (close[i] > H3_aligned[i] and volume_spike[i] and position != 1):
+        # Long: price touches or goes below L3 with volume spike
+        if (low[i] <= camarilla_L3_aligned[i] and vol_spike_aligned[i] > 0.5 and position != 1):
             position = 1
             signals[i] = 0.25
-        elif (close[i] < L3_aligned[i] and volume_spike[i] and position != -1):
+        # Short: price touches or goes above H3 with volume spike
+        elif (high[i] >= camarilla_H3_aligned[i] and vol_spike_aligned[i] > 0.5 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to mean (H1/L1) or opposite extreme
-        elif position == 1 and (close[i] < H1_aligned[i] or close[i] > H4_aligned[i]):
+        # Exit: price moves back toward mean (previous close)
+        elif position == 1 and close[i] >= pclose[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > L1_aligned[i] or close[i] < L4_aligned[i]):
+        elif position == -1 and close[i] <= pclose[i]:
             position = 0
             signals[i] = 0.0
         else:
