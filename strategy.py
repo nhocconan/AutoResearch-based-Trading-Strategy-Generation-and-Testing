@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_momentum_trend_v1
-# Strategy: 12h momentum with 1d EMA trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_v1
+# Strategy: 4h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: In trending markets, momentum combined with higher timeframe trend filter
-# captures sustainable moves while avoiding counter-trend whipsaws. Volume confirmation
-# ensures institutional participation. Designed for low trade frequency (<30/year) to
-# minimize fee drag, effective in both bull and bear markets via trend alignment.
+# Hypothesis: Camarilla pivot levels from daily charts act as strong support/resistance.
+# Breakouts above/below key levels (H3/L3) with volume confirmation (>1.5x 20-day average)
+# and aligned with 1d EMA50 trend capture sustainable moves. Designed for low trade frequency
+# (<30/year) to minimize fee drift, targeting 75-200 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_momentum_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,34 +33,27 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h momentum (10-period ROC)
-    mom = np.zeros_like(close)
-    mom[10:] = (close[10:] - close[:-10]) / close[:-10] * 100
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 12h RSI (14-period) for overbought/oversold
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[14] = np.mean(gain[:14])
-    avg_loss[14] = np.mean(loss[:14])
-    for i in range(15, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # 12h ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Camarilla levels
+    h3 = pivot + (range_1d * 1.1 / 2)
+    l3 = pivot - (range_1d * 1.1 / 2)
+    h4 = pivot + (range_1d * 1.1)
+    l4 = pivot - (range_1d * 1.1)
+    
+    # Align Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
@@ -77,18 +70,11 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(mom[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or \
-           np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or \
-           np.isnan(vol_1d_aligned[i]):
+        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or \
+           np.isnan(l4_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or \
+           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
-        
-        # Volatility filter: avoid low volatility (range) markets
-        if i >= 50:
-            atr_ma = pd.Series(atr[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1]
-            vol_filter = atr[i] > 0.8 * atr_ma  # Only trade when volatility is above 80% of average
-        else:
-            vol_filter = True
         
         # Volume confirmation: current 1d volume > 1.5x 20-period average
         vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
@@ -97,31 +83,30 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Momentum conditions
-        mom_strength = abs(mom[i]) > 1.0  # Minimum 1% momentum
-        mom_bullish = mom[i] > 0
-        mom_bearish = mom[i] < 0
-        
-        # RSI filter: avoid extremes
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
+        # Price relative to Camarilla levels
+        above_h3 = close[i] > h3_aligned[i]
+        below_l3 = close[i] < l3_aligned[i]
+        above_h4 = close[i] > h4_aligned[i]
+        below_l4 = close[i] < l4_aligned[i]
         
         # Entry conditions
-        # Long: Bullish momentum AND uptrend AND volume confirmation AND volatility filter
-        if mom_bullish and mom_strength and uptrend and vol_confirm and vol_filter and \
-           rsi_not_overbought and position != 1:
-            position = 1
-            signals[i] = 0.25
-        # Short: Bearish momentum AND downtrend AND volume confirmation AND volatility filter
-        elif mom_bearish and mom_strength and downtrend and vol_confirm and vol_filter and \
-             rsi_not_oversold and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Exit: Momentum reversal or RSI extreme
-        elif position == 1 and (mom_bearish or rsi[i] >= 70):
+        # Long: Price breaks above H3 AND uptrend AND volume confirmation
+        if above_h3 and uptrend and vol_confirm and position != 1:
+            # Additional check: ensure we didn't just break above H3 in previous bar
+            if i == 50 or close[i-1] <= h3_aligned[i-1]:
+                position = 1
+                signals[i] = 0.25
+        # Short: Price breaks below L3 AND downtrend AND volume confirmation
+        elif below_l3 and downtrend and vol_confirm and position != -1:
+            # Additional check: ensure we didn't just break below L3 in previous bar
+            if i == 50 or close[i-1] >= l3_aligned[i-1]:
+                position = -1
+                signals[i] = -0.25
+        # Exit: Price returns to pivot level (mean reversion)
+        elif position == 1 and close[i] < pivot[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (mom_bullish or rsi[i] <= 30):
+        elif position == -1 and close[i] > pivot[i]:
             position = 0
             signals[i] = 0.0
         else:
