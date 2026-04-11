@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 6h_1w_donchian_weekly_pivot_volume_v1
-# Strategy: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
-# Timeframe: 6h
+# 4h_1d_camarilla_breakout_v1
+# Strategy: 4-hour Camarilla pivot breakout with daily trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture trend momentum. Weekly pivot (from 1w) provides
-# directional bias: long above weekly pivot, short below. Volume confirms breakout strength.
-# Works in bull by riding uptrends, in bear by catching breakdowns below pivot.
+# Hypothesis: Camarilla pivot levels (H3/L3, H4/L4) act as strong support/resistance.
+# Breakouts above H3 or below L3 with volume confirmation and daily trend alignment
+# capture institutional moves. Works in bull by catching breakouts in uptrend,
+# and in bear by catching breakdowns in downtrend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,80 +27,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot point and support/resistance levels
-    # Using typical price: (H + L + C) / 3
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    pivot = typical_price.values
-    # Calculate R1, S1, R2, S2
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    r1 = 2 * pivot - low_w
-    s1 = 2 * pivot - high_w
-    r2 = pivot + (high_w - low_w)
-    s2 = pivot - (high_w - low_w)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Use weekly pivot as trend filter: above pivot = bullish bias, below = bearish
-    weekly_bias = pivot > (high_w + low_w + df_1w['close'].values) / 3  # Actually just pivot > typical price? No, pivot IS typical price
-    # Correction: weekly bias based on current price vs weekly pivot
-    # We'll compute this inside loop using current price and last weekly pivot
+    # Calculate Camarilla levels for previous day
+    # H4 = close + 1.5 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    # H3 = close + 1.125 * (high - low)
+    # L3 = close - 1.125 * (high - low)
+    range_1d = prev_high - prev_low
+    H4 = prev_close + 1.5 * range_1d
+    L4 = prev_close - 1.5 * range_1d
+    H3 = prev_close + 1.125 * range_1d
+    L3 = prev_close - 1.125 * range_1d
     
-    # Align weekly pivot to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Align daily Camarilla levels to 4h timeframe (no extra delay needed for pivot points)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # 6h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation (20-period average)
+    # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(50, n):  # Start after EMA warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(pivot_aligned[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current price and levels
+        # Current price
         price_now = close[i]
-        donchian_high = highest_high[i]
-        donchian_low = lowest_low[i]
-        weekly_pivot = pivot_aligned[i]
         
-        # Determine weekly bias: price above/below weekly pivot
-        bias_long = price_now > weekly_pivot
-        bias_short = price_now < weekly_pivot
+        # Breakout conditions
+        bull_breakout = (price_now > H3_aligned[i]) and vol_spike[i]
+        bear_breakout = (price_now < L3_aligned[i]) and vol_spike[i]
         
-        # Breakout conditions with volume confirmation
-        breakout_long = (price_now > donchian_high) and vol_spike[i]
-        breakout_short = (price_now < donchian_low) and vol_spike[i]
+        # Trend filter: only trade in direction of daily EMA(50)
+        bull_mode = close[i] > ema_50_aligned[i]
+        bear_mode = close[i] < ema_50_aligned[i]
         
-        # Exit conditions: opposite Donchian breakout or loss of bias
-        exit_long = position == 1 and (
-            (price_now < donchian_low) or  # Price breaks below Donchian low
-            not bias_long  # Lost bullish bias
-        )
-        exit_short = position == -1 and (
-            (price_now > donchian_high) or  # Price breaks above Donchian high
-            not bias_short  # Lost bearish bias
-        )
+        # Exit conditions: price returns to camillia pivot levels
+        exit_long = position == 1 and (price_now < H3_aligned[i] * 0.995)
+        exit_short = position == -1 and (price_now > L3_aligned[i] * 1.005)
         
-        # Trading logic: trade breakouts in direction of weekly bias
-        if breakout_long and bias_long and position != 1:
+        # Trading logic
+        if bull_breakout and bull_mode and position != 1:
             position = 1
             signals[i] = 0.25
-        elif breakout_short and bias_short and position != -1:
+        elif bear_breakout and bear_mode and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
