@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 6h_1w_icm_pullback_v1
-# Strategy: 6h Ichimoku pullback with weekly cloud filter
-# Timeframe: 6h
+# 12h_1d_camarilla_pivot_volume_v1
+# Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: In strong weekly trends (price above/below weekly Kumo), pullbacks to the 6h Tenkan-Kijun mean offer high-probability entries.
-# Works in bull via long pullbacks above weekly cloud, in bear via short pullbacks below weekly cloud.
-# Low trade frequency expected due to strict weekly trend filter.
+# Hypothesis: Camarilla pivot levels from daily chart act as strong support/resistance. 
+# Breakouts above/below these levels with 1d EMA trend alignment and volume confirmation 
+# capture significant moves. Designed for low trade frequency (~15-30/year) to minimize fee drag.
+# Works in bull markets via long breakouts and bear markets via short breakdowns.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_icm_pullback_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,102 +25,74 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:  # Need ~1 year of weekly data
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = (high_9 + low_9) / 2
+    # Calculate Camarilla pivot levels from previous day
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We'll use R3 and S3 as breakout levels
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = (high_26 + low_26) / 2
+    # Calculate pivot range
+    pivot_range = prev_high - prev_low
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    # We'll compute current Senkou A for cloud calculation (no shift needed for current cloud)
-    senkou_a = (tenkan + kijun) / 2
+    # Camarilla levels (using previous day's data)
+    r3 = prev_close + (pivot_range * 1.1 / 4)
+    s3 = prev_close - (pivot_range * 1.1 / 4)
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = (high_52 + low_52) / 2
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Weekly Ichimoku for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d EMA20 for trend filter
+    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Weekly Tenkan (9-period)
-    high_9_1w = pd.Series(high_1w).rolling(window=9, min_periods=9).max()
-    low_9_1w = pd.Series(low_1w).rolling(window=9, min_periods=9).min()
-    tenkan_1w = (high_9_1w + low_9_1w) / 2
-    
-    # Weekly Kijun (26-period)
-    high_26_1w = pd.Series(high_1w).rolling(window=26, min_periods=26).max()
-    low_26_1w = pd.Series(low_1w).rolling(window=26, min_periods=26).min()
-    kijun_1w = (high_26_1w + low_26_1w) / 2
-    
-    # Weekly Senkou Span A
-    senkou_a_1w = (tenkan_1w + kijun_1w) / 2
-    
-    # Weekly Senkou Span B (52-period)
-    high_52_1w = pd.Series(high_1w).rolling(window=52, min_periods=52).max()
-    low_52_1w = pd.Series(low_1w).rolling(window=52, min_periods=52).min()
-    senkou_b_1w = (high_52_1w + low_52_1w) / 2
-    
-    # Align weekly Ichimoku components to 6h
-    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w.values)
-    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w.values)
-    senkou_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_a_1w.values)
-    senkou_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_1w.values)
-    
-    # Weekly Kumo (cloud) boundaries
-    weekly_kumo_top = np.maximum(senkou_a_1w_aligned, senkou_b_1w_aligned)
-    weekly_kumo_bottom = np.minimum(senkou_a_1w_aligned, senkou_b_1w_aligned)
-    
-    # Determine if price is above or below weekly cloud
-    price_above_weekly_kumo = close > weekly_kumo_top
-    price_below_weekly_kumo = close < weekly_kumo_bottom
-    
-    # Tenkan-Kijun cross signals
-    tk_cross_up = (tenkan > kijun) & (tenkan.shift(1) <= kijun.shift(1))
-    tk_cross_down = (tenkan < kijun) & (tenkan.shift(1) >= kijun.shift(1))
-    
-    # Pullback to Tenkan-Kijun mean
-    tk_mean = (tenkan + kijun) / 2
-    pullback_to_tk = np.abs(close - tk_mean) < 0.5 * np.abs(tenkan - kijun)
+    # 20-period volume average for confirmation (on 12h timeframe)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(30, n):  # Start after enough data for indicators
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or
-            np.isnan(senkou_a_1w_aligned[i]) or np.isnan(senkou_b_1w_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
+        
+        # Breakout signals
+        breakout_up = high[i] > r3_aligned[i-1]
+        breakdown_down = low[i] < s3_aligned[i-1]
+        
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_20_1d_aligned[i]
+        trend_bearish = close[i] < ema_20_1d_aligned[i]
+        
         # Entry conditions
-        # Long: Price above weekly cloud, TK cross up, pullback to TK mean
-        if (price_above_weekly_kumo[i] and tk_cross_up[i] and pullback_to_tk[i] and position != 1):
+        # Long: Breakout above R3 AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price below weekly cloud, TK cross down, pullback to TK mean
-        elif (price_below_weekly_kumo[i] and tk_cross_down[i] and pullback_to_tk[i] and position != -1):
+        # Short: Breakdown below S3 AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite TK cross
-        elif position == 1 and tk_cross_down[i]:
+        # Exit: Opposite breakout (breakdown for long, breakout for short)
+        elif position == 1 and breakdown_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and tk_cross_up[i]:
+        elif position == -1 and breakout_up:
             position = 0
             signals[i] = 0.0
         else:
