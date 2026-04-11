@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_v1
-# Strategy: 12h Camarilla pivot with 1d EMA trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_volume_v2
+# Strategy: 4h Camarilla breakout with 1d EMA trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance. In trending markets (1d EMA filter), price reacts strongly at these levels. Volume confirmation ensures institutional participation. Works in both bull/bear by trading breakouts in trend direction, avoiding false signals in chop.
+# Hypothesis: Camarilla H3/L3 levels act as strong support/resistance. Breakouts in the direction of 1d EMA(50) trend with volume confirmation capture institutional moves. Works in bull/bear by trading breakouts only in trend direction, avoiding false signals in chop. Reduced position size and added cooldown to control trade frequency.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -54,26 +54,31 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    bars_since_entry = 0
     
     for i in range(20, n):
+        bars_since_entry += 1
+        
         # Skip if any required data is invalid
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ratio.iloc[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         # Volume confirmation: current volume > 1.5x average
         vol_confirmed = vol_ratio.iloc[i] > 1.5
         
         # Entry conditions
-        # Long: Price breaks above H3 + above 1d EMA50 (uptrend) + volume confirmation
-        if vol_confirmed and close[i] > camarilla_h3_aligned[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Long: Price breaks above H3 + above 1d EMA50 (uptrend) + volume confirmation + cooldown
+        if vol_confirmed and close[i] > camarilla_h3_aligned[i] and close[i] > ema_50_1d_aligned[i] and position != 1 and bars_since_entry >= 12:
             position = 1
-            signals[i] = 0.25
-        # Short: Price breaks below L3 + below 1d EMA50 (downtrend) + volume confirmation
-        elif vol_confirmed and close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
+            bars_since_entry = 0
+            signals[i] = 0.20
+        # Short: Price breaks below L3 + below 1d EMA50 (downtrend) + volume confirmation + cooldown
+        elif vol_confirmed and close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1 and bars_since_entry >= 12:
             position = -1
-            signals[i] = -0.25
+            bars_since_entry = 0
+            signals[i] = -0.20
         # Exit conditions: price returns to midpoint or trend reversal
         elif position == 1 and (close[i] < (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2 or close[i] < ema_50_1d_aligned[i]):
             position = 0
@@ -83,6 +88,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
