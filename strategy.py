@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v16"
+name = "12h_1d_camarilla_breakout_v17"
 timeframe = "12h"
 leverage = 1.0
 
@@ -52,7 +52,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h volume filter: volume > 2.0x 20-period average (adjusted for higher trade frequency)
+    # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 12h ADX for trend strength (14 period)
@@ -80,11 +80,11 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation (2.0x average - adjusted for higher trade frequency)
-        volume_confirmed = volume_current > 2.0 * vol_ma
+        # Volume confirmation (1.5x average)
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filter: ADX > 25 (moderate trend - adjusted for higher trade frequency)
-        trend_filter = adx[i] > 25
+        # Trend filter: ADX > 20
+        trend_filter = adx[i] > 20
         
         # Long conditions: price breaks above R3 with volume and trend
         long_signal = volume_confirmed and trend_filter and (price_high > r3_12h[i])
@@ -115,11 +115,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla pivot breakout strategy for 12h timeframe with adjusted volume confirmation (>2.0x average volume) and relaxed ADX filter (>25).
-# Enters long when 12h price breaks above daily R3 level (close + 1.166*range) with volume >2.0x average and ADX>25.
-# Enters short when price breaks below daily S3 level (close - 1.166*range) with volume >2.0x average and ADX>25.
+# Hypothesis: Daily Camarilla pivot breakout strategy for 12h timeframe with volume confirmation (>1.5x average volume) and relaxed ADX filter (>20).
+# Enters long when 12h price breaks above daily R3 level (close + 1.166*range) with volume >1.5x average and ADX>20.
+# Enters short when price breaks below daily S3 level (close - 1.166*range) with volume >1.5x average and ADX>20.
 # Exits when price returns to the daily pivot level (mean reversion within the day's range).
 # Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
-# Adjusted filters target 25-40 trades per year to stay within optimal range while maintaining edge.
+# Relaxed filters target 30-50 trades per year to stay within optimal range while maintaining edge.
 # Position size: 0.25 to balance risk and return.
 # Camarilla pivots work well in both bull and bear markets as they adapt to daily volatility ranges.
