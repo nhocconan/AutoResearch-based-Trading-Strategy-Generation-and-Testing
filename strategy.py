@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_vwap_mean_reversion_v2
-# Strategy: 12h VWAP mean reversion with 1d trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_volume_v2
+# Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Price reverts to VWAP in ranging markets. In trending markets, we follow the trend. Uses 1d EMA50 for trend filter and volume > 1.5x average for confirmation. Targets 20-50 trades/year to minimize fee drag.
+# Hypothesis: Camarilla levels (H4/L4, H3/L3) act as strong support/resistance. 
+# Breakouts with volume confirmation in the direction of the 1d trend yield high-probability trades.
+# Works in bull/bear: In uptrends, buy L3/L4 breaks; in downtrends, sell H3/H4 breaks.
+# Low frequency (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_vwap_mean_reversion_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,27 +38,40 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # VWAP calculation (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
+    # Calculate Camarilla levels from previous 1d candle
+    # Typical Price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Range = H - L
+    range_1d = df_1d['high'] - df_1d['low']
+    # Camarilla levels
+    # H4 = Close + 1.5 * Range * 1.1
+    # L4 = Close - 1.5 * Range * 1.1
+    # H3 = Close + 1.25 * Range * 1.1
+    # L3 = Close - 1.25 * Range * 1.1
+    h4 = df_1d['close'] + 1.5 * range_1d * 1.1
+    l4 = df_1d['close'] - 1.5 * range_1d * 1.1
+    h3 = df_1d['close'] + 1.25 * range_1d * 1.1
+    l3 = df_1d['close'] - 1.25 * range_1d * 1.1
     
-    # Distance from VWAP as percentage
-    vwap_dist = (close - vwap) / vwap
+    # Align Camarilla levels to 4h (they are constant throughout the day)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4.values)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4.values)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3.values)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
+    vol_confirm = volume > (1.8 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vwap_dist[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -63,18 +79,20 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: VWAP mean reversion in ranging, trend following in trending
-        if (vwap_dist[i] < -0.008 and vol_confirm[i] and not uptrend and position != 1):  # Oversold in downtrend/ranging
+        # Entry logic: Camarilla breakout + volume + trend alignment
+        if (close[i] > h3_aligned[i] and vol_confirm[i] and uptrend and position != 1):
+            # Break above H3 in uptrend -> long
             position = 1
             signals[i] = 0.25
-        elif (vwap_dist[i] > 0.008 and vol_confirm[i] and not downtrend and position != -1):  # Overbought in uptrend/ranging
+        elif (close[i] < l3_aligned[i] and vol_confirm[i] and downtrend and position != -1):
+            # Break below L3 in downtrend -> short
             position = -1
             signals[i] = -0.25
-        # Exit: VWAP cross or trend change
-        elif position == 1 and (vwap_dist[i] > 0.002 or downtrend):
+        # Exit: price returns to opposite Camarilla level or trend change
+        elif position == 1 and (close[i] < l3_aligned[i] or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (vwap_dist[i] < -0.002 or uptrend):
+        elif position == -1 and (close[i] > h3_aligned[i] or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
