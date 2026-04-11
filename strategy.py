@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_kama_rsi_momentum_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,86 +20,67 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return signals
     
-    # Calculate 1d KAMA (Kaufman Adaptive Moving Average)
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            er[i] = 0
-        else:
-            er[i] = change[i] / (np.sum(volatility[max(0, i-9):i+1]) + 1e-10)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 1d RSI
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Shift by 1 to use only completed weekly bars
+    upper_1w = np.roll(upper_1w, 1)
+    lower_1w = np.roll(lower_1w, 1)
+    upper_1w[0] = np.nan
+    lower_1w[0] = np.nan
     
-    # Shift by 1 to use only completed 1d bars
-    kama = np.roll(kama, 1)
-    rsi = np.roll(rsi, 1)
-    kama[0] = np.nan
-    rsi[0] = np.nan
+    # Align weekly indicators to daily timeframe
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
-    # Align 1d indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate daily ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h RSI for entry timing
-    delta_4h = np.diff(close, prepend=close[0])
-    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
-    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
-    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
-    
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(rsi_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
+        atr_val = atr[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Determine trend from 1d KAMA slope
-        kama_slope = kama_aligned[i] - kama_aligned[i-1] if i > 0 else 0
+        # Volatility filter: avoid extremely low volatility
+        vol_filter = atr_val > 0.01 * price_close  # ATR > 1% of price
         
-        # Long conditions: Uptrend (KAMA rising) + RSI not oversold + volume
-        long_signal = volume_confirmed and (kama_slope > 0) and (rsi_4h[i] > 30) and (rsi_4h[i] < 70)
+        # Long conditions: price breaks above weekly upper Donchian with volume and vol filter
+        long_signal = volume_confirmed and vol_filter and (price_high > upper_1w_aligned[i])
         
-        # Short conditions: Downtrend (KAMA falling) + RSI not overbought + volume
-        short_signal = volume_confirmed and (kama_slope < 0) and (rsi_4h[i] > 30) and (rsi_4h[i] < 70)
+        # Short conditions: price breaks below weekly lower Donchian with volume and vol filter
+        short_signal = volume_confirmed and vol_filter and (price_low < lower_1w_aligned[i])
         
-        # Exit when trend changes
-        exit_long = position == 1 and kama_slope <= 0
-        exit_short = position == -1 and kama_slope >= 0
+        # Exit when price returns to the midpoint of the weekly channel
+        mid_1w = (upper_1w_aligned[i] + lower_1w_aligned[i]) / 2
+        exit_long = position == 1 and price_close < mid_1w
+        exit_short = position == -1 and price_close > mid_1w
         
         # Trading logic
         if long_signal and position != 1:
@@ -120,12 +101,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h momentum strategy using 1d KAMA for trend direction and 4h RSI for entry timing.
-# Uses Kaufman Adaptive Moving Average (KAMA) on daily timeframe to identify adaptive trend.
-# Enters long when daily KAMA is rising (uptrend) and 4h RSI is between 30-70 (not extreme)
-# with volume confirmation (>1.3x average). Enters short when daily KAMA is falling
-# (downtrend) with same RSI and volume conditions. Exits when KAMA slope changes direction.
-# KAMA adapts to market noise, reducing false signals in choppy conditions. Volume
-# confirmation ensures participation. Designed for 4h timeframe to target 20-50 trades/year
-# (80-200 total over 4 years) to minimize fee drag. Works in both bull and bear markets
-# by following the adaptive trend on higher timeframe.
+# Hypothesis: Weekly Donchian breakout with volume and volatility filters on daily timeframe.
+# Uses 20-week Donchian channels to identify major support/resistance levels.
+# Enters long when daily price breaks above weekly upper channel with volume confirmation (>1.5x average)
+# and sufficient volatility (ATR > 1% of price). Enters short when price breaks below weekly lower channel
+# under same conditions. Exits when price returns to the midpoint of the weekly channel.
+# Works in both bull and bear markets by capturing major breakouts. Target: 20-80 total trades
+# over 4 years (5-20/year) to minimize fee drag on daily timeframe. Weekly timeframe reduces noise
+# and captures multi-week trends. Volume confirmation ensures institutional participation.
+# Volatility filter prevents whipsaws in low-volatility environments. Midpoint exit provides
+# systematic profit-taking while allowing trends to develop.
