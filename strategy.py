@@ -1,133 +1,113 @@
 #!/usr/bin/env python3
-# 1d_1w_kama_rsi_volume_v1
-# Strategy: 1-day KAMA direction with 1-week trend filter and volume confirmation
-# Timeframe: 1d
+# 12h_1d_camarilla_breakout_volume_v1
+# Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: KAMA adapts to market noise, reducing false signals in choppy markets. Combined with 1-week trend alignment and volume confirmation, it captures strong trends while avoiding whipsaws. Designed for low trade frequency (10-30/year) to minimize fee drag in both bull and bear markets.
+# Hypothesis: Camarilla pivot levels act as strong support/resistance. Breakouts with 1d EMA trend alignment and volume confirmation capture significant moves while minimizing false breakouts. Designed for low trade frequency (~12-37/year) to avoid fee decay.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on 1d data
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
+    # Calculate Camarilla levels from previous 1d bar
+    # Using close of previous day as base
+    prev_close = df_1d['close'].shift(1).values  # Previous day's close
+    prev_high = df_1d['high'].shift(1).values    # Previous day's high
+    prev_low = df_1d['low'].shift(1).values      # Previous day's low
     
-    # Proper ER calculation
-    er = np.zeros(n)
-    for i in range(10, n):
-        price_change = np.abs(close[i] - close[i-10])
-        price_volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
-        if price_volatility > 0:
-            er[i] = price_change / price_volatility
-        else:
-            er[i] = 0
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
+    # Range = prev_high - prev_low
+    # H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    # L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    # L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
+    # H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    # L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    rng = prev_high - prev_low
+    H4 = prev_close + 1.1 * rng / 2
+    L4 = prev_close - 1.1 * rng / 2
+    H3 = prev_close + 1.1 * rng / 4
+    L3 = prev_close - 1.1 * rng / 4
+    H2 = prev_close + 1.1 * rng / 6
+    L2 = prev_close - 1.1 * rng / 6
+    H1 = prev_close + 1.1 * rng / 12
+    L1 = prev_close - 1.1 * rng / 12
     
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    # Align KAMA to 1d (it's already 1d, but for consistency)
-    kama_aligned = kama  # no alignment needed as both are 1d
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate RSI on 1d
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
-    for i in range(14, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
-    
-    # 1-week EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume confirmation: 20-period average
-    vol_avg_20 = np.zeros(n)
-    for i in range(20, n):
-        vol_avg_20[i] = np.mean(volume[i-20:i])
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # KAMA direction: price above KAMA = bullish, below = bearish
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Breakout signals using Camarilla levels
+        # Breakout above H3 (strong resistance)
+        breakout_up = high[i] > H3_aligned[i-1]
+        # Breakdown below L3 (strong support)
+        breakdown_down = low[i] < L3_aligned[i-1]
         
-        # 1-week EMA trend filter
-        trend_bullish = close[i] > ema_20_1w_aligned[i]
-        trend_bearish = close[i] < ema_20_1w_aligned[i]
-        
-        # RSI filter: avoid extreme overbought/oversold
-        rsi_not_extreme = (rsi[i] > 20) and (rsi[i] < 80)
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: Price above KAMA AND bullish trend AND volume confirmation AND RSI not extreme
-        if price_above_kama and trend_bullish and vol_confirm and rsi_not_extreme and position != 1:
+        # Long: Breakout above H3 AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price below KAMA AND bearish trend AND volume confirmation AND RSI not extreme
-        elif price_below_kama and trend_bearish and vol_confirm and rsi_not_extreme and position != -1:
+        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite KAMA cross
-        elif position == 1 and price_below_kama:
+        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
+        elif position == 1 and low[i] < L4_aligned[i-1]:  # Break below L4
             position = 0
             signals[i] = 0.0
-        elif position == -1 and price_above_kama:
+        elif position == -1 and high[i] > H4_aligned[i-1]:  # Break above H4
             position = 0
             signals[i] = 0.0
         else:
