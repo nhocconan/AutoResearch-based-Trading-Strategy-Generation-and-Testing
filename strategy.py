@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_camarilla_pivot_v1"
+name = "6h_1d_1w_camarilla_breakout_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -100,17 +100,10 @@ def generate_signals(prices):
         if price_close < s4 and volume_confirmed and below_trend:
             short_signal = True
         
-        # Mean reversion fades at R3/S3 (optional - commented out for now)
-        # if price_close < r3 and price_close > s3 and volume_confirmed:
-        #     if price_close < (r3 + s3) / 2 and above_trend:  # bias long in uptrend
-        #         long_signal = True
-        #     elif price_close > (r3 + s3) / 2 and below_trend:  # bias short in downtrend
-        #         short_signal = True
-        
         # Exit conditions: return to pivot or opposite extreme
-        pivot_1d_val = (df_1d['high'].iloc[-1] + df_1d['low'].iloc[-1] + df_1d['close'].iloc[-1]) / 3 if len(df_1d) > 0 else 0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, 
-                                       np.full_like(df_1d['high'].values, pivot_1d_val))[i] if len(df_1d) > 0 else price_close
+        pivot_1d_val = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3 if len(high_1d) > 0 else 0
+        pivot_array = np.full_like(high_1d, pivot_1d_val)
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
         
         exit_long = price_close < pivot_aligned
         exit_short = price_close > pivot_aligned
@@ -134,7 +127,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Camarilla pivot strategy with weekly EMA50 trend filter and volume confirmation.
+# Hypothesis: 6h Camarilla breakout strategy with weekly EMA50 trend filter and volume confirmation.
 # Enters long when price breaks above R4 (strong bullish breakout) with volume confirmation and above weekly EMA50 trend.
 # Enters short when price breaks below S4 (strong bearish breakdown) with volume confirmation and below weekly EMA50 trend.
 # Exits when price returns to daily pivot point (mean reversion to equilibrium).
