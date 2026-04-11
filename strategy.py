@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation
-# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# - Long: Bull Power > 0 AND Bear Power < 0 AND 1d ADX(14) > 25 AND volume > 1.5x 20-period avg
-# - Short: Bear Power > 0 AND Bull Power < 0 AND 1d ADX(14) > 25 AND volume > 1.5x 20-period avg
-# - Exit: Power values revert toward zero (Bull Power < 0 for long exit, Bear Power < 0 for short exit)
+# Hypothesis: 12h TRIX momentum with 1w volume regime filter and 1d ATR stoploss
+# - Long: TRIX(12) crosses above zero (bullish momentum) AND 1w volume > 1.5x 20-period average (institutional participation)
+# - Short: TRIX(12) crosses below zero (bearish momentum) AND 1w volume > 1.5x 20-period average
+# - Exit: TRIX returns to zero line OR ATR-based stop (2.5 ATR)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - TRIX is a triple-smoothed EMA momentum oscillator that reduces noise and false signals
+# - Volume regime filter ensures we only trade when there is genuine market participation
+# - ATR stoploss adapts to volatility conditions
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Elder Ray measures bull/bear strength relative to EMA13, effective in trending markets
-# - 1d ADX > 25 ensures we only trade when higher timeframe has strong trend
-# - Volume confirmation filters low-participation moves
 
-name = "6h_1d_elder_ray_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1d_1w_trix_volume_atrstop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,57 +31,53 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load 1d data ONCE before loop for ADX regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data ONCE before loop for volume regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return signals
     
-    # Pre-compute 1d ADX(14) for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1w volume SMA(20) for regime filter
+    volume_1w = df_1w['volume'].values
+    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
+    
+    # Load 1d data ONCE before loop for TRIX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
+        return signals
+    
+    # Pre-compute 1d TRIX(12,9,9) - triple smoothed EMA
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
+    # First EMA
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Second EMA of first EMA
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Third EMA of second EMA
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # TRIX = percentage change of third EMA
+    trix = np.zeros_like(ema3)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Handle first value
+    trix[0] = 0.0
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align 1d TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
+    # Pre-compute 1d TRIX previous value for crossover detection
+    trix_prev = np.roll(trix_aligned, 1)
+    trix_prev[0] = trix_aligned[0]  # first value
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Pre-compute 6h EMA13 for Elder Ray calculation
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Pre-compute 6h Bull Power and Bear Power
-    bull_power = high - ema13  # High - EMA13
-    bear_power = ema13 - low   # EMA13 - Low
-    
-    # Pre-compute 6h volume confirmation (20-period average)
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Pre-compute ATR for stoploss (12h timeframe)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(trix_prev[i]) or np.isnan(volume_sma_20_aligned[i]) or
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -90,26 +85,23 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Elder Ray values
-        bull_current = bull_power[i]
-        bear_current = bear_power[i]
+        # TRIX values
+        trix_current = trix_aligned[i]
+        trix_previous = trix_prev[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
-        
-        # Regime filter: 1d ADX > 25 (indicates strong trend on higher timeframe)
-        adx_trend = adx_aligned[i] > 25
+        # Volume regime filter: current 12h volume > 1.5x 1w volume SMA(20)
+        vol_regime = volume_current > 1.5 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Bull Power positive (strong bulls), Bear Power negative (weak bears)
-        if bull_current > 0 and bear_current < 0 and vol_confirm and adx_trend:
+        # Long entry: TRIX crosses above zero (bullish momentum) with volume regime
+        if trix_previous <= 0 and trix_current > 0 and vol_regime:
             enter_long = True
         
-        # Short: Bear Power positive (strong bears), Bull Power negative (weak bulls)
-        if bear_current > 0 and bull_current < 0 and vol_confirm and adx_trend:
+        # Short entry: TRIX crosses below zero (bearish momentum) with volume regime
+        if trix_previous >= 0 and trix_current < 0 and vol_regime:
             enter_short = True
         
         # Exit conditions
@@ -117,13 +109,13 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if Bull Power becomes negative (bulls weakening)
-            exit_long = bull_current < 0
+            # Exit long if TRIX returns to zero or ATR-based stop
+            exit_long = (trix_current <= 0) or (close_price <= entry_price - 2.5 * atr_14[i])
         elif position == -1:
-            # Exit short if Bear Power becomes negative (bears weakening)
-            exit_short = bear_current < 0
+            # Exit short if TRIX returns to zero or ATR-based stop
+            exit_short = (trix_current >= 0) or (close_price >= entry_price + 2.5 * atr_14[i])
         
-        # Track entry price for stoploss calculation (though we use close-based exits)
+        # Track entry price for stoploss calculation
         if enter_long or enter_short:
             entry_price = close_price
         
