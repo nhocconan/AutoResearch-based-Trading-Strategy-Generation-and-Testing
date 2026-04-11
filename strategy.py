@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_ari_consecutive_highs_lows_v1
-Strategy: 12h Consecutive Higher Highs/Lows breakout with volume confirmation and 1d trend filter
-Timeframe: 12h
+4h_1d_squeeze_breakout_volume_v1
+Strategy: 4h Bollinger Band squeeze breakout with volume confirmation and 1d trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Uses 12h price breaking above 3 consecutive higher highs or below 3 consecutive lower lows confirmed by volume spike (>1.5x average volume) and filtered by 1d EMA50 trend direction. Designed to capture strong momentum moves while filtering out false breakouts in choppy markets. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Target: 50-150 total trades over 4 years.
+Hypothesis: Uses Bollinger Band squeeze detection (BB width < 20-day percentile) to identify low volatility periods. Breakouts from squeeze are confirmed by volume spike (>1.5x average) and filtered by 1d EMA50 trend direction. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Designed to capture explosive moves after consolidation with tight stops. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_ari_consecutive_highs_lows_v1"
-timeframe = "12h"
+name = "4h_1d_squeeze_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,15 +32,16 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h Consecutive Higher Highs (3-bar)
-    hh1 = high > np.roll(high, 1)
-    hh2 = hh1 & np.roll(hh1, 1)
-    consec_hh = hh2 & np.roll(hh2, 1)
+    # 4h Bollinger Bands (20, 2)
+    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # 12h Consecutive Lower Lows (3-bar)
-    ll1 = low < np.roll(low, 1)
-    ll2 = ll1 & np.roll(ll1, 1)
-    consec_ll = ll2 & np.roll(ll2, 1)
+    # Bollinger Band squeeze: width < 20-period percentile (20%)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).quantile(0.2).values
+    squeeze = bb_width < bb_width_percentile
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,9 +55,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vol_avg[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(bb_middle[i]) or np.isnan(bb_std[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -66,27 +68,25 @@ def generate_signals(prices):
         uptrend_1d = price_close > ema_50_1d_aligned[i]
         downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = consec_hh[i-1]  # Use previous bar's signal
-        breakout_down = consec_ll[i-1]  # Use previous bar's signal
+        # Breakout conditions: price breaks above/below Bollinger Bands
+        breakout_up = price_close > bb_upper[i-1]  # Use previous bar's upper band
+        breakout_down = price_close < bb_lower[i-1]  # Use previous bar's lower band
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: upward breakout with volume in uptrend
-        long_signal = breakout_up and vol_confirmed and uptrend_1d
+        # Squeeze condition: only trade when coming out of squeeze
+        squeeze_active = squeeze[i-1]  # Was in squeeze on previous bar
         
-        # Short: downward breakout with volume in downtrend
-        short_signal = breakout_down and vol_confirmed and downtrend_1d
+        # Long: upward breakout with volume from squeeze in uptrend
+        long_signal = breakout_up and vol_confirmed and squeeze_active and uptrend_1d
         
-        # Exit when price returns to middle of recent range (simple mean of last 5 closes)
-        if i >= 5:
-            recent_mean = np.mean(close[i-5:i])
-            exit_long = position == 1 and price_close < recent_mean
-            exit_short = position == -1 and price_close > recent_mean
-        else:
-            exit_long = False
-            exit_short = False
+        # Short: downward breakout with volume from squeeze in downtrend
+        short_signal = breakout_down and vol_confirmed and squeeze_active and downtrend_1d
+        
+        # Exit when price returns to middle (BB middle) or opposite band
+        exit_long = position == 1 and (price_close < bb_middle[i] or price_close > bb_upper[i])
+        exit_short = position == -1 and (price_close > bb_middle[i] or price_close < bb_lower[i])
         
         # Trading logic
         if long_signal and position != 1:
