@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Strategy: 4h Camarilla pivot level breakout with volume confirmation and 1d trend filter
+# 4h_1d_cci_rsi_volume_v1
+# Strategy: 4h CCI (Commodity Channel Index) mean reversion with RSI filter and volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (derived from 1d OHLC) act as strong support/resistance. 
-# Breakouts above resistance or below support with volume confirmation and aligned 1d trend 
-# capture institutional moves. Works in both bull (breakouts continue) and bear (breakouts reverse) markets.
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades. Target: ~25-40 trades/year.
+# Hypothesis: CCI identifies overbought/oversold conditions. In ranging markets, price reverts from extremes. 
+# RSI filter avoids trading against strong momentum. Volume confirmation ensures participation. 
+# Works in both bull and bear markets by focusing on mean reversion during consolidation phases.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_cci_rsi_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -38,55 +37,52 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels from 1d OHLC (previous day's values)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # CCI calculation: (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
+    tp = (high + low + close) / 3.0
+    tp_series = pd.Series(tp)
+    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp - sma_tp.values) / (0.015 * mad.values)
     
-    # Camarilla levels: H4, L4 (resistance/support)
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    # RSI calculation: 100 - (100 / (1 + RS))
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_avg_20)
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i])):
+        if (np.isnan(cci[i]) or np.isnan(rsi.iloc[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: avoid trading against strong 1d trend
+        uptrend_1d = close[i] > ema_50_1d_aligned[i]
+        downtrend_1d = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: Camarilla breakout + volume + trend alignment
-        if (close[i] > camarilla_h4_aligned[i] and  # Break above H4 resistance
-            vol_confirm[i] and uptrend and position != 1):
+        # Entry logic: CCI mean reversion + RSI filter + volume
+        if (cci[i] < -100 and rsi.iloc[i] < 50 and vol_confirm[i] and not downtrend_1d and position != 1):
             position = 1
             signals[i] = 0.25
-        elif (close[i] < camarilla_l4_aligned[i] and  # Break below L4 support
-              vol_confirm[i] and downtrend and position != -1):
+        elif (cci[i] > 100 and rsi.iloc[i] > 50 and vol_confirm[i] and not uptrend_1d and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to midpoint or trend reverses
-        elif position == 1 and (close[i] < (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2 or not uptrend):
+        # Exit: CCI returns to neutral zone or trend alignment
+        elif position == 1 and (cci[i] > -50 or downtrend_1d):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2 or not downtrend):
+        elif position == -1 and (cci[i] < 50 or uptrend_1d):
             position = 0
             signals[i] = 0.0
         else:
