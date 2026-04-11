@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_vwap_bounce_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,50 +25,34 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return signals
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily VWAP
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    vwap_num_1d = np.cumsum(typical_price_1d * df_1d['volume'].values)
+    vwap_den_1d = np.cumsum(df_1d['volume'].values)
+    vwap_1d = vwap_num_1d / vwap_den_1d
     
-    # Previous day's values (Camarilla uses previous day's OHLC)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # Set first day to NaN (no previous day)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Align VWAP to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Camarilla levels for previous day
-    # Resistance levels
-    R4 = prev_close + (prev_high - prev_low) * 1.500
-    R3 = prev_close + (prev_high - prev_low) * 1.250
-    R2 = prev_close + (prev_high - prev_low) * 1.166
-    R1 = prev_close + (prev_high - prev_low) * 1.083
-    # Support levels
-    S1 = prev_close - (prev_high - prev_low) * 1.083
-    S2 = prev_close - (prev_high - prev_low) * 1.166
-    S3 = prev_close - (prev_high - prev_low) * 1.250
-    S4 = prev_close - (prev_high - prev_low) * 1.500
+    # Daily ATR for volatility filter
+    high_low_1d = df_1d['high'].values - df_1d['low'].values
+    high_close_1d = np.abs(df_1d['high'].values - df_1d['close'].values)
+    low_close_1d = np.abs(df_1d['low'].values - df_1d['close'].values)
+    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align to 4h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # 4h price relative to VWAP bands
+    upper_band = vwap_1d_aligned + 0.5 * atr_1d_aligned
+    lower_band = vwap_1d_aligned - 0.5 * atr_1d_aligned
     
     # Volume confirmation: 4h volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(R4_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(R2_aligned[i]) or
-            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(S2_aligned[i]) or
-            np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -78,15 +62,25 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Camarilla breakout conditions
-        # Long: price breaks above R3 with volume
-        enter_long = (price_close > R3_aligned[i]) and vol_confirm
-        # Short: price breaks below S3 with volume
-        enter_short = (price_close < S3_aligned[i]) and vol_confirm
+        # VWAP bounce conditions
+        touch_lower = price_close <= lower_band[i]
+        touch_upper = price_close >= upper_band[i]
         
-        # Exit conditions: price returns to median (close to previous day's close)
-        exit_long = price_close < prev_close[i] if not np.isnan(prev_close[i]) else False
-        exit_short = price_close > prev_close[i] if not np.isnan(prev_close[i]) else False
+        # Entry conditions
+        enter_long = False
+        enter_short = False
+        
+        # Long: Price touches or goes below VWAP - 0.5*ATR + volume confirmation
+        if touch_lower and vol_confirm:
+            enter_long = True
+        
+        # Short: Price touches or goes above VWAP + 0.5*ATR + volume confirmation
+        if touch_upper and vol_confirm:
+            enter_short = True
+        
+        # Exit conditions: price returns to VWAP
+        exit_long = price_close >= vwap_1d_aligned[i]
+        exit_short = price_close <= vwap_1d_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
@@ -107,9 +101,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla pivot breakouts on daily timeframe with 4h execution.
-# Camarilla levels identify key support/resistance levels based on previous day's range.
-# Breakouts above R3 or below S3 with volume confirmation indicate strong momentum.
-# Returns to previous day's close act as natural profit targets/reversal points.
-# Works in both bull and bear markets as it captures breakout moves in either direction.
-# Position size 0.25 limits drawdown. Target: 20-50 trades per year.
+# Hypothesis: Daily VWAP acts as dynamic support/resistance. Price tends to revert to VWAP after
+# deviations, especially with volume confirmation. Works in both bull and bear markets as VWAP
+# adapts to price action. Bands at ±0.5*ATR provide entry zones with volatility adjustment.
+# Position size 0.25 limits drawdown. Target: 30-80 trades/year.
