@@ -1,16 +1,16 @@
-# 4h Donchian breakout with volume confirmation and 1d/1w trend filter
-# Long when price breaks above Donchian(20) high + volume > 1.5x average + 1d trend up + 1w trend up
-# Short when price breaks below Donchian(20) low + volume > 1.5x average + 1d trend down + 1w trend down
-# Exit when price returns to Donchian midpoint or 1d trend reverses
-# Designed for 20-40 trades/year on 4h timeframe with strong trend capture and low turnover
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_donchian_volume_trend_v1"
-timeframe = "4h"
+# Hypothesis: 12h Camarilla pivot with volume spike and 1d/1w trend filter
+# Long when price closes above Camarilla H3 + volume > 2x average + 1d uptrend
+# Short when price closes below Camarilla L3 + volume > 2x average + 1d downtrend
+# Exit when price returns to Camarilla pivot or trend reverses
+# Designed for 15-30 trades/year on 12h timeframe with strong trend capture and low turnover
+
+name = "12h_1d_1w_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,17 +24,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d and 1w EMA(50) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate 1w EMA(50) for trend filter
     close_1w = df_1w['close'].values
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
@@ -42,41 +47,50 @@ def generate_signals(prices):
     # Calculate 20-period average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate Camarilla levels from previous day (using daily data)
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
+    camarilla_pivot = np.full(n, np.nan)
+    
+    for i in range(n):
+        # Find the most recent completed daily bar
+        daily_idx = i // 2  # 2x 12h bars per day
+        if daily_idx >= 1 and daily_idx < len(df_1d):
+            # Previous day's OHLC (since current day is still forming)
+            prev_daily_idx = daily_idx - 1
+            if prev_daily_idx >= 0:
+                ph = df_1d['high'].iloc[prev_daily_idx]
+                pl = df_1d['low'].iloc[prev_daily_idx]
+                pc = df_1d['close'].iloc[prev_daily_idx]
+                camarilla_pivot[i] = (ph + pl + pc) / 3
+                camarilla_h3[i] = camarilla_pivot[i] + (ph - pl) * 1.1 / 6
+                camarilla_l3[i] = camarilla_pivot[i] - (ph - pl) * 1.1 / 6
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(camarilla_pivot[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current volume > 2x 20-period average
+        volume_filter = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Trend filter: price relative to 1d and 1w EMA50
-        is_uptrend_1d = close[i] > ema_50_1d_aligned[i]
-        is_downtrend_1d = close[i] < ema_50_1d_aligned[i]
-        is_uptrend_1w = close[i] > ema_50_1w_aligned[i]
-        is_downtrend_1w = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: both 1d and 1w EMAs agree
+        is_uptrend = (close[i] > ema_50_1d_aligned[i]) and (close[i] > ema_50_1w_aligned[i])
+        is_downtrend = (close[i] < ema_50_1d_aligned[i]) and (close[i] < ema_50_1w_aligned[i])
         
         # Entry conditions
-        donchian_breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
-        donchian_breakdown_down = close[i] < donchian_low[i-1]  # Break below previous period's low
-        
-        long_entry = donchian_breakout_up and volume_filter and is_uptrend_1d and is_uptrend_1w
-        short_entry = donchian_breakdown_down and volume_filter and is_downtrend_1d and is_downtrend_1w
+        long_entry = (close[i] > camarilla_h3[i]) and volume_filter and is_uptrend
+        short_entry = (close[i] < camarilla_l3[i]) and volume_filter and is_downtrend
         
         # Exit conditions
-        long_exit = (close[i] < donchian_mid[i]) or (not is_uptrend_1d)  # Return to midpoint or 1d trend change
-        short_exit = (close[i] > donchian_mid[i]) or (not is_downtrend_1d)  # Return to midpoint or 1d trend change
+        long_exit = (close[i] < camarilla_pivot[i]) or (not is_uptrend)
+        short_exit = (close[i] > camarilla_pivot[i]) or (not is_downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
