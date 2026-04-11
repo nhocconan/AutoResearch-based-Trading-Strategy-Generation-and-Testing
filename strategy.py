@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-# 6h_1d_1w_camarilla_pivot_volume_v1
-# Strategy: 6h Camarilla pivot breakout with daily/weekly pivot direction and volume confirmation
-# Timeframe: 6h
+# 12h_1w_camarilla_pivot_volume_v1
+# Strategy: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (R3/S3, R4/S4) act as institutional breakout/reversal zones.
-# In trending markets: breakouts above R4 or below S4 with volume confirmation continue the trend.
-# In ranging markets: reversals at R3/S3 with volume exhaustion provide mean reversion.
-# Weekly pivot adds higher-timeframe bias: only take long signals when price > weekly pivot,
-# only short when price < weekly pivot. Designed for low trade frequency (~15-25/year) to
-# minimize fee drag while capturing sustained moves in both bull and bear markets.
+# Hypothesis: Camarilla pivot levels from 1w act as strong support/resistance. 
+# Breakouts above/below these levels with volume > 1.5x 20-period 1w average 
+# and aligned with 1w EMA trend capture sustainable moves. 
+# Designed for low trade frequency (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_camarilla_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,123 +27,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    # Using previous day's high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day values (shift by 1 to avoid look-ahead)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev[0] = high_1d[0]  # First day uses same day
-    low_1d_prev[0] = low_1d[0]
-    close_1d_prev[0] = close_1d[0]
-    
-    # Calculate pivot point
-    pivot_1d = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d = high_1d_prev - low_1d_prev
-    
-    # Camarilla levels
-    r3_1d = pivot_1d + range_1d * 1.1 / 2.0
-    s3_1d = pivot_1d - range_1d * 1.1 / 2.0
-    r4_1d = pivot_1d + range_1d * 1.1
-    s4_1d = pivot_1d - range_1d * 1.1
-    
-    # Align 1d Camarilla levels to 6h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Calculate 1w pivot for trend bias
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Previous week values
-    high_1w_prev = np.roll(high_1w, 1)
-    low_1w_prev = np.roll(low_1w, 1)
-    close_1w_prev = np.roll(close_1w, 1)
-    high_1w_prev[0] = high_1w[0]
-    low_1w_prev[0] = low_1w[0]
-    close_1w_prev[0] = close_1w[0]
-    
-    pivot_1w = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    
-    # 6h ATR for volatility filter (avoid extreme volatility)
+    # 12h ATR for volatility filter (optional, can be removed if too restrictive)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1w High, Low, Close for Camarilla calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Camarilla levels for 1w
+    # H4 = Close + 1.5 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    camarilla_high = close_1w + 1.5 * (high_1w - low_1w)
+    camarilla_low = close_1w - 1.5 * (high_1w - low_1w)
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1w, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1w, camarilla_low)
+    
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 1w volume average (20-period) for confirmation
+    volume_1w = df_1w['volume'].values
+    vol_avg_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20_1w)
+    
+    # Align raw 1w volume for confirmation
+    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or \
-           np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or \
-           np.isnan(pivot_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or \
+           np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20_1w_aligned[i]) or \
+           np.isnan(vol_1w_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: avoid extreme volatility ( ATR > 2.5x MA )
-        vol_filter = atr[i] <= 2.5 * atr_ma[i]
+        # Volume confirmation: current 1w volume > 1.5x 20-period average
+        vol_confirm = vol_1w_aligned[i] > 1.5 * vol_avg_20_1w_aligned[i]
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.3 * vol_ma[i]
+        # Trend filter: close vs 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Price levels
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        r4 = r4_1d_aligned[i]
-        s4 = s4_1d_aligned[i]
-        weekly_pivot = pivot_1w_aligned[i]
-        
-        # Determine market bias from weekly pivot
-        long_bias = close[i] > weekly_pivot
-        short_bias = close[i] < weekly_pivot
+        # Price relative to Camarilla levels
+        above_resistance = close[i] > camarilla_high_aligned[i]
+        below_support = close[i] < camarilla_low_aligned[i]
         
         # Entry conditions
-        # Long: Breakout above R4 with volume and bias OR reversal at S3 with volume exhaustion
-        long_breakout = close[i] > r4 and close[i-1] <= r4 and vol_confirm and long_bias and vol_filter
-        long_reversal = close[i] > s3 and close[i-1] <= s3 and vol_confirm and not vol_filter  # reversal on volume exhaustion
-        
-        # Short: Breakdown below S4 with volume and bias OR reversal at R3 with volume exhaustion
-        short_breakout = close[i] < s4 and close[i-1] >= s4 and vol_confirm and short_bias and vol_filter
-        short_reversal = close[i] < r3 and close[i-1] >= r3 and vol_confirm and not vol_filter
-        
-        # Exit conditions: reverse signal or volatility spike
-        exit_long = (close[i] < s3 and vol_confirm) or (not vol_filter and position == 1)
-        exit_short = (close[i] > r3 and vol_confirm) or (not vol_filter and position == -1)
-        
-        if (long_breakout or long_reversal) and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif (short_breakout or short_reversal) and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
+        # Long: Price closes above Camarilla H4 AND uptrend AND volume confirmation
+        if above_resistance and uptrend and vol_confirm and position != 1:
+            # Additional check: ensure we didn't just break above in previous bar
+            if i == 50 or close[i-1] <= camarilla_high_aligned[i-1]:
+                position = 1
+                signals[i] = 0.25
+        # Short: Price closes below Camarilla L4 AND downtrend AND volume confirmation
+        elif below_support and downtrend and vol_confirm and position != -1:
+            # Additional check: ensure we didn't just break below in previous bar
+            if i == 50 or close[i-1] >= camarilla_low_aligned[i-1]:
+                position = -1
+                signals[i] = -0.25
+        # Exit: Price returns to mean (close to 1w close) or reverses
+        elif position == 1 and close[i] < camarilla_high_aligned[i] * 0.995:  # Slight hysteresis
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif position == -1 and close[i] > camarilla_low_aligned[i] * 1.005:  # Slight hysteresis
             position = 0
             signals[i] = 0.0
         else:
