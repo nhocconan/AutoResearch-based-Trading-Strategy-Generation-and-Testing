@@ -3,17 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h-1d strategy combining daily VWAP pullback with volume confirmation and volatility filter.
-# Works in bull/bear: VWAP acts as dynamic support/resistance, volume confirms institutional interest,
-# volatility filter avoids low-momentum whipsaws. Target: 20-30 trades/year.
-
-name = "4h_1d_vwap_pullback_volume"
-timeframe = "4h"
+name = "6h_1d_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,76 +25,87 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return signals
     
-    # Calculate 1d VWAP using typical price * volume / cumulative volume
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
+    # Calculate weekly data from 1d bars (weekly pivot points)
+    # We'll group by week using the index
+    weekly_high = df_1d['high'].resample('W').max()
+    weekly_low = df_1d['low'].resample('W').min()
+    weekly_close = df_1d['close'].resample('W').last()
     
-    # Align VWAP to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Calculate weekly pivot points
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # Calculate 1d ATR for volatility filter (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align weekly data to 1d index
+    weekly_pivot_1d = weekly_pivot.reindex(df_1d.index, method='ffill').values
+    weekly_r1_1d = weekly_r1.reindex(df_1d.index, method='ffill').values
+    weekly_s1_1d = weekly_s1.reindex(df_1d.index, method='ffill').values
+    weekly_r2_1d = weekly_r2.reindex(df_1d.index, method='ffill').values
+    weekly_s2_1d = weekly_s2.reindex(df_1d.index, method='ffill').values
     
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Align weekly pivots to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot_1d)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1_1d)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1_1d)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2_1d)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2_1d)
     
-    # Calculate 1d ATR MA (20-period) for volatility regime filter
-    atr_ma_20_1d = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d ATR ratio (current / MA) for regime detection
-    atr_ratio_1d = np.where(atr_ma_20_1d > 0, atr_14_1d_aligned / atr_ma_20_1d, 1.0)
-    
-    # Volume confirmation: 20-period average on 4h
+    # Volume confirmation: 20-period average on 6h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(100, n):
+    # Volatility filter: 6h ATR ratio
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_6h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_20 = pd.Series(atr_6h).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = np.where(atr_ma_20 > 0, atr_6h / atr_ma_20, 1.0)
+    
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(volume_sma_20[i]) or
+            np.isnan(atr_ratio[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume_current > 1.3 * volume_sma_20[i]
         
-        # Volatility regime filter: trade only when volatility is elevated (ATR ratio > 0.8)
-        vol_regime = atr_ratio_1d[i] > 0.8
+        # Volatility regime: trade only when volatility is elevated
+        vol_regime = atr_ratio[i] > 0.7
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price pulls back to VWAP (within 0.5%) and closes above it + volume + volatility
-        near_vwap = abs(price_close - vwap_1d_aligned[i]) / vwap_1d_aligned[i] < 0.005
-        above_vwap = price_close > vwap_1d_aligned[i]
-        if near_vwap and above_vwap and vol_confirm and vol_regime:
+        # Long: Price breaks above weekly R1 with volume and volatility
+        price_above_r1 = price_close > weekly_r1_aligned[i]
+        if price_above_r1 and vol_confirm and vol_regime:
             enter_long = True
         
-        # Short: Price pulls back to VWAP (within 0.5%) and closes below it + volume + volatility
-        below_vwap = price_close < vwap_1d_aligned[i]
-        if near_vwap and below_vwap and vol_confirm and vol_regime:
+        # Short: Price breaks below weekly S1 with volume and volatility
+        price_below_s1 = price_close < weekly_s1_aligned[i]
+        if price_below_s1 and vol_confirm and vol_regime:
             enter_short = True
         
-        # Exit conditions: price moves 1.5% away from VWAP in opposite direction
+        # Exit conditions: price crosses back through weekly pivot
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price drops 1.5% below VWAP
-            exit_long = price_close < vwap_1d_aligned[i] * (1 - 0.015)
+            # Exit long if price crosses below weekly pivot
+            exit_long = price_close < weekly_pivot_aligned[i]
         elif position == -1:
-            # Exit short if price rises 1.5% above VWAP
-            exit_short = price_close > vwap_1d_aligned[i] * (1 + 0.015)
+            # Exit short if price crosses above weekly pivot
+            exit_short = price_close > weekly_pivot_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
