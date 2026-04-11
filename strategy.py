@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w volume confirmation + ADX trend filter
-# - Donchian levels from 1d: upper/lower bands act as dynamic support/resistance
-# - Long when price breaks above upper band with volume > 1.5x 20-period average (strong conviction)
-# - Short when price breaks below lower band with volume > 1.5x 20-period average
-# - ADX trend filter: only trade when ADX(14) > 20 to ensure trending conditions and avoid chop
+# Hypothesis: 12h Camarilla pivot + 1d volume spike + ADX trend filter
+# - Camarilla levels from 1d: key support/resistance levels for mean reversion
+# - Long when price touches S3 level with volume > 2.5x 20-period average (strong reversal)
+# - Short when price touches R3 level with volume > 2.5x 20-period average
+# - ADX trend filter: only trade when ADX < 25 to avoid strong trends and focus on mean reversion
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 10-30 trades/year (40-120 total over 4 years) to stay within fee drag limits for 1d
-# - Volume requirement (>1.5x average) ensures we only trade high-conviction breakouts
-# - ADX filter prevents false signals in ranging markets
-# - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
-# - 1w HTF provides reliable volume confirmation and ADX, reducing false signals from daily noise
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
+# - Works in both bull (reversals at support) and bear (reversals at resistance) markets
+# - 1d HTF provides reliable Camarilla levels and volume confirmation
 
-name = "1d_1w_donchian_volume_adx_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,60 +30,65 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop for volume and ADX
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for Camarilla levels, volume, and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1w volume and ADX
-    volume_1w = df_1w['volume'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Extract 1d arrays
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w volume SMA (20-period)
-    volume_series = pd.Series(volume_1w)
-    volume_sma_20_1w = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla levels for each 1d bar
+    # Camarilla: pivot = (H+L+C)/3, range = H-L
+    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4
+    # R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    s3_1d = close_1d - (range_1d * 1.1 / 4.0)  # Strongest support
+    r3_1d = close_1d + (range_1d * 1.1 / 4.0)  # Strongest resistance
     
-    # Calculate ADX(14) on 1w
+    # 1d volume SMA (20-period)
+    volume_series = pd.Series(volume_1d)
+    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # 1d ADX (14-period) - trend strength filter
     # True Range
-    tr1 = pd.Series(high_1w).shift(1) - pd.Series(low_1w).shift(1)
-    tr2 = abs(pd.Series(high_1w).shift(1) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w).shift(1) - pd.Series(close_1w).shift(1))
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
     # Directional Movement
-    up_move = pd.Series(high_1w).diff()
-    down_move = pd.Series(low_1w).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = -pd.Series(low_1d).diff()
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
     # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / tr_14
-    minus_di = 100 * minus_dm_14 / tr_14
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr_14_1d
+    di_minus = 100 * dm_minus_smooth / atr_14_1d
     
     # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx_14_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1w indicators to 1d timeframe
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Pre-compute 1d Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Align 1d indicators to 12h timeframe
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or
             np.isnan(volume_sma_20_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
@@ -96,38 +99,39 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         
-        # Donchian breakout conditions
-        breakout_long = price_close > donchian_upper[i-1]  # Close above previous period's upper band
-        breakout_short = price_close < donchian_lower[i-1]  # Close below previous period's lower band
+        # Camarilla touch conditions (with small tolerance for wicks)
+        tolerance = 0.001  # 0.1% tolerance for level touch
+        touch_s3 = abs(price_low - s3_aligned[i]) / s3_aligned[i] <= tolerance
+        touch_r3 = abs(price_high - r3_aligned[i]) / r3_aligned[i] <= tolerance
         
-        # Volume confirmation: current volume > 1.5x 20-period average (using 1w aligned volume)
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Volume confirmation: current volume > 2.5x 20-period average
+        vol_confirm = volume_current > 2.5 * volume_sma_20_aligned[i]
         
-        # ADX trend filter: trade only when ADX > 20 (trending market)
-        trend_filter = adx_aligned[i] > 20
+        # ADX trend filter: only trade when ADX < 25 (range-bound market)
+        adx_filter = adx_aligned[i] < 25.0
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Donchian upper breakout + volume confirmation + trend filter
-        if breakout_long and vol_confirm and trend_filter:
+        # Long: Price touches S3 support + volume confirmation + ADX filter (range market)
+        if touch_s3 and vol_confirm and adx_filter:
             enter_long = True
         
-        # Short: Donchian lower breakdown + volume confirmation + trend filter
-        if breakout_short and vol_confirm and trend_filter:
+        # Short: Price touches R3 resistance + volume confirmation + ADX filter
+        if touch_r3 and vol_confirm and adx_filter:
             enter_short = True
         
-        # Exit conditions: opposite Donchian breakout or trend weakness
+        # Exit conditions: opposite touch or volatility breakout
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below lower band OR trend weakens
-            exit_long = (price_close < donchian_lower[i-1]) or (not trend_filter)
+            # Exit long if price touches R3 resistance or ADX indicates strong trend
+            exit_long = touch_r3 or (adx_aligned[i] >= 30.0)
         elif position == -1:
-            # Exit short if price breaks above upper band OR trend weakens
-            exit_short = (price_close > donchian_upper[i-1]) or (not trend_filter)
+            # Exit short if price touches S3 support or ADX indicates strong trend
+            exit_short = touch_s3 or (adx_aligned[i] >= 30.0)
         
         # Trading logic
         if enter_long and position != 1:
