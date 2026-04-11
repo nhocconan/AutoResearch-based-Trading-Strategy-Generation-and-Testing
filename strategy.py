@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-1h_4d_RSI_Range_Mean_Reversion
-Hypothesis: In 1h timeframe, use 4-hour RSI to identify overbought/oversold conditions and mean-revert toward the 1-day VWAP. 
-Works in both bull and bear markets by fading extreme RSI readings during ranging periods, avoiding strong trends.
-Targets 20-30 trades/year per symbol with strict RSI thresholds and volume confirmation.
+6h_1w_Donchian_Breakout_Trend
+Hypothesis: Uses weekly Donchian channels for trend direction and 6-hour Donchian breakouts with volume confirmation.
+The weekly trend filters out counter-trend trades, while 6H breakouts capture momentum within the trend.
+Volume confirmation ensures institutional participation. Works in bull/bear by following weekly trend.
+Targets 15-30 trades/year per symbol with high-probability trend-following setups.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_RSI_Range_Mean_Reversion"
-timeframe = "1h"
+name = "6h_1w_Donchian_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -25,41 +26,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data for RSI calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Load 1d data for VWAP
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    # Weekly Donchian channel (20-period) for trend direction
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 4h RSI(14)
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Align weekly Donchian levels to 6h timeframe (wait for weekly close)
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
     
-    # Calculate 1h RSI(14) for entry confirmation
-    delta_1h = np.diff(close, prepend=close[0])
-    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
-    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
-    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
-    rsi_1h = 100 - (100 / (1 + rs_1h))
-    
-    # Calculate 1-day VWAP (typical price * volume)
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d_values = vwap_1d.values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
+    # 6-hour Donchian breakout (20-period)
+    donchian_high_6h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_6h = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,37 +53,38 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi_1h[i]) or 
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
+            np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or
+            np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.2x 20-period average
-        volume_filter = volume[i] > 1.2 * vol_ma_20[i]
+        # Weekly trend filter: price relative to weekly Donchian
+        weekly_uptrend = close[i] > donchian_high_20_aligned[i]  # Above weekly high = strong uptrend
+        weekly_downtrend = close[i] < donchian_low_20_aligned[i]  # Below weekly low = strong downtrend
         
-        # Mean reversion conditions based on 4h RSI extremes
-        rsi_overbought = rsi_4h_aligned[i] > 70
-        rsi_oversold = rsi_4h_aligned[i] < 30
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Price position relative to 1d VWAP
-        price_above_vwap = close[i] > vwap_1d_aligned[i]
-        price_below_vwap = close[i] < vwap_1d_aligned[i]
+        # 6H breakout conditions
+        breakout_6h_high = close[i] > donchian_high_6h[i]  # Break above 6H high
+        breakdown_6h_low = close[i] < donchian_low_6h[i]   # Break below 6H low
         
-        # Entry conditions: fade RSI extremes toward VWAP
-        long_entry = rsi_oversold and price_below_vwap and volume_filter
-        short_entry = rsi_overbought and price_above_vwap and volume_filter
+        # Entry conditions: only trade in direction of weekly trend
+        long_entry = breakout_6h_high and volume_filter and weekly_uptrend
+        short_entry = breakdown_6h_low and volume_filter and weekly_downtrend
         
-        # Exit conditions: RSI returns to neutral range or price crosses VWAP
-        long_exit = (rsi_4h_aligned[i] > 50) or (close[i] > vwap_1d_aligned[i])
-        short_exit = (rsi_4h_aligned[i] < 50) or (close[i] < vwap_1d_aligned[i])
+        # Exit conditions: opposite 6H breakout or trend change
+        long_exit = breakdown_6h_low or (not weekly_uptrend)
+        short_exit = breakout_6h_high or (not weekly_downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -108,6 +93,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
