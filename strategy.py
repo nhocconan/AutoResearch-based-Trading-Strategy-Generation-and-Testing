@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1-week Bollinger Band squeeze breakout + volume confirmation + ADX trend filter.
-# Uses Bollinger Band width < 20th percentile for squeeze detection, breakout on close > upper band or < lower band,
-# volume > 1.5x 20-day average, and ADX > 25 for trend confirmation. Designed for low trade frequency (~10-20/year)
-# to minimize fee decay while capturing explosive moves in both bull and bear markets.
+# Hypothesis: 12h timeframe with 1-day Volume Weighted Average Price (VWAP) deviation + volume surge + volatility filter.
+# VWAP deviation identifies mean reversion opportunities when price deviates significantly from VWAP.
+# Volume surge confirms institutional interest, volatility filter ensures sufficient market movement.
+# Designed for low trade frequency (<30/year) to minimize fee decay while capturing mean reversion in ranging markets.
+# Works in both bull/bear markets by fading extreme deviations from institutional VWAP.
 
-name = "1d_1w_bb_squeeze_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_vwap_deviation_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -23,101 +24,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands on 1w data
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1d VWAP (Volume Weighted Average Price)
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_numerator = (typical_price_1d * df_1d['volume']).cumsum()
+    vwap_denominator = df_1d['volume'].cumsum()
+    vwap_1d = (vwap_numerator / vwap_denominator).values
+    # Handle division by zero on first bar
+    vwap_1d[0] = typical_price_1d.iloc[0] if hasattr(typical_price_1d, 'iloc') else typical_price_1d[0]
     
-    # 20-period SMA and standard deviation
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std()
+    # Calculate 1d standard deviation of price from VWAP (20-period)
+    price_dev_1d = typical_price_1d - vwap_1d
+    vwap_std_20_1d = pd.Series(price_dev_1d).rolling(window=20, min_periods=20).std().values
     
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
-    bb_width = upper_band - lower_band
+    # Calculate 1d volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Bollinger Band width percentile (20-period lookback for squeeze)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True)
+    # Align VWAP, its std dev, and volume average to 12h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    vwap_std_aligned = align_htf_to_ltf(prices, df_1d, vwap_std_20_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # Squeeze condition: BB width < 20th percentile
-    squeeze = bb_width_percentile < 0.2
-    
-    # Breakout conditions: close outside Bollinger Bands
-    breakout_up = close_1w > upper_band
-    breakout_down = close_1w < lower_band
-    
-    # ADX calculation on 1w data (14-period)
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = high_1w[0] - low_1w[0]
-    tr2[0] = np.abs(high_1w[0] - close_1w[0])
-    tr3[0] = np.abs(low_1w[0] - close_1w[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
-    
-    # Directional Indicators
-    plus_di = 100 * (plus_dm_14 / tr_14)
-    minus_di = 100 * (minus_dm_14 / tr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    
-    # Align all 1w indicators to daily timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1w, squeeze.values)
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1w, breakout_up.values)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1w, breakout_down.values)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx.values.fillna(0))
-    
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_filter = volume > (1.5 * vol_avg_20)
+    # Calculate 12h typical price for deviation measurement
+    typical_price = (high + low + close) / 3
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 50 to ensure all indicators are valid
-    for i in range(50, n):
+    # Start from index 20 to ensure VWAP std and volume averages are valid
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(breakout_up_aligned[i]) or 
-            np.isnan(breakout_down_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(vwap_std_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: BB squeeze breakout with volume and trend confirmation
-        long_entry = (squeeze_aligned[i] and breakout_up_aligned[i] and 
-                      volume_filter[i] and (adx_aligned[i] > 25))
-        short_entry = (squeeze_aligned[i] and breakout_down_aligned[i] and 
-                       volume_filter[i] and (adx_aligned[i] > 25))
+        # Volatility filter: current VWAP std > 1.5 * median of last 30 periods
+        vol_filter = vwap_std_aligned[i] > 1.5 * np.nanmedian(vwap_std_aligned[max(0, i-30):i])
         
-        # Exit conditions: return to middle Bollinger Band (20-period SMA)
-        sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20.values.fillna(0))
-        if not np.isnan(sma_20_aligned[i]):
-            exit_long = close[i] < sma_20_aligned[i]
-            exit_short = close[i] > sma_20_aligned[i]
-        else:
-            exit_long = exit_short = False
+        # Volume filter: current volume > 2.0 * 1d average volume (higher threshold for fewer trades)
+        vol_surge = volume[i] > 2.0 * vol_avg_aligned[i]
+        
+        # Deviation from VWAP: price deviation in units of VWAP std dev
+        price_deviation = (typical_price[i] - vwap_aligned[i]) / vwap_std_aligned[i]
+        
+        # Entry conditions: price deviates >2.0 std dev from VWAP with volatility and volume surge
+        # Long when price is significantly below VWAP (mean reversion up)
+        # Short when price is significantly above VWAP (mean reversion down)
+        long_entry = (price_deviation < -2.0 and vol_filter and vol_surge)
+        short_entry = (price_deviation > 2.0 and vol_filter and vol_surge)
+        
+        # Exit conditions: price returns to within 0.5 std dev of VWAP
+        exit_condition = abs(price_deviation) < 0.5
         
         if long_entry and position != 1:
             position = 1
@@ -125,10 +88,7 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_long:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position != 0 and exit_condition:
             position = 0
             signals[i] = 0.0
         else:
