@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volatility_v2
-Strategy: 4h breakout with 1d volatility filter and volume confirmation
+4h_1d_camarilla_breakout_volume_v33
+Strategy: 4h breakout with 1d volume confirmation and volatility filter
 Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
+Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 25-45 trades/year to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volatility_v2"
+name = "4h_1d_camarilla_breakout_volume_v33"
 timeframe = "4h"
 leverage = 1.0
 
@@ -135,4 +135,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
+# Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 25-45 trades/year to minimize fee drift.
