@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1-day Camarilla pivot levels + volume confirmation.
-# Uses Camarilla levels calculated from previous day's range to identify mean reversion opportunities.
-# Fades at R3/S3 levels (mean reversion) and breaks out at R4/S4 levels (momentum).
-# Volume filter confirms institutional participation.
-# Designed for 19-50 trades/year to minimize fee drift while capturing both mean reversion and breakout moves.
-# Works in bull/bear markets by adapting to volatility regimes and using volume as confirmation.
+# Hypothesis: 6h timeframe with 12h Williams %R overbought/oversold + 12h ADX trend filter + volume confirmation.
+# Williams %R(14) identifies overextended moves: > -20 = overbought (short), < -80 = oversold (long).
+# ADX(14) > 25 filters for trending conditions to avoid whipsaws in ranging markets.
+# Volume confirmation ensures institutional participation.
+# Designed for 12-37 trades/year to minimize fee drag while capturing mean reversion in trends.
+# Works in bull/bear markets by combining momentum overextension with trend strength filtering.
 
-name = "4h_1d_camarilla_pivot_volume_v1"
-timeframe = "4h"
+name = "6h_12h_williams_r_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -25,102 +25,127 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Williams %R (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Previous day's values for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        (highest_high - close_12h) / (highest_high - lowest_low) * -100,
+        -50  # neutral when range is zero
+    )
     
-    # First day has no previous data
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate 12h ADX (14-period)
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate daily range
-    daily_range = prev_high - prev_low
+    # Directional Movement
+    dm_plus = np.where(
+        (high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]),
+        np.maximum(high_12h[1:] - high_12h[:-1], 0),
+        0
+    )
+    dm_minus = np.where(
+        (low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]),
+        np.maximum(low_12h[:-1] - low_12h[1:], 0),
+        0
+    )
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
     
-    # Camarilla levels
-    # R4 = close + (high-low) * 1.1/2
-    # R3 = close + (high-low) * 1.1/4
-    # S3 = close - (high-low) * 1.1/4
-    # S4 = close - (high-low) * 1.1/2
-    r4 = prev_close + daily_range * 1.1 / 2
-    r3 = prev_close + daily_range * 1.1 / 4
-    s3 = prev_close - daily_range * 1.1 / 4
-    s4 = prev_close - daily_range * 1.1 / 2
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period])  # skip first NaN
+        # Wilder smoothing
+        for i in range(period, len(arr)):
+            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
+                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+            else:
+                result[i] = np.nan
+        return result
     
-    # Calculate daily average volume (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20 = np.zeros_like(volume_1d, dtype=float)
-    for i in range(19, len(volume_1d)):
-        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
-    vol_avg_20[:19] = np.nan
+    atr = smooth_wilder(tr, 14)
+    dm_plus_smooth = smooth_wilder(dm_plus, 14)
+    dm_minus_smooth = smooth_wilder(dm_minus, 14)
     
-    # Align daily levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
+    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    
+    # DX and ADX
+    dx = np.where(
+        (di_plus + di_minus) != 0,
+        np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100,
+        0
+    )
+    adx = smooth_wilder(dx, 14)
+    
+    # Calculate 12h average volume (20-period)
+    volume_12h = df_12h['volume'].values
+    vol_avg_20 = np.full_like(volume_12h, np.nan, dtype=float)
+    for i in range(19, len(volume_12h)):
+        vol_avg_20[i] = np.mean(volume_12h[i-19:i+1])
+    
+    # Align 12h indicators to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(30, n):  # Warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.3 * daily average volume
-        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.5 * 12h average volume
+        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Fade at S3/R3 (mean reversion) - long at S3, short at R3
-        fade_long = low[i] <= s3_aligned[i] and vol_filter
-        fade_short = high[i] >= r3_aligned[i] and vol_filter
+        # Williams %R signals
+        williams_oversold = williams_r_aligned[i] < -80  # Oversold - long signal
+        williams_overbought = williams_r_aligned[i] > -20  # Overbought - short signal
         
-        # Breakout at S4/R4 (momentum) - long above R4, short below S4
-        breakout_long = high[i] >= r4_aligned[i] and vol_filter
-        breakout_short = low[i] <= s4_aligned[i] and vol_filter
+        # ADX trend filter: only trade when trending (ADX > 25)
+        trending = adx_aligned[i] > 25
         
-        # Exit conditions: return to previous day's close
-        prev_close_val = prev_close[i] if i < len(prev_close) else np.nan
-        if not np.isnan(prev_close_val):
-            prev_close_array = np.full_like(close_1d, prev_close_val)
-            prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_array)
-            exit_long = not np.isnan(prev_close_aligned[i]) and high[i] >= prev_close_aligned[i]
-            exit_short = not np.isnan(prev_close_aligned[i]) and low[i] <= prev_close_aligned[i]
-        else:
-            exit_long = exit_short = False
+        # Entry logic: Williams extremes only in trending markets
+        long_signal = williams_oversold and trending and vol_filter
+        short_signal = williams_overbought and trending and vol_filter
         
-        # Priority: breakout > fade > hold
-        if breakout_long and position != 1:
+        # Exit when Williams %R returns to neutral range (-50 ± 15)
+        exit_long = williams_r_aligned[i] > -65  # Exit long when less oversold
+        exit_short = williams_r_aligned[i] < -35  # Exit short when less overbought
+        
+        # Update position and signals
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif breakout_short and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif fade_long and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif fade_short and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif position == 1 and (exit_long or (low[i] >= s3_aligned[i] and high[i] <= r3_aligned[i])):
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (exit_short or (low[i] >= s3_aligned[i] and high[i] <= r3_aligned[i])):
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
