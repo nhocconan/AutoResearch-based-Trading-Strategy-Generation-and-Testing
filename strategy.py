@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_adaptive_kama_v1"
-timeframe = "1h"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timezone = "UTC"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,127 +21,140 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return signals
-    
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate 4h KAMA for trend filter
-    close_4h = df_4h['close'].values
-    change_4h = np.abs(np.diff(close_4h, prepend=close_4h[0]))
-    direction_4h = np.abs(np.diff(close_4h, k=10, prepend=close_4h[:10]))
-    er_4h = np.where(change_4h != 0, direction_4h / change_4h, 0)
-    sc_4h = (er_4h * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama_4h = np.zeros_like(close_4h)
-    kama_4h[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        kama_4h[i] = kama_4h[i-1] + sc_4h[i] * (close_4h[i] - kama_4h[i-1])
-    kama_4h = np.roll(kama_4h, 1)  # shift for completed bar
-    kama_4h[0] = np.nan
-    
-    # Calculate 1d volatility regime (ATR-based)
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    vol_regime = atr_1d / atr_ma_1d  # >1 = high vol, <1 = low vol
-    vol_regime = np.roll(vol_regime, 1)  # shift for completed bar
-    vol_regime[0] = np.nan
     
-    # Calculate 1h KAMA for entry signal
-    change_1h = np.abs(np.diff(close, prepend=close[0]))
-    direction_1h = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    er_1h = np.where(change_1h != 0, direction_1h / change_1h, 0)
-    sc_1h = (er_1h * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama_1h = np.zeros_like(close)
-    kama_1h[0] = close[0]
-    for i in range(1, len(close)):
-        kama_1h[i] = kama_1h[i-1] + sc_1h[i] * (close[i] - kama_1h[i-1])
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Range
+    range_1d = high_1d - low_1d
     
-    # Align 4h indicators to 1h timeframe
-    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
+    # Camarilla levels
+    r4 = close_1d + (range_1d * 1.1 / 2)
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    r2 = close_1d + (range_1d * 1.1 / 6)
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    s2 = close_1d - (range_1d * 1.1 / 6)
+    s3 = close_1d - (range_1d * 1.1 / 4)
+    s4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Volume filter: volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Shift by 1 to use only completed daily bars
+    pivot = np.roll(pivot, 1)
+    r1 = np.roll(r1, 1)
+    r2 = np.roll(r2, 1)
+    r3 = np.roll(r3, 1)
+    r4 = np.roll(r4, 1)
+    s1 = np.roll(s1, 1)
+    s2 = np.roll(s2, 1)
+    s3 = np.roll(s3, 1)
+    s4 = np.roll(s4, 1)
+    pivot[0] = np.nan
+    r1[0] = np.nan
+    r2[0] = np.nan
+    r3[0] = np.nan
+    r4[0] = np.nan
+    s1[0] = np.nan
+    s2[0] = np.nan
+    s3[0] = np.nan
+    s4[0] = np.nan
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Align daily levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    for i in range(50, n):  # Start after warmup
+    # Calculate 12h EMA25 for trend filter
+    ema_25 = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
+    
+    # Volume filter: volume > 1.8x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    
+    # Calculate 12h ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = np.nan  # First TR is invalid
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    for i in range(30, n):  # Start after EMA25 and ATR warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_4h_aligned[i]) or np.isnan(vol_regime_aligned[i]) or
-            np.isnan(kama_1h[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_25[i]) or np.isnan(vol_ma_30[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        kama_4h_val = kama_4h_aligned[i]
-        vol_reg = vol_regime_aligned[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_30[i]
+        atr = atr_14[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Trend filter: price vs 4h KAMA
-        trend_up = price_close > kama_4h_val
-        trend_down = price_close < kama_4h_val
+        # Long conditions: price breaks above R3 with volume and uptrend
+        long_breakout = price_high > r3_aligned[i]
+        long_trend = price_close > ema_25[i]
+        long_signal = volume_confirmed and long_breakout and long_trend
         
-        # Volatility regime filter: only trade in low volatility (mean reversion favorable)
-        low_volatility = vol_reg < 1.2
+        # Short conditions: price breaks below S3 with volume and downtrend
+        short_breakout = price_low < s3_aligned[i]
+        short_trend = price_close < ema_25[i]
+        short_signal = volume_confirmed and short_breakout and short_trend
         
-        # Mean reversion entry: price deviates from 1h KAMA
-        kama_dev = (price_close - kama_1h[i]) / kama_1h[i]
-        long_signal = volume_confirmed and trend_down and low_volatility and (kama_dev < -0.008)
-        short_signal = volume_confirmed and trend_up and low_volatility and (kama_dev > 0.008)
+        # Stoploss: 2 * ATR from entry
+        stop_long = position == 1 and price_close < ema_25[i] - 2.0 * atr
+        stop_short = position == -1 and price_close > ema_25[i] + 2.0 * atr
         
-        # Exit when price returns to KAMA or volatility increases
-        exit_long = position == 1 and (kama_dev >= -0.002 or vol_reg > 1.5)
-        exit_short = position == -1 and (kama_dev <= 0.002 or vol_reg > 1.5)
+        # Exit when price returns to pivot (mean reversion)
+        exit_long = position == 1 and price_close < pivot_aligned[i]
+        exit_short = position == -1 and price_close > pivot_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.20
-        elif position == 1 and exit_long:
+            signals[i] = -0.25
+        elif position == 1 and (exit_long or stop_long):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and (exit_short or stop_short):
             position = 0
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Adaptive KAMA-based mean reversion on 1h with 4h trend filter and 1d volatility regime.
-# Uses Kaufman's Adaptive Moving Average (KAMA) which adapts to market noise - 
-# faster in trending markets, slower in ranging markets. 
-# 4h KAMA determines trend direction (only trade mean reversion against higher timeframe trend).
-# 1d ATR volatility regime filter: only trade in low volatility environments where mean reversion works.
-# 1h KAMA deviation triggers entries when price extends too far from adaptive mean.
-# Volume confirmation ensures institutional participation.
-# Session filter (08-20 UTC) reduces noise during low liquidity periods.
-# Position size fixed at 0.20 to manage risk and minimize churn.
-# Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag on 1h timeframe.
+# Hypothesis: Camarilla pivot breakout with volume confirmation and EMA25 trend filter on 12h.
+# Uses daily Camarilla levels (R3/S3 as key resistance/support) for breakout signals.
+# Enters long when price breaks above R3 with volume confirmation (>1.8x average) and
+# price above EMA25 (uptrend). Enters short when price breaks below S3 with volume
+# confirmation and price below EMA25 (downtrend). Exits when price returns to the
+# daily pivot or when stoploss (2*ATR) is hit. Works in both bull and bear markets
+# by trading breakouts in the direction of the 12h EMA25 trend. Target: 50-150 total
+# trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe. Camarilla
+# levels provide mathematically derived support/resistance that works across market
+# regimes. Volume confirmation ensures institutional participation. EMA25 filter
+# prevents counter-trend trades and ATR-based stoploss manages risk.
