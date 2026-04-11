@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_v1"
+name = "4h_1d_camarilla_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,17 +26,27 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return signals
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper/lower bands
-    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: H3, L3, H4, L4
+    # H3 = close + 1.1 * (high - low) / 2
+    # L3 = close - 1.1 * (high - low) / 2
+    # H4 = close + 1.1 * (high - low)
+    # L4 = close - 1.1 * (high - low)
+    range_1d = high_1d - low_1d
+    h3 = close_1d + 1.1 * range_1d / 2
+    l3 = close_1d - 1.1 * range_1d / 2
+    h4 = close_1d + 1.1 * range_1d
+    l4 = close_1d - 1.1 * range_1d
     
-    # Align daily Donchian to 4h timeframe
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    # Align Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,7 +66,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
             np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
             signals[i] = 0.0
             continue
@@ -65,8 +76,10 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        upper = upper_1d_aligned[i]
-        lower = lower_1d_aligned[i]
+        h3_val = h3_aligned[i]
+        l3_val = l3_aligned[i]
+        h4_val = h4_aligned[i]
+        l4_val = l4_aligned[i]
         atr_val = atr[i]
         trending = trending_market[i]
         
@@ -77,26 +90,25 @@ def generate_signals(prices):
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above daily upper Donchian with volume and trending
-        if price_high > upper and volume_confirmed and trending:
+        # Long: price breaks above H3 with volume and trending
+        if price_high > h3_val and volume_confirmed and trending:
             long_signal = True
         
-        # Short: price breaks below daily lower Donchian with volume and trending
-        if price_low < lower and volume_confirmed and trending:
+        # Short: price breaks below L3 with volume and trending
+        if price_low < l3_val and volume_confirmed and trending:
             short_signal = True
         
         # Exit conditions
-        # Calculate daily midpoint for exit
-        midpoint_1d = (upper_1d + lower_1d) / 2
-        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)[i]
+        # Exit to midpoint of H3 and L3
+        midpoint = (h3_val + l3_val) / 2
         
         # Stop loss conditions
         stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
         stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
         
         # Exit to midpoint
-        exit_long = position == 1 and price_close < midpoint_aligned
-        exit_short = position == -1 and price_close > midpoint_aligned
+        exit_long = position == 1 and price_close < midpoint
+        exit_short = position == -1 and price_close > midpoint
         
         # Trading logic
         if long_signal and position != 1:
@@ -119,10 +131,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Donchian breakout strategy with volume confirmation and trend filter.
-# Enters long when price breaks above daily 20-period Donchian upper band with volume confirmation (>1.5x avg volume) in trending markets (ATR ratio > 0.6).
-# Enters short when price breaks below daily 20-period Donchian lower band with volume confirmation and trending.
+# Hypothesis: 4h Camarilla breakout strategy with volume confirmation and trend filter.
+# Enters long when price breaks above daily H3 Camarilla level with volume confirmation (>1.5x avg volume) in trending markets (ATR ratio > 0.6).
+# Enters short when price breaks below daily L3 Camarilla level with volume confirmation and trending.
 # Uses volume confirmation to ensure institutional participation and trend filter to avoid whipsaws in sideways markets.
-# Exits when price returns to daily Donchian midpoint or ATR stop loss (2x) is hit.
+# Exits when price returns to midpoint of H3 and L3 or ATR stop loss (2x) is hit.
 # Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
 # Works in both bull and bear markets by trading breakouts in either direction with trend filter.
