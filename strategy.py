@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 20:
         return signals
     
     # Calculate daily Camarilla pivots
@@ -39,10 +39,9 @@ def generate_signals(prices):
     r4_1d = close_1d + range_1d * 1.1 / 2
     s4_1d = close_1d - range_1d * 1.1 / 2
     
-    # Align daily pivots to 12h timeframe
+    # Align daily pivots to 4h timeframe
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,10 +54,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(50, n):
+    # Filter: Avoid sideways markets - require price to be outside 15% of daily range
+    price_position = (close - s4_1d_aligned) / (r4_1d_aligned - s4_1d_aligned + 1e-10)
+    in_extreme_zone = (price_position < 0) | (price_position > 1)
+    
+    for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(in_extreme_zone[i])):
             signals[i] = 0.0
             continue
         
@@ -68,21 +71,40 @@ def generate_signals(prices):
         volume_current = volume[i]
         r4 = r4_1d_aligned[i]
         s4 = s4_1d_aligned[i]
-        pivot = pivot_1d_aligned[i]
         atr_val = atr[i]
+        extreme_zone = in_extreme_zone[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Entry signals: Breakout of Camarilla levels with volume
-        long_signal = price_high > r4 and volume_confirmed
-        short_signal = price_low < s4 and volume_confirmed
+        # Entry signals - only in extreme zones to avoid whipsaws
+        long_signal = False
+        short_signal = False
+        
+        # Long: price breaks above R4 with volume and in extreme zone
+        if price_high > r4 and volume_confirmed and extreme_zone:
+            long_signal = True
+        
+        # Short: price breaks below S4 with volume and in extreme zone
+        if price_low < s4 and volume_confirmed and extreme_zone:
+            short_signal = True
         
         # Exit conditions
-        exit_long = position == 1 and price_close < pivot
-        exit_short = position == -1 and price_close > pivot
+        # Calculate daily pivot for exit
+        if len(high_1d) > 0:
+            pivot_1d_val = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3
+        else:
+            pivot_1d_val = 0
+        pivot_array = np.full_like(high_1d, pivot_1d_val)
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
+        
+        # Stop loss conditions
         stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
         stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
+        
+        # Exit to pivot
+        exit_long = position == 1 and price_close < pivot_aligned
+        exit_short = position == -1 and price_close > pivot_aligned
         
         # Trading logic
         if long_signal and position != 1:
@@ -105,10 +127,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla breakout strategy with volume confirmation and ATR stop loss.
-# Enters long when price breaks above R4 (strong bullish breakout) with volume confirmation.
-# Enters short when price breaks below S4 (strong bearish breakdown) with volume confirmation.
-# Exits when price returns to daily pivot point or ATR stop loss is hit.
+# Hypothesis: 4h Camarilla breakout strategy with volume confirmation, extreme zone filter, and ATR stop loss.
+# Enters long when price breaks above R4 with volume confirmation and only in extreme zones (<0 or >1).
+# Enters short when price breaks below S4 with volume confirmation and only in extreme zones.
 # Uses volume confirmation (>1.5x 20-period average) to ensure institutional participation.
-# Target: 15-30 trades per year to minimize fee decay while capturing strong directional moves.
+# Extreme zone filter prevents whipsaws in sideways markets by only allowing breaks outside daily range.
+# Exits when price returns to daily pivot point or ATR stop loss (2x) is hit.
+# Target: 20-40 trades per year to minimize fee decay while capturing strong directional moves.
 # Works in both bull and bear markets by trading breakouts in either direction.
