@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-# 6h_1d_cci_rvol_mean_reversion_v1
-# Strategy: 6-hour Commodity Channel Index (CCI) mean reversion with 1-day volume filter
-# Timeframe: 6h
+# 12h_1d_camarilla_breakout_v1
+# Strategy: 12-hour Camarilla pivot breakout with 1-day trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: CCI identifies overbought/oversold conditions on 6h timeframe. 
-# Mean reversion trades are taken when CCI crosses back from extreme levels (>100 or <-100) 
-# with confirmation from elevated 1-day relative volume (RVOL > 1.5) to filter for institutional interest.
-# Works in both bull and bear markets as mean reversion occurs during pullbacks in trends and 
-# during range-bound periods. Volume filter ensures trades occur with participation.
+# Hypothesis: Price breaking above/below daily Camarilla pivot levels (H4/L4) with
+# volume confirmation (RVOL > 1.5) captures institutional moves. The 1-day EMA(50)
+# trend filter ensures trades align with higher timeframe direction, reducing false
+# breakouts in sideways markets. Works in bull by catching continuation breakouts
+# and in bear by capturing breakdowns with volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_cci_rvol_mean_reversion_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -28,66 +28,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for volume filter
+    # Load daily data ONCE before loop for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily volume average for RVOL calculation
-    vol_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Daily OHLC for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 6h CCI (20-period) for mean reversion signals
-    typical_price = (high + low + close) / 3.0
-    tp_series = pd.Series(typical_price)
-    ma_tp = tp_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate daily Camarilla levels: H4, L4
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # H4 = Close + Range * 1.1/2
+    # L4 = Close - Range * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_h4 = close_1d + range_1d * 1.1 / 2.0
+    camarilla_l4 = close_1d - range_1d * 1.1 / 2.0
     
-    # Mean deviation
-    mad = tp_series.rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Avoid division by zero
-    cci = (typical_price - ma_tp) / (0.015 * mad + 1e-10)
+    # Align 1D indicators to 12H timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily relative volume: current day volume / 20-day average volume
-    # Note: we use the current day's volume aligned to 6s bars
-    vol_1d_current = df_1d['volume'].values
-    vol_1d_current_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
-    rvol_1d = vol_1d_current_aligned / (vol_avg_20_1d_aligned + 1e-10)
+    # 12H Relative Volume (RVOL): current volume / 20-period average volume
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    rvol = volume / (vol_avg_20 + 1e-10)  # Avoid division by zero
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after CCI warmup
+    for i in range(20, n):  # Start after RVOL warmup
         # Skip if any required data is invalid
-        if (np.isnan(cci[i]) or np.isnan(rvol_1d[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(rvol[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion conditions
-        # Long: CCI crosses above -100 from below (oversold bounce)
-        long_signal = (cci[i-1] <= -100) and (cci[i] > -100)
-        # Short: CCI crosses below 100 from above (overbought reversal)
-        short_signal = (cci[i-1] >= 100) and (cci[i] < 100)
+        # Breakout conditions
+        bull_breakout = close[i] > camarilla_h4_aligned[i-1]  # Break above prior H4
+        bear_breakout = close[i] < camarilla_l4_aligned[i-1]  # Break below prior L4
         
-        # Volume filter: elevated daily volume suggests participation
-        vol_filter = rvol_1d[i] > 1.5
+        # Volume confirmation: RVOL > 1.5
+        vol_confirm = rvol[i] > 1.5
         
-        # Entry logic: mean reversion + volume confirmation
-        if long_signal and vol_filter and position != 1:
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Entry logic: breakout + volume + trend alignment
+        if bull_breakout and vol_confirm and uptrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and vol_filter and position != -1:
+        elif bear_breakout and vol_confirm and downtrend and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: opposite mean reversion signal
-        elif position == 1 and short_signal:
+        # Exit: opposite breakout with volume confirmation
+        elif position == 1 and bear_breakout and vol_confirm:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and long_signal:
+        elif position == -1 and bull_breakout and vol_confirm:
             position = 0
             signals[i] = 0.0
         else:
