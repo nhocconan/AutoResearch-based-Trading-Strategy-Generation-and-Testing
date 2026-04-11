@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_trix_volume_regime_v1"
-timeframe = "4h"
+name = "12h_1d_vortex_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -20,94 +20,68 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d TRIX (12-period EMA of EMA of EMA)
+    # Calculate 1d Vortex Indicator (period=34)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Triple EMA
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
-    trix = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix = trix.fillna(0).values  # Handle initial NaN
+    # Vortex movements
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
+    
+    # Sum over period
+    period = 34
+    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
+    
+    # Vortex Indicator
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
     
     # Calculate 1d average volume (20-period)
+    volume_1d = df_1d['volume'].values
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all 1d indicators to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Align all 1d indicators to 12h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    
-    # Calculate 4h ADX for trend strength (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr1 = np.abs(high[1:] - low[:-1])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    period_adx = 14
-    alpha = 1.0 / period_adx
-    tr14 = np.zeros_like(tr)
-    plus_dm14 = np.zeros_like(plus_dm)
-    minus_dm14 = np.zeros_like(minus_dm)
-    
-    tr14[period_adx] = tr[1:period_adx+1].sum()
-    plus_dm14[period_adx] = plus_dm[1:period_adx+1].sum()
-    minus_dm14[period_adx] = minus_dm[1:period_adx+1].sum()
-    
-    for i in range(period_adx + 1, len(tr)):
-        tr14[i] = tr14[i-1] - (tr14[i-1] / period_adx) + tr[i]
-        plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / period_adx) + plus_dm[i]
-        minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / period_adx) + minus_dm[i]
-    
-    # Avoid division by zero
-    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
-    dx = np.where((plus_di14 + minus_di14) != 0, 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    
-    # Smooth DX to get ADX
-    adx = np.zeros_like(dx)
-    adx[2*period_adx] = dx[period_adx+1:2*period_adx+1].mean()
-    for i in range(2*period_adx + 1, len(dx)):
-        adx[i] = (adx[i-1] * (period_adx - 1) + dx[i]) / period_adx
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 40 to ensure sufficient data
-    for i in range(40, n):
+    # Start from index 35 to ensure sufficient data
+    for i in range(35, n):
         # Skip if any required data is invalid
-        if (np.isnan(trix_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Current 1d volume (aligned)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_surge = vol_1d_current > 1.3 * vol_avg_20_1d_aligned[i]  # 30% above average
+        vol_surge = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]  # 50% above average
         
-        # Long when TRIX > 0 with volume surge and ADX > 20 (trending)
-        long_signal = trix_aligned[i] > 0 and vol_surge and adx_aligned[i] > 20
-        # Short when TRIX < 0 with volume surge and ADX > 20 (trending)
-        short_signal = trix_aligned[i] < 0 and vol_surge and adx_aligned[i] > 20
+        # Long when VI+ > VI- with volume surge
+        long_signal = vi_plus_aligned[i] > vi_minus_aligned[i] and vol_surge
+        # Short when VI- > VI+ with volume surge
+        short_signal = vi_minus_aligned[i] > vi_plus_aligned[i] and vol_surge
         
-        # Exit when TRIX crosses zero (mean reversion in ranging markets)
-        exit_long = trix_aligned[i] < 0
-        exit_short = trix_aligned[i] > 0
+        # Exit when Vortex lines cross (mean reversion)
+        exit_long = vi_plus_aligned[i] < vi_minus_aligned[i]
+        exit_short = vi_minus_aligned[i] < vi_plus_aligned[i]
         
         if long_signal and position != 1:
             position = 1
