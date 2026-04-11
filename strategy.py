@@ -3,23 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout + volume confirmation + choppiness regime filter
-# - Donchian(20) breakout: price > upper band (long) or < lower band (short)
-# - Volume confirmation: current volume > 1.5x 20-period average
-# - Choppiness regime: CHOP(14) > 61.8 for mean-reversion, CHOP < 38.2 for trend-following
-# - In trending regime (CHOP < 38.2): follow Donchian breakout direction
-# - In ranging regime (CHOP > 61.8): fade Donchian breakout (counter-trend)
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
-# - Works in both bull (trend following) and bear (mean reversion in ranges) markets
+# Hypothesis: 1d Williams %R + Volume Spike + Choppiness Regime Filter
+# - Williams %R(14): momentum oscillator, long when < -80 (oversold), short when > -20 (overbought)
+# - Volume Spike: current volume > 2.0x 20-period average to confirm strong moves
+# - Choppiness Regime: CHOP(14) > 61.8 = ranging (mean reversion), CHOP < 38.2 = trending (use Williams %R extremes)
+# - Works in both bull (mean reversion in ranges) and bear (extreme oversold bounces)
+# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits
 
-name = "4h_donchian_volume_chop_regime_v1"
-timeframe = "4h"
+name = "1d_williamsr_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,91 +28,79 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for HTF filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 1w data ONCE before loop for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return signals
     
-    # Pre-compute 1d ATR for volatility filter
-    atr_period = 14
-    tr1 = pd.Series(df_1d['high']).shift(1) - pd.Series(df_1d['low'])
-    tr2 = abs(pd.Series(df_1d['high']).shift(1) - pd.Series(df_1d['close']))
-    tr3 = abs(pd.Series(df_1d['low']).shift(1) - pd.Series(df_1d['close']))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Pre-compute 1w Choppiness Index
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]), np.abs(low_1w[1:] - close_1w[:-1]))
+    tr = np.concatenate([[0], tr1])
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    lowest_low_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    chop_denom = highest_high_1w - lowest_low_1w
+    chop_denom_safe = np.where(chop_denom == 0, 1e-10, chop_denom)
+    chop_1w = 100 * np.log10(np.sum(tr) / chop_denom_safe) / np.log10(14) if False else \
+              100 * np.log10(pd.Series(tr).rolling(window=14, min_periods=14).sum().values / chop_denom_safe) / np.log10(14)
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
-    # Pre-compute 1d choppiness index for regime filter
-    chop_period = 14
-    tr_sum = pd.Series(tr).rolling(window=chop_period, min_periods=chop_period).sum().values
-    highest_high = pd.Series(df_1d['high']).rolling(window=chop_period, min_periods=chop_period).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=chop_period, min_periods=chop_period).min().values
-    chop_denom = highest_high - lowest_low
-    chop_1d = 100 * np.log10(tr_sum / chop_denom) / np.log10(chop_period)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Pre-compute Williams %R on 1d
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    denom = highest_high - lowest_low
+    denom_safe = np.where(denom == 0, 1e-10, denom)
+    williams_r = -100 * (highest_high - close) / denom_safe
     
-    for i in range(50, n):  # Start after 50-bar warmup
+    # Pre-compute 1d volume confirmation (20-period average)
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
-            i < 20):  # Need 20 bars for Donchian
+        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20[i]) or 
+            np.isnan(chop_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         volume_current = volume[i]
-        high_current = high[i]
-        low_current = low[i]
-        close_current = close[i]
         
-        # Donchian channels (20-period)
-        lookback_start = max(0, i - 19)
-        highest_high_20 = np.max(high[lookback_start:i+1])
-        lowest_low_20 = np.min(low[lookback_start:i+1])
+        # Williams %R signals
+        williams_oversold = williams_r[i] < -80
+        williams_overbought = williams_r[i] > -20
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        if i >= 20:
-            volume_sma_20 = np.mean(volume[i-19:i+1])
-            vol_confirm = volume_current > 1.5 * volume_sma_20
-        else:
-            vol_confirm = False
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
         
-        # Regime filter based on 1d chop
-        chop_value = chop_1d_aligned[i]
-        is_trending = chop_value < 38.2
-        is_ranging = chop_value > 61.8
+        # Choppiness regime filter
+        chop_ranging = chop_1w_aligned[i] > 61.8  # ranging market
+        chop_trending = chop_1w_aligned[i] < 38.2  # trending market
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        if vol_confirm:
-            # Breakout signals
-            breakout_up = close_current > highest_high_20
-            breakout_down = close_current < lowest_low_20
-            
-            if is_trending:
-                # Trending regime: follow breakout direction
-                if breakout_up:
-                    enter_long = True
-                elif breakout_down:
-                    enter_short = True
-            elif is_ranging:
-                # Ranging regime: fade breakout (mean reversion)
-                if breakout_up:
-                    enter_short = True  # Fade upward breakout
-                elif breakout_down:
-                    enter_long = True   # Fade downward breakout
+        # Long: Williams %R oversold + volume confirmation (works in ranging OR trending)
+        if williams_oversold and vol_confirm:
+            enter_long = True
         
-        # Exit conditions: opposite breakout or loss of confirmation
+        # Short: Williams %R overbought + volume confirmation (works in ranging OR trending)
+        if williams_overbought and vol_confirm:
+            enter_short = True
+        
+        # Exit conditions: Williams %R returns to neutral zone
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long on downward breakout or loss of volume confirmation
-            exit_long = (close_current < lowest_low_20) or (not vol_confirm)
+            # Exit long when Williams %R rises above -50 (returns to neutral)
+            exit_long = williams_r[i] > -50
         elif position == -1:
-            # Exit short on upward breakout or loss of volume confirmation
-            exit_short = (close_current > highest_high_20) or (not vol_confirm)
+            # Exit short when Williams %R falls below -50 (returns to neutral)
+            exit_short = williams_r[i] < -50
         
         # Trading logic
         if enter_long and position != 1:
