@@ -1,18 +1,15 @@
-#!/usr/bin/env python3
-"""
-12h_1d_camarilla_breakout_volume_trend_v1
-Strategy: 12h Camarilla pivot breakout with volume confirmation and 1d EMA trend filter
-Timeframe: 12h
-Leverage: 1.0
-Hypothesis: Uses 12h Camarilla pivot levels (calculated from prior 1d high/low/close) for breakout entries, filtered by 1d EMA50 trend alignment and volume spike (>2.0x average). Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Target: 15-35 trades per year (60-140 over 4 years).
-"""
+# 4h_1d_camarilla_breakout_volume_trend_v3
+# Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d EMA trend filter
+# Timeframe: 4h
+# Leverage: 1.0
+# Hypothesis: Uses daily Camarilla pivot levels for breakout entries with volume confirmation (>1.8x average volume) and filtered by 1d EMA50 trend alignment. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses 1d for direction and 4h only for timing. Target: 20-50 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +29,7 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA20 for trend filter (optional, using close)
+    # 4h EMA20 for trend filter
     ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # 1d EMA50 for trend filter
@@ -40,11 +37,11 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume average (30-period for 12h)
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (2.0 * vol_avg)  # Volume spike filter
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.8 * vol_avg)  # Volume spike filter
     
-    # Calculate Camarilla levels from previous day's data
+    # Calculate Camarilla levels from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_for_cama = df_1d['close'].values
@@ -53,7 +50,7 @@ def generate_signals(prices):
     camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
     camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
     camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
@@ -87,7 +84,7 @@ def generate_signals(prices):
         # Short: downward breakout with volume in downtrend
         short_signal = breakout_down and vol_confirmed and downtrend_1d
         
-        # Exit when price returns to the 12h EMA20 or opposite Camarilla level
+        # Exit when price returns to the 4h EMA20 or opposite Camarilla level
         exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
         exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
