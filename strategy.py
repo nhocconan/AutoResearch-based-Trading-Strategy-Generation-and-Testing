@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with weekly high/low channels + daily volume confirmation.
-# Uses weekly price channels (high/low of previous week) to identify trend continuation.
-# Long when price breaks above weekly high with volume confirmation, short when breaks below weekly low.
-# Weekly trend filter using weekly EMA to avoid counter-trend trades.
-# Designed for 12-37 trades/year to minimize fee drag while capturing major trend moves.
-# Works in bull markets via breakouts and in bear markets via breakdowns.
+# Hypothesis: 4h timeframe with 1-day/1-week Camarilla pivot levels + volume confirmation.
+# Uses weekly Camarilla levels for trend direction and daily levels for entry timing.
+# Fades at daily S3/R3 in the direction of weekly trend and breaks out at daily S4/R4.
+# Volume filter confirms institutional participation. Designed for 20-40 trades/year.
+# Weekly trend filter reduces whipsaw in sideways markets and improves win rate.
 
-name = "12h_1w_channel_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1w1d_camarilla_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,48 +24,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly high/low channels from previous week
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Previous week's values for channel calculation
-    prev_weekly_high = np.roll(weekly_high, 1)
-    prev_weekly_low = np.roll(weekly_low, 1)
-    prev_weekly_close = np.roll(weekly_close, 1)
-    
-    # First week has no previous data
-    prev_weekly_high[0] = np.nan
-    prev_weekly_low[0] = np.nan
-    prev_weekly_close[0] = np.nan
-    
-    # Calculate weekly EMA for trend filter (21-period)
-    weekly_close_series = pd.Series(weekly_close)
-    weekly_ema = weekly_close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Align weekly data to 12h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_low)
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    
-    # Load daily data for volume confirmation
+    # Load daily and weekly data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily average volume (20-period)
-    daily_volume = df_1d['volume'].values
-    vol_avg_20 = np.zeros_like(daily_volume, dtype=float)
-    for i in range(19, len(daily_volume)):
-        vol_avg_20[i] = np.mean(daily_volume[i-19:i+1])
-    vol_avg_20[:19] = np.nan
+    # Calculate weekly Camarilla levels for trend direction
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align daily volume average to 12h timeframe
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w[0] = np.nan
+    prev_low_1w[0] = np.nan
+    prev_close_1w[0] = np.nan
+    
+    daily_range_1w = prev_high_1w - prev_low_1w
+    r4_1w = prev_close_1w + daily_range_1w * 1.1 / 2
+    r3_1w = prev_close_1w + daily_range_1w * 1.1 / 4
+    s3_1w = prev_close_1w - daily_range_1w * 1.1 / 4
+    s4_1w = prev_close_1w - daily_range_1w * 1.1 / 2
+    
+    # Weekly trend: price above R3 = bullish, below S3 = bearish
+    weekly_trend_bull = prev_close_1w > (r3_1w + s3_1w) / 2  # Above midpoint
+    weekly_trend_bear = prev_close_1w < (r3_1w + s3_1w) / 2  # Below midpoint
+    
+    # Align weekly trend to 4h
+    weekly_trend_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bull)
+    weekly_trend_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bear)
+    
+    # Calculate daily Camarilla levels for entry
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
+    
+    daily_range_1d = prev_high_1d - prev_low_1d
+    r4_1d = prev_close_1d + daily_range_1d * 1.1 / 2
+    r3_1d = prev_close_1d + daily_range_1d * 1.1 / 4
+    s3_1d = prev_close_1d - daily_range_1d * 1.1 / 4
+    s4_1d = prev_close_1d - daily_range_1d * 1.1 / 2
+    
+    # Daily average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = np.full_like(volume_1d, np.nan, dtype=float)
+    for i in range(19, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
+    
+    # Align daily levels and volume to 4h
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
@@ -74,32 +92,56 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_avg_aligned[i]) or
+            np.isnan(weekly_trend_bull_aligned[i]) or np.isnan(weekly_trend_bear_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume filter: current volume > 1.5 * daily average volume
         vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Breakout above weekly high (long signal)
-        breakout_long = high[i] >= weekly_high_aligned[i] and vol_filter and close[i] > weekly_ema_aligned[i]
+        # Determine weekly trend direction
+        is_bullish_week = weekly_trend_bull_aligned[i]
+        is_bearish_week = weekly_trend_bear_aligned[i]
         
-        # Breakdown below weekly low (short signal)
-        breakout_short = low[i] <= weekly_low_aligned[i] and vol_filter and close[i] < weekly_ema_aligned[i]
+        # Fade at S3/R3 in direction of weekly trend
+        fade_long = (low[i] <= s3_1d_aligned[i] and vol_filter and is_bullish_week)
+        fade_short = (high[i] >= r3_1d_aligned[i] and vol_filter and is_bearish_week)
         
-        # Exit when price returns to weekly EMA (mean reversion within the week)
-        exit_long = position == 1 and close[i] <= weekly_ema_aligned[i]
-        exit_short = position == -1 and close[i] >= weekly_ema_aligned[i]
+        # Breakout at S4/R4 (always active, but stronger with trend)
+        breakout_long = (high[i] >= r4_1d_aligned[i] and vol_filter)
+        breakout_short = (low[i] <= s4_1d_aligned[i] and vol_filter)
         
-        # Priority: breakout/breakdown > exit > hold
+        # Exit when price returns to weekly midpoint or opposite S3/R3
+        weekly_midpoint = (r3_1w + s3_1w) / 2
+        weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint)
+        
+        exit_long = (position == 1 and 
+                    (low[i] <= weekly_midpoint_aligned[i] or 
+                     high[i] >= s3_1d_aligned[i]))  # Exit long if hits weekly midpoint or daily S3
+        exit_short = (position == -1 and 
+                     (high[i] >= weekly_midpoint_aligned[i] or 
+                      low[i] <= r3_1d_aligned[i]))  # Exit short if hits weekly midpoint or daily R3
+        
+        # Priority: breakout > fade > hold
         if breakout_long and position != 1:
             position = 1
             signals[i] = 0.25
         elif breakout_short and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long or exit_short:
+        elif fade_long and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif fade_short and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
