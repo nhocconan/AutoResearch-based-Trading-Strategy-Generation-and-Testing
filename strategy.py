@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
-# Long when Alligator jaw < teeth < lips (bullish alignment) + price > lips + volume > 1.5x average + 1d trend up
-# Short when Alligator jaw > teeth > lips (bearish alignment) + price < jaw + volume > 1.5x average + 1d trend down
-# Exit when Alligator lines cross (alignment breaks) or trend reverses
-# Designed for 20-50 trades/year on 4h timeframe with trend-following capability in both bull and bear markets
+# Hypothesis: 1d Camarilla pivot breakout with weekly trend filter and volume confirmation
+# Long when price breaks above Camarilla R3 level + volume > 2x average + weekly trend up
+# Short when price breaks below Camarilla S3 level + volume > 2x average + weekly trend down
+# Exit when price returns to Camarilla pivot point or weekly trend reverses
+# Designed for 30-100 trades over 4 years on 1d timeframe with strong trend capture and low turnover
 
-name = "4h_1d_alligator_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,66 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate 20-period average volume for volume filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 30-day average volume for volume filter
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # Calculate Williams Alligator (13,8,5 SMAs with future shifts)
-    # Jaw: 13-period SMA, shifted 8 bars forward
-    # Teeth: 8-period SMA, shifted 5 bars forward  
-    # Lips: 5-period SMA, shifted 3 bars forward
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8)
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5)
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3)
+    # Calculate Camarilla pivot levels from previous day
+    # Using previous day's OHLC to calculate today's levels
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    # Set first values to avoid NaN
+    prev_close[0] = close[0]
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # Convert to numpy arrays and handle NaN from shifting
-    jaw = jaw.values
-    teeth = teeth.values
-    lips = lips.values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels
+    r3 = pivot + (range_val * 1.1 / 4)
+    s3 = pivot - (range_val * 1.1 / 4)
+    r4 = pivot + (range_val * 1.1 / 2)
+    s4 = pivot - (range_val * 1.1 / 2)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(13, n):  # Start after max shift needed
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
+            np.isnan(vol_ma_30[i]) or np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current volume > 2x 30-day average
+        volume_filter = volume[i] > 2.0 * vol_ma_30[i]
         
-        # Trend filter: price relative to 1d EMA50
-        is_uptrend = close[i] > ema_50_1d_aligned[i]
-        is_downtrend = close[i] < ema_50_1d_aligned[i]
-        
-        # Alligator alignment conditions
-        bullish_alignment = (jaw[i] < teeth[i]) and (teeth[i] < lips[i])
-        bearish_alignment = (jaw[i] > teeth[i]) and (teeth[i] > lips[i])
+        # Trend filter: price relative to weekly EMA20
+        is_uptrend = close[i] > ema_20_1w_aligned[i]
+        is_downtrend = close[i] < ema_20_1w_aligned[i]
         
         # Entry conditions
-        long_entry = bullish_alignment and (close[i] > lips[i]) and volume_filter and is_uptrend
-        short_entry = bearish_alignment and (close[i] < jaw[i]) and volume_filter and is_downtrend
+        long_breakout = close[i] > r3[i] and volume_filter and is_uptrend
+        short_breakout = close[i] < s3[i] and volume_filter and is_downtrend
         
-        # Exit conditions: alignment breaks or trend reverses
-        long_exit = not bullish_alignment or not is_uptrend
-        short_exit = not bearish_alignment or not is_downtrend
+        # Exit conditions - return to pivot or trend reversal
+        long_exit = (close[i] < pivot[i]) or (not is_uptrend)
+        short_exit = (close[i] > pivot[i]) or (not is_downtrend)
         
         # Priority: entry > exit > hold
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
