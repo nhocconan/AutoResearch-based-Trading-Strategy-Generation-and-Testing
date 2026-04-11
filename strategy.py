@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,6 +34,10 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     
     # Camarilla levels (based on previous close)
+    # L4 = Close - (Range * 1.1000)
+    # L3 = Close - (Range * 1.1000/2)
+    # H3 = Close + (Range * 1.1000/2)
+    # H4 = Close + (Range * 1.1000)
     l4 = close_1d - (range_1d * 1.1000)
     l3 = close_1d - (range_1d * 1.1000 / 2)
     h3 = close_1d + (range_1d * 1.1000 / 2)
@@ -49,7 +53,7 @@ def generate_signals(prices):
     h3[0] = np.nan
     h4[0] = np.nan
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
@@ -58,20 +62,14 @@ def generate_signals(prices):
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Trend filter: 20-period EMA on 12h
+    # Trend filter: 20-period EMA on 4h
     ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align previous day's close to 12h for exit
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(l4_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or
-            np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(prev_close_aligned[i])):
+            np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -95,8 +93,14 @@ def generate_signals(prices):
         short_signal = volume_confirmed and downtrend and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
         
         # Exit when price returns to the previous day's close (pivot point)
-        exit_long = position == 1 and price_close < prev_close_aligned[i]
-        exit_short = position == -1 and price_close > prev_close_aligned[i]
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        if np.isnan(prev_close_aligned[i]):
+            pivot_value = price_close
+        else:
+            pivot_value = prev_close_aligned[i]
+        
+        exit_long = position == 1 and price_close < pivot_value
+        exit_short = position == -1 and price_close > pivot_value
         
         # Trading logic
         if long_signal and position != 1:
@@ -117,12 +121,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla pivot breakout strategy on 12h timeframe.
+# Hypothesis: Camarilla pivot breakout strategy on 4h timeframe.
 # Uses 1d Camarilla levels (L3, L4, H3, H4) from the previous day's price action.
 # Enters long when price breaks above H3 or H4 with volume confirmation (>1.5x average volume) during uptrend (price > 20 EMA).
 # Enters short when price breaks below L3 or L4 with volume confirmation during downtrend (price < 20 EMA).
 # Exits when price returns to the previous day's close (pivot point).
 # The Camarilla levels identify key support/resistance levels where price often reverses or accelerates.
-# Works in both bull and bear markets by trading breakouts in the direction of the 12h trend.
+# Works in both bull and bear markets by trading breakouts in the direction of the 4h trend.
 # Volume confirmation reduces false breakouts. Trend filter ensures we trade with the higher timeframe momentum.
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
+# Designed for low trade frequency (target: 19-50 trades/year) to minimize fee drag.
