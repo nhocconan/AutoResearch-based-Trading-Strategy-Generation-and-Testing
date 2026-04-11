@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_cci_extreme_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,55 +25,37 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return signals
     
-    # Daily EMA50 for trend direction
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # CCI(20) on daily
+    tp_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    sma_tp_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci_1d = (tp_1d - sma_tp_1d) / (0.015 * mad_1d)
     
-    # 12h Donchian channel (20 periods)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike detection (volume > 2x 20-period average)
+    # Volume spike detection on 4h (volume > 2x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily EMA to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align daily CCI to 4h timeframe
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(cci_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
-        price_close = close[i]
         volume_current = volume[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
-        ema_trend = ema_50_1d_aligned[i]
+        cci_val = cci_1d_aligned[i]
         
         # Volume confirmation: volume spike
         volume_spike = volume_current > 2.0 * vol_ma_20[i]
         
-        # Trend filter: price relative to daily EMA50
-        above_trend = price_close > ema_trend
-        below_trend = price_close < ema_trend
+        # Extreme CCI signals
+        long_signal = cci_val < -150 and volume_spike
+        short_signal = cci_val > 150 and volume_spike
         
-        # Breakout signals with volume and trend confirmation
-        long_signal = False
-        short_signal = False
-        
-        # Long: breakout above Donchian upper + volume spike + above daily EMA trend
-        if price_close > high_20_val and volume_spike and above_trend:
-            long_signal = True
-        
-        # Short: breakout below Donchian lower + volume spike + below daily EMA trend
-        if price_close < low_20_val and volume_spike and below_trend:
-            short_signal = True
-        
-        # Exit: return to opposite Donchian level (mean reversion)
-        exit_long = price_close < low_20_val
-        exit_short = price_close > high_20_val
+        # Exit: CCI returns to neutral zone (-50 to 50)
+        exit_long = cci_val > -50
+        exit_short = cci_val < 50
         
         # Trading logic
         if long_signal and position != 1:
@@ -94,12 +76,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian breakout strategy with daily EMA50 trend filter and volume confirmation.
-# Enters long when price breaks above 20-period Donchian high with volume spike and price above daily EMA50.
-# Enters short when price breaks below 20-period Donchian low with volume spike and price below daily EMA50.
-# Exits when price returns to opposite Donchian level.
-# Uses Donchian channel breakouts to capture momentum after consolidation.
-# Volume confirmation (>2x 20-period average) ensures institutional participation.
-# Daily EMA50 filter ensures trades align with higher timeframe trend.
-# Target: 15-25 trades per year to minimize fee drag while capturing breakout moves.
-# Works in both bull and bear markets by trading breakouts in the direction of higher timeframe trend.
+# Hypothesis: 4h CCI extreme with volume confirmation and daily timeframe alignment.
+# Enters long when daily CCI < -150 (extreme oversold) with volume spike (>2x 20-period avg).
+# Enters short when daily CCI > 150 (extreme overbought) with volume spike.
+# Exits when CCI returns to neutral zone (-50 to 50).
+# Uses daily CCI to avoid look-ahead and ensure alignment with higher timeframe extremes.
+# Volume confirmation ensures institutional participation in the move.
+# Target: 20-40 trades per year to minimize fee fade while capturing extreme reversals.
+# Works in both bull and bear markets by fading extreme momentum with volume validation.
