@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
-# 4h_1d_volatility_breakout_v1
-# Strategy: 4-hour volatility breakout with 1-day trend filter
-# Timeframe: 4h
+# 12h_1d_williams_alligator_v1
+# Strategy: 12-hour Williams Alligator crossover with 1-day trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Volatility breakouts combined with daily trend filtering capture
-# institutional momentum while filtering false signals. Uses ATR-based volatility
-# expansion and daily EMA trend filter. Works in bull markets by catching
-# continuation breakouts and in bear markets by capturing breakdowns with
-# volatility confirmation. Targets 20-40 trades/year to minimize fee drag.
+# Hypothesis: Williams Alligator (Jaw, Teeth, Lips) crossover identifies emerging trends.
+# Long when Lips > Teeth > Jaw + price above 1-day EMA50 + volume > 1.5x average.
+# Short when Lips < Teeth < Jaw + price below 1-day EMA50 + volume > 1.5x average.
+# Works in bull by catching uptrends early and in bear by catching downtrends early.
+# Williams Alligator uses SMAs with specific periods and forward shifts to avoid look-ahead.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_volatility_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_williams_alligator_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def williams_alligator(high, low, close):
+    """Calculate Williams Alligator lines: Jaw, Teeth, Lips"""
+    median_price = (high + low) / 2
+    
+    # Jaw: Blue line - 13-period SMMA, shifted 8 bars forward
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8)
+    
+    # Teeth: Red line - 8-period SMMA, shifted 5 bars forward
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5)
+    
+    # Lips: Green line - 5-period SMMA, shifted 3 bars forward
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3)
+    
+    return jaw.values, teeth.values, lips.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -31,65 +46,55 @@ def generate_signals(prices):
     # Load daily data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Daily EMA(34) for trend filter (faster than 50 for more signals)
+    # Daily EMA(50) for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4h ATR(14) for volatility measurement
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    # Williams Alligator on 12h data
+    jaw, teeth, lips = williams_alligator(high, low, close)
     
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14 = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # 4h ATR ratio: current ATR / 50-period average ATR (volatility expansion)
-    atr_ratio = atr_14 / (pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values + 1e-10)
-    
-    # 4h Donchian channel (20-period) for breakout levels
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # 12h Relative Volume: current volume / 20-period average volume
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_avg_20 + 1e-10)  # Avoid division by zero
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after ATR and Donchian warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr_ratio[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility expansion: ATR ratio > 1.5 (current volatility 50% above average)
-        vol_expansion = atr_ratio[i] > 1.5
+        # Williams Alligator conditions
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Breakout conditions
-        bull_breakout = close[i] > donchian_high[i-1]  # Break above prior high
-        bear_breakout = close[i] < donchian_low[i-1]   # Break below prior low
+        # Volume confirmation: vol_ratio > 1.5
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # Trend filter: price above/below daily EMA34
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: volatility expansion + breakout + trend alignment
-        if vol_expansion and bull_breakout and uptrend and position != 1:
+        # Entry logic: Alligator alignment + volume + trend alignment
+        if bullish_alignment and vol_confirm and uptrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif vol_expansion and bear_breakout and downtrend and position != -1:
+        elif bearish_alignment and vol_confirm and downtrend and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: opposite breakout with volatility confirmation
-        elif position == 1 and bear_breakout and vol_expansion:
+        # Exit: opposite Alligator alignment with volume confirmation
+        elif position == 1 and bearish_alignment and vol_confirm:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bull_breakout and vol_expansion:
+        elif position == -1 and bullish_alignment and vol_confirm:
             position = 0
             signals[i] = 0.0
         else:
