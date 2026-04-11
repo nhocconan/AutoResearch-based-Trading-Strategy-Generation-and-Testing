@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume_v2
-# Strategy: 4h Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter
+# 4h_1d_elder_ray_volume_v1
+# Strategy: 4h Elder Ray Index with volume confirmation and 1d trend filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture momentum bursts. Volume confirmation ensures institutional participation. EMA50 filter avoids counter-trend trades. Designed for low frequency (<50/year) to minimize fee drag and work in both bull/bear regimes.
+# Hypothesis: Elder Ray measures bull/bear power via EMA13. Bull Power > 0 with rising Bear Power and volume confirmation indicates strength in uptrends; Bear Power < 0 with falling Bull Power and volume indicates weakness in downtrends. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Targets 20-40 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_v2"
+name = "4h_1d_elder_ray_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,7 +26,6 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
     if len(df_1d) < 50:
         return np.zeros(n)
     
@@ -35,43 +34,46 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian(20) channels on 4h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # 4h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Elder Ray components
+    bull_power = high - ema_13  # Bull Power: high minus EMA13
+    bear_power = low - ema_13   # Bear Power: low minus EMA13
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.8 * vol_avg_20)
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter
+        # Trend filter: price above/below 1d EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: Donchian breakout + volume + trend alignment
-        if close[i] > upper[i-1] and vol_confirm[i] and uptrend and position != 1:
+        # Entry logic: Elder Ray + volume + trend alignment
+        if (bull_power[i] > 0 and bear_power[i] > bear_power[i-1] and  # Bull power positive and rising
+            vol_confirm[i] and uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        elif close[i] < lower[i-1] and vol_confirm[i] and downtrend and position != -1:
+        elif (bear_power[i] < 0 and bull_power[i] < bull_power[i-1] and  # Bear power negative and falling
+              vol_confirm[i] and downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: trend reversal or opposite breakout
-        elif position == 1 and (not uptrend or close[i] < lower[i-1]):
+        # Exit: Elder Ray divergence or trend change
+        elif position == 1 and (bull_power[i] <= 0 or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not downtrend or close[i] > upper[i-1]):
+        elif position == -1 and (bear_power[i] >= 0 or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
