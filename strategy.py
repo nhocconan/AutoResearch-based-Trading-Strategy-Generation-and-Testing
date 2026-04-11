@@ -1,15 +1,17 @@
+# 4h_1d_camarilla_pivot_volume_v1
+# Hypothesis: 4h Camarilla pivot reversal with volume confirmation and 1d trend filter
+# Long when price crosses above Camarilla H3 level + volume > 1.8x average + 1d trend up
+# Short when price crosses below Camarilla L3 level + volume > 1.8x average + 1d trend down
+# Exit when price returns to Camarilla Pivot level or trend reverses
+# Designed for 20-50 trades/year on 4h timeframe with mean reversion in range and trend following in trend
+# Camarilla levels work well in both bull (trend continuation) and bear (mean reversion) markets
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d/1w trend filter
-# Long when price breaks above Donchian(20) high + volume > 1.5x average + 1d trend up
-# Short when price breaks below Donchian(20) low + volume > 1.5x average + 1d trend down
-# Exit when price returns to Donchian midpoint or trend reverses
-# Designed for 20-50 trades/year on 4h timeframe with strong trend capture and low turnover
-
-name = "4h_1d_donchian_volume_trend_v1"
+name = "4h_1d_camarilla_pivot_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,7 +28,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate 1d EMA(50) for trend filter
@@ -37,38 +39,48 @@ def generate_signals(prices):
     # Calculate 20-period average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    # H4 = Close + 1.5*(High-Low), H3 = Close + 1.0*(High-Low), etc.
+    # L4 = Close - 1.5*(High-Low), L3 = Close - 1.0*(High-Low), etc.
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla levels for each day
+    camarilla_h3 = prev_close + 1.0 * (prev_high - prev_low)
+    camarilla_l3 = prev_close - 1.0 * (prev_high - prev_low)
+    camarilla_pivot = (prev_high + prev_low + prev_close) / 3.0
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > 1.8 * vol_ma_20[i]
         
         # Trend filter: price relative to 1d EMA50
         is_uptrend = close[i] > ema_50_1d_aligned[i]
         is_downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions
-        donchian_breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
-        donchian_breakdown_down = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Entry conditions: Camarilla H3/L3 break with volume and trend
+        long_entry = (close[i] > camarilla_h3_aligned[i]) and volume_filter and is_uptrend
+        short_entry = (close[i] < camarilla_l3_aligned[i]) and volume_filter and is_downtrend
         
-        long_entry = donchian_breakout_up and volume_filter and is_uptrend
-        short_entry = donchian_breakdown_down and volume_filter and is_downtrend
-        
-        # Exit conditions
-        long_exit = (close[i] < donchian_mid[i]) or (not is_uptrend)  # Return to midpoint or trend change
-        short_exit = (close[i] > donchian_mid[i]) or (not is_downtrend)  # Return to midpoint or trend change
+        # Exit conditions: return to Camarilla Pivot or trend reversal
+        long_exit = (close[i] < camarilla_pivot_aligned[i]) or (not is_uptrend)
+        short_exit = (close[i] > camarilla_pivot_aligned[i]) or (not is_downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
