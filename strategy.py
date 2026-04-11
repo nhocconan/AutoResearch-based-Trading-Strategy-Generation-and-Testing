@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v3"
-timeframe = "4h"
+name = "6h_1d_1w_elder_ray_power_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,70 +20,76 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
+    # Load daily and weekly data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return signals
     
-    # Calculate Camarilla pivot levels from daily data
+    # Calculate Elder Ray components
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # 13-period EMA on weekly data for trend filter
+    close_1w = df_1w['close'].values
+    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Bull and Bear Power for daily
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
-    daily_range = high_1d - low_1d
+    # Align daily indicators to 6h timeframe
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Key levels for breakout: R4 (resistance) and S4 (support)
-    r4 = close_1d + (daily_range * 1.1 / 2)
-    s4 = close_1d - (daily_range * 1.1 / 2)
+    # Align weekly EMA to 6h timeframe
+    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
     
-    # Volume confirmation: 4h volume > 1.5x 20-period average (reduced from 2.0 to increase trades slightly)
+    # Volume confirmation: 6h volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Pre-calculate S3 and R3 for exit
-    s3 = close_1d - (daily_range * 1.1 / 4)
-    r3 = close_1d + (daily_range * 1.1 / 4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i])):
+        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(ema13_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
+        ema13 = ema13_1d_aligned[i]
+        bull = bull_power_aligned[i]
+        bear = bear_power_aligned[i]
+        ema13_weekly = ema13_1w_aligned[i]
         
         # Volume confirmation
         vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above R4
-        breakout_down = price_close < s4_aligned[i]  # Break below S4
+        # Trend filter: price above/below weekly EMA13
+        uptrend = price_close > ema13_weekly
+        downtrend = price_close < ema13_weekly
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Break above R4 with volume confirmation
-        if breakout_up and vol_confirm:
+        # Long: Bull Power > 0 (bulls in control) + price above daily EMA13 + uptrend on weekly + volume
+        if bull > 0 and price_close > ema13 and uptrend and vol_confirm:
             enter_long = True
         
-        # Short: Break below S4 with volume confirmation
-        if breakout_down and vol_confirm:
+        # Short: Bear Power < 0 (bears in control) + price below daily EMA13 + downtrend on weekly + volume
+        if bear < 0 and price_close < ema13 and downtrend and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla level (S3 for long, R3 for short)
-        exit_long = price_close < s3_aligned[i]  # Return to S3 level
-        exit_short = price_close > r3_aligned[i]  # Return to R3 level
+        # Exit conditions: opposite power signal or trend change
+        exit_long = bull < 0 or not uptrend  # Bears take over or trend turns down
+        exit_short = bear > 0 or not downtrend  # Bulls take over or trend turns up
         
         # Trading logic
         if enter_long and position != 1:
@@ -104,11 +110,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels.
-# Enters long when price breaks above R4 with volume confirmation, short when breaks below S4.
-# Exits when price returns to S3/R3 levels respectively.
-# Uses volume confirmation to avoid false breakouts and Camarilla levels for precise entry/exit.
-# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# Hypothesis: 6h Elder Ray power strategy with weekly trend filter.
+# Uses daily Bull/Bear Power (High/Low - EMA13) to measure bull/bear strength.
+# Enters long when Bull Power > 0 (bulls in control) with price above daily EMA13,
+# weekly uptrend, and volume confirmation. Enters short when Bear Power < 0
+# (bears in control) with price below daily EMA13, weekly downtrend, and volume.
+# Weekly EMA13 filter ensures we trade with the higher timeframe trend.
+# Works in both bull and bear markets by adapting to the prevailing trend.
 # Position size 0.25 limits drawdown during volatile periods.
-# Adjusted volume threshold from 2.0x to 1.5x to increase trade frequency to target range (20-30 trades/year).
-# Target: 20-30 trades per year (80-120 total over 4 years) to minimize fee drag.
+# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
