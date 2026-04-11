@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_Range_Bound
-Hypothesis: In the 1h timeframe, price often ranges between daily Camarilla S3/R3 levels during low volatility periods.
-We buy near S3 and sell near R3 (or vice versa for shorts) only when 4h trend is aligned and volume confirms.
-This mean-reversion strategy works in both bull and bear markets by fading extremes within the daily range.
-Uses 4h for trend direction, 1h for entry timing, and avoids choppy markets via volume filter.
-Target: 20-40 trades/year per symbol with controlled risk.
+6h_1w_Liquidity_Trap_V1
+Hypothesis: Combines weekly liquidity traps (price rejection at weekly high/low) with 60-period EMA trend filter on 6h timeframe.
+Enters long when price rejects weekly low with bullish engulfing candle and price above EMA60.
+Enters short when price rejects weekly high with bearish engulfing candle and price below EMA60.
+Designed for 15-30 trades/year per symbol with high win rate by avoiding false breakouts.
+Works in bull/bear by following 60-period EMA trend direction - avoids counter-trend whipsaws.
 """
 
 from typing import Tuple
@@ -13,116 +13,97 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_Range_Bound"
-timeframe = "1h"
+name = "6h_1w_Liquidity_Trap_V1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_camarilla(high: float, low: float, close: float) -> Tuple[float, float, float, float]:
-    """Calculate Camarilla pivot levels (R3, R4, S3, S4) from previous period's OHLC."""
-    pivot = (high + low + close) / 3
-    range_ = high - low
-    r3 = pivot + (range_ * 1.1 / 2)
-    r4 = pivot + (range_ * 1.1)
-    s3 = pivot - (range_ * 1.1 / 2)
-    s4 = pivot - (range_ * 1.1)
-    return r3, r4, s3, s4
+def engulfing_candle(open_price, close_price, prev_open, prev_close) -> Tuple[bool, bool]:
+    """Returns (bullish_engulfing, bearish_engulfing)"""
+    bullish = close_price > open_price and prev_close < prev_open and \
+              close_price >= prev_open and open_price <= prev_close
+    bearish = close_price < open_price and prev_close > prev_open and \
+              close_price <= prev_open and open_price >= prev_close
+    return bullish, bearish
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop for liquidity levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate 60-period EMA for trend filter
+    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Calculate daily Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly high and low from previous week
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    r3_1d = np.full_like(close_1d, np.nan)
-    r4_1d = np.full_like(close_1d, np.nan)
-    s3_1d = np.full_like(close_1d, np.nan)
-    s4_1d = np.full_like(close_1d, np.nan)
+    weekly_high = np.full_like(high_1w, np.nan)
+    weekly_low = np.full_like(low_1w, np.nan)
     
-    for i in range(1, len(close_1d)):
-        r3, r4, s3, s4 = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-        r3_1d[i] = r3
-        r4_1d[i] = r4
-        s3_1d[i] = s3
-        s4_1d[i] = s4
+    for i in range(1, len(high_1w)):
+        weekly_high[i] = high_1w[i-1]
+        weekly_low[i] = low_1w[i-1]
     
-    # Calculate 4h EMA20 for trend filter
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align all to 1h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Volume filter: 24-period average (1 day of 1h bars)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align weekly levels to 6h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ma_24[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema_60[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.2x 24-period average (avoid low-volume noise)
-        volume_filter = volume[i] > 1.2 * vol_ma_24[i]
+        # Engulfing candle detection (need previous candle)
+        bullish_eng, bearish_eng = engulfing_candle(
+            open_price[i], close[i], open_price[i-1], close[i-1]
+        )
         
-        # Trend filter: price above/below 4h EMA20
-        uptrend = close[i] > ema_20_4h_aligned[i]
-        downtrend = close[i] < ema_20_4h_aligned[i]
+        # Liquidity trap conditions
+        # Long: bullish engulfing near weekly low + above EMA60
+        near_weekly_low = low[i] <= weekly_low_aligned[i] * 1.002  # within 0.2% of weekly low
+        long_trap = bullish_eng and near_weekly_low and close[i] > ema_60[i]
         
-        # Mean reversion entries: fade extremes toward S3/R3
-        # Long near S3 (support) in uptrend
-        long_entry = (close[i] <= s3_1d_aligned[i] * 1.005) and volume_filter and uptrend
-        # Short near R3 (resistance) in downtrend
-        short_entry = (close[i] >= r3_1d_aligned[i] * 0.995) and volume_filter and downtrend
+        # Short: bearish engulfing near weekly high + below EMA60
+        near_weekly_high = high[i] >= weekly_high_aligned[i] * 0.998  # within 0.2% of weekly high
+        short_trap = bearish_eng and near_weekly_high and close[i] < ema_60[i]
         
-        # Exit conditions: return to midpoint or trend failure
-        mid_point = (r3_1d_aligned[i] + s3_1d_aligned[i]) / 2
-        long_exit = (close[i] >= mid_point) or (not uptrend)
-        short_exit = (close[i] <= mid_point) or (not downtrend)
+        # Exit conditions: opposite engulfing candle or trend violation
+        if position == 1:
+            exit_condition = bearish_eng or close[i] < ema_60[i]
+        elif position == -1:
+            exit_condition = bullish_eng or close[i] > ema_60[i]
+        else:
+            exit_condition = False
         
         # Priority: entry > exit > hold
-        if long_entry and position != 1:
+        if long_trap and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif short_entry and position != -1:
+            signals[i] = 0.25
+        elif short_trap and position != -1:
             position = -1
-            signals[i] = -0.20
-        elif position == 1 and long_exit:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and short_exit:
+            signals[i] = -0.25
+        elif position != 0 and exit_condition:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
