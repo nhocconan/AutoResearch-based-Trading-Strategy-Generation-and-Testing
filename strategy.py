@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_volume_v1
-# Strategy: 4h Camarilla pivot reversal with volume confirmation and 1d trend filter
-# Timeframe: 4h
+# 12h_1d_camarilla_breakout_volume_v1
+# Strategy: 12h Camarilla pivot breakout with daily volume confirmation and weekly trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (L3/L4 for longs, H3/H4 for shorts) act as support/resistance.
-# In range-bound markets, price reverses at these levels with volume confirmation.
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades.
-# Designed for low frequency (~20-40/year) to minimize fee drift.
+# Hypothesis: Camarilla pivot levels from daily chart act as strong support/resistance. 
+# Breakouts above R4 or below S4 with volume confirmation indicate institutional interest.
+# Weekly EMA filter ensures we only trade in direction of higher timeframe trend.
+# Low frequency (~15-30/year) to minimize fee drag in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_volume_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,72 +27,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels from previous day
-    # Using previous day's high, low, close to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Daily OHLC for Camarilla calculation
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Camarilla levels
-    R4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
-    R3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    R2 = prev_close + ((prev_high - prev_low) * 1.1 / 6)
-    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
-    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
-    S2 = prev_close - ((prev_high - prev_low) * 1.1 / 6)
-    S3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
-    S4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
+    # Calculate Camarilla levels for each day
+    # Camarilla: range = H - L
+    # S1 = C - (range * 1.0833/2), S2 = C - (range * 1.1666/2), S3 = C - (range * 1.2500/2), S4 = C - (range * 1.5000/2)
+    # R1 = C + (range * 1.0833/2), R2 = C + (range * 1.1666/2), R3 = C + (range * 1.2500/2), R4 = C + (range * 1.5000/2)
+    range_1d = d_high - d_low
+    s4 = d_close - (range_1d * 1.5000 / 2)
+    r4 = d_close + (range_1d * 1.5000 / 2)
     
-    # Align to 4h timeframe (these levels are valid until next day's calculation)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align Camarilla levels to 12h timeframe
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: current volume > 2.0x 24-period average (2 days of 12h bars)
     vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
+    vol_avg_24 = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > (2.0 * vol_avg_24)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(s4_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price relative to 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry logic: Camarilla reversal + volume + trend alignment
-        # Long when price touches/surpasses S3/S4 in uptrend with volume
-        if (close[i] <= S3_aligned[i] and uptrend and vol_confirm[i] and position != 1):
+        # Entry logic: Camarilla breakout + volume + weekly trend alignment
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and weekly_uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short when price touches/surpasses R3/R4 in downtrend with volume
-        elif (close[i] >= R3_aligned[i] and downtrend and vol_confirm[i] and position != -1):
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and weekly_downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: trend reversal
-        elif position == 1 and not uptrend:
+        # Exit: price returns to daily midpoint or trend change
+        elif position == 1 and (close[i] < d_close[-1] or not weekly_uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and not downtrend:
+        elif position == -1 and (close[i] > d_close[-1] or not weekly_downtrend):
             position = 0
             signals[i] = 0.0
         else:
