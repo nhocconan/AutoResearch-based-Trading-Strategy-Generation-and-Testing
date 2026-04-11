@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_Momentum_v1
-Hypothesis: Combines daily Camarilla pivot breakouts with 4-hour momentum confirmation (RSI divergence) and volume filtering.
-Designed for low trade frequency (<25/year) with high-probability setups in both bull and bear markets by requiring
-confluence of price action, momentum, and volume. Uses discrete position sizing to minimize fee churn.
+1d_1w_Keltner_Breakout_Trend_v1
+Hypothesis: Uses weekly ATR-based Keltner channels with daily trend filter to capture strong trends in both bull and bear markets. 
+Keltner breakouts with trend alignment reduce whipsaws, while weekly timeframe ensures low trade frequency (target: 8-12 trades/year).
+Works in bull markets by catching breakouts and in bear markets by avoiding false signals during consolidation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Momentum_v1"
-timeframe = "4h"
+name = "1d_1w_Keltner_Breakout_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,75 +23,71 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop for Keltner channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 4h RSI for momentum confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate weekly ATR(10) for Keltner channels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]))
+    tr2 = np.maximum(np.abs(low_1w[1:] - close_1w[:-1]), tr1)
+    tr = np.concatenate([[np.inf], tr2])  # First TR undefined
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Volume filter: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly EMA(20) for middle line
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels from daily data
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Keltner channels: Upper = EMA + 2*ATR, Lower = EMA - 2*ATR
+    keltner_upper = ema_20 + 2.0 * atr_10
+    keltner_lower = ema_20 - 2.0 * atr_10
     
-    # Camarilla levels: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    # Align Keltner channels to daily timeframe (wait for weekly close)
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1w, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1w, keltner_lower)
     
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Daily EMA(50) for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi_values[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
+        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
+            np.isnan(ema_50[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Breakout conditions
+        breakout_up = close[i] > keltner_upper_aligned[i]  # Break above upper channel
+        breakdown_down = close[i] < keltner_lower_aligned[i]  # Break below lower channel
         
-        # Momentum confirmation: RSI not overextended
-        rsi_not_overbought = rsi_values[i] < 70
-        rsi_not_oversold = rsi_values[i] > 30
+        # Trend filter: price relative to daily EMA50
+        uptrend = close[i] > ema_50[i]
+        downtrend = close[i] < ema_50[i]
         
-        # Breakout conditions using Camarilla R4/S4 levels
-        breakout_up = close[i] > camarilla_r4_aligned[i]  # Break above R4
-        breakdown_down = close[i] < camarilla_s4_aligned[i]  # Break below S4
+        # Entry conditions: only trade breakouts in direction of trend
+        long_entry = breakout_up and uptrend
+        short_entry = breakdown_down and downtrend
         
-        # Entry conditions: require volume and momentum confirmation
-        long_entry = breakout_up and volume_filter and rsi_not_overbought
-        short_entry = breakdown_down and volume_filter and rsi_not_oversold
-        
-        # Exit conditions: return to opposite Camarilla level or momentum divergence
-        long_exit = (close[i] < camarilla_s4_aligned[i]) or (rsi_values[i] > 75)
-        short_exit = (close[i] > camarilla_r4_aligned[i]) or (rsi_values[i] < 25)
+        # Exit conditions: return to middle line or trend reversal
+        keltner_middle = ema_20  # Will be aligned below
+        # We need to align the middle line as well
+        keltner_middle_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+        long_exit = close[i] < keltner_middle_aligned[i]  # Return below middle
+        short_exit = close[i] > keltner_middle_aligned[i]  # Return above middle
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -100,6 +96,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
