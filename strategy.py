@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R reversal with 1d trend filter and volume spike
-# - Long: Williams %R(14) crosses above -80 (oversold reversal), volume > 2x 20-period avg, price > 1d EMA(50)
-# - Short: Williams %R(14) crosses below -20 (overbought reversal), volume > 2x 20-period avg, price < 1d EMA(50)
-# - Exit: Williams %R crosses above -20 for longs, below -80 for shorts
-# - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 25-35 trades/year (100-140 total over 4 years) to stay within fee drag limits
-# - Williams %R is effective in both bull and bear markets for identifying reversal points
-# - Volume spike confirms institutional participation
-# - 1d EMA filter ensures trades align with higher timeframe trend
+# Hypothesis: 1d strategy using Williams Alligator + 1w EMA filter + volume confirmation
+# - Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs on median price
+# - Long: Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA(50) AND volume > 1.5x 20-day avg
+# - Short: Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA(50) AND volume > 1.5x 20-day avg
+# - Exit: When Alligator alignment breaks (Lips crosses Teeth or Jaw)
+# - Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
+# - Works in both bull and bear markets by capturing strong trends with Alligator alignment
+# - Volume confirmation ensures breakouts have conviction
+# - 1w EMA filter prevents trading against higher timeframe trend
 
-name = "4h_1d_williamsr_volume_v1"
-timeframe = "4h"
+name = "1d_1w_alligator_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,71 +30,82 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for EMA trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Pre-compute 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pre-compute Williams %R(14) on 4h
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Pre-compute Williams Alligator components
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Jaw: 13-period SMA, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan  # First 8 values invalid due to shift
+    
+    # Teeth: 8-period SMA, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan  # First 5 values invalid due to shift
+    
+    # Lips: 5-period SMA, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan  # First 3 values invalid due to shift
+    
+    # Pre-compute volume confirmation (20-day average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(50, n):  # Start after 50-bar warmup (for Alligator and 1w EMA)
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(williams_r[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
         volume_current = volume[i]
-        wr_current = williams_r[i]
-        wr_prev = williams_r[i-1]
         
-        # Volume confirmation: current volume > 2x 20-period average (strict filter)
-        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
+        # Alligator alignment
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # 1d EMA trend bias
-        ema_bias_long = close_price > ema_50_1d_aligned[i]
-        ema_bias_short = close_price < ema_50_1d_aligned[i]
+        # 1w EMA trend filter
+        ema_bias_long = close_price > ema_50_1w_aligned[i]
+        ema_bias_short = close_price < ema_50_1w_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long reversal: Williams %R crosses above -80 from below, volume confirmation, long bias
-        if wr_prev <= -80 and wr_current > -80 and vol_confirm and ema_bias_long:
+        # Long: bullish Alligator alignment + price above 1w EMA + volume confirmation
+        if bullish_alignment and ema_bias_long and vol_confirm:
             enter_long = True
         
-        # Short reversal: Williams %R crosses below -20 from above, volume confirmation, short bias
-        if wr_prev >= -20 and wr_current < -20 and vol_confirm and ema_bias_short:
+        # Short: bearish Alligator alignment + price below 1w EMA + volume confirmation
+        if bearish_alignment and ema_bias_short and vol_confirm:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: When Alligator alignment breaks
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long when Williams %R crosses above -20 (overbought)
-            if wr_prev <= -20 and wr_current > -20:
-                exit_long = True
+            # Exit long if bullish alignment breaks
+            exit_long = not bullish_alignment
         elif position == -1:
-            # Exit short when Williams %R crosses below -80 (oversold)
-            if wr_prev >= -80 and wr_current < -80:
-                exit_short = True
+            # Exit short if bearish alignment breaks
+            exit_short = not bearish_alignment
         
         # Trading logic
         if enter_long and position != 1:
