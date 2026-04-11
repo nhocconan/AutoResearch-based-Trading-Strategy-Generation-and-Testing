@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
+name = "4h_1d_camarilla_breakout_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -62,10 +62,14 @@ def generate_signals(prices):
     # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Price momentum filter: close above/below 20-period SMA on 4h
+    close_sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i])):
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i]) or
+            np.isnan(close_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -78,16 +82,20 @@ def generate_signals(prices):
         # Volatility regime filter: trade only when volatility is elevated (ATR ratio > 0.8)
         vol_regime = atr_ratio_1d[i] > 0.8
         
+        # Price momentum filter: price above SMA for longs, below SMA for shorts
+        mom_filter_long = price_close > close_sma_20[i]
+        mom_filter_short = price_close < close_sma_20[i]
+        
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime
-        if price_close > camarilla_H4_aligned[i] and vol_confirm and vol_regime:
+        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime + momentum filter
+        if price_close > camarilla_H4_aligned[i] and vol_confirm and vol_regime and mom_filter_long:
             enter_long = True
         
-        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime
-        if price_close < camarilla_L4_aligned[i] and vol_confirm and vol_regime:
+        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime + momentum filter
+        if price_close < camarilla_L4_aligned[i] and vol_confirm and vol_regime and mom_filter_short:
             enter_short = True
         
         # Exit conditions: price crosses back through the Camarilla mid-point (C level)
