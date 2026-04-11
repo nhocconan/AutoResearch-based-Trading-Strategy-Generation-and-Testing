@@ -1,51 +1,23 @@
 #!/usr/bin/env python3
 """
-12h_1d_vortex_breakout_volume_v1
-Strategy: 12h Vortex indicator breakout with volume confirmation and 1d trend filter
-Timeframe: 12h
+4h_1d_cci_trend_volume_v1
+Strategy: 4h CCI trend with volume confirmation and 1d trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Uses Vortex indicator (VI+ and VI-) to detect trend direction and breakouts. 
-Enters long when VI+ crosses above VI- with volume confirmation in uptrend (price > 1d EMA50).
-Enters short when VI- crosses above VI+ with volume confirmation in downtrend (price < 1d EMA50).
-Vortex is effective in catching trend changes and works in both bull and bear markets by 
-identifying directional movement. Volume confirmation reduces false signals. 
-Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: Uses CCI(20) on 4h to identify trend extremes (>100 for uptrend, <-100 for downtrend) with volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend alignment. Designed to capture strong trend moves while avoiding false signals in chop. Uses higher timeframe for direction (1d) and 4h only for signal generation. Target: 20-50 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_vortex_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_cci_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_vortex(high, low, close, period=14):
-    """Calculate Vortex Indicator (VI+ and VI-)"""
-    # True Range
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # VM+ and VM-
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    
-    # Sum over period
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
-    
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
-    
-    return vi_plus, vi_minus
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -60,8 +32,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h Vortex indicator
-    vi_plus, vi_minus = calculate_vortex(high, low, close, period=14)
+    # 4h CCI(20)
+    typical_price = (high + low + close) / 3
+    ma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))))
+    cci = (typical_price - ma_tp) / (0.015 * mad)
+    cci = cci.values
     
     # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
@@ -75,35 +51,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(cci[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
         # Trend filter: price above/below 1d EMA50
-        uptrend = price_close > ema_50_1d_aligned[i]
-        downtrend = price_close < ema_50_1d_aligned[i]
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Vortex crossovers
-        vi_plus_cross_above = vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]
-        vi_minus_cross_above = vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1]
+        # CCI conditions
+        cci_overbought = cci[i] > 100
+        cci_oversold = cci[i] < -100
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: VI+ crosses above VI- with volume in uptrend
-        long_signal = vi_plus_cross_above and vol_confirmed and uptrend
+        # Long: CCI > 100 with volume in uptrend
+        long_signal = cci_overbought and vol_confirmed and uptrend_1d
         
-        # Short: VI- crosses above VI+ with volume in downtrend
-        short_signal = vi_minus_cross_above and vol_confirmed and downtrend
+        # Short: CCI < -100 with volume in downtrend
+        short_signal = cci_oversold and vol_confirmed and downtrend_1d
         
-        # Exit when Vortex crosses in opposite direction
-        exit_long = position == 1 and vi_minus_cross_above
-        exit_short = position == -1 and vi_plus_cross_above
+        # Exit when CCI returns to neutral zone
+        exit_long = position == 1 and cci[i] < 0
+        exit_short = position == -1 and cci[i] > 0
         
         # Trading logic
         if long_signal and position != 1:
