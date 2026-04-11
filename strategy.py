@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_34ema_rsi_volume_v1
-Strategy: 12h EMA34 + RSI(14) + Volume Spike
-Timeframe: 12h
+4h_1d_keltner_squeeze_breakout_v1
+Strategy: 4h Keltner channel squeeze breakout with volume confirmation and 1d ADX trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Combines 12h EMA34 trend filter with RSI mean reversion and volume confirmation. Enters long when price pulls back to EMA34 with RSI < 40 and volume spike; enters short when price rallies to EMA34 with RSI > 60 and volume spike. Designed to capture mean reversion within the trend, avoiding overextended moves. Uses volume to filter false signals. Target: 60-120 total trades over 4 years.
+Hypothesis: Combines volatility contraction (Keltner squeeze) with breakout logic. Uses 1d ADX to filter for trending markets only, avoiding false breakouts in ranging conditions. Volume confirmation ensures breakout validity. Designed to work in both bull and bear markets by capturing explosive moves after low volatility periods.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_34ema_rsi_volume_v1"
-timeframe = "12h"
+name = "4h_1d_keltner_squeeze_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,44 +32,90 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA34 for trend filter
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Keltner Channel (20, 2.0) on 4h
+    atr_period = 20
+    atr = pd.Series(high - low).rolling(window=atr_period, min_periods=atr_period).mean().values
+    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    upper_keltner = ma + 2.0 * atr
+    lower_keltner = ma - 2.0 * atr
     
-    # 1d RSI(14) for mean reversion signals
+    # Bollinger Bands (20, 2.0) on 4h for squeeze detection
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = ma + 2.0 * bb_std
+    lower_bb = ma - 2.0 * bb_std
+    
+    # Squeeze condition: Bollinger Bands inside Keltner Channels
+    squeeze = (upper_bb <= upper_keltner) & (lower_bb >= lower_keltner)
+    
+    # 1d ADX for trend filtering
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).rolling(window=14, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).rolling(window=14, min_periods=14).mean().values
+    
+    # DI and DX
+    di_plus = 100 * dm_plus_smooth / atr_1d
+    di_minus = 100 * dm_minus_smooth / atr_1d
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_34[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Mean reversion signals with volume confirmation
-        long_signal = (price_close <= ema_34[i]) and (rsi_1d_aligned[i] < 40) and vol_spike[i]
-        short_signal = (price_close >= ema_34[i]) and (rsi_1d_aligned[i] > 60) and vol_spike[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_aligned[i] > 25
         
-        # Exit when price crosses EMA34 in opposite direction
-        exit_long = position == 1 and price_close > ema_34[i]
-        exit_short = position == -1 and price_close < ema_34[i]
+        # Squeeze breakout conditions
+        squeeze_release = not squeeze[i-1] and squeeze[i]  # Squeeze just released
+        breakout_up = price_close > upper_keltner[i]
+        breakout_down = price_close < lower_keltner[i]
+        
+        # Volume confirmation
+        vol_confirmed = vol_spike[i]
+        
+        # Long: upward breakout after squeeze release in trending market
+        long_signal = squeeze_release and breakout_up and vol_confirmed and trending
+        
+        # Short: downward breakout after squeeze release in trending market
+        short_signal = squeeze_release and breakout_down and vol_confirmed and trending
+        
+        # Exit when price returns to the middle of Keltner channel
+        exit_long = position == 1 and price_close < ma[i]
+        exit_short = position == -1 and price_close > ma[i]
         
         # Trading logic
         if long_signal and position != 1:
