@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_donchian_breakout_volume_chop_v1"
-timeframe = "4h"
+name = "1h_1d_ema_rsi_meanrev_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,88 +17,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Pre-calc session hours (08-20 UTC) for filtering
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate daily RSI(14) and EMA(50)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Donchian upper/lower (20-period)
-    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    # Align to 1h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: 4h volume > 1.3x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h RSI(14) for entry timing
+    delta_1h = np.diff(close, prepend=close[0])
+    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
+    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
+    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
+    rsi_1h = 100 - (100 / (1 + rs_1h))
     
-    # Chopiness index (14-period) on 4h to detect ranging vs trending
-    atr_14 = pd.Series(np.maximum.reduce([
-        high[1:] - low[:-1],
-        np.abs(high[1:] - close[:-1]),
-        np.abs(low[1:] - close[:-1])
-    ])).rolling(window=14, min_periods=14).mean().values
-    # Pad first value
-    atr_14 = np.concatenate([[np.nan], atr_14])
-    
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Chopiness = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
-    chop_denom = highest_high_14 - lowest_low_14
-    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # avoid div by zero
-    chop_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(chop_sum / chop_denom) / np.log10(14)
-    
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi_1h[i])):
             signals[i] = 0.0
             continue
         
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
         price_close = close[i]
-        volume_current = volume[i]
+        rsi_daily = rsi_1d_aligned[i]
+        ema50_daily = ema50_1d_aligned[i]
+        rsi_hourly = rsi_1h[i]
         
-        # Volume confirmation
-        vol_confirm = volume_current > 1.3 * vol_ma_20[i]
-        
-        # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending (trend follow)
-        # For breakout strategy, we want trending markets (chop < 38.2)
-        trending_regime = chop[i] < 38.2
-        
-        # Entry conditions
+        # Mean reversion signals
+        # Long when: daily RSI < 30 (oversold) + price below daily EMA50 + hourly RSI < 30
+        # Short when: daily RSI > 70 (overbought) + price above daily EMA50 + hourly RSI > 70
         enter_long = False
         enter_short = False
         
-        # Long: price breaks above 12h Donchian high + volume + trending regime
-        if price_close > donch_high_aligned[i] and vol_confirm and trending_regime:
-            enter_long = True
+        if in_session:
+            if rsi_daily < 30 and price_close < ema50_daily and rsi_hourly < 30:
+                enter_long = True
+            if rsi_daily > 70 and price_close > ema50_daily and rsi_hourly > 70:
+                enter_short = True
         
-        # Short: price breaks below 12h Donchian low + volume + trending regime
-        if price_close < donch_low_aligned[i] and vol_confirm and trending_regime:
-            enter_short = True
-        
-        # Exit conditions: price returns to middle of Donchian channel
-        donch_mid = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
-        exit_long = price_close < donch_mid
-        exit_short = price_close > donch_mid
+        # Exit when RSI returns to neutral zone (40-60)
+        exit_long = rsi_daily >= 40
+        exit_short = rsi_daily <= 60
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -107,11 +100,12 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 12h Donchian breakout with volume confirmation and chop regime filter on 4h timeframe.
-# Uses 12h Donchian channels (20-period) for major trend breaks, volume confirmation for participation,
-# and chopiness filter to avoid false breakouts in ranging markets. Works in both bull and bear markets
-# by catching strong directional moves. Position size 0.25 limits drawdown. Target: 80-150 trades.
+# Hypothesis: Mean reversion on daily timeframe with hourly execution timing.
+# Uses daily RSI(14) for regime (oversold/overbought) and price relative to daily EMA50 for trend filter.
+# Hourly RSI provides entry timing precision. Session filter (08-20 UTC) reduces noise.
+# Works in both bull and bear markets by fading extremes. Target: 60-150 trades over 4 years.
+# Position size 0.20 limits drawdown. Discrete sizing minimizes fee churn.
