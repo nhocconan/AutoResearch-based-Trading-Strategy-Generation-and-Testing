@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_volume_v1
-# Strategy: 1d Camarilla pivot levels (S3/S4 and R3/R4) with weekly trend filter and volume confirmation
-# Timeframe: 1d
+# 4h_1d_camarilla_breakout_v1
+# Strategy: 4h Camarilla pivot breakout with 1d volume confirmation and volatility filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance. Long near S3/S4 with weekly uptrend,
-# short near R3/R4 with weekly downtrend. Volume confirmation filters false breaks. Designed for low trade frequency (~10-25/year) to minimize fee drift.
-# Works in bull markets via buying dips at support and bear markets via selling rallies at resistance.
+# Hypothesis: Camarilla pivot levels (L3, H3) act as strong support/resistance. A break above H3 or below L3 with increased volume signals institutional participation. Volatility filter (ATR ratio) avoids choppy markets. Designed for low trade frequency (~20-40/year) to minimize fee drift. Works in bull markets via breakout continuation and bear markets via breakdown continuation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,72 +24,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 1d Camarilla pivot levels
+    # Based on previous day's OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily high, low, close for Camarilla calculation
-    high_1d = df_1w['high'].values
-    low_1d = df_1w['low'].values
-    close_1d = df_1w['close'].values
+    # Typical price for pivot calculation
+    typical_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate Camarilla levels for previous weekly bar
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.0 * (high - low)
-    # S3 = close - 1.0 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    hl_range = high_1d - low_1d
-    r4 = close_1d + 1.5 * hl_range
-    r3 = close_1d + 1.0 * hl_range
-    s3 = close_1d - 1.0 * hl_range
-    s4 = close_1d - 1.5 * hl_range
+    # Camarilla levels: H4, H3, L3, L4
+    # H3 = close + 1.1 * range / 2
+    # L3 = close - 1.1 * range / 2
+    camarilla_h3 = close_1d + 1.1 * range_1d / 2
+    camarilla_l3 = close_1d - 1.1 * range_1d / 2
     
-    # Align Camarilla levels to daily timeframe (previous weekly bar's levels)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Daily volume confirmation: volume > 1.5x 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_avg_20
+    # 1d volume average (20-period) for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    
+    # Align raw 1d volume for confirmation
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    
+    # 4h ATR(14) for volatility filter
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # ATR ratio: current ATR / 50-period average ATR (volatility regime filter)
+    atr_avg_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / (atr_avg_50 + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or \
-           np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or \
+           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]) or \
+           np.isnan(atr_ratio[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Weekly trend: close > EMA20 = uptrend, close < EMA20 = downtrend
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        vol_confirm = vol_1d_aligned[i] > 1.3 * vol_avg_20_1d_aligned[i]
         
-        # Entry conditions with Camarilla levels
-        # Long: price crosses above S3/S4 with weekly uptrend and volume confirmation
-        if weekly_uptrend and vol_confirm[i] and position != 1:
-            if close[i] > s3_aligned[i] or close[i] > s4_aligned[i]:
-                position = 1
-                signals[i] = 0.25
-        # Short: price crosses below R3/R4 with weekly downtrend and volume confirmation
-        elif weekly_downtrend and vol_confirm[i] and position != -1:
-            if close[i] < r3_aligned[i] or close[i] < r4_aligned[i]:
-                position = -1
-                signals[i] = -0.25
-        # Exit: weekly trend reversal
-        elif position == 1 and weekly_downtrend:
+        # Volatility filter: avoid extreme volatility (ratio > 3.0) and too low volatility (ratio < 0.5)
+        vol_filter = (atr_ratio[i] >= 0.5) and (atr_ratio[i] <= 3.0)
+        
+        # Breakout conditions
+        breakout_up = close[i] > camarilla_h3_aligned[i]
+        breakout_down = close[i] < camarilla_l3_aligned[i]
+        
+        # Entry conditions
+        # Long: Break above H3 with volume confirmation and volatility filter
+        if breakout_up and vol_confirm and vol_filter and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short: Break below L3 with volume confirmation and volatility filter
+        elif breakout_down and vol_confirm and vol_filter and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit: Price returns to pivot level (mean reversion)
+        elif position == 1 and close[i] <= camarilla_h3_aligned[i] * 0.995:  # Slight buffer
             position = 0
             signals[i] = 0.0
-        elif position == -1 and weekly_uptrend:
+        elif position == -1 and close[i] >= camarilla_l3_aligned[i] * 1.005:  # Slight buffer
             position = 0
             signals[i] = 0.0
         else:
