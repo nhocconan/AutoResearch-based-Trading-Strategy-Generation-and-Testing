@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_volume_v1
-# Strategy: 12h Camarilla pivot levels with 1d volume confirmation and ATR stoploss
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_volume_v2
+# Strategy: 4h Camarilla pivot breakout with volume confirmation and daily volatility filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance zones. Price retracements to these levels with volume confirmation offer high-probability reversal entries. The 1d timeframe provides volume context to distinguish institutional participation from noise. Designed for low trade frequency (~15-30/year) to minimize fee drift. Works in both bull and bear markets by fading extremes at statistically significant levels.
+# Hypothesis: Camarilla levels from daily chart act as key support/resistance. Breakouts with volume capture institutional flow.
+# Daily volatility filter avoids choppy markets. Designed for ~20-40 trades/year to minimize fee drag.
+# Works in bull markets via long breakouts above H4 and in bear markets via short breakdowns below L4.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,88 +29,80 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation (using 1d data)
-    # Camarilla levels based on previous day's range
-    prev_high = df_1d['high'].shift(1).values  # Previous day high
-    prev_low = df_1d['low'].shift(1).values    # Previous day low
-    prev_close = df_1d['close'].shift(1).values # Previous day close
+    # Calculate Camarilla levels from previous day
+    # Formula: H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
+    # Using previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla levels for current day based on previous day's OHLC
-    # Range = previous day high - previous day low
-    # Levels: Close ± (Range * multiplier / 11)
-    # Key levels: L3, L4, L5, L6 (support) and H3, H4, H5, H6 (resistance)
-    # We focus on L3, L4, H3, H4 as primary levels
-    range_1d = prev_high - prev_low
-    camarilla_l3 = prev_close - (range_1d * 1.1 / 12)  # ~0.0916 * range
-    camarilla_l4 = prev_close - (range_1d * 1.1 / 6)   # ~0.1833 * range
-    camarilla_h3 = prev_close + (range_1d * 1.1 / 12)  # ~0.0916 * range
-    camarilla_h4 = prev_close + (range_1d * 1.1 / 6)   # ~0.1833 * range
+    # Avoid division by zero in range calculation
+    prev_range = prev_high - prev_low
+    # Where range is zero, use a small epsilon to avoid invalid levels
+    prev_range = np.where(prev_range == 0, 0.0001, prev_range)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    H4 = prev_close + prev_range * 1.1 / 2
+    L4 = prev_close - prev_range * 1.1 / 2
     
-    # 1d volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Align Camarilla levels to 4h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # ATR for stoploss (using 12h data)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily volatility filter: use ATR(10) to avoid ranging markets
+    # Calculate ATR on 1d timeframe
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_10 = tr.rolling(window=10, min_periods=10).mean().values
+    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
+    
+    # 4h volume average (20-period) for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(atr[i])):
+        if np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or np.isnan(atr_10_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 12h volume > 1.3x 20-period average
-        # Note: We use 12h volume from prices, compare to aligned 1d volume average
-        vol_confirm = volume[i] > 1.3 * vol_avg_20_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
+        
+        # Volatility filter: avoid trading when ATR is too low (choppy market)
+        # Use 50-period average of ATR as threshold
+        if i >= 50:
+            atr_avg_50 = np.nanmean(atr_10_aligned[i-50:i]) if not np.isnan(np.nanmean(atr_10_aligned[i-50:i])) else 0
+            vol_filter = atr_10_aligned[i] > 0.5 * atr_avg_50  # Only trade when volatility is above half of recent average
+        else:
+            vol_filter = True  # Not enough data, allow trade
+        
+        # Breakout signals
+        breakout_up = high[i] > H4_aligned[i]
+        breakdown_down = low[i] < L4_aligned[i]
         
         # Entry conditions
-        # Long: Price retraces to L3/L4 support with volume confirmation
-        long_signal = ((low[i] <= camarilla_l3_aligned[i] or low[i] <= camarilla_l4_aligned[i]) and
-                       vol_confirm and position != 1)
-        
-        # Short: Price retraces to H3/H4 resistance with volume confirmation
-        short_signal = ((high[i] >= camarilla_h3_aligned[i] or high[i] >= camarilla_h4_aligned[i]) and
-                        vol_confirm and position != -1)
-        
-        # Stoploss: ATR-based (2.5 * ATR from entry)
-        # We track entry price implicitly through position and use current bar's extreme
-        if position == 1 and low[i] < camarilla_l4_aligned[i] - 2.5 * atr[i]:
-            # Stoploss hit for long
-            signals[i] = 0.0
-            position = 0
-            continue
-        elif position == -1 and high[i] > camarilla_h4_aligned[i] + 2.5 * atr[i]:
-            # Stoploss hit for short
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Execute signals
-        if long_signal:
+        # Long: Breakout above H4 with volume confirmation and volatility filter
+        if breakout_up and vol_confirm and vol_filter and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal:
+        # Short: Breakdown below L4 with volume confirmation and volatility filter
+        elif breakdown_down and vol_confirm and vol_filter and position != -1:
             position = -1
             signals[i] = -0.25
+        # Exit: Opposite breakout (breakdown for long, breakout for short)
+        elif position == 1 and breakdown_down:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and breakout_up:
+            position = 0
+            signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
