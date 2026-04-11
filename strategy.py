@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_breakout_volume
-Strategy: 1d price action with 1w Camarilla confluence
-Timeframe: 1d
+4h_12h_camarilla_breakout_volume
+Strategy: 4h breakout with 12h Camarilla confluence
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Buy when daily close exceeds weekly R3 with volume confirmation; sell when daily close falls below weekly S3 with volume confirmation. Uses weekly trend filter (weekly close > prior weekly close) to avoid counter-trend trades. Designed for low frequency (target 7-25 trades/year) to minimize fee drag and work in both bull and bear markets by aligning with higher timeframe momentum.
+Hypothesis: Buy when 4h closes above 12h R3 with volume confirmation and 12h uptrend; sell when 4h closes below 12h S3 with volume confirmation and 12h downtrend. Uses 12h close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (12h close > prior 12h close for longs, < for shorts). Low-frequency design targets 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume"
-timeframe = "1d"
+name = "4h_12h_camarilla_breakout_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
@@ -27,53 +27,50 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 20:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Daily ATR for volatility context
+    # 4h ATR for volatility filter (optional, not used in entry but good for context)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily volume filter: volume > 1.5x 20-period average
+    # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === Weekly Close (trend filter: use prior week's close) ===
-    close_1w = df_1w['close'].values
+    # === 12h Close (trend filter: use prior 12h's close) ===
+    close_12h = df_12h['close'].values
     # Trend: today's close > yesterday's close for uptrend, < for downtrend
-    # We'll use the 1w close shifted by 1 to represent "prior week close" for trend
-    close_1w_shifted = np.roll(close_1w, 1)
-    close_1w_shifted[0] = np.nan
-    close_1w_trend = align_htf_to_ltf(prices, df_1w, close_1w_shifted)
+    # We'll use the 12h close shifted by 1 to represent "prior 12h close" for trend
+    close_12h_shifted = np.roll(close_12h, 1)
+    close_12h_shifted[0] = np.nan
+    close_12h_trend = align_htf_to_ltf(prices, df_12h, close_12h_shifted)
     
-    # === Weekly Close (prior week close for trend calculation) ===
-    # Already handled above with close_1w_shifted
+    # === 12h Camarilla (entry levels from prior 12h) ===
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === Weekly Camarilla (entry levels from prior week) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Prior 12h's Camarilla levels (use shifted values to avoid look-ahead)
+    high_12h_shift = np.roll(high_12h, 1)
+    low_12h_shift = np.roll(low_12h, 1)
+    close_12h_shift = np.roll(close_12h, 1)
+    high_12h_shift[0] = np.nan
+    low_12h_shift[0] = np.nan
+    close_12h_shift[0] = np.nan
     
-    # Prior week's Camarilla levels (use shifted values to avoid look-ahead)
-    high_1w_shift = np.roll(high_1w, 1)
-    low_1w_shift = np.roll(low_1w, 1)
-    close_1w_shift = np.roll(close_1w, 1)
-    high_1w_shift[0] = np.nan
-    low_1w_shift[0] = np.nan
-    close_1w_shift[0] = np.nan
+    pivot_12h = (high_12h_shift + low_12h_shift + close_12h_shift) / 3
+    range_12h = high_12h_shift - low_12h_shift
+    r3_12h = close_12h_shift + range_12h * 1.166
+    s3_12h = close_12h_shift - range_12h * 1.166
     
-    pivot_1w = (high_1w_shift + low_1w_shift + close_1w_shift) / 3
-    range_1w = high_1w_shift - low_1w_shift
-    r3_1w = close_1w_shift + range_1w * 1.166
-    s3_1w = close_1w_shift - range_1w * 1.166
-    
-    # Align weekly Camarilla to daily timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Align 12h Camarilla to 4h timeframe
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
     
     # Session filter: 0-23 UTC (covers major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -82,10 +79,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(close_1w_trend[i]) or np.isnan(atr_daily[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or
+            np.isnan(close_12h_trend[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -94,23 +91,23 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: daily volume must be elevated
+        # Volume confirmation: 4h volume must be elevated
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filter: price close vs prior week close (1w trend)
-        uptrend_1w = price_close > close_1w_trend[i]
-        downtrend_1w = price_close < close_1w_trend[i]
+        # Trend filter: price close vs prior 12h close (12h trend)
+        uptrend_12h = price_close > close_12h_trend[i]
+        downtrend_12h = price_close < close_12h_trend[i]
         
-        # Long conditions: daily close above prior week's R3 with volume + 1w uptrend
-        long_signal = volume_confirmed and (price_close > r3_1w_aligned[i]) and uptrend_1w
+        # Long conditions: 4h closes above prior 12h's R3 with volume + 12h uptrend
+        long_signal = volume_confirmed and (price_close > r3_12h_aligned[i]) and uptrend_12h
         
-        # Short conditions: daily close below prior week's S3 with volume + 1w downtrend
-        short_signal = volume_confirmed and (price_close < s3_1w_aligned[i]) and downtrend_1w
+        # Short conditions: 4h closes below prior 12h's S3 with volume + 12h downtrend
+        short_signal = volume_confirmed and (price_close < s3_12h_aligned[i]) and downtrend_12h
         
-        # Exit when price returns to the weekly pivot (mean reversion within prior week's range)
-        pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-        exit_long = position == 1 and price_close < pivot_1w_aligned[i]
-        exit_short = position == -1 and price_close > pivot_1w_aligned[i]
+        # Exit when price returns to the 12h pivot (mean reversion within prior 12h's range)
+        pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+        exit_long = position == 1 and price_close < pivot_12h_aligned[i]
+        exit_short = position == -1 and price_close > pivot_12h_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -130,4 +127,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when daily close exceeds weekly R3 with volume confirmation; sell when daily close falls below weekly S3 with volume confirmation. Uses weekly trend filter (weekly close > prior weekly close) to avoid counter-trend trades. Designed for low frequency (target 7-25 trades/year) to minimize fee drag and work in both bull and bear markets by aligning with higher timeframe momentum.
+# Hypothesis: Buy when 4h closes above 12h R3 with volume confirmation and 12h uptrend; sell when 4h closes below 12h S3 with volume confirmation and 12h downtrend. Uses 12h close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (12h close > prior 12h close for longs, < for shorts). Low-frequency design targets 20-50 trades/year to minimize fee drag.
