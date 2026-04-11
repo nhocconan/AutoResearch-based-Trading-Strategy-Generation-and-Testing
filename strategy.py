@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v5"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,9 +31,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla formula: range = high - low
+    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
+    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
     daily_range = high_1d - low_1d
     
-    # Key levels: R4 (resistance) and S4 (support)
+    # Key levels for breakout: R4 (resistance) and S4 (support)
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
@@ -41,10 +43,10 @@ def generate_signals(prices):
     r3 = close_1d + (daily_range * 1.1 / 4)
     s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Volume confirmation: 12h volume > 2.2x 50-period average (stricter to reduce trades)
+    # Volume confirmation: 4h volume > 1.5x 50-period average (moderate threshold)
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -61,8 +63,8 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation - stricter threshold
-        vol_confirm = volume_current > 2.2 * vol_ma_50[i]
+        # Volume confirmation - moderate threshold
+        vol_confirm = volume_current > 1.5 * vol_ma_50[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -87,10 +89,10 @@ def generate_signals(prices):
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -99,16 +101,17 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 2.2x 50-period average.
-# Enters short when price breaks below S4 with volume > 2.2x 50-period average.
+# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 1.5x 50-period average.
+# Enters short when price breaks below S4 with volume > 1.5x 50-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses stricter volume threshold (2.2x) to reduce trade frequency and avoid fee drag.
-# Position size set to 0.30 to balance risk and reward.
-# Target: 15-30 trades per year (60-120 total over 4 years) to minimize fee drag.
+# Uses moderate volume threshold (1.5x) to balance trade frequency and signal quality.
+# Position size set to 0.25 to manage risk during volatile periods.
+# Target: 20-40 trades per year (80-160 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 12h timeframe reduces noise and 1d Camarilla levels provide institutional reference points.
+# 4h timeframe provides balance between signal quality and trade frequency.
+# Daily Camarilla levels provide institutional reference points for significant breakouts.
