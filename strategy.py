@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-# 1h_4d_rvol_breakout_v1
-# Strategy: 1-hour Relative Volume (RVOL) breakout with 4-day trend filter
-# Timeframe: 1h
+# 6h_1d_1w_cci_volume_breakout_v1
+# Strategy: 6-hour CCI breakout with volume confirmation and 1d/1w trend filter
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Price breakouts above/below 1h Donchian channels (20-period) combined with
-# RVOL > 1.5 (current volume > 1.5x 20-period average volume) capture momentum.
-# The 4-day EMA(50) trend filter ensures trades align with higher timeframe
-# direction, reducing false breakouts in sideways markets. Session filter (08-20 UTC)
-# reduces noise. Designed for 15-37 trades/year to avoid fee drag.
+# Hypothesis: CCI(20) identifies overbought/oversold conditions; breakouts beyond ±100
+# with volume confirmation (RVOL > 1.5) capture momentum. Trend filters from 1d EMA(50)
+# and 1w EMA(20) ensure trades align with higher timeframe direction, reducing false
+# signals in choppy markets. Works in bull by catching continuation breakouts and in
+# bear by capturing breakdowns with volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_rvol_breakout_v1"
-timeframe = "1h"
+name = "6h_1d_1w_cci_volume_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,65 +28,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (pre-compute hours)
-    hours = prices.index.hour
+    # Load daily and weekly data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    if len(df_4h) < 30:
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1h Donchian channel (20-period) for breakout
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 1h Relative Volume (RVOL): current volume / 20-period average volume
+    # 6h CCI(20): (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
+    tp = (high + low + close) / 3.0
+    tp_series = pd.Series(tp)
+    sma_tp = tp_series.rolling(window=20, min_periods=20).mean().values
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp - sma_tp) / (0.015 * mad + 1e-10)
+    
+    # 6h Relative Volume (RVOL): current volume / 20-period average volume
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    rvol = volume / (vol_avg_20 + 1e-10)  # Avoid division by zero
+    rvol = volume / (vol_avg_20 + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(rvol[i]) or np.isnan(ema_50_4h_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(cci[i]) or np.isnan(rvol[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
-        
-        # Breakout conditions
-        bull_breakout = close[i] > donchian_high[i-1]  # Break above prior high
-        bear_breakout = close[i] < donchian_low[i-1]   # Break below prior low
+        # CCI breakout conditions
+        bull_breakout = cci[i] > 100.0  # Break above overbought
+        bear_breakout = cci[i] < -100.0  # Break below oversold
         
         # Volume confirmation: RVOL > 1.5
         vol_confirm = rvol[i] > 1.5
         
-        # Trend filter: price above/below 4h EMA50
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Trend filters: price above/below daily EMA50 and weekly EMA20
+        uptrend = close[i] > ema_50_1d_aligned[i] and close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i] and close[i] < ema_20_1w_aligned[i]
         
-        # Entry logic: breakout + volume + trend alignment
+        # Entry logic: CCI breakout + volume + trend alignment
         if bull_breakout and vol_confirm and uptrend and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif bear_breakout and vol_confirm and downtrend and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit: opposite breakout with volume confirmation
+            signals[i] = -0.25
+        # Exit: opposite CCI breakout with volume confirmation
         elif position == 1 and bear_breakout and vol_confirm:
             position = 0
             signals[i] = 0.0
@@ -95,6 +94,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
