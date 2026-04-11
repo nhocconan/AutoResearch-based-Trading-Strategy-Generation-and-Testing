@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v5"
+name = "4h_1d_camarilla_breakout_volume_trend_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,7 +52,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 2.5x 20-period average
+    # 4h volume filter: volume > 2.0x 20-period average (reduced from 2.5x)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -71,11 +71,11 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation
-        volume_confirmed = volume_current > 2.5 * vol_ma
+        # Volume confirmation (adjusted threshold)
+        volume_confirmed = volume_current > 2.0 * vol_ma
         
-        # Volatility filter: ATR > 25-period median (avoid low volatility whipsaws)
-        atr_median = pd.Series(atr).rolling(window=25, min_periods=25).median()
+        # Volatility filter: ATR > 20-period median (avoid low volatility whipsaws)
+        atr_median = pd.Series(atr).rolling(window=20, min_periods=20).median()
         atr_median_val = atr_median[i] if not np.isnan(atr_median[i]) else 0
         volatility_filter = atr[i] > atr_median_val
         
@@ -93,10 +93,10 @@ def generate_signals(prices):
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -104,13 +104,13 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
 # Hypothesis: Camarilla breakout strategy using H3/L3 levels from previous day's price action.
-# Enters long when 4h price breaks above H3 (close + range*1.1/4) with volume >2.5x average and sufficient volatility.
+# Enters long when 4h price breaks above H3 (close + range*1.1/4) with volume >2.0x average and sufficient volatility.
 # Enters short when price breaks below L3 (close - range*1.1/4) with same conditions.
 # Exits when price returns to the pivot level (mean reversion within the day's range).
 # Volatility filter prevents entries during low-volatility chop, reducing false breakouts.
-# Target: 20-30 trades per year to minimize fee drag while maintaining edge in trending conditions.
+# Target: 25-35 trades per year to minimize fee drag while maintaining edge in trending conditions.
