@@ -3,19 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ATR-based trend filter
-# - Long: price breaks above Donchian(20) high, volume > 1.8x 20-period avg, ATR(10) > ATR(30) * 1.1 (weak trend filter)
-# - Short: price breaks below Donchian(20) low, volume > 1.8x 20-period avg, ATR(10) > ATR(30) * 1.1
-# - Exit: price returns to Donchian midpoint
-# - Uses 1d EMA(50) for trend bias: price > EMA(50) for long bias, price < EMA(50) for short bias
-# - Position size: 0.25 (discrete to minimize fee churn)
-# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee drag limits
-# - Weak ATR trend filter reduces trade frequency vs previous versions while maintaining edge
-# - Volume multiplier increased to 1.8x for stricter confirmation
-# - Works in both bull and bear by requiring volume surge and trend alignment
+# Hypothesis: 6h Williams %R extreme reversal with 1d trend filter and volume spike
+# - Long: Williams %R(14) < -80 (oversold) + price > 1d EMA(50) (uptrend bias) + volume > 2.0x 20-period avg
+# - Short: Williams %R(14) > -20 (overbought) + price < 1d EMA(50) (downtrend bias) + volume > 2.0x 20-period avg
+# - Exit: Williams %R returns to -50 level (mean reversion to midpoint)
+# - Uses discrete position sizing (0.25) to limit fee churn
+# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within 6h fee drag limits
+# - Works in both bull and bear markets by capturing mean reversions from extremes during trending regimes
 
-name = "4h_1d_donchian_atr_volume_v7"
-timeframe = "4h"
+name = "6h_1d_williamsr_extreme_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,46 +38,31 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Pre-compute 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Pre-compute 6h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute ATR filters for regime detection
-    # ATR(10) for current volatility
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    # ATR(30) for longer-term volatility comparison
-    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_10[i]) or np.isnan(atr_30[i]) or
+            np.isnan(williams_r[i]) or np.isnan(volume_sma_20[i]) or
             np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
-        high_price = high[i]
-        low_price = low[i]
         volume_current = volume[i]
+        wr = williams_r[i]
         
-        # Donchian levels
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
-        mid_channel = donchian_mid[i]
-        
-        # Volume confirmation: current volume > 1.8x 20-period average (stricter)
-        vol_confirm = volume_current > 1.8 * volume_sma_20[i]
-        
-        # Trend filter: ATR(10) > ATR(30) * 1.1 (weak trend filter to reduce trades)
-        atr_trend = atr_10[i] > (atr_30[i] * 1.1)
+        # Volume confirmation: current volume > 2.0x 20-period average (spike filter)
+        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
         
         # 1d EMA trend bias
         ema_bias_long = close_price > ema_50_1d_aligned[i]
@@ -90,24 +72,24 @@ def generate_signals(prices):
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above upper Donchian, volume confirmation, trending, long bias
-        if close_price > upper_channel and vol_confirm and atr_trend and ema_bias_long:
+        # Long entry: Williams %R deeply oversold (< -80) + uptrend bias + volume spike
+        if wr < -80.0 and ema_bias_long and vol_confirm:
             enter_long = True
         
-        # Short breakout: price below lower Donchian, volume confirmation, trending, short bias
-        if close_price < lower_channel and vol_confirm and atr_trend and ema_bias_short:
+        # Short entry: Williams %R deeply overbought (> -20) + downtrend bias + volume spike
+        if wr > -20.0 and ema_bias_short and vol_confirm:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: Williams %R returns to midpoint (-50)
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to Donchian midpoint
-            exit_long = close_price <= mid_channel
+            # Exit long when Williams %R returns to -50 (mean reversion complete)
+            exit_long = wr >= -50.0
         elif position == -1:
-            # Exit short if price returns to Donchian midpoint
-            exit_short = close_price >= mid_channel
+            # Exit short when Williams %R returns to -50 (mean reversion complete)
+            exit_short = wr <= -50.0
         
         # Trading logic
         if enter_long and position != 1:
