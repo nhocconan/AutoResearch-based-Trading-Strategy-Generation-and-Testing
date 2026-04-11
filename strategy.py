@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and chop regime filter
-# - Long: price breaks above Donchian(20) high, volume > 1.5x 20-period avg, CHOP(14) < 38.2 (trending)
-# - Short: price breaks below Donchian(20) low, volume > 1.5x 20-period avg, CHOP(14) < 38.2 (trending)
-# - Exit: price returns to Donchian midpoint or ATR-based stop
-# - Uses 12h EMA(50) trend filter: price > EMA for long bias, price < EMA for short bias
-# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 25-40 trades/year (100-160 total over 4 years) to stay within fee drag limits
-# - Donchian channels work well in trending markets; chop filter avoids ranging conditions
+# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Long: price breaks above Camarilla H3 level, volume > 1.5x 20-period avg, 1w EMA(21) bullish (price > EMA)
+# - Short: price breaks below Camarilla L3 level, volume > 1.5x 20-period avg, 1w EMA(21) bearish (price < EMA)
+# - Exit: price returns to Camarilla pivot point (PP)
+# - Uses discrete position sizing ±0.25 to limit drawdown and reduce fee churn
+# - Target: 15-25 trades/year (60-100 total over 4 years) to stay within fee drag limits
+# - Camarilla levels derived from prior day's range work well in both trending and ranging markets
+# - 1w EMA filter ensures we only trade with the higher timeframe trend, reducing whipsaw in bear markets
 
-name = "4h_12h_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_ema_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,47 +29,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for EMA trend filter (MTF rule compliance)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1w data ONCE before loop for EMA trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return signals
     
-    # Pre-compute 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Pre-compute 1w EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Pre-compute 4h Donchian channels (20-period)
-    donchian_window = 20
-    dc_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    dc_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    dc_mid = (dc_high + dc_low) / 2
+    # Load 1d data ONCE before loop for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return signals
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Pre-compute 1d OHLC for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    # PP = (H + L + C) / 3
+    # H3 = C + ((H-L) * 1.1/4)
+    # L3 = C - ((H-L) * 1.1/4)
+    PP = (high_1d + low_1d + close_1d) / 3
+    H3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
+    L3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    
+    # Align Camarilla levels to 1d timeframe (same timeframe, so identity alignment)
+    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Pre-compute 1d volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute Choppiness Index (CHOP) for regime detection
-    # True Range
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Sum of TR over 14 periods
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Max(HH) - Min(LL) over 14 periods
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # CHOP formula: 100 * log10(sum_tr_14 / (max_high_14 - min_low_14)) / log10(14)
-    # Avoid division by zero
-    range_14 = max_high_14 - min_low_14
-    chop = np.where(range_14 > 0, 100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 50)
-    chop = np.nan_to_num(chop, nan=50.0)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or np.isnan(dc_mid[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(chop[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(PP_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_21_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -77,31 +76,28 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Donchian levels
-        dc_high_level = dc_high[i]
-        dc_low_level = dc_low[i]
-        dc_mid_level = dc_mid[i]
+        # Camarilla levels
+        PP_level = PP_aligned[i]
+        H3_level = H3_aligned[i]
+        L3_level = L3_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Chop regime filter: CHOP < 38.2 indicates trending market (avoid ranging)
-        chop_trend = chop[i] < 38.2
-        
-        # 12h EMA trend bias
-        ema_bias_long = close_price > ema_50_12h_aligned[i]
-        ema_bias_short = close_price < ema_50_12h_aligned[i]
+        # 1w EMA trend filter
+        ema_bullish = close_price > ema_21_1w_aligned[i]
+        ema_bearish = close_price < ema_21_1w_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above Donchian high, volume confirmation, trending chop, long bias
-        if close_price > dc_high_level and vol_confirm and chop_trend and ema_bias_long:
+        # Long breakout: price above Camarilla H3, volume confirmation, 1w EMA bullish
+        if close_price > H3_level and vol_confirm and ema_bullish:
             enter_long = True
         
-        # Short breakout: price below Donchian low, volume confirmation, trending chop, short bias
-        if close_price < dc_low_level and vol_confirm and chop_trend and ema_bias_short:
+        # Short breakout: price below Camarilla L3, volume confirmation, 1w EMA bearish
+        if close_price < L3_level and vol_confirm and ema_bearish:
             enter_short = True
         
         # Exit conditions
@@ -109,11 +105,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to Donchian midpoint
-            exit_long = close_price <= dc_mid_level
+            # Exit long if price returns to pivot point
+            exit_long = close_price <= PP_level
         elif position == -1:
-            # Exit short if price returns to Donchian midpoint
-            exit_short = close_price >= dc_mid_level
+            # Exit short if price returns to pivot point
+            exit_short = close_price >= PP_level
         
         # Trading logic
         if enter_long and position != 1:
