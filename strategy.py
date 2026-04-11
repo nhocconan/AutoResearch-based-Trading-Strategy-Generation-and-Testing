@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_21ema_cross_volume_spike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +23,16 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA(21) for trend
     close_1d = df_1d['close'].values
-    
-    # Donchian upper = max(high, lookback)
-    # Donchian lower = min(low, lookback)
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
     
     # Calculate 1d average volume (20-period) for volume filter
     volume_1d = df_1d['volume'].values
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all 1d indicators to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align all 1d indicators to 12h timeframe
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
@@ -52,8 +41,7 @@ def generate_signals(prices):
     # Start from index 30 to ensure sufficient data
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(ema_21_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -63,19 +51,17 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Long when price breaks above upper Donchian band in uptrend with volume spike
-        long_setup = price > donchian_upper_aligned[i]
-        long_trend = price > ema_50_1d_aligned[i]  # Above EMA = uptrend bias
-        long_signal = long_setup and long_trend and vol_spike
+        # Long when price crosses above 21-day EMA with volume spike
+        long_cross = price > ema_21_1d_aligned[i] and close[i-1] <= ema_21_1d_aligned[i-1]
+        long_signal = long_cross and vol_spike
         
-        # Short when price breaks below lower Donchian band in downtrend with volume spike
-        short_setup = price < donchian_lower_aligned[i]
-        short_trend = price < ema_50_1d_aligned[i]  # Below EMA = downtrend bias
-        short_signal = short_setup and short_trend and vol_spike
+        # Short when price crosses below 21-day EMA with volume spike
+        short_cross = price < ema_21_1d_aligned[i] and close[i-1] >= ema_21_1d_aligned[i-1]
+        short_signal = short_cross and vol_spike
         
-        # Exit when price returns to opposite Donchian band
-        exit_long = price < donchian_lower_aligned[i]
-        exit_short = price > donchian_upper_aligned[i]
+        # Exit when price crosses back through 21-day EMA
+        exit_long = price < ema_21_1d_aligned[i] and close[i-1] >= ema_21_1d_aligned[i-1]
+        exit_short = price > ema_21_1d_aligned[i] and close[i-1] <= ema_21_1d_aligned[i-1]
         
         if long_signal and position != 1:
             position = 1
