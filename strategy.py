@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_camarilla_breakout_volume
-Strategy: 1h breakout with 4h/1d Camarilla confluence
+1h_4h_1d_camarilla_breakout_volume_v2
+Strategy: 1h breakout with 4h/1d Camarilla confluence and volume filter
 Timeframe: 1h
 Leverage: 1.0
-Hypothesis: Buy when 1h closes above 4h R3 with volume confirmation and 1d uptrend; sell when 1h closes below 4h S3 with 1d downtrend. Uses 4h Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 15-37 trades/year to minimize fee drag.
+Hypothesis: Long when 1h closes above 4h R3 with volume > 1.5x 20-period average and 1d uptrend (current close > prior 1d close). Short when 1h closes below 4h S3 with volume confirmation and 1d downtrend. Exits when price returns to 4h pivot. Uses 4h/1d for directional bias and 1h for timing. Designed to work in both bull and bear markets by aligning with higher timeframe trend. Target: 15-37 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_volume"
+name = "1h_4h_1d_camarilla_breakout_volume_v2"
 timeframe = "1h"
 leverage = 1.0
 
@@ -33,7 +33,7 @@ def generate_signals(prices):
     if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1h ATR for volatility filter
+    # 1h ATR for volatility filter (not used in entry but kept for potential exit logic)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -70,6 +70,7 @@ def generate_signals(prices):
     # Align 4h Camarilla to 1h timeframe
     r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
     s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
     
     # Session filter: 08-20 UTC (major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -104,8 +105,6 @@ def generate_signals(prices):
         short_signal = volume_confirmed and (price_close < s3_4h_aligned[i]) and downtrend_1d
         
         # Exit when price returns to the 4h pivot (mean reversion within prior 4h's range)
-        pivot_4h = (high_4h_shift + low_4h_shift + close_4h_shift) / 3
-        pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
         exit_long = position == 1 and price_close < pivot_4h_aligned[i]
         exit_short = position == -1 and price_close > pivot_4h_aligned[i]
         
@@ -127,4 +126,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when 1h closes above 4h R3 with volume confirmation and 1d uptrend; sell when 1h closes below 4h S3 with 1d downtrend. Uses 4h Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 15-37 trades/year to minimize fee drag.
+"""Hypothesis: Long when 1h closes above 4h R3 with volume > 1.5x 20-period average and 1d uptrend (current close > prior 1d close). Short when 1h closes below 4h S3 with volume confirmation and 1d downtrend. Exits when price returns to 4h pivot. Uses 4h/1d for directional bias and 1h for timing. Designed to work in both bull and bear markets by aligning with higher timeframe trend. Target: 15-37 trades/year to minimize fee drag."""
