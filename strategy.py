@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout + 1d volume confirmation + ATR volatility filter
-# - Camarilla levels from 1d: H4/H3/L3/L4 act as intraday support/resistance
-# - Long when price breaks above H3 with volume > 1.2x 20-period average (1d aligned)
-# - Short when price breaks below L3 with volume > 1.2x 20-period average (1d aligned)
-# - ATR filter: only trade when ATR(10) > 0.3 * ATR(30) to avoid low volatility chop
+# Hypothesis: 1d Camarilla pivot + 1w volume confirmation + choppiness regime filter
+# - Long when price touches Camarilla L3 support with volume > 1.5x 1w average and chop > 61.8 (range)
+# - Short when price touches Camarilla H3 resistance with volume > 1.5x 1w average and chop > 61.8 (range)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots work in both bull (breakouts with volume) and bear (breakdowns with volume) markets
-# - 1d HTF provides reliable structure, 4h balances frequency and cost
+# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits
+# - Camarilla pivots work in ranging markets (chop > 61.8) which are common in bear/consolidation periods
+# - 1w HTF provides reliable volume confirmation, 1d timeframe balances signal quality and cost
 
-name = "4h_1d_camarilla_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_volume_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,53 +28,56 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla pivots, volume confirmation and ATR
+    # Load 1d data for Camarilla pivots and choppiness
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d indicators
+    # Load 1w data for volume confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return signals
+    
+    # Pre-compute 1d Camarilla pivots (based on previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate previous day's Camarilla levels (using prior day's data)
-    # H4, H3, L3, L4 are the key levels for intraday trading
-    prev_high = pd.Series(high_1d).shift(1).values
-    prev_low = pd.Series(low_1d).shift(1).values
-    prev_close = pd.Series(close_1d).shift(1).values
+    # Camarilla levels: based on previous day's range
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Camarilla calculation: based on previous day's range
-    camarilla_range = prev_high - prev_low
-    camarilla_h4 = prev_close + camarilla_range * 1.1 / 2
-    camarilla_h3 = prev_close + camarilla_range * 1.1 / 4
-    camarilla_l3 = prev_close - camarilla_range * 1.1 / 4
-    camarilla_l4 = prev_close - camarilla_range * 1.1 / 2
-    
-    # 1d volume SMA (20-period)
-    volume_series = pd.Series(volume_1d)
-    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # ATR calculation for volatility filter
+    # Pre-compute 1d choppiness index (14-period)
+    # True range
     tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
     tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
     tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
     tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_30_1d = pd.Series(tr_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Align all 1d indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
-    atr_30_aligned = align_htf_to_ltf(prices, df_1d, atr_30_1d)
+    # Choppiness = 100 * log10(sum(TR14) / (ATR14 * 14)) / log10(14)
+    atr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum()
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop_1d = 100 * np.log10(atr_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop_1d = chop_1d.values
+    
+    # Pre-compute 1w volume SMA (20-period)
+    volume_1w = df_1w['volume'].values
+    volume_series = pd.Series(volume_1w)
+    volume_sma_20_1w = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 1d timeframe (no alignment needed for same timeframe)
+    camarilla_h3_aligned = camarilla_h3
+    camarilla_l3_aligned = camarilla_l3
+    chop_1d_aligned = chop_1d
+    
+    # Align 1w volume to 1d timeframe
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr_10_aligned[i]) or np.isnan(atr_30_aligned[i])):
+            np.isnan(chop_1d_aligned[i]) or np.isnan(volume_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -86,38 +87,38 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         
-        # Camarilla breakout conditions
-        breakout_long = price_close > camarilla_h3_aligned[i-1]  # Close above previous period's H3
-        breakout_short = price_close < camarilla_l3_aligned[i-1]  # Close below previous period's L3
+        # Camarilla touch conditions (using today's price vs yesterday's levels)
+        touch_h3 = abs(price_high - camarilla_h3_aligned[i-1]) < 0.001 * camarilla_h3_aligned[i-1]  # Within 0.1%
+        touch_l3 = abs(price_low - camarilla_l3_aligned[i-1]) < 0.001 * camarilla_l3_aligned[i-1]  # Within 0.1%
         
-        # Volume confirmation: current volume > 1.2x 20-period average (using 1d aligned volume)
-        vol_confirm = volume_current > 1.2 * volume_sma_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average (using 1w aligned volume)
+        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
-        # ATR filter: trade only when short-term ATR > 0.3 * long-term ATR (avoid low volatility)
-        atr_filter = atr_10_aligned[i] > 0.3 * atr_30_aligned[i]
+        # Choppiness regime: chop > 61.8 indicates ranging market (good for mean reversion at pivots)
+        chop_regime = chop_1d_aligned[i] > 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Camarilla H3 breakout + volume confirmation + ATR filter
-        if breakout_long and vol_confirm and atr_filter:
+        # Long: Camarilla L3 touch + volume confirmation + chop regime
+        if touch_l3 and vol_confirm and chop_regime:
             enter_long = True
         
-        # Short: Camarilla L3 breakdown + volume confirmation + ATR filter
-        if breakout_short and vol_confirm and atr_filter:
+        # Short: Camarilla H3 touch + volume confirmation + chop regime
+        if touch_h3 and vol_confirm and chop_regime:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla breakout or volatility collapse
+        # Exit conditions: opposite Camarilla touch or chop regime breakdown
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below L3 OR volatility collapses
-            exit_long = (price_close < camarilla_l3_aligned[i-1]) or (not atr_filter)
+            # Exit long if price touches H3 OR chop regime breaks down
+            exit_long = touch_h3 or (not chop_regime)
         elif position == -1:
-            # Exit short if price breaks above H3 OR volatility collapses
-            exit_short = (price_close > camarilla_h3_aligned[i-1]) or (not atr_filter)
+            # Exit short if price touches L3 OR chop regime breaks down
+            exit_short = touch_l3 or (not chop_regime)
         
         # Trading logic
         if enter_long and position != 1:
