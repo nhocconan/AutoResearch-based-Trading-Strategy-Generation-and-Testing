@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1-day and 1-week Choppiness Index as regime filter.
-# Uses weekly Choppiness to determine trend regime (trend vs range) and daily Choppiness for entry timing.
-# In trending regime (weekly CHOP < 38.2): trade breakouts in direction of trend.
-# In ranging regime (weekly CHOP > 61.8): fade at extremes using Bollinger Bands.
-# Volume confirmation filters false signals. Designed for 20-40 trades/year.
+# Hypothesis: 1h timeframe with 4h and 1d multi-timeframe confirmation.
+# Uses 4h RSI for trend direction and 1d volume filter for institutional participation.
+# Takes long positions when 4h RSI > 60 (bullish) and price pulls back to 1h EMA(20) with volume confirmation.
+# Takes short positions when 4h RSI < 40 (bearish) and price rallies to 1h EMA(20) with volume confirmation.
+# Designed for 15-30 trades/year (60-120 total over 4 years) with 0.20 position sizing.
+# The 4h RSI filter reduces whipsaw in sideways markets, while volume confirmation ensures quality setups.
 
-name = "4h_1w1d_choppiness_regime_v1"
-timeframe = "4h"
+name = "1h_4h1d_rsi_volume_pullback_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:  # Need enough data for indicators
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,156 +25,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 20:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Choppiness Index (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 4h RSI(14) for trend direction
+    close_4h = df_4h['close'].values
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # True Range for weekly
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.concatenate([[np.nan], close_1w[:-1]]))
-    tr3 = np.abs(low_1w - np.concatenate([[np.nan], close_1w[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # ATR (14-period)
-    atr_period = 14
-    atr = np.full_like(tr, np.nan, dtype=float)
-    for i in range(atr_period - 1, len(tr)):
-        atr[i] = np.nanmean(tr[i - atr_period + 1:i + 1])
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Sum of ATR (14-period)
-    atr_sum = np.full_like(tr, np.nan, dtype=float)
-    for i in range(atr_period - 1, len(tr)):
-        atr_sum[i] = np.nansum(tr[i - atr_period + 1:i + 1])
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_4h = 100 - (100 / (1 + rs))
+    rsi_4h[:13] = np.nan  # Not enough data for first 13 periods
     
-    # Choppiness Index
-    chop = np.full_like(tr, np.nan, dtype=float)
-    for i in range(atr_period - 1, len(tr)):
-        if atr_sum[i] > 0 and np.nansum(tr[i - atr_period + 1:i + 1]) > 0:
-            chop[i] = 100 * np.log10(atr_sum[i] / (atr[i] * atr_period)) / np.log10(atr_period)
+    # Calculate 1h EMA(20) for pullback entries
+    close_series = pd.Series(close)
+    ema_20 = close_series.ewm(span=20, adjust=False).mean().values
     
-    # Weekly regime: trending (CHOP < 38.2) or ranging (CHOP > 61.8)
-    weekly_chop_trend = chop < 38.2
-    weekly_chop_range = chop > 61.8
-    
-    # Align weekly chop regime to 4h
-    weekly_chop_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_chop_trend)
-    weekly_chop_range_aligned = align_htf_to_ltf(prices, df_1w, weekly_chop_range)
-    
-    # Calculate daily Bollinger Bands (20, 2) for ranging regime
-    close_1d = df_1d['close'].values
-    sma_20 = np.full_like(close_1d, np.nan, dtype=float)
-    std_20 = np.full_like(close_1d, np.nan, dtype=float)
-    for i in range(19, len(close_1d)):
-        sma_20[i] = np.mean(close_1d[i-19:i+1])
-        std_20[i] = np.std(close_1d[i-19:i+1])
-    
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    
-    # Align BB to 4h
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    
-    # Daily Donchian Channel (20-period) for trending regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Upper band (20-period high)
-    donch_high = np.full_like(high_1d, np.nan, dtype=float)
-    for i in range(19, len(high_1d)):
-        donch_high[i] = np.max(high_1d[i-19:i+1])
-    
-    # Lower band (20-period low)
-    donch_low = np.full_like(low_1d, np.nan, dtype=float)
-    for i in range(19, len(low_1d)):
-        donch_low[i] = np.min(low_1d[i-19:i+1])
-    
-    # Align Donchian to 4h
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    
-    # Volume filter: current volume > 1.3 * 20-period average volume
+    # Calculate 1d average volume (20-period) for institutional confirmation
     volume_1d = df_1d['volume'].values
     vol_avg_20 = np.full_like(volume_1d, np.nan, dtype=float)
     for i in range(19, len(volume_1d)):
         vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
+    
+    # Align all indicators to 1h timeframe
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    ema_20_aligned = align_htf_to_ltf(prices, df_4h, ema_20)  # Using 4h index for EMA since it's calculated on close
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
-            np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
-            np.isnan(vol_avg_aligned[i]) or
-            np.isnan(weekly_chop_trend_aligned[i]) or np.isnan(weekly_chop_range_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_20_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume filter: current volume > 1.3 * 20-period average volume
+        # Volume filter: current volume > 1.3 * daily average volume
         vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
         
-        # Determine weekly regime
-        is_trending = weekly_chop_trend_aligned[i]
-        is_ranging = weekly_chop_range_aligned[i]
+        # Determine 4h RSI trend conditions
+        rsi_bullish = rsi_4h_aligned[i] > 60
+        rsi_bearish = rsi_4h_aligned[i] < 40
         
-        # Entry logic based on regime
-        if is_trending and vol_filter:
-            # Trending regime: trade breakouts in direction of trend
-            # Determine trend direction from price vs Donchian midpoint
-            donch_mid = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
-            trend_up = close[i] > donch_mid
-            trend_down = close[i] < donch_mid
-            
-            breakout_long = (high[i] >= donch_high_aligned[i] and trend_up)
-            breakout_short = (low[i] <= donch_low_aligned[i] and trend_down)
-            
-            if breakout_long and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif breakout_short and position != -1:
-                position = -1
-                signals[i] = -0.25
-                
-        elif is_ranging and vol_filter:
-            # Ranging regime: fade at Bollinger Bands
-            fade_long = (low[i] <= bb_lower_aligned[i])
-            fade_short = (high[i] >= bb_upper_aligned[i])
-            
-            if fade_long and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif fade_short and position != -1:
-                position = -1
-                signals[i] = -0.25
+        # Long setup: bullish 4h trend + price pullback to EMA(20) with volume
+        long_setup = (rsi_bullish and 
+                     low[i] <= ema_20_aligned[i] and 
+                     vol_filter)
         
-        # Exit logic: opposite signal or regime change
+        # Short setup: bearish 4h trend + price rally to EMA(20) with volume
+        short_setup = (rsi_bearish and 
+                      high[i] >= ema_20_aligned[i] and 
+                      vol_filter)
+        
+        # Exit conditions: reverse signal or loss of momentum
         exit_long = (position == 1 and 
-                    ((is_ranging and high[i] >= bb_upper_aligned[i]) or  # Hit upper BB in ranging
-                     (is_trending and low[i] <= donch_low_aligned[i]) or  # Hit lower Donchian in trending
-                     not is_trending and not is_ranging))  # Choppy middle - exit
+                    (rsi_4h_aligned[i] < 50 or  # RSI turns bearish
+                     high[i] >= ema_20_aligned[i] * 1.02))  # 2% above EMA
         
         exit_short = (position == -1 and 
-                     ((is_ranging and low[i] <= bb_lower_aligned[i]) or  # Hit lower BB in ranging
-                      (is_trending and high[i] >= donch_high_aligned[i]) or  # Hit upper Donchian in trending
-                      not is_trending and not is_ranging))  # Choppy middle - exit
+                     (rsi_4h_aligned[i] > 50 or  # RSI turns bullish
+                      low[i] <= ema_20_aligned[i] * 0.98))  # 2% below EMA
         
-        if position == 1 and exit_long:
+        # Enter long on setup
+        if long_setup and position != 1:
+            position = 1
+            signals[i] = 0.20
+        # Enter short on setup
+        elif short_setup and position != -1:
+            position = -1
+            signals[i] = -0.20
+        # Exit long
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
+        # Exit short
         elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
