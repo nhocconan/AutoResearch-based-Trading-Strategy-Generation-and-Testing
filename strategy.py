@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with volume confirmation and 1w trend filter
-# - Enter long when price breaks above H4 resistance with volume > 2.0x 20-period volume SMA AND 1w close > 1w EMA20
-# - Enter short when price breaks below L4 support with volume > 2.0x 20-period volume SMA AND 1w close < 1w EMA20
-# - Exit: price retreats to H3 (for longs) or L3 (for shorts)
-# - Breakout logic captures momentum in both bull and bear markets
+# Hypothesis: 4h Camarilla pivot breakout with 12h volume spike and 1d trend filter
+# - Enter long when price breaks above Camarilla H3 resistance AND 12h volume > 2.0x 20-period volume SMA AND 1d close > 1d EMA50
+# - Enter short when price breaks below Camarilla L3 support AND 12h volume > 2.0x 20-period volume SMA AND 1d close < 1d EMA50
+# - Exit: price moves to Camarilla H4 (for longs) or L4 (for shorts) or opposite pivot touch
+# - Camarilla pivots provide mathematical support/resistance levels
 # - Volume confirmation ensures institutional participation
-# - 1w EMA20 filter avoids counter-trend trades in strong weekly trends
-# - Target: 10-25 trades/year to minimize fee drag while capturing strong moves
+# - 1d EMA50 filter ensures alignment with daily trend
+# - Target: 20-50 trades/year to minimize fee drag while capturing high-probability breakouts
 
-name = "1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "4h_12h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,14 +30,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla calculation and volume confirmation
+    # Load 1d data ONCE before loop for trend filter and Camarilla calculation (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return signals
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 12h data ONCE before loop for volume confirmation (MTF rule compliance)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return signals
     
     # Pre-compute Camarilla levels for 1d data (based on previous day's OHLC)
@@ -50,75 +50,81 @@ def generate_signals(prices):
     l3 = close_1d - 1.125 * camarilla_range
     l4 = close_1d - 1.5 * camarilla_range
     
-    # Align Camarilla levels to 1d timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Pre-compute volume SMA for 1d data (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Pre-compute EMA50 for 1d close (trend filter)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute EMA20 for 1w close (trend filter)
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Pre-compute 1d close aligned for trend comparison
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
     
-    # Pre-compute 1w close aligned for trend comparison
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Pre-compute volume SMA for 12h data (20-period)
+    volume_12h = df_12h['volume'].values
+    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
     
-    for i in range(20, n):  # Start after 20-bar warmup for volume SMA
+    # Pre-compute 12h volume aligned for volume confirmation
+    volume_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+    
+    for i in range(50, n):  # Start after 50-bar warmup for EMA50
         # Skip if any required data is invalid
         if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(close_1w_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(close_1d_aligned[i]) or
+            np.isnan(volume_sma_20_12h_aligned[i]) or np.isnan(volume_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: 1d volume > 2.0x 20-period volume SMA
-        volume_confirm = volume[i] > 2.0 * volume_sma_20_1d_aligned[i]
+        # Volume confirmation: 12h volume > 2.0x 20-period volume SMA
+        vol_confirm = volume_12h_aligned[i] > 2.0 * volume_sma_20_12h_aligned[i]
         
-        # Trend filter: 1w close vs EMA20
-        uptrend = close_1w_aligned[i] > ema_20_1w_aligned[i]
-        downtrend = close_1w_aligned[i] < ema_20_1w_aligned[i]
+        # Trend filter: 1d close vs EMA50
+        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Camarilla breakout signals (using 1d close for breakout confirmation)
-        breakout_high = close[i] > h4_aligned[i]  # Price closed above H4 resistance
-        breakout_low = close[i] < l4_aligned[i]   # Price closed below L4 support
+        # Camarilla pivot breakout signals (using 4h close for breakout detection)
+        breakout_h3 = close[i] > h3_aligned[i]  # Price closed above H3 level
+        breakout_l3 = close[i] < l3_aligned[i]  # Price closed below L3 level
+        touch_h4 = high[i] >= h4_aligned[i] and low[i] <= h4_aligned[i]  # Price touched H4 level (exit for longs)
+        touch_l4 = high[i] >= l4_aligned[i] and low[i] <= l4_aligned[i]  # Price touched L4 level (exit for shorts)
+        touch_opposite_long = touch_l3  # Exit long when price touches opposite L3
+        touch_opposite_short = touch_h3  # Exit short when price touches opposite H3
         
-        # Exit conditions: price retreats to H3/L3 levels
-        retreat_high = close[i] < h3_aligned[i]  # Price closed below H3 (exit long)
-        retreat_low = close[i] > l3_aligned[i]   # Price closed above L3 (exit short)
+        # Exit conditions
+        exit_long = touch_h4 or touch_opposite_long  # Exit long when price reaches H4 or touches L3
+        exit_short = touch_l4 or touch_opposite_short  # Exit short when price reaches L4 or touches H3
         
         # Trading logic
-        if volume_confirm:
-            # Long: H4 breakout in uptrend
-            if breakout_high and uptrend:
+        if vol_confirm:
+            # Long: H3 breakout in uptrend
+            if breakout_h3 and uptrend:
                 if position != 1:  # Only signal on new long entry
                     position = 1
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                 else:
-                    signals[i] = 0.25
-            # Short: L4 breakout in downtrend
-            elif breakout_low and downtrend:
+                    signals[i] = 0.30
+            # Short: L3 breakout in downtrend
+            elif breakout_l3 and downtrend:
                 if position != -1:  # Only signal on new short entry
                     position = -1
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
             else:
                 # Check for exits
-                if position == 1 and retreat_high:
+                if position == 1 and exit_long:
                     position = 0
                     signals[i] = 0.0
-                elif position == -1 and retreat_low:
+                elif position == -1 and exit_short:
                     position = 0
                     signals[i] = 0.0
                 else:
                     # Maintain current position
-                    signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+                    signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
         else:
             # No volume confirmation: exit any position
             if position != 0:
