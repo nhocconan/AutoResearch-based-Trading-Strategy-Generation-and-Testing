@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_kama_ema_trend_v1
-# Strategy: 12h trend following with KAMA trend detection and EMA confirmation from 1d timeframe
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_v1
+# Strategy: 4h breakout at Camarilla pivot levels with 1d volume confirmation and ADX filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: KAMA adapts to market noise, reducing false signals in choppy markets.
-#             Combined with 1d EMA trend filter, it captures strong trends while avoiding whipsaws.
-#             Designed for low frequency (12-25 trades/year) to minimize fee drag in trending markets.
+# Hypothesis: Camarilla levels from 1d act as strong support/resistance. Breakouts with volume
+# and trend strength (ADX > 25) capture momentum. Works in both bull (breakouts up) and bear
+# (breakouts down) by trading direction based on 1d EMA trend. Low frequency to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_kama_ema_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,6 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -36,64 +37,72 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # KAMA calculation (adaptive moving average)
-    er_len = 10
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # 1d volume average (20-period) for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    change = np.abs(np.diff(close, k=10))  # 10-period net change
-    change = np.insert(change, 0, 0)       # align with original index
+    # ADX calculation (14-period)
+    period = 14
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+    tr = np.insert(tr, 0, 0)
     
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean()
+    plus_di = 100 * (pd.Series(plus_dm).rolling(window=period, min_periods=period).sum() / atr)
+    minus_di = 100 * (pd.Series(minus_dm).rolling(window=period, min_periods=period).sum() / atr)
+    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean()
     
-    # Calculate efficiency ratio properly
-    price_change = np.abs(np.diff(close, k=10))
-    price_change = np.insert(price_change, 0, 0)
+    # Calculate Camarilla levels from previous 1d bar
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    typical_price_vals = typical_price.values
     
-    volatility_sum = np.zeros_like(close)
-    for i in range(1, len(close)):
-        volatility_sum[i] = volatility_sum[i-1] + np.abs(close[i] - close[i-1])
+    # Camarilla levels: H/L = typical_price +/- 1.1 * (H - L) / 2
+    high_low_diff = df_1d['high'].values - df_1d['low'].values
+    camarilla_high = typical_price_vals + 1.1 * high_low_diff / 2
+    camarilla_low = typical_price_vals - 1.1 * high_low_diff / 2
     
-    er = np.where(volatility_sum != 0, price_change / volatility_sum, 0)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Price channels for entry (20-period high/low)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    # Volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(high_20.iloc[i]) or np.isnan(low_20.iloc[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or 
+            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
+            np.isnan(adx.iloc[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filters
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        price_above_ema1d = close[i] > ema_50_1d_aligned[i]
-        price_below_ema1d = close[i] < ema_50_1d_aligned[i]
+        # ADX trend strength filter
+        strong_trend = adx.iloc[i] > 25
+        
+        # Volume confirmation (current volume > 1.5x average)
+        volume_confirm = vol_ratio[i] > 1.5
         
         # Entry conditions
-        if price_above_kama and price_above_ema1d and close[i] > high_20.iloc[i-1] and position != 1:
+        if strong_trend and volume_confirm and close[i] > camarilla_high_aligned[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif price_below_kama and price_below_ema1d and close[i] < low_20.iloc[i-1] and position != -1:
+        elif strong_trend and volume_confirm and close[i] < camarilla_low_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: trend deterioration
-        elif position == 1 and (close[i] < kama[i] or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: trend weakening, opposite signal, or volume drop
+        elif position == 1 and (adx.iloc[i] < 20 or close[i] < camarilla_low_aligned[i] or vol_ratio[i] < 0.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > kama[i] or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (adx.iloc[i] < 20 or close[i] > camarilla_high_aligned[i] or vol_ratio[i] < 0.8):
             position = 0
             signals[i] = 0.0
         else:
