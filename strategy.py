@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,6 +19,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -53,10 +54,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Pivot level for exit (calculated per day)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(pivot_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -67,35 +72,20 @@ def generate_signals(prices):
         r4 = r4_1d_aligned[i]
         s4 = s4_1d_aligned[i]
         atr_val = atr[i]
+        pivot_val = pivot_1d_aligned[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Camarilla-based signals
-        long_signal = False
-        short_signal = False
+        # Breakout signals
+        long_signal = price_high > r4 and volume_confirmed
+        short_signal = price_low < s4 and volume_confirmed
         
-        # Long: price breaks above R4 with volume
-        if price_high > r4 and volume_confirmed:
-            long_signal = True
-        
-        # Short: price breaks below S4 with volume
-        if price_low < s4 and volume_confirmed:
-            short_signal = True
-        
-        # Exit conditions: ATR stop loss or return to daily pivot
-        # Calculate daily pivot for exit
-        pivot_1d_val = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3 if len(high_1d) > 0 else 0
-        pivot_array = np.full_like(high_1d, pivot_1d_val)
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
-        
-        # Stop loss conditions
-        stop_long = position == 1 and price_low < (entry_price - 1.5 * atr_val) if 'entry_price' in locals() else False
-        stop_short = position == -1 and price_high > (entry_price + 1.5 * atr_val) if 'entry_price' in locals() else False
-        
-        # Exit to pivot
-        exit_long = position == 1 and price_close < pivot_aligned
-        exit_short = position == -1 and price_close > pivot_aligned
+        # Exit conditions
+        stop_long = position == 1 and price_low < (entry_price - 1.5 * atr_val)
+        stop_short = position == -1 and price_high > (entry_price + 1.5 * atr_val)
+        exit_long = position == 1 and price_close < pivot_val
+        exit_short = position == -1 and price_close > pivot_val
         
         # Trading logic
         if long_signal and position != 1:
@@ -108,9 +98,11 @@ def generate_signals(prices):
             signals[i] = -0.25
         elif position == 1 and (exit_long or stop_long):
             position = 0
+            entry_price = 0.0
             signals[i] = 0.0
         elif position == -1 and (exit_short or stop_short):
             position = 0
+            entry_price = 0.0
             signals[i] = 0.0
         else:
             # Maintain current position
