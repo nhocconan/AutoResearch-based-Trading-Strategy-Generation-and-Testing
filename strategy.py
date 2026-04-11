@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "6h_1w_1d_williams_alligator_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,113 +20,154 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate 4h ATR(14) for volatility filter
-    tr1 = df_4h['high'] - df_4h['low']
-    tr2 = np.abs(df_4h['high'] - df_4h['close'].shift())
-    tr3 = np.abs(df_4h['low'] - df_4h['close'].shift())
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate 1d Close for trend filter
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
-    close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Calculate Williams Alligator from weekly data
+    # Alligator lines: Jaw (13-period SMMA, 8 bars ahead), Teeth (8-period SMMA, 5 bars ahead), Lips (5-period SMMA, 3 bars ahead)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    median_price_1w = (high_1w + low_1w) / 2
     
-    # Align 4h ATR and 1d SMA to 1h timeframe
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
+    # Calculate SMMA (Smoothed Moving Average)
+    def smma(data, period):
+        result = np.full_like(data, np.nan, dtype=np.float64)
+        if len(data) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (Prev_SMMA * (period-1) + Current_Value) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Calculate 1h Camarilla pivot levels from previous day
-    # We'll use daily data to calculate pivots, then align to 1h
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    daily_range = daily_high - daily_low
+    jaw = smma(median_price_1w, 13)
+    teeth = smma(median_price_1w, 8)
+    lips = smma(median_price_1w, 5)
     
-    # Camarilla levels: S1, S2, S3, S4 and R1, R2, R3, R4
-    # Using formula: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    # R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
-    s1 = daily_close - (daily_range * 1.1 / 12)
-    s2 = daily_close - (daily_range * 1.1 / 6)
-    s3 = daily_close - (daily_range * 1.1 / 4)
-    s4 = daily_close - (daily_range * 1.1 / 2)
-    r1 = daily_close + (daily_range * 1.1 / 12)
-    r2 = daily_close + (daily_range * 1.1 / 6)
-    r3 = daily_close + (daily_range * 1.1 / 4)
-    r4 = daily_close + (daily_range * 1.1 / 2)
+    # Shift jaws forward by 8 bars, teeth by 5, lips by 3 (as per Alligator definition)
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
     
-    # Align all Camarilla levels to 1h timeframe
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    # Invalidate the shifted values that look ahead
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Align weekly Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw_shifted)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth_shifted)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips_shifted)
+    
+    # Calculate weekly ADX for trend strength
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Calculate Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smooth TR, DM+ and DM- with Wilder's smoothing (similar to EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=np.float64)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        # Subsequent values: SMMA = (Prev_SMMA * (period-1) + Current_Value) / period
+        for i in range(period, len(data)):
+            if np.isnan(result[i-1]):
+                result[i] = np.nan
+            else:
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_1w = wilders_smooth(tr, 14)
+    dm_plus_smooth = wilders_smooth(dm_plus, 14)
+    dm_minus_smooth = wilders_smooth(dm_minus, 14)
+    
+    # Calculate DI+ and DI-
+    di_plus = np.where(atr_1w != 0, dm_plus_smooth / atr_1w * 100, 0)
+    di_minus = np.where(atr_1w != 0, dm_minus_smooth / atr_1w * 100, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    adx = wilders_smooth(dx, 14)
+    
+    # Align weekly ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Calculate 60-period EMA for 6h trend filter (close > EMA = uptrend)
+    close_s = pd.Series(close)
+    ema_60 = close_s.ewm(span=60, adjust=False, min_periods=60).values
+    
+    # Volume confirmation: 6h volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_4h_aligned[i]) or np.isnan(sma_50_1d_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade between 08:00 and 20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(ema_60[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volatility filter: only trade when 4h ATR > 0.5% of price (avoid low volatility)
-        volatility_filter = atr_4h_aligned[i] > (price_close * 0.005)
+        # Alligator conditions: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        alligator_short = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
         
-        # Trend filter: price above/below 1d SMA50
-        trend_filter = price_close > sma_50_1d_aligned[i]  # for long
-        trend_filter_short = price_close < sma_50_1d_aligned[i]  # for short
+        # Trend filters: ADX > 25 for strong trend, price > EMA60 for uptrend bias
+        strong_trend = adx_aligned[i] > 25
+        uptrend_bias = price_close > ema_60[i]
+        downtrend_bias = price_close < ema_60[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above R4
-        breakout_down = price_close < s4_aligned[i]  # Break below S4
+        # Volume confirmation
+        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Break above R4 with volatility and trend filter
-        if breakout_up and volatility_filter and trend_filter:
+        # Long: Alligator aligned up + strong trend + uptrend bias + volume
+        if alligator_long and strong_trend and uptrend_bias and vol_confirm:
             enter_long = True
         
-        # Short: Break below S4 with volatility and trend filter
-        if breakout_down and volatility_filter and trend_filter_short:
+        # Short: Alligator aligned down + strong trend + downtrend bias + volume
+        if alligator_short and strong_trend and downtrend_bias and vol_confirm:
             enter_short = True
         
-        # Exit conditions: return to opposite S2/R2 levels (tighter stop)
-        exit_long = price_close < s2_aligned[i]  # Return to S2 level
-        exit_short = price_close > r2_aligned[i]  # Return to R2 level
+        # Exit conditions: when Alligator reverses or trend weakens
+        exit_long = not (alligator_long and strong_trend and uptrend_bias)
+        exit_short = not (alligator_short and strong_trend and downtrend_bias)
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -135,18 +176,15 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 1h Camarilla breakout strategy using 4h volatility filter and 1d trend filter.
-# Enters long when price breaks above daily R4 with 4h ATR > 0.5% of price and price > 1d SMA50.
-# Enters short when price breaks below daily S4 with 4h ATR > 0.5% of price and price < 1d SMA50.
-# Exits when price returns to S2/R2 levels for quick profit taking.
-# Uses session filter (08-20 UTC) to avoid low-liquidity periods.
-# Position size fixed at 0.20 to minimize risk and allow for multiple trades.
-# Target: 15-30 trades per year (60-120 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by capturing significant breakouts in either direction.
-# The volatility filter prevents trading in choppy markets, while the trend filter ensures
-# we only trade in the direction of the higher timeframe trend.
-# Camarilla levels provide precise entry/exit levels based on institutional reference points.
+# Hypothesis: 6h Williams Alligator strategy with weekly trend confirmation.
+# Uses weekly Williams Alligator (Lips/Teeth/Jaw) for trend direction and entry signals.
+# Filters trades with weekly ADX > 25 for strong trends and 6h EMA60 for bias alignment.
+# Requires volume confirmation (1.5x 20-period average) to avoid false breakouts.
+# Exits when Alligator alignment breaks or trend weakens.
+# Designed to work in both bull and bear markets by capturing strong trends.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Weekly timeframe provides robust trend identification, reducing whipsaws in ranging markets.
