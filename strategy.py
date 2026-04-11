@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v3"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +22,7 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return signals
     
     # Calculate Camarilla pivot levels from daily data
@@ -30,9 +30,6 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
     daily_range = high_1d - low_1d
     
     # Key levels for breakout: R4 (resistance) and S4 (support)
@@ -43,10 +40,10 @@ def generate_signals(prices):
     r3 = close_1d + (daily_range * 1.1 / 4)
     s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Volume confirmation: 12h volume > 2.0x 50-period average (very strict to reduce trades)
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: 4h volume > 1.8x 30-period average (balanced threshold)
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -56,15 +53,15 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_50[i])):
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation - very strict
-        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
+        # Volume confirmation - balanced threshold
+        vol_confirm = volume_current > 1.8 * vol_ma_30[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -89,10 +86,10 @@ def generate_signals(prices):
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.28
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.28
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -101,16 +98,18 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.28 if position == 1 else (-0.28 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 2.0x 50-period average.
-# Enters short when price breaks below S4 with volume > 2.0x 50-period average.
+# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 1.8x 30-period average.
+# Enters short when price breaks below S4 with volume > 1.8x 30-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses very strict volume threshold (2.0x) and moderate MA (50) to achieve 15-30 trades per year.
-# Position size set to 0.30 to balance risk and reward.
-# Target: 15-30 trades per year (60-120 total over 4 years) to minimize fee drag.
+# Uses balanced volume threshold (1.8x) and moderate MA (30) to achieve 20-40 trades per year.
+# Position size set to 0.28 to balance risk and reward.
+# Target: 20-40 trades per year (80-160 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 12h timeframe reduces noise and 1d Camarilla levels provide institutional reference points.
+# 4h timeframe provides good balance between noise reduction and timely signals.
+# Daily Camarilla levels provide institutional reference points for breakouts.
+# This version focuses on BTC/ETH performance with volume confirmation to filter false breakouts.
