@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_keltner_breakout_volume_v1
-Strategy: 4h Keltner Channel breakout with volume confirmation and 1d trend filter
-Timeframe: 4h
+12h_1d_camarilla_breakout_volume_v1
+Strategy: 12h Camarilla pivot breakout with volume confirmation and 1d trend filter
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses 4h price breakout above/below Keltner Channel (EMA20 ± 2*ATR10) confirmed by volume spike (>1.5x average volume) and filtered by 1d EMA50 trend direction. Designed to capture strong momentum moves in trending markets while avoiding false breakouts in chop. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Target: 50-150 total trades over 4 years.
+Hypothesis: Uses 12h price breakout above/below Camarilla pivot levels (calculated from previous 12h bar) confirmed by volume spike (>1.5x average volume) and filtered by 1d EMA50 trend direction. Designed to capture strong momentum moves in trending markets while avoiding false breakouts in chop. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_keltner_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,19 +32,27 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA20 for Keltner middle
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels for 12h timeframe using previous bar's OHLC
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    close_prev = np.roll(close, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
     
-    # 4h ATR(10) for Keltner width
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Camarilla pivot calculation
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    range_prev = high_prev - low_prev
     
-    # Keltner Channel bounds
-    upper_kt = ema_20 + 2.0 * atr_10
-    lower_kt = ema_20 - 2.0 * atr_10
+    # Camarilla levels
+    cam_h4 = close_prev + (range_prev * 1.1 / 2)  # H4
+    cam_l4 = close_prev - (range_prev * 1.1 / 2)  # L4
+    cam_h3 = close_prev + (range_prev * 1.1 / 4)  # H3
+    cam_l3 = close_prev - (range_prev * 1.1 / 4)  # L3
+    cam_h2 = close_prev + (range_prev * 1.1 / 6)  # H2
+    cam_l2 = close_prev - (range_prev * 1.1 / 6)  # L2
+    cam_h1 = close_prev + (range_prev * 1.1 / 12) # H1
+    cam_l1 = close_prev - (range_prev * 1.1 / 12) # L1
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20[i]) or np.isnan(atr_10[i]) or 
+        if (np.isnan(pivot[i]) or np.isnan(cam_h4[i]) or np.isnan(cam_l4[i]) or
             np.isnan(vol_avg[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -71,9 +79,9 @@ def generate_signals(prices):
         uptrend_1d = price_close > ema_50_1d_aligned[i]
         downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = price_close > upper_kt[i-1]  # Use previous bar's upper band
-        breakout_down = price_close < lower_kt[i-1]  # Use previous bar's lower band
+        # Breakout conditions (using H4/L4 for strong breakout)
+        breakout_up = price_close > cam_h4[i]
+        breakout_down = price_close < cam_l4[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
@@ -84,9 +92,9 @@ def generate_signals(prices):
         # Short: downward breakout with volume in downtrend
         short_signal = breakout_down and vol_confirmed and downtrend_1d
         
-        # Exit when price returns to middle (EMA20)
-        exit_long = position == 1 and price_close < ema_20[i]
-        exit_short = position == -1 and price_close > ema_20[i]
+        # Exit when price returns to pivot level
+        exit_long = position == 1 and price_close < pivot[i]
+        exit_short = position == -1 and price_close > pivot[i]
         
         # Trading logic
         if long_signal and position != 1:
