@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with weekly Donchian breakout + volume confirmation.
-# Uses weekly price channels to capture long-term trend momentum.
-# Long when price breaks above weekly high with volume > 1.5x average,
-# short when breaks below weekly low with volume > 1.5x average.
-# Exit when price returns to weekly midpoint (mean reversion).
-# Designed for low trade frequency (~10-25/year) to minimize fee decay.
-# Works in bull/bear markets by trading breakouts in either direction.
+# Hypothesis: 6h timeframe with 1-day Camarilla pivot levels + volume confirmation.
+# Uses Camarilla levels calculated from previous day's range to identify mean reversion opportunities.
+# Fades at R3/S3 levels (mean reversion) and breaks out at R4/S4 levels (momentum).
+# Volume filter confirms institutional participation.
+# Designed for 12-30 trades/year to minimize fee drag while capturing both mean reversion and breakout moves.
+# Works in bull/bear markets by adapting to volatility regimes.
 
-name = "1d_1w_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
     # Price arrays
@@ -26,77 +25,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate rolling max/min for Donchian channels
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
+    # Previous day's values for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan, dtype=float)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
+    # First day has no previous data
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Weekly Donchian channels
-    upper_donch = rolling_max(high_1w, 20)
-    lower_donch = rolling_min(low_1w, 20)
-    mid_donch = (upper_donch + lower_donch) / 2
+    # Calculate daily range
+    daily_range = prev_high - prev_low
     
-    # Calculate weekly average volume (20-period)
-    volume_1w = df_1w['volume'].values
-    vol_avg_20 = np.full_like(volume_1w, np.nan, dtype=float)
-    for i in range(19, len(volume_1w)):
-        vol_avg_20[i] = np.mean(volume_1w[i-19:i+1])
+    # Camarilla levels
+    # R4 = close + (high-low) * 1.1/2
+    # R3 = close + (high-low) * 1.1/4
+    # S3 = close - (high-low) * 1.1/4
+    # S4 = close - (high-low) * 1.1/2
+    r4 = prev_close + daily_range * 1.1 / 2
+    r3 = prev_close + daily_range * 1.1 / 4
+    s3 = prev_close - daily_range * 1.1 / 4
+    s4 = prev_close - daily_range * 1.1 / 2
     
-    # Align weekly levels to daily timeframe
-    upper_donch_aligned = align_htf_to_ltf(prices, df_1w, upper_donch)
-    lower_donch_aligned = align_htf_to_ltf(prices, df_1w, lower_donch)
-    mid_donch_aligned = align_htf_to_ltf(prices, df_1w, mid_donch)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20)
+    # Calculate daily average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = np.zeros_like(volume_1d, dtype=float)
+    for i in range(19, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
+    vol_avg_20[:19] = np.nan
+    
+    # Align daily levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(n):
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_donch_aligned[i]) or np.isnan(lower_donch_aligned[i]) or
-            np.isnan(mid_donch_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * weekly average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.3 * daily average volume
+        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
         
-        # Entry conditions: price breaks above/below weekly Donchian with volume
-        long_break = high[i] > upper_donch_aligned[i] and vol_filter
-        short_break = low[i] < lower_donch_aligned[i] and vol_filter
+        # Fade at S3/R3 (mean reversion) - long at S3, short at R3
+        fade_long = low[i] <= s3_aligned[i] and vol_filter
+        fade_short = high[i] >= r3_aligned[i] and vol_filter
         
-        # Exit conditions: price returns to weekly midpoint (mean reversion)
-        exit_long = low[i] <= mid_donch_aligned[i]
-        exit_short = high[i] >= mid_donch_aligned[i]
+        # Breakout at S4/R4 (momentum) - long above R4, short below S4
+        breakout_long = high[i] >= r4_aligned[i] and vol_filter
+        breakout_short = low[i] <= s4_aligned[i] and vol_filter
         
-        if long_break and position != 1:
+        # Exit conditions: return to previous day's close
+        prev_close_val = prev_close[i] if i < len(prev_close) else np.nan
+        if not np.isnan(prev_close_val):
+            prev_close_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(close_1d, prev_close_val))
+            exit_long = high[i] >= prev_close_aligned[i] if not np.isnan(prev_close_aligned[i]) else False
+            exit_short = low[i] <= prev_close_aligned[i] if not np.isnan(prev_close_aligned[i]) else False
+        else:
+            exit_long = exit_short = False
+        
+        # Priority: breakout > fade > hold
+        if breakout_long and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_break and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        elif fade_long and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif fade_short and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and (exit_long or (low[i] >= s3_aligned[i] and high[i] <= r3_aligned[i])):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and (exit_short or (low[i] >= s3_aligned[i] and high[i] <= r3_aligned[i])):
             position = 0
             signals[i] = 0.0
         else:
