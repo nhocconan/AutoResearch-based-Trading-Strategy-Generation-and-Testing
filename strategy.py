@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 4h_12h_keltner_breakout_v1
-# Strategy: 4-hour Keltner breakout with 12-hour trend filter and volume confirmation
-# Timeframe: 4h
+# 1h_4h_1d_volume_breakout_v1
+# Strategy: 1-hour volume breakout with 4h/1d trend filter and volume confirmation
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: Price breaks out of Keltner channels during high momentum periods, with 12h trend filter to avoid counter-trend trades.
-# Works in bull by capturing breakouts with trend, and in bear by fading false breakouts via trend filter. Volume confirms institutional participation.
-# Uses Keltner channels (ATR-based) for dynamic support/resistance, which adapts to volatility regimes.
+# Hypothesis: Breakouts above rolling highs on volume spikes capture momentum in trending markets.
+# Uses 4h EMA50 and 1d EMA200 for trend alignment to avoid counter-trend trades.
+# Volume spike filter ensures institutional participation. Works in bull by riding trends,
+# and in bear by catching mean-reversion bounces when volume spikes against trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_keltner_breakout_v1"
-timeframe = "4h"
+name = "1h_4h_1d_volume_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,63 +28,64 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA20 for trend filter
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate ATR for Keltner channels (using 4h data)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 1d EMA200 for long-term trend filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Keltner channels: EMA20 ± 2*ATR
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema_20 + 2.0 * atr
-    lower_keltner = ema_20 - 2.0 * atr
+    # 20-period rolling high/low for breakout detection
+    roll_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    roll_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (2.0 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_avg[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(roll_high[i]) or np.isnan(roll_low[i]) or np.isnan(vol_avg[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 12h EMA20
-        uptrend_12h = price_close > ema_20_12h_aligned[i]
-        downtrend_12h = price_close < ema_20_12h_aligned[i]
+        # Trend filters: price above/below 4h EMA50 and 1d EMA200
+        uptrend_4h = price_close > ema_50_4h_aligned[i]
+        uptrend_1d = price_close > ema_200_1d_aligned[i]
+        downtrend_4h = price_close < ema_50_4h_aligned[i]
+        downtrend_1d = price_close < ema_200_1d_aligned[i]
         
-        # Breakout signals: price breaks Keltner bands with volume
-        long_breakout = (price_close > upper_keltner[i]) and vol_spike[i]
-        short_breakout = (price_close < lower_keltner[i]) and vol_spike[i]
+        # Breakout signals: price breaks rolling bands with volume
+        long_breakout = (price_close > roll_high[i]) and vol_spike[i]
+        short_breakout = (price_close < roll_low[i]) and vol_spike[i]
         
-        # Exit when price returns to EMA20 (mean reversion) or opposite breakout
-        exit_long = position == 1 and (price_close < ema_20[i])
-        exit_short = position == -1 and (price_close > ema_20[i])
+        # Exit when price returns to midpoint of range or opposite breakout
+        mid_point = (roll_high[i] + roll_low[i]) / 2
+        exit_long = position == 1 and (price_close < mid_point)
+        exit_short = position == -1 and (price_close > mid_point)
         
-        # Trading logic: only trade in direction of 12h trend
-        if long_breakout and uptrend_12h and position != 1:
+        # Trading logic: require alignment of both timeframes
+        if long_breakout and uptrend_4h and uptrend_1d and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif short_breakout and downtrend_12h and position != -1:
+            signals[i] = 0.20
+        elif short_breakout and downtrend_4h and downtrend_1d and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -91,6 +93,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
