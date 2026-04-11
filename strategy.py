@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-# 12h_1w_camarilla_breakout_volume_trend_v1
-# Strategy: 12-hour Camarilla pivot breakout with 1-week trend filter and volume confirmation
-# Timeframe: 12h
+# 1d_1w_kama_rsi_chop_v1
+# Strategy: Daily KAMA trend with RSI momentum and Choppiness index regime filter
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Uses weekly Camarilla pivot levels (R3/S3 for reversals, R4/S4 for breakouts)
-# filtered by 1-week EMA50 trend and volume spikes. Designed to capture multi-day momentum
-# bursts while filtering counter-trend noise. Targets 50-150 total trades over 4 years.
+# Hypothesis: In both bull and bear markets, price tends to trend when Choppiness Index is low (<38.2).
+# KAMA adapts to trend strength and noise, providing reliable trend signals.
+# RSI filters for momentum exhaustion to avoid chasing extremes.
+# Weekly trend filter ensures alignment with higher timeframe momentum.
+# Designed for low trade frequency (<25/year) to minimize fee drag in ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "1d_1w_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -32,34 +34,79 @@ def generate_signals(prices):
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1w OHLC for Camarilla pivots and EMA50
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Weekly close for trend filter
     close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for previous week
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (H-L) * 1.1/2
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    # S4 = C - (H-L) * 1.1/2
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
-    r4_1w = close_1w + range_1w * 1.1 / 2.0
-    r3_1w = close_1w + range_1w * 1.1 / 4.0
-    s3_1w = close_1w - range_1w * 1.1 / 4.0
-    s4_1w = close_1w - range_1w * 1.1 / 2.0
+    # KAMA parameters
+    fast_sc = 0.666
+    slow_sc = 0.0645
     
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Efficiency Ratio and Smoothing Constant
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Handle first 9 values
+    change = np.concatenate([np.full(9, np.nan), change])
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Align 1w data to 12h timeframe (wait for weekly close)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start with first close
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # RSI (14-period)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # First average
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    # Wilder smoothing
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Choppiness Index (14-period)
+    atr_1 = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
+    atr_1[0] = high[0] - low[0]  # First value
+    atr_sum = np.nancumsum(atr_1)  # Cumulative sum for rolling sum
+    atr_sum_14 = np.where(np.arange(len(atr_sum)) >= 13, 
+                          atr_sum - np.roll(atr_sum, 14), 
+                          np.nan)
+    atr_sum_14[:13] = np.nan
+    # True range for first 13 values
+    for i in range(1, 14):
+        if i < len(atr_sum_14):
+            atr_sum_14[i] = np.sum(atr_1[:i+1])
+    highest_high = np.maximum.accumulate(high)
+    lowest_low = np.minimum.accumulate(low)
+    highest_high_14 = np.where(np.arange(len(highest_high)) >= 13, 
+                               highest_high - np.roll(highest_high, 14), 
+                               highest_high)
+    lowest_low_14 = np.where(np.arange(len(lowest_low)) >= 13, 
+                             lowest_low - np.roll(lowest_low, 14), 
+                             lowest_low)
+    for i in range(13):
+        highest_high_14[i] = np.max(high[:i+1])
+        lowest_low_14[i] = np.min(low[:i+1])
+    chop = np.where((highest_high_14 - lowest_low_14) != 0, 
+                    100 * np.log10(atr_sum_14 / (highest_high_14 - lowest_low_14)) / np.log10(14), 
+                    50)
+    
+    # Weekly EMA for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align weekly data to daily timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,41 +117,42 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or 
-            np.isnan(s3_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 1w EMA50
-        uptrend_1w = price_close > ema_50_1w_aligned[i]
-        downtrend_1w = price_close < ema_50_1w_aligned[i]
+        # Trend filter: price relative to KAMA
+        above_kama = price_close > kama[i]
+        below_kama = price_close < kama[i]
         
-        # Camarilla breakout signals (using previous week's levels)
-        breakout_up = price_close > r4_1w_aligned[i]   # Break above R4
-        breakdown_down = price_close < s4_1w_aligned[i]  # Break below S4
-        reverse_at_r3 = price_close < r3_1w_aligned[i] and price_close > r3_1w_aligned[i-1]  # Reject at R3
-        reverse_at_s3 = price_close > s3_1w_aligned[i] and price_close < s3_1w_aligned[i-1]  # Reject at S3
+        # Momentum filter: RSI not extreme
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
+        
+        # Regime filter: Choppiness Index low (trending market)
+        trending_market = chop[i] < 38.2
+        
+        # Weekly trend filter
+        weekly_uptrend = price_close > ema_20_1w_aligned[i]
+        weekly_downtrend = price_close < ema_20_1w_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: Break above R4 with volume in uptrend OR rejection at R3 with volume in uptrend
-        long_signal = (breakout_up and vol_confirmed and uptrend_1w) or \
-                      (reverse_at_r3 and vol_confirmed and uptrend_1w)
+        # Long: Above KAMA, not overbought, trending market, weekly uptrend, volume spike
+        long_signal = (above_kama and rsi_not_overbought and trending_market and 
+                      weekly_uptrend and vol_confirmed)
         
-        # Short: Break below S4 with volume in downtrend OR rejection at S3 with volume in downtrend
-        short_signal = (breakdown_down and vol_confirmed and downtrend_1w) or \
-                       (reverse_at_s3 and vol_confirmed and downtrend_1w)
+        # Short: Below KAMA, not oversold, trending market, weekly downtrend, volume spike
+        short_signal = (below_kama and rsi_not_oversold and trending_market and 
+                       weekly_downtrend and vol_confirmed)
         
-        # Exit when price returns to the 1w pivot level or opposite Camarilla level
-        pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-        exit_long = position == 1 and (price_close < pivot_1w_aligned[i] or 
-                                       price_close < s3_1w_aligned[i])
-        exit_short = position == -1 and (price_close > pivot_1w_aligned[i] or 
-                                         price_close > r3_1w_aligned[i])
+        # Exit when price crosses KAMA in opposite direction or RSI reaches extreme
+        exit_long = position == 1 and (price_close < kama[i] or rsi[i] > 75)
+        exit_short = position == -1 and (price_close > kama[i] or rsi[i] < 25)
         
         # Trading logic
         if long_signal and position != 1:
