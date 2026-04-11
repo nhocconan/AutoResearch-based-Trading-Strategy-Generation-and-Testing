@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v6"
+name = "4h_1d_camarilla_breakout_v7"
 timeframe = "4h"
 leverage = 1.0
 
@@ -56,7 +56,7 @@ def generate_signals(prices):
     
     # Filter: Avoid sideways markets - require price to be outside 15% of daily range
     price_position = (close - s4_1d_aligned) / (r4_1d_aligned - s4_1d_aligned + 1e-10)
-    in_extreme_zone = (price_position < 0) | (price_position > 1)
+    in_extreme_zone = (price_position < -0.15) | (price_position > 1.15)
     
     for i in range(100, n):
         # Skip if any required data is invalid
@@ -127,11 +127,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy with volume confirmation, extreme zone filter, and ATR stop loss.
-# Enters long when price breaks above R4 with volume confirmation and only in extreme zones (<0 or >1).
+# Hypothesis: 4h Camarilla breakout strategy with volume confirmation, extreme zone filter (expanded to -0.15 to 1.15), and ATR stop loss.
+# Enters long when price breaks above R4 with volume confirmation and only in extreme zones (<-0.15 or >1.15).
 # Enters short when price breaks below S4 with volume confirmation and only in extreme zones.
 # Uses volume confirmation (>1.5x 20-period average) to ensure institutional participation.
-# Extreme zone filter prevents whipsaws in sideways markets by only allowing breaks outside daily range.
+# Extreme zone filter prevents whipsaws in sideways markets by only allowing breaks outside daily range with buffer.
 # Exits when price returns to daily pivot point or ATR stop loss (2x) is hit.
 # Target: 20-40 trades per year to minimize fee decay while capturing strong directional moves.
 # Works in both bull and bear markets by trading breakouts in either direction.
