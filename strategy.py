@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_adx_volume_v2"
-timeframe = "4h"
+name = "6h_1d_1w_rsi_divergence_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,118 +20,121 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d OHLC for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels (based on previous day's range)
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
-    camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
-    camarilla_pivot = close_1d  # Previous day's close
+    # Calculate 1d RSI(14)
+    delta = np.diff(df_1d['close'].values)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = np.where(avg_loss != 0, 100 - (100 / (1 + rs)), 100)
+    # Pad with NaN for first 14 values
+    rsi_1d = np.concatenate([np.full(14, np.nan), rsi_1d])
     
-    # Calculate ADX on 1d for trend strength filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate 1w RSI(14)
+    delta_w = np.diff(df_1w['close'].values)
+    gain_w = np.where(delta_w > 0, delta_w, 0)
+    loss_w = np.where(delta_w < 0, -delta_w, 0)
+    avg_gain_w = pd.Series(gain_w).rolling(window=14, min_periods=14).mean().values
+    avg_loss_w = pd.Series(loss_w).rolling(window=14, min_periods=14).mean().values
+    rs_w = np.where(avg_loss_w != 0, avg_gain_w / avg_loss_w, 0)
+    rsi_1w = np.where(avg_loss_w != 0, 100 - (100 / (1 + rs_w)), 100)
+    # Pad with NaN for first 14 values
+    rsi_1w = np.concatenate([np.full(14, np.nan), rsi_1w])
     
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Align 1d and 1w RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_period = 14
-    tr_smoothed = wilders_smoothing(tr, atr_period)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, atr_period)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, atr_period)
-    
-    plus_di = np.where(tr_smoothed != 0, plus_dm_smoothed / tr_smoothed * 100, 0)
-    minus_di = np.where(tr_smoothed != 0, minus_dm_smoothed / tr_smoothed * 100, 0)
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = wilders_smoothing(dx, atr_period)
-    
-    # Trend filter: ADX > 25 indicates strong trend
-    strong_trend = adx >= 25
-    
-    # Align all 1d indicators to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
+    # Calculate 6h RSI(14) for divergence detection
+    delta_6h = np.diff(close)
+    gain_6h = np.where(delta_6h > 0, delta_6h, 0)
+    loss_6h = np.where(delta_6h < 0, -delta_6h, 0)
+    avg_gain_6h = pd.Series(gain_6h).rolling(window=14, min_periods=14).mean().values
+    avg_loss_6h = pd.Series(loss_6h).rolling(window=14, min_periods=14).mean().values
+    rs_6h = np.where(avg_loss_6h != 0, avg_gain_6h / avg_loss_6h, 0)
+    rsi_6h = np.where(avg_loss_6h != 0, 100 - (100 / (1 + rs_6h)), 100)
+    rsi_6h = np.concatenate([np.full(14, np.nan), rsi_6h])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 80 to ensure sufficient data for ADX
-    for i in range(80, n):
+    # Start from index 100 to ensure sufficient data
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(strong_trend_aligned[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(rsi_6h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current 1d volume (aligned)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume)[i]
-        vol_avg_20_1d = pd.Series(align_htf_to_ltf(prices, df_1d, volume)).rolling(window=20, min_periods=20).mean().values[i]
-        vol_spike = vol_1d_current > 1.5 * vol_avg_20_1d  # 50% above average
+        rsi_1d_val = rsi_1d_aligned[i]
+        rsi_1w_val = rsi_1w_aligned[i]
+        rsi_6h_val = rsi_6h[i]
         
-        price = close[i]
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        lookback = 10  # Look back 10 periods for divergence
         
-        # Only trade in strong trending conditions (ADX > 25)
-        if not strong_trend_aligned[i]:
-            # In weak trends, flatten position
-            if position != 0:
+        if i >= lookback:
+            # Price lows and highs
+            price_low_6h = np.min(low[i-lookback:i+1])
+            price_high_6h = np.max(high[i-lookback:i+1])
+            price_low_prev = np.min(low[i-lookback*2:i-lookback+1])
+            price_high_prev = np.max(high[i-lookback*2:i-lookback+1])
+            
+            # RSI lows and highs
+            rsi_low_6h = np.nanmin(rsi_6h[i-lookback:i+1])
+            rsi_high_6h = np.nanmax(rsi_6h[i-lookback:i+1])
+            rsi_low_prev = np.nanmin(rsi_6h[i-lookback*2:i-lookback+1])
+            rsi_high_prev = np.nanmax(rsi_6h[i-lookback*2:i-lookback+1])
+            
+            # Bullish divergence conditions
+            bull_div = (price_low_6h < price_low_prev) and (rsi_low_6h > rsi_low_prev)
+            # Bearish divergence conditions
+            bear_div = (price_high_6h > price_high_prev) and (rsi_high_6h < rsi_high_prev)
+            
+            # Additional filters: RSI extremes and multi-timeframe alignment
+            rsi_oversold = rsi_6h_val < 30
+            rsi_overbought = rsi_6h_val > 70
+            rsi_1d_oversold = rsi_1d_val < 30
+            rsi_1d_overbought = rsi_1d_val > 70
+            rsi_1w_oversold = rsi_1w_val < 30
+            rsi_1w_overbought = rsi_1w_val > 70
+            
+            # Long signal: bullish divergence + oversold conditions
+            long_signal = bull_div and (rsi_oversold or rsi_1d_oversold or rsi_1w_oversold)
+            # Short signal: bearish divergence + overbought conditions
+            short_signal = bear_div and (rsi_overbought or rsi_1d_overbought or rsi_1w_overbought)
+            
+            # Exit conditions: RSI returns to neutral territory
+            exit_long = rsi_6h_val > 50
+            exit_short = rsi_6h_val < 50
+            
+            if long_signal and position != 1:
+                position = 1
+                signals[i] = 0.25
+            elif short_signal and position != -1:
+                position = -1
+                signals[i] = -0.25
+            elif position == 1 and exit_long:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and exit_short:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.0
-            continue
-        
-        # Long when price breaks above Camarilla R3 with volume spike
-        long_breakout = price > camarilla_r3_aligned[i]
-        long_signal = long_breakout and vol_spike
-        
-        # Short when price breaks below Camarilla S3 with volume spike
-        short_breakout = price < camarilla_s3_aligned[i]
-        short_signal = short_breakout and vol_spike
-        
-        # Exit when price returns to the Camarilla pivot (previous day's close)
-        exit_long = price < camarilla_pivot_aligned[i]
-        exit_short = price > camarilla_pivot_aligned[i]
-        
-        if long_signal and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif short_signal and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif position == 1 and exit_long:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and exit_short:
-            position = 0
-            signals[i] = 0.0
+                # Hold current position
+                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
         else:
-            # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            # Not enough data for divergence calculation
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
     
     return signals
