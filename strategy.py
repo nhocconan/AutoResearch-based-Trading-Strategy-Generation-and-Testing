@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_vortex_volume"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,70 +25,74 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return signals
     
-    # Calculate Vortex indicator on daily data
+    # Calculate Camarilla pivot levels from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Camarilla formula: range = high - low
+    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
+    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
+    daily_range = high_1d - low_1d
     
-    # +VM and -VM
-    vm_plus = np.abs(high_1d - np.roll(low_1d, 1))
-    vm_minus = np.abs(low_1d - np.roll(high_1d, 1))
+    # Key levels for breakout: R4 (resistance) and S4 (support)
+    r4 = close_1d + (daily_range * 1.1 / 2)
+    s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Sum over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Exit levels: R3 and S3
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
+    # Volume confirmation: 12h volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: 4h volume > 1.8x 80-period average
-    vol_ma_80 = pd.Series(volume).rolling(window=80, min_periods=80).mean().values
+    # Align daily levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Align daily Vortex values to 4h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
-    
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or
-            np.isnan(vol_ma_80[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        price_close = close[i]
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 1.8 * vol_ma_80[i]
+        vol_confirm = volume_current > 2.0 * vol_ma_20[i]
         
-        # Vortex crossover signals
-        vi_plus_prev = vi_plus_aligned[i-1]
-        vi_minus_prev = vi_minus_aligned[i-1]
-        vi_plus_curr = vi_plus_aligned[i]
-        vi_minus_curr = vi_minus_aligned[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > r4_aligned[i]  # Break above R4
+        breakout_down = price_close < s4_aligned[i]  # Break below S4
         
         # Entry conditions
-        enter_long = (vi_plus_curr > vi_minus_curr) and (vi_plus_prev <= vi_minus_prev) and vol_confirm
-        enter_short = (vi_minus_curr > vi_plus_curr) and (vi_minus_prev <= vi_plus_prev) and vol_confirm
+        enter_long = False
+        enter_short = False
         
-        # Exit conditions: opposite crossover
-        exit_long = (vi_minus_curr > vi_plus_curr) and (vi_minus_prev <= vi_plus_prev)
-        exit_short = (vi_plus_curr > vi_minus_curr) and (vi_plus_prev <= vi_minus_prev)
+        # Long: Break above R4 with volume confirmation
+        if breakout_up and vol_confirm:
+            enter_long = True
+        
+        # Short: Break below S4 with volume confirmation
+        if breakout_down and vol_confirm:
+            enter_short = True
+        
+        # Exit conditions: return to opposite S3/R3 levels
+        exit_long = price_close < s3_aligned[i]  # Return to S3 level
+        exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -97,16 +101,16 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 4h Vortex crossover strategy with volume confirmation using daily Vortex values.
-# Enters long when VI+ crosses above VI- with volume > 1.8x 80-period average.
-# Enters short when VI- crosses above VI+ with volume > 1.8x 80-period average.
-# Exits on opposite crossover.
-# Uses higher volume threshold (1.8x) and longer MA (80) to reduce trade frequency.
-# Position size set to 0.25 to manage risk in volatile markets.
-# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
-# Vortex indicator identifies trend initiation and direction, working in both bull and bear markets.
-# 4h timeframe provides good balance between signal quality and trade frequency.
+# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 2.0x 20-period average.
+# Enters short when price breaks below S4 with volume > 2.0x 20-period average.
+# Exits when price returns to S3/R3 levels respectively.
+# Uses higher volume threshold (2.0x) and shorter MA (20) to reduce trade frequency.
+# Position size set to 0.30 to balance risk and reward.
+# Target: 15-30 trades per year (60-120 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# 12h timeframe provides lower trade frequency suitable for the strategy's logic.
