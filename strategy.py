@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,25 +23,35 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper/lower bands
-    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Previous day's close, high, low
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first value
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    # Align daily Donchian to 6h timeframe
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    # Camarilla levels calculation
+    range_ = prev_high - prev_low
+    camarilla_H4 = prev_close + 1.1 * range_ / 2  # resistance
+    camarilla_L4 = prev_close - 1.1 * range_ / 2  # support
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align to 12h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
-    # ATR for stop loss
+    # Volume confirmation: volume > 1.3x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    
+    # ATR for stop loss and trend filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -49,15 +59,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Filter: Avoid choppy markets - require ATR ratio > 0.6
+    # Trend filter: ATR > 0.7 * 50-period ATR average (avoid choppy markets)
     atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / (atr_ma_50 + 1e-10)
-    trending_market = atr_ratio > 0.6
+    trending_market = atr > 0.7 * atr_ma_50
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
+        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
+            np.isnan(vol_ma_30[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
             signals[i] = 0.0
             continue
         
@@ -65,38 +74,36 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        upper = upper_1d_aligned[i]
-        lower = lower_1d_aligned[i]
+        H4 = camarilla_H4_aligned[i]
+        L4 = camarilla_L4_aligned[i]
         atr_val = atr[i]
         trending = trending_market[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
+        volume_confirmed = volume_current > 1.3 * vol_ma_30[i]
         
         # Entry signals - only in trending markets to avoid whipsaws
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above daily upper Donchian with volume and trending
-        if price_high > upper and volume_confirmed and trending:
+        # Long: price breaks above Camarilla H4 with volume and trending
+        if price_high > H4 and volume_confirmed and trending:
             long_signal = True
         
-        # Short: price breaks below daily lower Donchian with volume and trending
-        if price_low < lower and volume_confirmed and trending:
+        # Short: price breaks below Camarilla L4 with volume and trending
+        if price_low < L4 and volume_confirmed and trending:
             short_signal = True
         
         # Exit conditions
-        # Calculate daily midpoint for exit
-        midpoint_1d = (upper_1d + lower_1d) / 2
-        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)[i]
-        
         # Stop loss conditions
-        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
-        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
+        stop_long = position == 1 and price_low < (entry_price - 1.5 * atr_val)
+        stop_short = position == -1 and price_high > (entry_price + 1.5 * atr_val)
         
-        # Exit to midpoint
-        exit_long = position == 1 and price_close < midpoint_aligned
-        exit_short = position == -1 and price_close > midpoint_aligned
+        # Exit when price returns to Camarilla pivot (close level)
+        camarilla_pivot = (prev_close[i] + prev_high[i] + prev_low[i]) / 3
+        camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)[i]
+        exit_long = position == 1 and price_close < camarilla_pivot_aligned
+        exit_short = position == -1 and price_close > camarilla_pivot_aligned
         
         # Trading logic
         if long_signal and position != 1:
@@ -119,10 +126,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Donchian breakout strategy with volume confirmation and trend filter.
-# Enters long when price breaks above daily 20-period Donchian upper band with volume confirmation (>1.5x avg volume) in trending markets (ATR ratio > 0.6).
-# Enters short when price breaks below daily 20-period Donchian lower band with volume confirmation and trending.
-# Uses volume confirmation to ensure institutional participation and trend filter to avoid whipsaws in sideways markets.
-# Exits when price returns to daily Donchian midpoint or ATR stop loss (2x) is hit.
-# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Camarilla breakout strategy with volume confirmation and trend filter.
+# Enters long when price breaks above daily Camarilla H4 level with volume confirmation (>1.3x avg volume) in trending markets.
+# Enters short when price breaks below daily Camarilla L4 level with volume confirmation and trending.
+# Uses Camarilla levels from daily timeframe for institutional-grade support/resistance.
+# Volume confirmation ensures institutional participation, trend filter avoids whipsaws in sideways markets.
+# Exits when price returns to Camarilla pivot point or ATR stop loss (1.5x) is hit.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
 # Works in both bull and bear markets by trading breakouts in either direction with trend filter.
