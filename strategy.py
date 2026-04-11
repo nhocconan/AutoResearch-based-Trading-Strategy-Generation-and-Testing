@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_fibonacci_retracement_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,58 +20,64 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Calculate weekly KAMA for trend filter
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, n=10))
-    volatility = np.sum(np.abs(np.diff(close_1w, n=1)), axis=0)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close_1w, np.nan)
-    kama[29] = close_1w[29]  # seed
-    for i in range(30, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i-1] * (close_1w[i] - kama[i-1])
+    # Calculate daily pivot points (classic)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use only completed weekly bars
-    kama = np.roll(kama, 1)
-    kama[0] = np.nan
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    r3 = high_1d + 2 * (pivot - low_1d)
+    s3 = low_1d - 2 * (high_1d - pivot)
     
-    # Align weekly KAMA to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Shift by 1 to use only completed daily bars
+    pivot = np.roll(pivot, 1)
+    r1 = np.roll(r1, 1)
+    s1 = np.roll(s1, 1)
+    r2 = np.roll(r2, 1)
+    s2 = np.roll(s2, 1)
+    r3 = np.roll(r3, 1)
+    s3 = np.roll(s3, 1)
+    pivot[0] = np.nan
+    r1[0] = np.nan
+    s1[0] = np.nan
+    r2[0] = np.nan
+    s2[0] = np.nan
+    r3[0] = np.nan
+    s3[0] = np.nan
     
-    # Calculate daily RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align daily pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate daily ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 6-period ATR for dynamic sizing and volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=6, min_periods=6).mean().values
     
-    # Volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -83,17 +89,23 @@ def generate_signals(prices):
         atr_val = atr[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
-        # Long conditions: Price > Weekly KAMA AND RSI < 70 AND volume
-        long_signal = volume_confirmed and (price_close > kama_aligned[i]) and (rsi[i] < 70)
+        # Price position relative to pivot and S1/R1
+        near_support = price_low <= s1_aligned[i] + 0.5 * atr_val and price_close > s1_aligned[i]
+        near_resistance = price_high >= r1_aligned[i] - 0.5 * atr_val and price_close < r1_aligned[i]
         
-        # Short conditions: Price < Weekly KAMA AND RSI > 30 AND volume
-        short_signal = volume_confirmed and (price_close < kama_aligned[i]) and (rsi[i] > 30)
+        # Breakout conditions with volume
+        breakout_up = price_close > r1_aligned[i] and volume_confirmed
+        breakout_down = price_close < s1_aligned[i] and volume_confirmed
         
-        # Exit when price crosses back through KAMA
-        exit_long = position == 1 and price_close <= kama_aligned[i]
-        exit_short = position == -1 and price_close >= kama_aligned[i]
+        # Retracement entry conditions
+        long_signal = volume_confirmed and near_support and price_close > pivot_aligned[i]
+        short_signal = volume_confirmed and near_resistance and price_close < pivot_aligned[i]
+        
+        # Exit when price moves to opposite S1/R1 level
+        exit_long = position == 1 and price_close >= r1_aligned[i]
+        exit_short = position == -1 and price_close <= s1_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -114,13 +126,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily KAMA/RSI breakout with weekly trend filter.
-# Uses weekly KAMA as adaptive trend filter (more responsive than SMA in volatile markets).
-# Enters long when daily price crosses above weekly KAMA with RSI < 70 (not overbought)
-# and volume confirmation (>1.5x average). Enters short when price crosses below weekly KAMA
-# with RSI > 30 (not oversold) and volume confirmation. Exits when price crosses back through
-# weekly KAMA. Works in both bull and bear markets by aligning with higher timeframe trend.
-# Weekly timeframe reduces noise, daily timeframe provides timely entries. Target: 20-60 trades
-# over 4 years (5-15/year) to minimize fee drag on daily timeframe. KAMA adapts to market
-# conditions, reducing false signals during choppy periods. RSI prevents buying into
-# overextended moves. Volume confirmation ensures institutional participation.
+# Hypothesis: Daily pivot point retracement strategy on 6h timeframe.
+# Uses classic pivot points (P, R1, S1, R2, S2, R3, S3) calculated from daily OHLC.
+# Enters long near S1 support when price shows rejection (wick below S1 but close above it)
+# with volume confirmation (>1.3x average). Enters short near R1 resistance when price
+# shows rejection (wick above R1 but close below it) with volume confirmation.
+# Exits when price reaches opposite R1/S1 level. Works in both ranging and trending
+# markets by fading extremes and capturing mean reversion. Target: 50-150 total trades
+# over 4 years (12-37/year) to minimize fee drag on 6h timeframe. Pivot points act as
+# natural support/resistance levels where institutional order flow often concentrates.
