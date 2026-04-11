@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_cci_volatility_filter_v1
-# Strategy: 1d CCI with volatility filter on 1d and trend filter from 1w EMA
-# Timeframe: 1d
+# 12h_1d_kama_rsi_chop_v1
+# Strategy: 12h KAMA direction + RSI(14) + Choppiness Index filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: CCI identifies overbought/oversold conditions. Combined with 1d volatility filter
-# (ATR ratio) to avoid low-volatility chop and 1w EMA trend filter to align with higher timeframe
-# trend. This reduces false signals and improves win rate. Designed for low trade frequency
-# (<25/year) to minimize fee drag in ranging markets like 2025.
+# Hypothesis: KAMA adapts to market efficiency, trending when ER high, mean-reverting when ER low.
+# Combined with RSI for momentum and Choppiness Index to avoid ranging markets (CHOP > 61.8).
+# Works in bull/bear: KAMA catches trends, RSI avoids extremes, CHOP filter prevents whipsaws in sideways markets.
+# Target: 15-30 trades/year (~60-120 total over 4 years) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_cci_volatility_filter_v1"
-timeframe = "1d"
+name = "12h_1d_kama_rsi_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,76 +27,137 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d CCI calculation (20-period)
-    typical_price = (high + low + close) / 3
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
-    # Avoid division by zero
-    cci = np.where(tp_std != 0, (typical_price - tp_mean) / (0.015 * tp_std), 0.0)
+    # 12h KAMA (adaptive moving average)
+    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    change = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # Will fix below
     
-    # 1d ATR for volatility filter
+    # Proper volatility calculation (sum of absolute changes over 10 periods)
+    volatility = np.zeros_like(close)
+    for i in range(10, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
+    
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants: fastest SC = 2/(2+1) = 0.67, slowest SC = 2/(30+1) = 0.0645
+    sc = (er * (0.67 - 0.0645) + 0.0645) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # 12h RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 12h Choppiness Index (14-period)
+    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]
+    # ATR(14)
+    atr = np.zeros_like(close)
+    atr[13] = np.mean(tr[1:15])
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Sum of ATR over 14 periods
+    sum_atr_14 = np.zeros_like(close)
+    for i in range(13, len(close)):
+        if i == 13:
+            sum_atr_14[i] = np.sum(atr[0:14])
+        else:
+            sum_atr_14[i] = sum_atr_14[i-1] - atr[i-14] + atr[i]
+    # Highest high and lowest low over 14 periods
+    highest_high = np.zeros_like(close)
+    lowest_low = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < 14:
+            highest_high[i] = np.max(high[0:i+1])
+            lowest_low[i] = np.min(low[0:i+1])
+        else:
+            highest_high[i] = np.max(high[i-13:i+1])
+            lowest_low[i] = np.min(low[i-13:i+1])
+    # Chop = 100 * log10(sum(ATR14) / (HH - LL)) / log10(14)
+    hh_ll = highest_high - lowest_low
+    chop = np.where(hh_ll > 0, 100 * np.log10(sum_atr_14 / hh_ll) / np.log10(14), 50)
     
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d RSI for trend filter (avoid counter-trend)
+    close_1d = df_1d['close'].values
+    delta_1d = np.diff(close_1d)
+    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
+    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
+    avg_gain_1d = np.zeros_like(close_1d)
+    avg_loss_1d = np.zeros_like(close_1d)
+    if len(close_1d) > 14:
+        avg_gain_1d[14] = np.mean(gain_1d[1:15])
+        avg_loss_1d[14] = np.mean(loss_1d[1:15])
+        for i in range(15, len(close_1d)):
+            avg_gain_1d[i] = (avg_gain_1d[i-1] * 13 + gain_1d[i]) / 14
+            avg_loss_1d[i] = (avg_loss_1d[i-1] * 13 + loss_1d[i]) / 14
+        rs_1d = np.where(avg_loss_1d != 0, avg_gain_1d / avg_loss_1d, 100)
+        rsi_1d = 100 - (100 / (1 + rs_1d))
+        rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    else:
+        rsi_1d_aligned = np.full(n, 50.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):  # Warmup for KAMA/RSI/Chop
         # Skip if any required data is invalid
-        if np.isnan(cci[i]) or np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(rsi_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: avoid low volatility (range) markets
-        # ATR ratio: current ATR vs 50-period average ATR
-        if i >= 50:
-            atr_ma = pd.Series(atr[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1]
-            vol_filter = atr[i] > 0.8 * atr_ma  # Only trade when volatility is above 80% of average
-        else:
-            vol_filter = True
+        # Choppiness filter: avoid ranging markets (CHOP > 61.8 = range)
+        chop_filter = chop[i] <= 61.8  # Only trade when NOT in strong ranging market
         
-        # CCI conditions
-        cci_overbought = cci[i] > 100
-        cci_oversold = cci[i] < -100
-        cci_neutral = abs(cci[i]) <= 100
+        # RSI filter: avoid extremes (only trade when RSI 30-70)
+        rsi_filter = (rsi[i] >= 30) & (rsi[i] <= 70)
         
-        # Trend filter: close vs 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend direction: price vs KAMA
+        above_kama = close[i] > kama[i]
+        below_kama = close[i] < kama[i]
+        
+        # 1d RSI trend filter: avoid counter-trend trades
+        uptrend_1d = rsi_1d_aligned[i] > 50
+        downtrend_1d = rsi_1d_aligned[i] < 50
         
         # Entry conditions
-        # Long: CCI crosses below -100 (oversold) AND uptrend AND volatility filter
-        if cci[i] < -100 and uptrend and vol_filter and position != 1:
-            # Additional check: ensure we just crossed below -100 (was above or equal previous bar)
-            if i == 20 or cci[i-1] >= -100:
-                position = 1
-                signals[i] = 0.25
-        # Short: CCI crosses above 100 (overbought) AND downtrend AND volatility filter
-        elif cci[i] > 100 and downtrend and vol_filter and position != -1:
-            # Additional check: ensure we just crossed above 100 (was below or equal previous bar)
-            if i == 20 or cci[i-1] <= 100:
-                position = -1
-                signals[i] = -0.25
-        # Exit: CCI returns to neutral zone (|CCI| <= 100)
-        elif position == 1 and cci_neutral:
+        # Long: Price above KAMA AND RSI in neutral range AND 1d uptrend AND not choppy
+        if above_kama and rsi_filter and uptrend_1d and chop_filter and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short: Price below KAMA AND RSI in neutral range AND 1d downtrend AND not choppy
+        elif below_kama and rsi_filter and downtrend_1d and chop_filter and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit: Reverse signal or RSI reaches extreme
+        elif position == 1 and (below_kama or rsi[i] >= 70):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and cci_neutral:
+        elif position == -1 and (above_kama or rsi[i] <= 30):
             position = 0
             signals[i] = 0.0
         else:
