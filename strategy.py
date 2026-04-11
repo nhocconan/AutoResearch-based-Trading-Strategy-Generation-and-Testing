@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 4h_1d_rsi_momentum_v1
-# Strategy: 4h RSI momentum with 1d EMA trend filter and volume confirmation
-# Timeframe: 4h
+# 1d_1w_donchian_breakout_v1
+# Strategy: Daily Donchian(20) breakout with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: RSI momentum combined with higher timeframe trend and volume confirmation captures
-# sustainable moves in both bull and bear markets. The 1d EMA filter ensures we trade with the
-# dominant trend, while volume confirmation filters out false signals. Low trade frequency
-# (~25-35 per year) minimizes fee drag.
+# Hypothesis: Daily Donchian breakouts capture strong momentum. Weekly trend filter (EMA50)
+# ensures we trade only in the direction of the higher timeframe trend. Volume confirmation
+# (>1.5x 20-day average) filters out weak breakouts. Designed for low trade frequency
+# (~15-25 trades/year) to minimize fee drag and work in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_rsi_momentum_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
@@ -27,86 +27,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 1d volume average (20-period) for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    
-    # Align raw 1d volume for confirmation
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Daily volume average (20-period) for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]) or \
-           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: avoid low volatility (range) markets
-        if i >= 50:
-            atr_ma = pd.Series(atr[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1]
-            vol_filter = atr[i] > 0.8 * atr_ma
-        else:
-            vol_filter = True
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
-        
-        # Trend filter: close vs 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
-        
-        # RSI momentum conditions
-        rsi_overbought = rsi[i] > 70
-        rsi_oversold = rsi[i] < 30
-        rsi_rising = rsi[i] > rsi[i-1] if i > 0 else False
-        rsi_falling = rsi[i] < rsi[i-1] if i > 0 else False
+        # Trend filter: close vs weekly EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Entry conditions
-        # Long: RSI oversold AND rising AND uptrend AND volume confirmation AND volatility filter
-        if rsi_oversold and rsi_rising and uptrend and vol_confirm and vol_filter and position != 1:
+        # Long: Price breaks above Donchian high AND uptrend AND volume confirmation
+        if high[i] > highest_high[i] and uptrend and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: RSI overbought AND falling AND downtrend AND volume confirmation AND volatility filter
-        elif rsi_overbought and rsi_falling and downtrend and vol_confirm and vol_filter and position != -1:
+        # Short: Price breaks below Donchian low AND downtrend AND volume confirmation
+        elif low[i] < lowest_low[i] and downtrend and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: RSI crosses back to neutral territory (50) or opposite extreme
-        elif position == 1 and (rsi[i] >= 50 or rsi[i] > 70):
+        # Exit: Price crosses back through the midpoint of the Donchian channel
+        elif position == 1 and close[i] < (highest_high[i] + lowest_low[i]) / 2:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi[i] <= 50 or rsi[i] < 30):
+        elif position == -1 and close[i] > (highest_high[i] + lowest_low[i]) / 2:
             position = 0
             signals[i] = 0.0
         else:
