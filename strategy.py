@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_camarilla_breakout_v1
-# Strategy: 1h Camarilla pivot breakout with 4h/1d trend filter and volume confirmation
-# Timeframe: 1h
+# 12h_1d_donchian_breakout_volume_filter_v1
+# Strategy: 12h Donchian(20) breakout with volume confirmation and ATR stop
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels act as intraday support/resistance. Breakouts above H3 or below L3
-# with 4h/1d trend alignment and volume confirmation capture high-probability moves.
-# Uses 4h EMA for trend direction and 1d volume filter to avoid low-liquidity noise.
-# Designed for ~15-35 trades/year to minimize fee drag in challenging 1h timeframe.
+# Hypothesis: Donchian breakouts capture breakout trends. Volume > 1.5x 20-period average confirms institutional participation.
+# ATR-based stoploss limits drawdown. Designed for low trade frequency (~15-30/year) to minimize fee drag.
+# Works in bull markets via upward breakouts and bear markets via downward breakouts.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "12h_1d_donchian_breakout_volume_filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,17 +26,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 4h EMA21 for trend filter
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # 12h Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 12h ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # 1d volume average (20-period) for confirmation
     volume_1d = df_1d['volume'].values
@@ -47,76 +53,41 @@ def generate_signals(prices):
     # Align raw 1d volume for confirmation
     vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
-    # Calculate Camarilla levels for each 1h bar using previous day's OHLC
-    # We need daily OHLC - resample 1h data to daily using proper alignment
-    # Since we can't resample, we'll use the 1d data we already loaded
-    # For each 1h bar, use the most recent completed 1d bar's OHLC
-    # We'll shift the 1d data by 1 to avoid look-ahead (use previous day's data)
-    if len(df_1d) >= 2:
-        prev_day_high = df_1d['high'].shift(1).values  # Previous day's high
-        prev_day_low = df_1d['low'].shift(1).values    # Previous day's low
-        prev_day_close = df_1d['close'].shift(1).values # Previous day's close
-        
-        # Align to 1h timeframe
-        prev_day_high_aligned = align_htf_to_ltf(prices, df_1d, prev_day_high)
-        prev_day_low_aligned = align_htf_to_ltf(prices, df_1d, prev_day_low)
-        prev_day_close_aligned = align_htf_to_ltf(prices, df_1d, prev_day_close)
-        
-        # Calculate Camarilla levels
-        range_val = prev_day_high_aligned - prev_day_low_aligned
-        # Avoid division by zero
-        range_val = np.where(range_val == 0, 1e-10, range_val)
-        
-        # Camarilla formulas
-        H3 = prev_day_close_aligned + (range_val * 1.1 / 6)
-        L3 = prev_day_close_aligned - (range_val * 1.1 / 6)
-        H4 = prev_day_close_aligned + (range_val * 1.1 / 2)
-        L4 = prev_day_close_aligned - (range_val * 1.1 / 2)
-    else:
-        # Not enough data
-        H3 = L3 = H4 = L4 = np.full(n, np.nan)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or 
-            np.isnan(vol_1d_aligned[i]) or np.isnan(H3[i]) or np.isnan(L3[i]) or
-            np.isnan(H4[i]) or np.isnan(L4[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(atr[i]) or \
+           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1h volume > 1.5x 20-period 1d average
-        # Note: Comparing 1h volume to 1d average - this is intentional to detect unusual activity
-        vol_confirm = volume[i] > 1.5 * vol_avg_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Trend filter: 4h EMA direction
-        # For long: price above 4h EMA (uptrend)
-        # For short: price below 4h EMA (downtrend)
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Donchian breakout signals
+        breakout_up = close[i] > high_max_20[i-1]  # break above previous period's high
+        breakout_down = close[i] < low_min_20[i-1]  # break below previous period's low
         
         # Entry conditions
-        # Long: Break above H3 with uptrend and volume confirmation
-        if high[i] > H3[i] and uptrend and vol_confirm and position != 1:
+        # Long: upward breakout AND volume confirmation
+        if breakout_up and vol_confirm and position != 1:
             position = 1
-            signals[i] = 0.20
-        # Short: Break below L3 with downtrend and volume confirmation
-        elif low[i] < L3[i] and downtrend and vol_confirm and position != -1:
+            signals[i] = 0.25
+        # Short: downward breakout AND volume confirmation
+        elif breakout_down and vol_confirm and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit conditions
-        # Long exit: Break below L3 (failed breakout) or reverse signal
-        elif position == 1 and (low[i] < L3[i] or (high[i] > H4[i] and not uptrend)):
+            signals[i] = -0.25
+        # Exit: ATR-based stoploss
+        elif position == 1 and close[i] < high_max_20[i] - 2.0 * atr[i]:
             position = 0
             signals[i] = 0.0
-        # Short exit: Break above H3 (failed breakout) or reverse signal
-        elif position == -1 and (high[i] > H3[i] or (low[i] < L4[i] and not downtrend)):
+        elif position == -1 and close[i] > low_min_20[i] + 2.0 * atr[i]:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
