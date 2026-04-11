@@ -1,15 +1,18 @@
-# 4h_12h_kama_volatility_breakout_v1
-# Strategy: 4h Kaufman Adaptive Moving Average (KAMA) breakout with volume confirmation and 12h volatility filter
-# Timeframe: 4h
+#!/usr/bin/env python3
+# 1d_1w_camarilla_pivot_volume_v1
+# Strategy: 1d Camarilla pivot levels with volume confirmation and 1w trend filter
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: KAMA adapts to market noise, reducing false signals in ranging markets. Breakouts above/below KAMA with volume confirmation capture trends. 12h ATR-based volatility filter avoids low-volatility chop. Designed for low trade frequency (<30/year) to minimize fee drag.
+# Hypothesis: Camarilla pivot levels identify key support/resistance where price often reverses or breaks.
+# In trending markets (1w EMA50), breakouts above/below pivot levels with volume continuation yield high-probability trades.
+# Low frequency (~10-20/year) to minimize fee drag and improve generalization.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_kama_volatility_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,72 +26,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 12h ATR(14) for volatility filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align length
-    atr_14_12h = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    # 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # KAMA(10, 2, 30) calculation
-    close_series = pd.Series(close)
-    change = np.abs(close_series.diff(10))
-    volatility = close_series.diff().abs().rolling(10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = [np.nan] * len(close)
-    kama[9] = close.iloc[9]  # seed
-    for i in range(10, len(close)):
-        if not np.isnan(sc.iloc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close.iloc[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama = np.array(kama)
+    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
+    # Camarilla formulas: 
+    # H4 = Close + 1.5 * (High - Low)
+    # H3 = Close + 1.0 * (High - Low)
+    # L3 = Close - 1.0 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    # We use H3/L3 for breakout entries, H4/L4 for stop levels
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Set first day's values to avoid NaN
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    daily_range = prev_high - prev_low
+    H3 = prev_close + 1.0 * daily_range
+    L3 = prev_close - 1.0 * daily_range
+    H4 = prev_close + 1.5 * daily_range
+    L4 = prev_close - 1.5 * daily_range
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_avg_20)
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(10, n):
+    for i in range(1, n):  # Start from 1 since we use previous day's data
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(atr_14_12h_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(H3[i]) or np.isnan(L3[i]) or
+            np.isnan(H4[i]) or np.isnan(L4[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: only trade when 12h ATR > its 50-period average (avoid low-vol chop)
-        if i < 50:
-            vol_filter = True  # warmup period
-        else:
-            vol_avg_50 = np.nanmean(atr_14_12h_aligned[i-50:i])
-            vol_filter = not np.isnan(vol_avg_50) and atr_14_12h_aligned[i] > vol_avg_50
+        # Trend filter: price above/below 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry logic: KAMA breakout + volume + volatility filter
-        if close[i] > kama[i] and vol_confirm[i] and vol_filter and position != 1:
+        # Entry logic: Breakout of H3/L3 with volume confirmation and trend alignment
+        if (close[i] > H3[i] and vol_confirm[i] and uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        elif close[i] < kama[i] and vol_confirm[i] and vol_filter and position != -1:
+        elif (close[i] < L3[i] and vol_confirm[i] and downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price crosses back through KAMA
-        elif position == 1 and close[i] <= kama[i]:
+        # Exit: Price reaches H4/L4 (stop levels) or trend reversal
+        elif position == 1 and (close[i] >= H4[i] or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= kama[i]:
+        elif position == -1 and (close[i] <= L4[i] or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
