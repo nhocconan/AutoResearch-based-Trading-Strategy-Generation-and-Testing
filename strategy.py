@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_12h_Weekly_Pivot_Donchian_Breakout
-Hypothesis: Combines weekly pivot levels (direction) with 6-hour Donchian(20) breakouts and volume confirmation.
-Weekly pivots provide institutional support/resistance; breakouts with volume capture momentum.
-Works in bull markets (breakouts up) and bear markets (breakdowns down) by using pivot bias.
-Targets 100-200 total trades over 4 years (25-50/year) to avoid fee drag.
+4h_1d_Volume_Spike_Keltner_Breakout_v1
+Hypothesis: Uses 1-day Keltner channels with volume spikes to identify volatility expansions in trending markets.
+Designed to work in both bull and bear markets by capturing volatility bursts that often precede strong moves.
+Trades only when volatility expands (ATR-based) and volume confirms, reducing whipsaws and focusing on high-probability breakouts.
+Targets 20-40 trades per year per symbol to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_Weekly_Pivot_Donchian_Breakout"
-timeframe = "6h"
+name = "4h_1d_Volume_Spike_Keltner_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
@@ -26,57 +26,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for pivot levels
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Load 1d data ONCE before loop for Keltner channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points: (H+L+C)/3
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
-    pivot_w = (high_w + low_w + close_w) / 3.0
+    # Calculate 40-period EMA for 4h trend filter
+    ema_40_4h = pd.Series(close).ewm(span=40, adjust=False, min_periods=40).mean().values
     
-    # Weekly bias: price above/below pivot
-    bias_up = close_w > pivot_w
-    bias_down = close_w < pivot_w
-    
-    # Align weekly bias to 6h timeframe (wait for weekly close)
-    bias_up_aligned = align_htf_to_ltf(prices, df_w, bias_up.astype(float))
-    bias_down_aligned = align_htf_to_ltf(prices, df_w, bias_down.astype(float))
-    
-    # Calculate 6h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: 20-period average
+    # Volume spike filter: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate 1-day Keltner channels
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # 20-period EMA of close for Keltner center
+    keltner_center_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # True range for 1-day ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First period
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # First period
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])   # First period
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
+    keltner_upper_1d = keltner_center_1d + 2.0 * atr_1d
+    keltner_lower_1d = keltner_center_1d - 2.0 * atr_1d
+    
+    # Align Keltner channels to 4h timeframe (wait for daily close)
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper_1d)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower_1d)
+    keltner_center_aligned = align_htf_to_ltf(prices, df_1d, keltner_center_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(bias_up_aligned[i]) or 
-            np.isnan(bias_down_aligned[i])):
+        if (np.isnan(ema_40_4h[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
+            np.isnan(keltner_center_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume spike: current volume > 2.0x 20-period average
+        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > high_max[i-1]  # Break above previous high
-        breakdown_down = close[i] < low_min[i-1]  # Break below previous low
+        # Trend filter: price above/below 40-period EMA
+        uptrend = close[i] > ema_40_4h[i]
+        downtrend = close[i] < ema_40_4h[i]
         
-        # Entry conditions: trade in direction of weekly bias
-        long_entry = breakout_up and volume_filter and bias_up_aligned[i] > 0.5
-        short_entry = breakdown_down and volume_filter and bias_down_aligned[i] > 0.5
+        # Breakout conditions using daily Keltner channels
+        breakout_up = close[i] > keltner_upper_aligned[i]   # Break above upper Keltner
+        breakdown_down = close[i] < keltner_lower_aligned[i] # Break below lower Keltner
         
-        # Exit conditions: opposite Donchian break or loss of bias
-        long_exit = (close[i] < low_min[i-1]) or (bias_up_aligned[i] < 0.5)
-        short_exit = (close[i] > high_max[i-1]) or (bias_down_aligned[i] < 0.5)
+        # Entry conditions: volatility expansion + volume spike + trend alignment
+        long_entry = breakout_up and volume_spike and uptrend
+        short_entry = breakdown_down and volume_spike and downtrend
+        
+        # Exit conditions: return to Keltner center or trend reversal
+        long_exit = (close[i] < keltner_center_aligned[i]) or (not uptrend)
+        short_exit = (close[i] > keltner_center_aligned[i]) or (not downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
