@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-# 1d_1w_ema_trend_volume_v1
-# Strategy: 1d EMA trend filter with weekly volume confirmation
-# Timeframe: 1d
+# 12h_1d_camarilla_breakout_volume_v1
+# Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: EMA crossover on daily timeframe combined with weekly volume surge captures strong trends while avoiding chop. Weekly volume filter reduces false signals. Designed for low trade frequency (<20/year) to minimize fee drag in both bull and bear markets.
+# Hypothesis: Camarilla pivot levels act as strong support/resistance on 12h timeframe.
+# Breakouts with 1d EMA trend alignment and volume confirmation capture significant moves while minimizing false breakouts.
+# Designed for low trade frequency (~12-37/year) to avoid fee drag on 12h chart.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_ema_trend_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -24,52 +26,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA cross on daily timeframe (fast=21, slow=55)
-    ema_fast = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_slow = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # Calculate Camarilla levels from previous 1d bar
+    # Using close of previous day as base
+    prev_close = df_1d['close'].shift(1).values  # Previous day's close
+    prev_high = df_1d['high'].shift(1).values    # Previous day's high
+    prev_low = df_1d['low'].shift(1).values      # Previous day's low
     
-    # Calculate weekly volume average (20-period)
-    vol_avg_20w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20w)
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
+    # Range = prev_high - prev_low
+    # H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    # L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    # L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
+    # H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    # L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    
+    rng = prev_high - prev_low
+    H4 = prev_close + 1.1 * rng / 2
+    L4 = prev_close - 1.1 * rng / 2
+    H3 = prev_close + 1.1 * rng / 4
+    L3 = prev_close - 1.1 * rng / 4
+    H2 = prev_close + 1.1 * rng / 6
+    L2 = prev_close - 1.1 * rng / 6
+    H1 = prev_close + 1.1 * rng / 12
+    L1 = prev_close - 1.1 * rng / 12
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(55, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
-            np.isnan(vol_avg_20w_aligned[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Weekly volume confirmation: current week's volume > 1.8x 20-week average
-        # Note: For daily data, we check if the current day belongs to a week with high volume
-        vol_confirm = volume[i] > 1.8 * vol_avg_20w_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # EMA crossover signals
-        ema_cross_up = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        ema_cross_down = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
+        # Breakout signals using Camarilla levels
+        # Breakout above H3 (strong resistance)
+        breakout_up = high[i] > H3_aligned[i-1]
+        # Breakdown below L3 (strong support)
+        breakdown_down = low[i] < L3_aligned[i-1]
+        
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: EMA bullish crossover AND volume confirmation
-        if ema_cross_up and vol_confirm and position != 1:
+        # Long: Breakout above H3 AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: EMA bearish crossover AND volume confirmation
-        elif ema_cross_down and vol_confirm and position != -1:
+        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite EMA crossover
-        elif position == 1 and ema_cross_down:
+        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
+        elif position == 1 and low[i] < L4_aligned[i-1]:  # Break below L4
             position = 0
             signals[i] = 0.0
-        elif position == -1 and ema_cross_up:
+        elif position == -1 and high[i] > H4_aligned[i-1]:  # Break above H4
             position = 0
             signals[i] = 0.0
         else:
