@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_ma_cross_volume_filter_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_pivot_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,65 +19,90 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Weekly SMA(8) and SMA(21) for trend
-    close_1w = df_1w['close'].values
-    sma_8_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().values
-    sma_21_1w = pd.Series(close_1w).rolling(window=21, min_periods=21).mean().values
+    # Calculate Camarilla pivot levels from previous 1d bar (H, L, C)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use only completed weekly bars
-    sma_8_1w = np.roll(sma_8_1w, 1)
-    sma_21_1w = np.roll(sma_21_1w, 1)
-    sma_8_1w[0] = np.nan
-    sma_21_1w[0] = np.nan
+    # Camarilla levels for previous day (H_{y-1}, L_{y-1}, C_{y-1})
+    H_prev = np.roll(high_1d, 1)
+    L_prev = np.roll(low_1d, 1)
+    C_prev = np.roll(close_1d, 1)
     
-    # Align weekly SMA to 6h timeframe
-    sma_8_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_8_1w)
-    sma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_21_1w)
+    # First day: no previous data
+    H_prev[0] = high_1d[0]
+    L_prev[0] = low_1d[0]
+    C_prev[0] = close_1d[0]
     
-    # Volume filter: volume > 1.8x 50-period average
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Calculate Camarilla levels
+    range_prev = H_prev - L_prev
+    camarilla_H4 = C_prev + range_prev * 1.1 / 2  # Resistance 4
+    camarilla_L4 = C_prev - range_prev * 1.1 / 2  # Support 4
+    camarilla_H3 = C_prev + range_prev * 1.1 / 4  # Resistance 3
+    camarilla_L3 = C_prev - range_prev * 1.1 / 4  # Support 3
+    camarilla_H2 = C_prev + range_prev * 1.1 / 6  # Resistance 2
+    camarilla_L2 = C_prev - range_prev * 1.1 / 6  # Support 2
+    camarilla_H1 = C_prev + range_prev * 1.1 / 12 # Resistance 1
+    camarilla_L1 = C_prev - range_prev * 1.1 / 12 # Support 1
     
-    # EMA(50) on 6h for exit condition
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    camarilla_H2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H2)
+    camarilla_L2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L2)
+    camarilla_H1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H1)
+    camarilla_L1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L1)
     
-    for i in range(200, n):
+    # Volume confirmation: volume > 1.5x 20-period average on 12h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(30, n):  # Start after 30 bars to ensure data availability
         # Skip if any required data is invalid
-        if (np.isnan(sma_8_1w_aligned[i]) or np.isnan(sma_21_1w_aligned[i]) or
-            np.isnan(vol_ma_50[i]) or np.isnan(ema_50[i])):
+        if (np.isnan(vol_ma_20[i]) or np.isnan(camarilla_H4_aligned[i]) or 
+            np.isnan(camarilla_L4_aligned[i]) or np.isnan(camarilla_H3_aligned[i]) or
+            np.isnan(camarilla_L3_aligned[i]) or np.isnan(camarilla_H2_aligned[i]) or
+            np.isnan(camarilla_L2_aligned[i]) or np.isnan(camarilla_H1_aligned[i]) or
+            np.isnan(camarilla_L1_aligned[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
-        vol_ma = vol_ma_50[i]
+        vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.8 * vol_ma
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Weekly MA crossover signals
-        bullish_cross = sma_8_1w_aligned[i] > sma_21_1w_aligned[i]
-        bearish_cross = sma_8_1w_aligned[i] < sma_21_1w_aligned[i]
+        # Breakout conditions
+        # Long: price breaks above H4 (strong resistance) with volume
+        long_signal = price_high > camarilla_H4_aligned[i] and volume_confirmed
         
-        # Entry conditions
-        long_entry = bullish_cross and volume_confirmed
-        short_entry = bearish_cross and volume_confirmed
+        # Short: price breaks below L4 (strong support) with volume
+        short_signal = price_low < camarilla_L4_aligned[i] and volume_confirmed
         
-        # Exit conditions: price crosses 50 EMA in opposite direction
-        exit_long = position == 1 and price_close < ema_50[i]
-        exit_short = position == -1 and price_close > ema_50[i]
+        # Exit conditions: return to H3/L3 levels (profit taking)
+        exit_long = position == 1 and price_close < camarilla_H3_aligned[i]
+        exit_short = position == -1 and price_close > camarilla_L3_aligned[i]
         
         # Trading logic
-        if long_entry and position != 1:
+        if long_signal and position != 1:
             position = 1
+            entry_price = price_close
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_signal and position != -1:
             position = -1
+            entry_price = price_close
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
@@ -91,9 +116,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly MA crossover with volume filter on 6h timeframe.
-# Uses weekly SMA(8)/SMA(21) crossovers to determine trend direction.
-# Enters only when volume exceeds 1.8x 50-period average to avoid false signals.
-# Exits when price crosses the 6h EMA(50) in the opposite direction.
-# Designed for low trade frequency (target: 25-40 trades/year) to minimize fee drag.
-# Works in both bull and bear markets by following the higher timeframe trend.
+# Hypothesis: Camarilla pivot breakout strategy on 12h timeframe.
+# Uses daily Camarilla levels (H4/L4) as breakout triggers with volume confirmation (>1.5x avg volume).
+# Enters long when price breaks above H4 resistance, short when breaks below L4 support.
+# Exits when price returns to H3/L3 levels for profit taking.
+# Camarilla levels are based on previous day's high, low, close, providing statistical support/resistance.
+# Works in both bull and bear markets by trading breakouts in either direction.
+# Designed for low trade frequency (target: 15-25 trades/year) to minimize fee drift.
+# Uses 12h timeframe to capture significant moves while avoiding noise.
