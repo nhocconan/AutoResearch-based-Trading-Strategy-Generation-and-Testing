@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_12h_TRIX_ZeroCross_Volume_Regime_v1
-Hypothesis: TRIX (triple smoothed EMA) zero-cross signals combined with volume confirmation and regime filter (Choppiness Index) to avoid whipsaws in sideways markets. TRIX captures momentum shifts while volume confirms institutional participation. Choppiness Index > 61.8 filters out ranging conditions where TRIX whipsaws. Targets 15-30 trades/year per symbol with focus on high-probability momentum shifts in both bull and bear markets.
+4h_1d_KAMA_RSI_Trend_v1
+Hypothesis: Uses KAMA (Kaufman Adaptive Moving Average) trend direction combined with RSI momentum and 1-day Bollinger Bands for mean reversion signals. Designed to capture trending moves in bull markets and mean-reversion bounces in bear markets with tight entry conditions to limit trade frequency (<30 trades/year per symbol).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_TRIX_ZeroCross_Volume_Regime_v1"
-timeframe = "6h"
+name = "4h_1d_KAMA_RSI_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -23,76 +23,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for TRIX and Choppiness Index
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate TRIX on 12h close (15,9,9 smoothing)
-    close_12h = df_12h['close'].values
-    # First EMA (15-period)
-    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Second EMA (9-period on first EMA)
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    # Third EMA (9-period on second EMA)
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    # TRIX = % change of third EMA
-    trix = np.zeros_like(ema3)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Calculate KAMA (Kaufman Adaptive Moving Average) for trend
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder for correct calc
+    # Correct calculation:
+    change = np.abs(np.diff(close, prepend=close[0]))
+    # Volatility is sum of absolute changes over 10 periods
+    volatility = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < 10:
+            volatility[i] = np.nan
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
+    # Avoid loop by using rolling sum of absolute differences
+    diff_abs = np.abs(np.diff(close, prepend=close[0]))
+    volatility = pd.Series(diff_abs).rolling(window=10, min_periods=10).sum().values
+    # ER = change / volatility, handle division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # SC = [ER * (fastest - slowest) + slowest]^2, fastest=2/(2+1), slowest=2/(30+1)
+    fastest = 2 / (2 + 1)
+    slowest = 2 / (30 + 1)
+    sc = (er * (fastest - slowest) + slowest) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Choppiness Index on 12h data (14-period)
-    # True Range
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1).values
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Sum of absolute price change over 14 periods
-    atr_sum = pd.Series(abs(df_12h['high'] - df_12h['low'])).rolling(window=14, min_periods=14).sum().values
-    # Choppiness Index = 100 * log10(tr_sum / atr_sum) / log10(14)
-    chop = np.full_like(tr_sum, 50.0, dtype=float)  # default neutral
-    valid = (atr_sum > 0) & ~np.isnan(tr_sum) & ~np.isnan(atr_sum)
-    chop[valid] = 100 * np.log10(tr_sum[valid] / atr_sum[valid]) / np.log10(14)
+    # RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align TRIX and Choppiness Index to 6h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # 1-day Bollinger Bands (20-period, 2 std)
+    close_1d = df_1d['close'].values
+    bb_mid_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper_1d = bb_mid_1d + 2 * bb_std_1d
+    bb_lower_1d = bb_mid_1d - 2 * bb_std_1d
     
-    # Volume filter: 20-period average on 6h timeframe
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1d indicators to 4h timeframe
+    bb_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_upper_1d)
+    bb_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_lower_1d)
+    bb_mid_1d_aligned = align_htf_to_ltf(prices, df_1d, bb_mid_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(bb_upper_1d_aligned[i]) or np.isnan(bb_lower_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Trend filter: price above/below KAMA
+        uptrend = close[i] > kama[i]
+        downtrend = close[i] < kama[i]
         
-        # Regime filter: only trade when market is trending (Choppiness < 61.8)
-        trending_regime = chop_aligned[i] < 61.8
+        # Mean reversion signals from Bollinger Bands
+        near_lower_bb = close[i] <= bb_lower_1d_aligned[i] * 1.01  # within 1% of lower band
+        near_upper_bb = close[i] >= bb_upper_1d_aligned[i] * 0.99  # within 1% of upper band
         
-        # TRIX zero-cross signals
-        trix_now = trix_aligned[i]
-        trix_prev = trix_aligned[i-1]
+        # RSI conditions: oversold (<30) or overbought (>70)
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Zero-cross signals: bullish when crossing above zero, bearish when crossing below zero
-        bullish_cross = (trix_prev <= 0) and (trix_now > 0)
-        bearish_cross = (trix_prev >= 0) and (trix_now < 0)
+        # Entry conditions
+        long_entry = near_lower_bb and rsi_oversold and uptrend
+        short_entry = near_upper_bb and rsi_overbought and downtrend
         
-        # Entry conditions: TRIX zero-cross + volume + trending regime
-        long_entry = bullish_cross and volume_filter and trending_regime
-        short_entry = bearish_cross and volume_filter and trending_regime
-        
-        # Exit conditions: opposite TRIX zero-cross or loss of trending regime
-        long_exit = bearish_cross or (not trending_regime)
-        short_exit = bullish_cross or (not trending_regime)
+        # Exit conditions: return to middle band or trend reversal
+        long_exit = (close[i] >= bb_mid_1d_aligned[i]) or (not uptrend)
+        short_exit = (close[i] <= bb_mid_1d_aligned[i]) or (not downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
