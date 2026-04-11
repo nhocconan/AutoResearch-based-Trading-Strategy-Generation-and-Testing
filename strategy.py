@@ -3,23 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R reversal with 1d trend filter and volume spike confirmation
-# - Long: Williams %R(14) crosses above -80 (oversold) + price > 1d EMA50 (uptrend) + volume > 2.0x 20-period average
-# - Short: Williams %R(14) crosses below -20 (overbought) + price < 1d EMA50 (downtrend) + volume > 2.0x 20-period average
-# - Exit: Opposite Williams %R crossing (%R < -80 for long exit, %R > -20 for short exit) or volume drop below average
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# Hypothesis: 12h Williams Alligator + Elder Ray + Volume confirmation
+# - Uses Williams Alligator (JAW=13, TEETH=8, LIPS=5) smoothed with SMMA to identify trend direction
+# - Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures trend strength
+# - Volume confirmation: current volume > 1.5x 20-period average volume
+# - Long: Alligator aligned (Lips > Teeth > Jaw) + Bull Power > 0 + volume confirmation
+# - Short: Alligator aligned inversely (Lips < Teeth < Jaw) + Bear Power < 0 + volume confirmation
+# - Exit: Opposite Alligator alignment or Elder Ray power crosses zero
+# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Williams %R identifies exhaustion points in both bull and bear markets
-# - 1d EMA50 filter ensures we trade with the higher timeframe trend
-# - Volume spike confirmation filters out false reversals and increases signal quality
+# - Works in both bull and bear markets by capturing strong trending moves with volume confirmation
 
-name = "6h_1d_williamsr_reversal_v1"
-timeframe = "6h"
+name = "12h_1d_alligator_elder_ray_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,64 +31,88 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for trend filter
+    # Load 1d data ONCE before loop for Elder Ray and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d EMA50 for trend filter
+    # Pre-compute 1d EMA13 for Elder Ray
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Pre-compute 1d volume average for confirmation
+    # Pre-compute 1d Elder Ray components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power_1d = high_1d - ema_13_1d  # Bull Power = High - EMA13
+    bear_power_1d = low_1d - ema_13_1d   # Bear Power = Low - EMA13
+    
+    # Pre-compute 1d volume confirmation (20-period average)
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute Williams %R on 6h timeframe
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Pre-compute Williams Alligator on 12h timeframe (smoothed with SMMA)
+    # JAW: 13-period SMMA, shifted 8 bars
+    # TEETH: 8-period SMMA, shifted 5 bars
+    # LIPS: 5-period SMMA, shifted 3 bars
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CLOSE) / N
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    for i in range(50, n):  # Start after 50-bar warmup
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Shift as per Alligator definition
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    
+    # Set NaN for shifted values that don't have enough data
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
+            np.isnan(bull_power_1d[i]) or np.isnan(bear_power_1d[i]) or np.isnan(volume_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
-        close_price = close[i]
         volume_current = volume[i]
-        williams_r_current = williams_r[i]
-        williams_r_prev = williams_r[i-1]
         
-        # Trend filter: price vs 1d EMA50
-        uptrend = close_price > ema_50_1d_aligned[i]
-        downtrend = close_price < ema_50_1d_aligned[i]
+        # Alligator alignment
+        lips_val = lips_shifted[i]
+        teeth_val = teeth_shifted[i]
+        jaw_val = jaw_shifted[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = volume_current > 2.0 * volume_sma_20_aligned[i]
+        # Elder Ray components from 1d (aligned)
+        bull_power = bull_power_1d[i]
+        bear_power = bear_power_1d[i]
         
-        # Williams %R crossovers
-        cross_above_80 = (williams_r_prev <= -80) and (williams_r_current > -80)
-        cross_below_20 = (williams_r_prev >= -20) and (williams_r_current < -20)
-        cross_below_80 = (williams_r_prev >= -80) and (williams_r_current < -80)
-        cross_above_20 = (williams_r_prev <= -20) and (williams_r_current > -20)
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Williams %R crosses above -80 (oversold) + uptrend + volume confirmation
-        if cross_above_80 and uptrend and vol_confirm:
+        # Long: Alligator aligned upward (Lips > Teeth > Jaw) + Bull Power > 0 + volume confirmation
+        if lips_val > teeth_val > jaw_val and bull_power > 0 and vol_confirm:
             enter_long = True
         
-        # Short: Williams %R crosses below -20 (overbought) + downtrend + volume confirmation
-        if cross_below_20 and downtrend and vol_confirm:
+        # Short: Alligator aligned downward (Lips < Teeth < Jaw) + Bear Power < 0 + volume confirmation
+        if lips_val < teeth_val < jaw_val and bear_power < 0 and vol_confirm:
             enter_short = True
         
         # Exit conditions
@@ -95,11 +120,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if Williams %R crosses below -80 or volume drops below average
-            exit_long = cross_below_80 or (volume_current < volume_sma_20_aligned[i])
+            # Exit long if Alligator alignment breaks or Bull Power turns negative
+            exit_long = not (lips_val > teeth_val > jaw_val) or bull_power <= 0
         elif position == -1:
-            # Exit short if Williams %R crosses above -20 or volume drops below average
-            exit_short = cross_above_20 or (volume_current < volume_sma_20_aligned[i])
+            # Exit short if Alligator alignment breaks or Bear Power turns positive
+            exit_short = not (lips_val < teeth_val < jaw_val) or bear_power >= 0
         
         # Trading logic
         if enter_long and position != 1:
