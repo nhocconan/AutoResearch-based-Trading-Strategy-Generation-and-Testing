@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d timeframe with 1-week volatility regime filter (ATR-based) and 1-week Donchian breakout.
-# Uses weekly ATR to detect volatility regimes and weekly Donchian channels for trend direction.
-# Long when price breaks above weekly Donchian high in high volatility regime, short when breaks below weekly Donchian low.
-# Designed for low trade frequency (~10-30/year) to minimize fee decay while capturing major trend moves.
-# Works in bull markets by capturing trends and in bear markets by avoiding false breakouts via volatility filter.
+# Hypothesis: 6h timeframe with 12h/1d Donchian breakout + volume confirmation + regime filter.
+# Long when price breaks above 12h Donchian(20) high with volume > 1.5x 12h average volume and 12h ADX > 25.
+# Short when price breaks below 12h Donchian(20) low with volume > 1.5x and 12h ADX > 25.
+# Exit when price crosses 12h Donchian midline (average of high/low channel) or ADX < 20.
+# Designed for low trade frequency (~15-30/year) to minimize fee decay while capturing strong trends.
+# Works in bull/bear markets by only trading when ADX indicates strong trend (ADX>25) and avoiding chop.
 
-name = "1d_1w_donchian_atr_volatility_v1"
-timeframe = "1d"
+name = "6h_12h_donchian_breakout_volume_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,80 +25,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly ATR(14) for volatility regime
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # True Range calculation
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Donchian high and low
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_high + donch_low) / 2
+    
+    # Calculate 12h ADX (14-period)
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    tr[0] = tr1[0]  # First period has no previous close
     
-    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    atr_14 = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i == 0:
-            atr_14[i] = np.nan
-        elif i < 14:
-            if i == 1:
-                atr_14[i] = np.nanmean(tr[1:i+1])
-            else:
-                atr_14[i] = (atr_14[i-1] * (i-1) + tr[i]) / i
-        else:
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Directional Movement
+    up_move = high_12h - np.roll(high_12h, 1)
+    down_move = np.roll(low_12h, 1) - low_12h
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Calculate weekly Donchian channels (20-period)
-    high_max_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align weekly indicators to daily timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
-    high_max_20_aligned = align_htf_to_ltf(prices, df_1w, high_max_20)
-    low_min_20_aligned = align_htf_to_ltf(prices, df_1w, low_min_20)
+    # Smoothed values
+    def _wilders_smoothing(arr, period):
+        result = np.zeros_like(arr)
+        result[period-1] = np.nansum(arr[:period])  # First value is simple average
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Calculate volatility regime: current ATR > 1.5 * ATR(50) average
-    atr_50 = np.full_like(tr, np.nan)
-    for i in range(len(tr)):
-        if i < 50:
-            atr_50[i] = np.nan
-        elif i == 50:
-            atr_50[i] = np.nanmean(tr[1:51])
-        else:
-            atr_50[i] = (atr_50[i-1] * 49 + tr[i]) / 50
+    atr = _wilders_smoothing(tr, 14)
+    plus_di = 100 * _wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * _wilders_smoothing(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = _wilders_smoothing(dx, 14)
     
-    atr_50_aligned = align_htf_to_ltf(prices, df_1w, atr_50)
-    vol_regime = atr_14_aligned > (1.5 * atr_50_aligned)
+    # 12h average volume (20-period)
+    vol_12h = df_12h['volume'].values
+    vol_avg_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_12h, donch_mid)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure Donchian channels are valid
+    # Start from index 20 to ensure all indicators are valid
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_max_20_aligned[i]) or np.isnan(low_min_20_aligned[i]) or
-            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: Donchian breakout in high volatility regime
-        long_breakout = close[i] > high_max_20_aligned[i]
-        short_breakout = close[i] < low_min_20_aligned[i]
+        # Volume filter: current volume > 1.5 * 12h average volume
+        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        long_entry = long_breakout and vol_regime[i]
-        short_entry = short_breakout and vol_regime[i]
+        # Trend filter: 12h ADX > 25 (strong trend)
+        trend_filter = adx_aligned[i] > 25
         
-        # Exit conditions: price returns to middle of Donchian channel
-        donchian_mid = (high_max_20_aligned[i] + low_min_20_aligned[i]) / 2
-        exit_long = close[i] < donchian_mid
-        exit_short = close[i] > donchian_mid
+        # Exit trend filter: ADX < 20 (weakening trend)
+        exit_trend_filter = adx_aligned[i] < 20
+        
+        # Entry conditions: Donchian breakout with volume and trend confirmation
+        long_breakout = high[i] > donch_high_aligned[i]
+        short_breakout = low[i] < donch_low_aligned[i]
+        
+        long_entry = long_breakout and vol_filter and trend_filter
+        short_entry = short_breakout and vol_filter and trend_filter
+        
+        # Exit conditions: midline cross or trend weakening
+        exit_long = (close[i] < donch_mid_aligned[i]) or exit_trend_filter
+        exit_short = (close[i] > donch_mid_aligned[i]) or exit_trend_filter
         
         if long_entry and position != 1:
             position = 1
