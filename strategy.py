@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v3"
+name = "4h_1d_camarilla_breakout_volume_v8"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,11 +31,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
+    # Resistance levels: R4 = close + (range * 1.1/2), S4 = close - (range * 1.1/2)
     daily_range = high_1d - low_1d
-    
-    # Key levels for breakout: R4 (resistance) and S4 (support)
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
@@ -43,7 +40,7 @@ def generate_signals(prices):
     r3 = close_1d + (daily_range * 1.1 / 4)
     s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Volume confirmation: 4h volume > 2.0x 100-period average (tightened for fewer trades)
+    # Volume confirmation: 4h volume > 2.0x 100-period average (reduces trades)
     vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
     
     # Align daily levels to 4h timeframe
