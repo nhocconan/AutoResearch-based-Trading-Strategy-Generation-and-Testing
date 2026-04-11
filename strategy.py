@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator + 1d/1w trend filter with volume confirmation
-# Long when price > Alligator teeth (green line) + 1d trend up + volume > 1.5x avg
-# Short when price < Alligator teeth + 1d trend down + volume > 1.5x avg
-# Exit when price crosses back below/above teeth or trend reverses
-# Williams Alligator uses SMAs of median price: Jaw(13,8), Teeth(8,5), Lips(5,3)
-# Designed for 15-35 trades/year on 12h timeframe with trend-following in both bull/bear markets
+# Hypothesis: 4h Camarilla pivot reversal with volume confirmation and 12h trend filter
+# Long when price touches Camarilla S3 level + volume > 2x average + 12h trend up
+# Short when price touches Camarilla R3 level + volume > 2x average + 12h trend down
+# Exit when price reaches Camarilla C level (close) or trend reverses
+# Designed for 30-60 trades/year on 4h timeframe with mean reversion in range markets
 
-name = "12h_1w_alligator_trend_volume_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,59 +24,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 10:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate Williams Alligator on median price
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3)
+    # Calculate 12h EMA(25) for trend filter
+    close_12h = df_12h['close'].values
+    ema_25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
     
     # Calculate 20-period average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Calculate Camarilla levels from previous 12h bar
+    # Camarilla formulas: 
+    # H4 = close + 1.5*(high-low)
+    # H3 = close + 1.125*(high-low)
+    # H2 = close + 0.75*(high-low)
+    # H1 = close + 0.5*(high-low)
+    # L1 = close - 0.5*(high-low)
+    # L2 = close - 0.75*(high-low)
+    # L3 = close - 1.125*(high-low)
+    # L4 = close - 1.5*(high-low)
+    # C = close (pivot)
+    
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
+    camarilla_c = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        # Use previous 12h bar's OHLC (need to map 12h to 4h)
+        # Since we're using 12h data aligned to 4h, we can use the aligned values
+        pass  # Will calculate properly below
+    
+    # Instead, calculate Camarilla from 12h OHLC and align to 4h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    camarilla_h3_12h = close_12h + 1.125 * (high_12h - low_12h)
+    camarilla_l3_12h = close_12h - 1.125 * (high_12h - low_12h)
+    camarilla_c_12h = close_12h  # pivot point
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3_12h)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3_12h)
+    camarilla_c_aligned = align_htf_to_ltf(prices, df_12h, camarilla_c_12h)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(25, n):  # Start after EMA warmup
         # Skip if any required data is invalid
-        if (np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_c_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_25_12h_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current volume > 2x 20-period average
+        volume_filter = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Trend filter: both 1d and 1w EMAs must agree
-        is_uptrend = close[i] > ema_50_1d_aligned[i] and close[i] > ema_50_1w_aligned[i]
-        is_downtrend = close[i] < ema_50_1d_aligned[i] and close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price relative to 12h EMA25
+        is_uptrend = close[i] > ema_25_12h_aligned[i]
+        is_downtrend = close[i] < ema_25_12h_aligned[i]
         
-        # Entry conditions: price above/below teeth with lips alignment
-        price_above_teeth = close[i] > teeth[i] and close[i] > lips[i]
-        price_below_teeth = close[i] < teeth[i] and close[i] < lips[i]
+        # Entry conditions: price touches Camarilla S3/L3 with volume and trend alignment
+        # For long: price touches or goes below S3 (L3) in uptrend (mean reversion long)
+        # For short: price touches or goes above R3 (H3) in downtrend (mean reversion short)
+        long_entry = (close[i] <= camarilla_l3_aligned[i]) and volume_filter and is_uptrend
+        short_entry = (close[i] >= camarilla_h3_aligned[i]) and volume_filter and is_downtrend
         
-        long_entry = price_above_teeth and volume_filter and is_uptrend
-        short_entry = price_below_teeth and volume_filter and is_downtrend
-        
-        # Exit conditions: price crosses lips or trend changes
-        long_exit = close[i] < lips[i] or not is_uptrend
-        short_exit = close[i] > lips[i] or not is_downtrend
+        # Exit conditions: price returns to Camarilla C level (pivot) or trend reverses
+        long_exit = (close[i] >= camarilla_c_aligned[i]) or (not is_uptrend)
+        short_exit = (close[i] <= camarilla_c_aligned[i]) or (not is_downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
