@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
-# 6h_12h_pivot_volume_v1
-# Strategy: 6h price reversal at 12h Camarilla pivot levels with volume confirmation
-# Timeframe: 6h
+# 4h_1d_donchian_breakout_volume_v1
+# Strategy: 4h Donchian(20) breakout with 1d volume confirmation and 1d ADX trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance on 12h timeframe.
-# Price approaching these levels with diminishing momentum (volume < average) indicates exhaustion.
-# Entry: Fade moves toward R3/S3 when volume is below 20-period average (mean reversion).
-# Exit: Return to mean (12h VWAP) or opposite pivot level.
-# Designed for low frequency (15-30 trades/year) to minimize fee drag in choppy markets.
+# Hypothesis: Donchian breakouts capture strong directional moves. Volume confirmation
+# ensures institutional participation. ADX > 25 filters choppy markets. Designed for
+# 20-40 trades/year to minimize fee drag while capturing major trends in bull/bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -28,78 +26,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla pivot levels (based on previous day)
-    # Camarilla: R4 = C + ((H-L) * 1.500), R3 = C + ((H-L) * 1.250)
-    #          S3 = C - ((H-L) * 1.250), S4 = C - ((H-L) * 1.500)
-    # where C = (H+L+Close)/3 of previous period
-    h_12h = df_12h['high'].values
-    l_12h = df_12h['low'].values
-    c_12h = df_12h['close'].values
+    # 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous period's values for pivot calculation
-    h_prev = np.roll(h_12h, 1)
-    l_prev = np.roll(l_12h, 1)
-    c_prev = np.roll(c_12h, 1)
-    # First value will be invalid (rolled), but we'll handle with valid check
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    pivot = (h_prev + l_prev + c_prev) / 3.0
-    range_prev = h_prev - l_prev
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    r3 = pivot + (range_prev * 1.250)
-    s3 = pivot - (range_prev * 1.250)
+    # Smoothed values
+    def wilders_smoothing(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Align pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    tr14 = wilders_smoothing(tr, 14)
+    dm_plus14 = wilders_smoothing(dm_plus, 14)
+    dm_minus14 = wilders_smoothing(dm_minus, 14)
     
-    # 12h VWAP as mean reversion target
-    typical_price_12h = (h_12h + l_12h + c_12h) / 3.0
-    vwap_12h = (typical_price_12h * df_12h['volume'].values).cumsum() / df_12h['volume'].values.cumsum()
-    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    # DI and DX
+    di_plus = np.where(tr14 != 0, 100 * dm_plus14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus14 / tr14, 0)
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    adx_1d = adx  # 14-period smoothed
     
-    # Volume filter: below average indicates exhaustion
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    low_volume = volume < vol_ma_20  # Volume below 20-period average
+    # 1d volume moving average
+    vol_ma_20_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Distance to pivot levels (normalized by ATR-like measure)
-    atr_14 = pd.Series(high - low).rolling(window=14, min_periods=14).mean()
-    dist_to_r3 = (r3_aligned - close) / atr_14
-    dist_to_s3 = (close - s3_aligned) / atr_14
+    # Align HTF indicators to 4h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(100, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vwap_12h_aligned[i]) or np.isnan(dist_to_r3[i]) or 
-            np.isnan(dist_to_s3[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: price near pivot with low volume (exhaustion)
-        near_r3 = dist_to_r3[i] <= 0.5  # Within 0.5x ATR of R3
-        near_s3 = dist_to_s3[i] <= 0.5  # Within 0.5x ATR of S3
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_1d_aligned[i] > 25
         
-        # Fade R3 (sell pressure exhaustion -> long)
-        if near_r3 and low_volume[i] and position != 1:
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > (vol_ma_20_1d_aligned[i] * 1.5)
+        
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_high[i-1]  # Break above previous high
+        breakout_down = close[i] < donchian_low[i-1]  # Break below previous low
+        
+        # Entry logic: Donchian breakout + volume confirmation + trend filter
+        if (breakout_up and volume_confirmed and trending and position != 1):
             position = 1
             signals[i] = 0.25
-        # Fade S3 (buy pressure exhaustion -> short)
-        elif near_s3 and low_volume[i] and position != -1:
+        elif (breakout_down and volume_confirmed and trending and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to mean (VWAP) or reaches opposite pivot
-        elif position == 1 and (close[i] >= vwap_12h_aligned[i] or close[i] <= s3_aligned[i]):
+        # Exit: Opposite Donchian breakout or loss of trend/volume conditions
+        elif position == 1 and (breakout_down or not trending or not volume_confirmed):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] <= vwap_12h_aligned[i] or close[i] >= r3_aligned[i]):
+        elif position == -1 and (breakout_up or not trending or not volume_confirmed):
             position = 0
             signals[i] = 0.0
         else:
