@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-# 1h_4d_1d_adx_volume_v1
-# Strategy: 1h ADX trend strength with volume confirmation and 4h/1d trend filter
-# Timeframe: 1h
+# 6h_1w_elders_ray_v1
+# Strategy: 6h Elder Ray (Bull/Bear Power) with 1-week trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: ADX > 25 indicates strong trend. In bull markets: long when ADX rising, price above 4h/1d EMA50, volume > 1.5x average. In bear markets: short when ADX rising, price below 4h/1d EMA50, volume > 1.5x average. Uses 4h and 1d EMA50 for trend alignment to avoid counter-trend trades. Low frequency (~15-35/year) to minimize fee drag.
+# Hypothesis: Elder Ray measures bull/bear power relative to EMA. In bull markets, we buy when bull power > 0 and rising with volume.
+# In bear markets, we sell when bear power < 0 and falling with volume. 1-week EMA50 filters trend to avoid counter-trend trades.
+# Low frequency (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_1d_adx_volume_v1"
-timeframe = "1h"
+name = "6h_1w_elders_ray_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,54 +26,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # EMA(13) for Elder Ray calculation (6 timeframe)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    def smooth(val, period):
-        result = np.zeros_like(val)
-        result[period-1] = np.nansum(val[:period])
-        for i in range(period, len(val)):
-            result[i] = result[i-1] - (result[i-1] / period) + val[i]
-        return result
-    
-    atr = smooth(tr, 14)
-    plus_di = 100 * smooth(plus_dm, 14) / atr
-    minus_di = 100 * smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = smooth(dx, 14)
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -81,41 +52,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(13, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend alignment: price above/both EMAs for long, below/both for short
-        uptrend_4h = close[i] > ema_50_4h_aligned[i]
-        uptrend_1d = close[i] > ema_50_1d_aligned[i]
-        downtrend_4h = close[i] < ema_50_4h_aligned[i]
-        downtrend_1d = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # ADX rising and strong trend
-        adx_rising = adx[i] > adx[i-1]
-        strong_trend = adx[i] > 25
-        
-        # Entry logic: ADX strength + volume + trend alignment
-        if (strong_trend and adx_rising and (plus_di[i] > minus_di[i]) and 
-            uptrend_4h and uptrend_1d and vol_confirm[i] and position != 1):
+        # Entry logic: Elder Ray + volume + trend alignment
+        if (bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and  # Bull power positive and rising
+            vol_confirm[i] and uptrend and position != 1):
             position = 1
-            signals[i] = 0.20
-        elif (strong_trend and adx_rising and (minus_di[i] > plus_di[i]) and 
-              downtrend_4h and downtrend_1d and vol_confirm[i] and position != -1):
+            signals[i] = 0.25
+        elif (bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and  # Bear power negative and falling
+              vol_confirm[i] and downtrend and position != -1):
             position = -1
-            signals[i] = -0.20
-        # Exit: ADX weakening or trend change
-        elif position == 1 and (adx[i] < 20 or not (uptrend_4h and uptrend_1d)):
+            signals[i] = -0.25
+        # Exit: Elder Ray momentum divergence or trend change
+        elif position == 1 and (bull_power[i] <= 0 or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (adx[i] < 20 or not (downtrend_4h and downtrend_1d)):
+        elif position == -1 and (bear_power[i] >= 0 or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
