@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot levels from 1d with adaptive volume threshold
-# - Uses dynamic volume threshold based on volume percentile (more robust than fixed multiplier)
-# - Adds momentum filter: requires price to be above/below 20-period EMA for breakout validity
-# - Long: price breaks above R4 with volume in top 30% and close above EMA20
-# - Short: price breaks below S4 with volume in top 30% and close below EMA20
-# - Exit: mean reversion at R3/S3 levels or EMA crossover
-# - Works in both bull/bear by fading extremes (R3/S3) and capturing momentum breaks (R4/S4)
-# - Discrete sizing: 0.25 for position, 0.0 for flat
-# - Target: 12-30 trades/year (50-120 total over 4 years)
+# Hypothesis: 4h Camarilla pivot levels from 1d: breakout continuation at R4/S4 with volume confirmation and ATR filter
+# - Long: price breaks above R4 with volume > 1.5x ATR-scaled average and ATR(14) > 0.01*close (volatility filter)
+# - Short: price breaks below S4 with same volume and ATR conditions
+# - Exit: mean reversion at R3/S3 levels or ATR-based stoploss (2*ATR from entry)
+# - Uses 1d Camarilla levels from prior day OHLC, aligned to 4h
+# - Works in bull markets (breakout continuation) and bear markets (fade extremes at R4/S4 then revert to R3/S3)
+# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
+# - Discrete position sizing: 0.25 magnitude to balance risk and reward
 
-name = "6h_1d_camarilla_volpercentile_ema_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,6 +28,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0  # track entry price for stoploss
     
     # Load 1d data ONCE before loop for Camarilla levels (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
@@ -41,34 +41,43 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla levels: based on previous day's range
+    # R4 = close + 1.1*(high-low)*1.1/2
+    # R3 = close + 1.1*(high-low)*1.1/4
+    # S3 = close - 1.1*(high-low)*1.1/4
+    # S4 = close - 1.1*(high-low)*1.1/2
     range_1d = high_1d - low_1d
     camarilla_r4 = close_1d + 1.1 * range_1d * 1.1 / 2
     camarilla_r3 = close_1d + 1.1 * range_1d * 1.1 / 4
     camarilla_s3 = close_1d - 1.1 * range_1d * 1.1 / 4
     camarilla_s4 = close_1d - 1.1 * range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 6h timeframe (use prior day's levels for current day)
+    # Align Camarilla levels to 4h timeframe (use prior day's levels for current day)
     camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Pre-compute 6h indicators
-    # EMA20 for momentum filter
-    close_s = pd.Series(close)
-    ema_20 = close_s.ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Pre-compute ATR(14) for volatility filter and stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume percentile lookback (50 periods ~ 6d6h on 6h)
-    volume_pct_lookback = 50
-    volume_percentile = pd.Series(volume).rolling(window=volume_pct_lookback, min_periods=volume_pct_lookback).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) == volume_pct_lookback else np.nan, raw=False
-    ).values
+    # Pre-compute volume confirmation: volume > 1.5 * ATR-scaled average volume
+    # Use ATR to normalize volume threshold across different volatility regimes
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = 1.5 * vol_ma_20  # base threshold
+    # Adjust threshold by ATR to make it volatility-sensitive: higher ATR = higher volume needed
+    atr_ratio = atr / close  # ATR as fraction of price
+    atr_ratio_ma = pd.Series(atr_ratio).rolling(window=20, min_periods=1).mean().values  # smooth
+    vol_threshold_adj = vol_threshold * (1 + atr_ratio_ma)  # increase threshold in high volatility
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
         if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
             np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(ema_20[i]) or np.isnan(volume_percentile[i])):
+            np.isnan(atr[i]) or np.isnan(vol_threshold_adj[i])):
             signals[i] = 0.0
             continue
         
@@ -76,9 +85,13 @@ def generate_signals(prices):
         close_price = close[i]
         high_price = high[i]
         low_price = low[i]
+        volume_current = volume[i]
         
-        # Volume confirmation: volume in top 30% percentile (adaptive threshold)
-        vol_confirm = volume_percentile[i] > 0.7
+        # Volume confirmation: current volume > volatility-adjusted threshold
+        vol_confirm = volume_current > vol_threshold_adj[i]
+        
+        # ATR filter: only trade when volatility is reasonable (avoid extremely low/high vol)
+        atr_filter = (atr[i] > 0.005 * close_price) & (atr[i] < 0.05 * close_price)
         
         # Price position relative to Camarilla levels
         r4 = camarilla_r4_aligned[i]
@@ -86,45 +99,45 @@ def generate_signals(prices):
         s3 = camarilla_s3_aligned[i]
         s4 = camarilla_s4_aligned[i]
         
-        # Momentum filter: price relative to EMA20
-        price_above_ema = close_price > ema_20[i]
-        price_below_ema = close_price < ema_20[i]
-        
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price breaks above R4 with volume confirmation and above EMA20
-        if close_price > r4 and vol_confirm and price_above_ema:
+        # Long breakout: price breaks above R4 with volume confirmation and ATR filter
+        if close_price > r4 and vol_confirm and atr_filter:
             enter_long = True
         
-        # Short breakout: price breaks below S4 with volume confirmation and below EMA20
-        if close_price < s4 and vol_confirm and price_below_ema:
+        # Short breakout: price breaks below S4 with volume confirmation and ATR filter
+        if close_price < s4 and vol_confirm and atr_filter:
             enter_short = True
         
-        # Exit conditions: mean reversion at R3/S3 or EMA crossover
+        # Exit conditions
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price drops back to R3 or crosses below EMA20
-            exit_long = close_price <= r3 or close_price < ema_20[i]
+            # Exit long: mean reversion at R3 OR stoploss (2*ATR below entry)
+            exit_long = close_price <= r3 or close_price < entry_price - 2.0 * atr[i]
         elif position == -1:
-            # Exit short if price rises back to S3 or crosses above EMA20
-            exit_short = close_price >= s3 or close_price > ema_20[i]
+            # Exit short: mean reversion at S3 OR stoploss (2*ATR above entry)
+            exit_short = close_price >= s3 or close_price > entry_price + 2.0 * atr[i]
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
+            entry_price = close_price
             signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
+            entry_price = close_price
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
+            entry_price = 0.0
             signals[i] = 0.0
         elif position == -1 and exit_short:
             position = 0
+            entry_price = 0.0
             signals[i] = 0.0
         else:
             # Maintain current position
