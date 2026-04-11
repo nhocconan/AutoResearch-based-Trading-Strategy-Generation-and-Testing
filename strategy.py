@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + 1w ADX trend filter
-# - Long: price breaks above Donchian(20) high + 1d volume > 1.5x 20-period volume average + 1w ADX > 25 and +DI > -DI
-# - Short: price breaks below Donchian(20) low + 1d volume > 1.5x 20-period volume average + 1w ADX > 25 and -DI > +DI
-# - Exit: ATR trailing stop (highest high since entry - 2.5*ATR for longs, lowest low since entry + 2.5*ATR for shorts)
+# Hypothesis: 4h Camarilla pivot breakout + 1d volume spike + 1w choppiness regime filter
+# - Long: price breaks above Camarilla H3 level + 1d volume > 1.3x 20-period volume average + 1w Choppiness Index > 61.8 (ranging market)
+# - Short: price breaks below Camarilla L3 level + 1d volume > 1.3x 20-period volume average + 1w Choppiness Index > 61.8 (ranging market)
+# - Exit: price reverses back to Camarilla H4/L4 levels or opposite pivot touch
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 20-50 trades/year to stay within fee drag limits while capturing strong trending moves
-# - ADX filter ensures we only trade when weekly trend is strong, reducing whipsaws in ranging markets
-# - Works in both bull and bear markets by filtering for strong weekly trends only
+# - Target: 20-50 trades/year to stay within fee drag limits
+# - Choppiness filter ensures we only trade in ranging markets where mean reversion works
+# - Works in both bull and bear markets by focusing on ranging conditions where price respects pivot levels
 
-name = "4h_1d_1w_donchian_volume_adx_v1"
+name = "4h_1d_1w_camarilla_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,11 +27,8 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    # Load 4h data ONCE before loop for Donchian and ATR (MTF rule compliance)
+    # Load 4h data ONCE before loop for Camarilla calculation (MTF rule compliance)
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 50:
         return signals
@@ -41,29 +38,37 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return signals
     
-    # Load 1w data ONCE before loop for ADX trend filter (MTF rule compliance)
+    # Load 1w data ONCE before loop for Choppiness Index (MTF rule compliance)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return signals
     
-    # Pre-compute 4h Donchian(20)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute 4h Camarilla levels (based on previous day's range)
+    # Camarilla uses previous period's high, low, close
+    prev_high = df_4h['high'].shift(1).values
+    prev_low = df_4h['low'].shift(1).values
+    prev_close = df_4h['close'].shift(1).values
     
-    # Pre-compute 4h ATR(20) for stoploss
-    tr1 = pd.Series(high).rolling(2).max() - pd.Series(low).rolling(2).min()
-    tr2 = abs(pd.Series(high).shift(1) - pd.Series(close))
-    tr3 = abs(pd.Series(low).shift(1) - pd.Series(close))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_20 = tr.rolling(window=20, min_periods=20).mean().values
-    atr_20_aligned = align_htf_to_ltf(prices, df_4h, atr_20)
+    # Calculate Camarilla levels for 4h timeframe
+    # H3 = C + (H-L)*1.1/4, L3 = C - (H-L)*1.1/4
+    # H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    camarilla_h4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_l4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l4)
     
     # Pre-compute 1d volume SMA for confirmation
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 1w ADX(14) for trend filter
+    # Pre-compute 1w Choppiness Index (14-period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -75,30 +80,22 @@ def generate_signals(prices):
     tr_w = pd.concat([tr1_w, tr2_w, tr3_w], axis=1).max(axis=1)
     atr_w = tr_w.rolling(window=14, min_periods=14).mean().values
     
-    # Directional Movement
-    up_move = pd.Series(high_1w).diff()
-    down_move = -pd.Series(low_1w).diff()
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM and TR
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_w
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_w
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    plus_di_aligned = align_htf_to_ltf(prices, df_1w, plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, df_1w, minus_di)
+    # Choppiness Index = 100 * log10(sum(ATR14) / (max(high) - min(low))) / log10(14)
+    # We'll use a simplified version: CHOP = 100 * log10(ATR14_sum / (HHV - LLV)) / log10(period)
+    # Higher CHOP (>61.8) = ranging market, Lower CHOP (<38.2) = trending market
+    atr_sum_14 = pd.Series(atr_w).rolling(window=14, min_periods=14).sum().values
+    hhvl_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    llvl_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    chop_numerator = atr_sum_14 / (hhvl_1w - llvl_1w + 1e-10)
+    chop_numerator = np.where(chop_numerator > 0, chop_numerator, 1e-10)
+    chop = 100 * np.log10(chop_numerator) / np.log10(14)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(atr_20_aligned[i]) or np.isnan(volume_sma_20_1d_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -107,61 +104,46 @@ def generate_signals(prices):
         high_price = high[i]
         low_price = low[i]
         
-        # Volume confirmation: 1d volume > 1.5x 20-period volume average (moderate threshold)
+        # Volume confirmation: 1d volume > 1.3x 20-period volume average (moderate threshold)
         volume_1d_current = df_1d['volume'].values
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
-        vol_confirm = volume_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
+        vol_confirm = volume_1d_aligned[i] > 1.3 * volume_sma_20_1d_aligned[i]
         
-        # Weekly trend filter: ADX > 25 and directional bias
-        weekly_adx = adx_aligned[i]
-        weekly_plus_di = plus_di_aligned[i]
-        weekly_minus_di = minus_di_aligned[i]
-        weekly_bullish = weekly_adx > 25 and weekly_plus_di > weekly_minus_di
-        weekly_bearish = weekly_adx > 25 and weekly_minus_di > weekly_plus_di
+        # Weekly chop filter: Choppiness Index > 61.8 (ranging market)
+        weekly_chop = chop_aligned[i]
+        chop_filter = weekly_chop > 61.8
         
-        # Donchian breakout conditions
-        donchian_breakout_long = close_price > highest_high_20[i]
-        donchian_breakout_short = close_price < lowest_low_20[i]
+        # Camarilla breakout conditions
+        camarilla_breakout_long = close_price > camarilla_h3_aligned[i]
+        camarilla_breakout_short = close_price < camarilla_l3_aligned[i]
         
         # Entry conditions
-        enter_long = donchian_breakout_long and vol_confirm and weekly_bullish
-        enter_short = donchian_breakout_short and vol_confirm and weekly_bearish
+        enter_long = camarilla_breakout_long and vol_confirm and chop_filter
+        enter_short = camarilla_breakout_short and vol_confirm and chop_filter
         
-        # Exit conditions: ATR trailing stop
+        # Exit conditions: price reverses to H4/L4 levels or touches opposite pivot
         exit_long = False
         exit_short = False
         
         if position == 1:
-            highest_since_entry = max(highest_since_entry, high_price)
-            exit_long = close_price < highest_since_entry - 2.5 * atr_20_aligned[i]
+            # Exit long if price drops below H4 or touches L3 (mean reversion)
+            exit_long = close_price < camarilla_h4_aligned[i] or low_price <= camarilla_l3_aligned[i]
         elif position == -1:
-            lowest_since_entry = min(lowest_since_entry, low_price)
-            exit_short = close_price > lowest_since_entry + 2.5 * atr_20_aligned[i]
+            # Exit short if price rises above L4 or touches H3 (mean reversion)
+            exit_short = close_price > camarilla_l4_aligned[i] or high_price >= camarilla_h3_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            entry_price = close_price
-            highest_since_entry = high_price
-            lowest_since_entry = low_price
             signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            entry_price = close_price
-            highest_since_entry = high_price
-            lowest_since_entry = low_price
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
-            entry_price = 0.0
-            highest_since_entry = 0.0
-            lowest_since_entry = 0.0
             signals[i] = 0.0
         elif position == -1 and exit_short:
             position = 0
-            entry_price = 0.0
-            highest_since_entry = 0.0
-            lowest_since_entry = 0.0
             signals[i] = 0.0
         else:
             # Maintain current position
