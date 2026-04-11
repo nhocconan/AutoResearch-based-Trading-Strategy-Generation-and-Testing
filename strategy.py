@@ -1,107 +1,88 @@
-# This strategy targets 6h timeframe with weekly trend bias and daily pivot structure.
-# Hypothesis: Weekly trend (via EMA200) filters direction, while daily Camarilla pivots provide high-probability reversal zones.
-# Long only in weekly uptrend at S1/S2 support with bullish reversal candle.
-# Short only in weekly downtrend at R3/R4 resistance with bearish reversal candle.
-# Designed for low turnover (target: 15-35 trades/year) with high win rate in both bull and bear markets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_daily_camarilla_v1"
-timeframe = "6h"
+# Hypothesis: 12h Camarilla pivot reversal with 1d volume spike and trend filter
+# Long when price touches Camarilla L3 support + volume spike + 1d uptrend
+# Short when price touches Camarilla H3 resistance + volume spike + 1d downtrend
+# Exit when price reaches Camarilla H4/L4 or trend reverses
+# Designed for 15-30 trades/year on 12h timeframe with mean-reversion in ranging markets
+# Works in both bull/bear via trend filter and mean-reversion logic
+
+name = "12h_1d_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER (applied once before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # === DAILY CAMARILLA PIVOTS (applied once before loop) ===
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA(20) for trend filter
     close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate Camarilla levels from previous day
-    # H = high, L = low, C = close of previous day
-    H = np.roll(high_1d, 1)
-    L = np.roll(low_1d, 1)
-    C = np.roll(close_1d, 1)
+    # Calculate 24-period average volume for volume filter (24*12h = 12d)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # First value will be NaN due to roll, that's expected
-    P = (H + L + C) / 3
-    range_hl = H - L
+    # Calculate Camarilla levels from previous 12h bar
+    # Camarilla: H4 = C + 1.5*(H-L), H3 = C + 1.25*(H-L), L3 = C - 1.25*(H-L), L4 = C - 1.5*(H-L)
+    camarilla_high = np.roll(high, 1)
+    camarilla_low = np.roll(low, 1)
+    camarilla_close = np.roll(close, 1)
+    camarilla_high[0] = np.nan
+    camarilla_low[0] = np.nan
+    camarilla_close[0] = np.nan
     
-    R3 = C + (range_hl * 1.1 / 2)
-    R4 = C + (range_hl * 1.1)
-    S3 = C - (range_hl * 1.1 / 2)
-    S4 = C - (range_hl * 1.1)
-    
-    # Align to 6h timeframe (wait for daily close)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    camarilla_range = camarilla_high - camarilla_low
+    camarilla_h3 = camarilla_close + 1.25 * camarilla_range
+    camarilla_l3 = camarilla_close - 1.25 * camarilla_range
+    camarilla_h4 = camarilla_close + 1.5 * camarilla_range
+    camarilla_l4 = camarilla_close - 1.5 * camarilla_range
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(24, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(R4_aligned[i]) or
-            np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i])):
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or 
+            np.isnan(vol_ma_24[i]) or np.isnan(ema_20_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine weekly trend
-        weekly_uptrend = close[i] > ema_200_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_200_1w_aligned[i]
+        # Volume confirmation: current volume > 2.0x 24-period average
+        volume_filter = volume[i] > 2.0 * vol_ma_24[i]
         
-        # Bullish reversal candle: close > open and close > previous close
-        bullish_reversal = (close[i] > prices['open'].iloc[i]) and (i > 0 and close[i] > close[i-1])
-        # Bearish reversal candle: close < open and close < previous close
-        bearish_reversal = (close[i] < prices['open'].iloc[i]) and (i > 0 and close[i] < close[i-1])
+        # Trend filter: price relative to 1d EMA20
+        is_uptrend = close[i] > ema_20_1d_aligned[i]
+        is_downtrend = close[i] < ema_20_1d_aligned[i]
         
-        # Entry conditions
-        long_setup = weekly_uptrend and (
-            (close[i] <= S3_aligned[i] * 1.005) or  # Near S3
-            (close[i] <= S4_aligned[i] * 1.01)      # Near S4
-        ) and bullish_reversal
+        # Entry conditions: price touches Camarilla H3/L3 with volume and trend
+        long_entry = (close[i] <= camarilla_l3[i] and low[i] <= camarilla_l3[i]) and volume_filter and is_uptrend
+        short_entry = (close[i] >= camarilla_h3[i] and high[i] >= camarilla_h3[i]) and volume_filter and is_downtrend
         
-        short_setup = weekly_downtrend and (
-            (close[i] >= R3_aligned[i] * 0.995) or  # Near R3
-            (close[i] >= R4_aligned[i] * 0.99)      # Near R4
-        ) and bearish_reversal
-        
-        # Exit conditions: opposite reversal or midpoint reversion
-        long_exit = bearish_reversal or (close[i] >= (S3_aligned[i] + S4_aligned[i]) / 2 * 1.02)
-        short_exit = bullish_reversal or (close[i] <= (R3_aligned[i] + R4_aligned[i]) / 2 * 0.98)
+        # Exit conditions: price reaches H4/L4 or trend reverses
+        long_exit = (close[i] >= camarilla_h4[i]) or (not is_uptrend)
+        short_exit = (close[i] <= camarilla_l4[i]) or (not is_downtrend)
         
         # Priority: entry > exit > hold
-        if long_setup and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
