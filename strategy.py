@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_keltner_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,46 +20,58 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate 12h Keltner Channels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Keltner Channel: EMA(20) ± ATR(10) * 2
-    ema_20 = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr = np.maximum(high_12h - low_12h,
-                    np.maximum(np.abs(high_12h - np.roll(close_12h, 1)),
-                               np.abs(low_12h - np.roll(close_12h, 1))))
-    tr[0] = high_12h[0] - low_12h[0]
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    kc_upper = ema_20 + (atr_10 * 2)
-    kc_lower = ema_20 - (atr_10 * 2)
+    # Previous day's range
+    range_1d = high_1d - low_1d
     
-    # Shift by 1 to use only completed 12h bars
-    ema_20 = np.roll(ema_20, 1)
-    kc_upper = np.roll(kc_upper, 1)
-    kc_lower = np.roll(kc_lower, 1)
-    ema_20[0] = np.nan
-    kc_upper[0] = np.nan
-    kc_lower[0] = np.nan
+    # Camarilla levels (based on previous close)
+    l4 = close_1d - (range_1d * 1.1000)
+    l3 = close_1d - (range_1d * 1.1000 / 2)
+    h3 = close_1d + (range_1d * 1.1000 / 2)
+    h4 = close_1d + (range_1d * 1.1000)
     
-    # Align 12h Keltner to 4h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20)
-    kc_upper_aligned = align_htf_to_ltf(prices, df_12h, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_12h, kc_lower)
+    # Shift by 1 to use only completed 1d bars
+    l4 = np.roll(l4, 1)
+    l3 = np.roll(l3, 1)
+    h3 = np.roll(h3, 1)
+    h4 = np.roll(h4, 1)
+    l4[0] = np.nan
+    l3[0] = np.nan
+    h3[0] = np.nan
+    h4[0] = np.nan
     
-    # Volume confirmation: volume > 1.5x 20-period average on 4h
+    # Align 1d Camarilla levels to 12h timeframe
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Trend filter: 20-period EMA on 12h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align previous day's close to 12h for exit
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = np.nan
+    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(kc_upper_aligned[i]) or
-            np.isnan(kc_lower_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(l4_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or
+            np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(prev_close_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -72,19 +84,19 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend direction from 12h EMA
-        uptrend = price_close > ema_20_aligned[i]
-        downtrend = price_close < ema_20_aligned[i]
+        # Trend direction
+        uptrend = price_close > ema_20[i]
+        downtrend = price_close < ema_20[i]
         
-        # Long: price breaks above upper Keltner with volume in uptrend
-        long_signal = volume_confirmed and uptrend and (price_high > kc_upper_aligned[i])
+        # Long: price breaks above H3/H4 with volume in uptrend
+        long_signal = volume_confirmed and uptrend and (price_high > h3_aligned[i] or price_high > h4_aligned[i])
         
-        # Short: price breaks below lower Keltner with volume in downtrend
-        short_signal = volume_confirmed and downtrend and (price_low < kc_lower_aligned[i])
+        # Short: price breaks below L3/L4 with volume in downtrend
+        short_signal = volume_confirmed and downtrend and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
         
-        # Exit when price returns to 12h EMA (mean reversion)
-        exit_long = position == 1 and price_close < ema_20_aligned[i]
-        exit_short = position == -1 and price_close > ema_20_aligned[i]
+        # Exit when price returns to the previous day's close (pivot point)
+        exit_long = position == 1 and price_close < prev_close_aligned[i]
+        exit_short = position == -1 and price_close > prev_close_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -105,10 +117,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Keltner breakout strategy on 4h timeframe using 12h Keltner Channels.
-# Enters long when price breaks above upper Keltner (EMA20 + 2*ATR10) with volume confirmation (>1.5x avg volume) during uptrend (price > 12h EMA20).
-# Enters short when price breaks below lower Keltner (EMA20 - 2*ATR10) with volume confirmation during downtrend (price < 12h EMA20).
-# Exits when price returns to the 12h EMA20 (mean reversion to the trend).
+# Hypothesis: Camarilla pivot breakout strategy on 12h timeframe.
+# Uses 1d Camarilla levels (L3, L4, H3, H4) from the previous day's price action.
+# Enters long when price breaks above H3 or H4 with volume confirmation (>1.5x average volume) during uptrend (price > 20 EMA).
+# Enters short when price breaks below L3 or L4 with volume confirmation during downtrend (price < 20 EMA).
+# Exits when price returns to the previous day's close (pivot point).
+# The Camarilla levels identify key support/resistance levels where price often reverses or accelerates.
 # Works in both bull and bear markets by trading breakouts in the direction of the 12h trend.
-# Volume confirmation reduces false breakouts. Trend filter ensures we trade with higher timeframe momentum.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Volume confirmation reduces false breakouts. Trend filter ensures we trade with the higher timeframe momentum.
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
