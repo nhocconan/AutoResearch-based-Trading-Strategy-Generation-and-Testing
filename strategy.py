@@ -1,24 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d Trend Filter and Volume Confirmation
-# Uses Elder Ray (EMA13-based bull/bear power) to measure bull/bear strength.
-# Filters trades by 1d EMA50 trend direction to align with higher timeframe bias.
-# Requires volume > 1.5x 20-period average for institutional confirmation.
-# Aims to capture trend continuations in both bull and bear markets with controlled risk.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
-# Position size: 0.25 (25% of capital) to balance return and drawdown.
-
-name = "6h_1d_elder_ray_trend_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -32,56 +23,88 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return signals
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily Camarilla pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Elder Ray components (requires EMA13)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull power: high - EMA13
-    bear_power = low - ema13   # Bear power: low - EMA13
+    # Pivot point and levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align daily EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Camarilla levels (standard multipliers)
+    r4_1d = close_1d + range_1d * 1.1 / 2
+    s4_1d = close_1d - range_1d * 1.1 / 2
+    
+    # Align daily pivots to 12h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(50, n):
+    # ATR for stop loss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Filter: Avoid sideways markets - require price to be outside 5% of daily range
+    price_position = (close - s4_1d_aligned) / (r4_1d_aligned - s4_1d_aligned + 1e-10)
+    in_extreme_zone = (price_position < -0.05) | (price_position > 1.05)
+    
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(in_extreme_zone[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        ema13_val = ema13[i]
-        bull = bull_power[i]
-        bear = bear_power[i]
-        ema50 = ema50_1d_aligned[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
+        r4 = r4_1d_aligned[i]
+        s4 = s4_1d_aligned[i]
+        atr_val = atr[i]
+        extreme_zone = in_extreme_zone[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Trend filter: price above/below daily EMA50
-        uptrend = price_close > ema50
-        downtrend = price_close < ema50
-        
-        # Entry signals
+        # Entry signals - only in extreme zones to avoid whipsaws
         long_signal = False
         short_signal = False
         
-        # Long: bull power positive AND uptrend AND volume confirmation
-        if bull > 0 and uptrend and volume_confirmed:
+        # Long: price breaks above R4 with volume and in extreme zone
+        if price_high > r4 and volume_confirmed and extreme_zone:
             long_signal = True
         
-        # Short: bear power negative AND downtrend AND volume confirmation
-        if bear < 0 and downtrend and volume_confirmed:
+        # Short: price breaks below S4 with volume and in extreme zone
+        if price_low < s4 and volume_confirmed and extreme_zone:
             short_signal = True
+        
+        # Exit conditions
+        # Calculate daily pivot for exit
+        if len(high_1d) > 0:
+            pivot_1d_val = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3
+        else:
+            pivot_1d_val = 0
+        pivot_array = np.full_like(high_1d, pivot_1d_val)
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
+        
+        # Stop loss conditions
+        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
+        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
+        
+        # Exit to pivot
+        exit_long = position == 1 and price_close < pivot_aligned
+        exit_short = position == -1 and price_close > pivot_aligned
         
         # Trading logic
         if long_signal and position != 1:
@@ -92,10 +115,10 @@ def generate_signals(prices):
             position = -1
             entry_price = price_close
             signals[i] = -0.25
-        elif position == 1 and bull <= 0:  # Exit long when bull power fades
+        elif position == 1 and (exit_long or stop_long):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bear >= 0:  # Exit short when bear power fades
+        elif position == -1 and (exit_short or stop_short):
             position = 0
             signals[i] = 0.0
         else:
@@ -104,9 +127,11 @@ def generate_signals(prices):
     
     return signals
 
-# Elder Ray (Bull/Bear Power) measures the power of bulls/bears relative to EMA13.
-# Bull Power = High - EMA13 (strength of bulls)
-# Bear Power = Low - EMA13 (weakness of bears)
-# Trades taken in direction of higher timeframe trend (daily EMA50) with volume confirmation.
-# Exits when the respective power diminishes, avoiding hard stops that may cause whipsaws.
-# Works in bull markets (buy bull power dips in uptrend) and bear markets (sell bear power rallies in downtrend).
+# Hypothesis: 12h Camarilla breakout strategy with volume confirmation, extreme zone filter, and ATR stop loss.
+# Enters long when price breaks above daily R4 with volume confirmation and only in extreme zones (<-0.05 or >1.05).
+# Enters short when price breaks below daily S4 with volume confirmation and only in extreme zones.
+# Uses volume confirmation (>1.5x 20-period average) to ensure institutional participation.
+# Extreme zone filter prevents whipsaws in sideways markets by only allowing breaks outside daily range with buffer.
+# Exits when price returns to daily pivot point or ATR stop loss (2x) is hit.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by trading breakouts in either direction.
