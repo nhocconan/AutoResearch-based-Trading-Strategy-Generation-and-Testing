@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,7 +39,7 @@ def generate_signals(prices):
     r4_1d = close_1d + range_1d * 1.1 / 2
     s4_1d = close_1d - range_1d * 1.1 / 2
     
-    # Align daily pivots to 12h timeframe
+    # Align daily pivots to 4h timeframe
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
@@ -110,11 +110,11 @@ def generate_signals(prices):
         if long_signal and position != 1:
             position = 1
             entry_price = price_close
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_signal and position != -1:
             position = -1
             entry_price = price_close
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and (exit_long or stop_long):
             position = 0
             signals[i] = 0.0
@@ -123,15 +123,15 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 12h Camarilla breakout strategy with volume confirmation, extreme zone filter, and ATR stop loss.
-# Enters long when price breaks above R4 with volume confirmation and only in extreme zones (<-0.05 or >1.05).
-# Enters short when price breaks below S4 with volume confirmation and only in extreme zones.
+# Hypothesis: 4h Camarilla breakout strategy with volume confirmation, extreme zone filter, and ATR stop loss.
+# Enters long when price breaks above daily R4 with volume confirmation and only in extreme zones (<-0.05 or >1.05).
+# Enters short when price breaks below daily S4 with volume confirmation and only in extreme zones.
 # Uses volume confirmation (>1.5x 20-period average) to ensure institutional participation.
 # Extreme zone filter prevents whipsaws in sideways markets by only allowing breaks outside daily range with buffer.
 # Exits when price returns to daily pivot point or ATR stop loss (2x) is hit.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
 # Works in both bull and bear markets by trading breakouts in either direction.
