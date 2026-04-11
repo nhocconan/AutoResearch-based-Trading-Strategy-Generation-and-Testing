@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 6h_1w_turtle_soup_v1
-# Strategy: 6h Turtle Soup (false breakout fade) with 1w trend filter and volume confirmation
-# Timeframe: 6h
+# 12h_1d_keltner_channel_v1
+# Strategy: 12h Keltner Channel breakout with 1d ATR-based trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Turtle Soup fades false breakouts of the 20-period high/low. In trending markets (identified by 1w ADX > 25), these reversals offer high-probability entries. Volume confirmation ensures institutional participation. Works in both bull and bear markets by fading exhaustion moves.
+# Hypothesis: Keltner Channel breakouts capture volatility expansion moves. Combined with 1d ATR trend filter (using ATR > its 50-period MA to confirm trending markets) and volume confirmation, it works in both bull and bear markets by entering only during volatile, trending conditions while avoiding chop. Uses discrete position sizing to minimize fee churn.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_turtle_soup_v1"
-timeframe = "6h"
+name = "12h_1d_keltner_channel_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,108 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w ADX(14) for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d ATR(14) and its 50-period MA for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    # Trend filter: ATR > its MA indicates expanding volatility/trending market
+    atr_trend = atr_14 > atr_ma_50
+    atr_trend_aligned = align_htf_to_ltf(prices, df_1d, atr_trend)
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # 12h Keltner Channel (20-period EMA, 2*ATR)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR for KC (using same period as EMA smoothing)
+    atr_kc = pd.Series(close).rolling(window=20, min_periods=20).apply(
+        lambda x: np.max(np.abs(np.diff(np.concatenate(([x[0]], x))))), raw=True
+    ).values
+    # Simpler ATR calculation for KC
+    tr_kc = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_kc[0] = 0
+    atr_kc = pd.Series(tr_kc).rolling(window=20, min_periods=20).mean().values
     
-    # Smoothed values
-    tr_period = 14
-    atr = np.zeros_like(tr)
-    dm_plus_smooth = np.zeros_like(dm_plus)
-    dm_minus_smooth = np.zeros_like(dm_minus)
+    kc_upper = ema_20 + 2 * atr_kc
+    kc_lower = ema_20 - 2 * atr_kc
     
-    # Initial smoothed values
-    atr[tr_period-1] = np.mean(tr[:tr_period])
-    dm_plus_smooth[tr_period-1] = np.mean(dm_plus[:tr_period])
-    dm_minus_smooth[tr_period-1] = np.mean(dm_minus[:tr_period])
-    
-    # Wilder's smoothing
-    for i in range(tr_period, len(tr)):
-        atr[i] = (atr[i-1] * (tr_period - 1) + tr[i]) / tr_period
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (tr_period - 1) + dm_plus[i]) / tr_period
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (tr_period - 1) + dm_minus[i]) / tr_period
-    
-    # DI and DX
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    dx = np.zeros_like(di_plus)
-    dx[tr_period:] = 100 * np.abs(di_plus[tr_period:] - di_minus[tr_period:]) / (di_plus[tr_period:] + di_minus[tr_period:])
-    
-    # ADX
-    adx = np.zeros_like(dx)
-    adx[2*tr_period-1:] = np.nan
-    for i in range(2*tr_period-1, len(dx)):
-        if i == 2*tr_period-1:
-            adx[i] = np.mean(dx[tr_period:i+1])
-        else:
-            adx[i] = (adx[i-1] * (tr_period - 1) + dx[i]) / tr_period
-    
-    adx_1w = adx
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # 6h Donchian channels (20-period)
-    donchian_len = 20
-    high_max = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
-    low_min = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
-    
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_ratio = pd.Series(volume) / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(donchian_len, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ratio.iloc[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(atr_trend_aligned[i]) or np.isnan(vol_ratio.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Only trade in trending markets (ADX > 25)
-        trending = adx_1w_aligned[i] > 25
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirmed = vol_ratio.iloc[i] > 1.5
         
-        # Volume confirmation
-        vol_confirmed = vol_ratio.iloc[i] > 1.3
-        
-        # Turtle Soup logic: fade false breakouts
-        # Long setup: false breakdown below 20-period low
-        if trending and vol_confirmed and low[i] < low_min[i] and close[i] > low_min[i] and position != 1:
-            # Price broke below Donchian low but closed back above - long signal
+        # Entry conditions
+        # Long: Close breaks above KC upper + ATR trend (volatile market) + volume confirmation
+        if vol_confirmed and close[i] > kc_upper[i] and atr_trend_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short setup: false breakout above 20-period high
-        elif trending and vol_confirmed and high[i] > high_max[i] and close[i] < high_max[i] and position != -1:
-            # Price broke above Donchian high but closed back below - short signal
+        # Short: Close breaks below KC lower + ATR trend (volatile market) + volume confirmation
+        elif vol_confirmed and close[i] < kc_lower[i] and atr_trend_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: price reaches opposite Donchian band or trend weakens
-        elif position == 1 and (close[i] >= high_max[i] or adx_1w_aligned[i] < 20):
+        # Exit conditions: loss of volatility expansion or mean reversion to middle
+        elif position == 1 and (close[i] < ema_20[i] or not atr_trend_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] <= low_min[i] or adx_1w_aligned[i] < 20):
+        elif position == -1 and (close[i] > ema_20[i] or not atr_trend_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
