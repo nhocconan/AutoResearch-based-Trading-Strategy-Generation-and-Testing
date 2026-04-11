@@ -1,23 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1w_camarilla_trend_follow
-Strategy: 6h price action with weekly Camarilla pivot trend following
-Timeframe: 6h
+12h_1d_keltner_breakout_volume
+Strategy: 12h price action with 1d Keltner Channel confluence
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Trade in direction of weekly trend using price position relative to weekly Camarilla levels. 
-Go long when 6h close is above weekly R3 and weekly trend is up (weekly close > prior weekly close).
-Go short when 6h close is below weekly S3 and weekly trend is down (weekly close < prior weekly close).
-Exit when price returns to weekly pivot. Uses volume confirmation to avoid false breakouts.
-Designed to work in both bull and bear markets by following higher timeframe trend.
-Targets 12-37 trades per year to minimize fee drag.
+Hypothesis: Buy when 12h closes above upper Keltner Channel with volume confirmation and price above 200 EMA; sell when 12h closes below lower Keltner Channel with volume confirmation and price below 200 EMA. Uses 1d EMA200 as trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend. Low-frequency design targets 12-37 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_camarilla_trend_follow"
-timeframe = "6h"
+name = "12h_1d_keltner_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,52 +26,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load higher timeframe data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 10:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 6h ATR for volatility filter
+    # 12h ATR for Keltner Channel (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 1.5x 20-period average
+    # 12h EMA for center line (20-period)
+    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    
+    # 12h Keltner Channels
+    keltner_upper = ema_20 + (2.0 * atr_12h)
+    keltner_lower = ema_20 - (2.0 * atr_12h)
+    
+    # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === Weekly Close (trend filter: use prior week's close) ===
-    close_1w = df_1w['close'].values
-    # Trend: today's close > yesterday's close for uptrend, < for downtrend
-    # We'll use the 1w close shifted by 1 to represent "prior week close" for trend
-    close_1w_shifted = np.roll(close_1w, 1)
-    close_1w_shifted[0] = np.nan
-    close_1w_trend = align_htf_to_ltf(prices, df_1w, close_1w_shifted)
-    
-    # === Weekly Camarilla (entry levels from prior week) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Prior week's Camarilla levels (use shifted values to avoid look-ahead)
-    high_1w_shift = np.roll(high_1w, 1)
-    low_1w_shift = np.roll(low_1w, 1)
-    close_1w_shift = np.roll(close_1w, 1)
-    high_1w_shift[0] = np.nan
-    low_1w_shift[0] = np.nan
-    close_1w_shift[0] = np.nan
-    
-    pivot_1w = (high_1w_shift + low_1w_shift + close_1w_shift) / 3
-    range_1w = high_1w_shift - low_1w_shift
-    r3_1w = close_1w_shift + range_1w * 1.166
-    s3_1w = close_1w_shift - range_1w * 1.166
-    
-    # Align weekly Camarilla to 6h timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # === 1d EMA200 (trend filter) ===
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Session filter: 0-23 UTC (covers major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -87,9 +62,8 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(close_1w_trend[i]) or
-            np.isnan(atr_6h[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -98,22 +72,22 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: 6h volume must be elevated
+        # Volume confirmation: 12h volume must be elevated
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filter: price close vs prior week close (1w trend)
-        uptrend_1w = price_close > close_1w_trend[i]
-        downtrend_1w = price_close < close_1w_trend[i]
+        # Trend filter: price vs 1d EMA200
+        price_above_ema200 = price_close > ema_200_1d_aligned[i]
+        price_below_ema200 = price_close < ema_200_1d_aligned[i]
         
-        # Long conditions: 6h closes above prior week's R3 with volume + 1w uptrend
-        long_signal = volume_confirmed and (price_close > r3_1w_aligned[i]) and uptrend_1w
+        # Long conditions: 12h closes above upper Keltner with volume + price above 1d EMA200
+        long_signal = volume_confirmed and (price_close > keltner_upper[i]) and price_above_ema200
         
-        # Short conditions: 6h closes below prior week's S3 with volume + 1w downtrend
-        short_signal = volume_confirmed and (price_close < s3_1w_aligned[i]) and downtrend_1w
+        # Short conditions: 12h closes below lower Keltner with volume + price below 1d EMA200
+        short_signal = volume_confirmed and (price_close < keltner_lower[i]) and price_below_ema200
         
-        # Exit when price returns to the weekly pivot (mean reversion within prior week's range)
-        exit_long = position == 1 and price_close < pivot_1w_aligned[i]
-        exit_short = position == -1 and price_close > pivot_1w_aligned[i]
+        # Exit when price returns to the 12h EMA20 (mean reversion to middle)
+        exit_long = position == 1 and price_close < ema_20[i]
+        exit_short = position == -1 and price_close > ema_20[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -133,9 +107,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Trade in direction of weekly trend using price position relative to weekly Camarilla levels. 
-# Go long when 6h close is above weekly R3 and weekly trend is up (weekly close > prior weekly close).
-# Go short when 6h close is below weekly S3 and weekly trend is down (weekly close < prior weekly close).
-# Exit when price returns to weekly pivot. Uses volume confirmation to avoid false breakouts.
-# Designed to work in both bull and bear markets by following higher timeframe trend.
-# Targets 12-37 trades per year to minimize fee drag.
+# Hypothesis: Buy when 12h closes above upper Keltner Channel with volume confirmation and price above 200 EMA; sell when 12h closes below lower Keltner Channel with volume confirmation and price below 200 EMA. Uses 1d EMA200 as trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend. Low-frequency design targets 12-37 trades/year to minimize fee drag.
