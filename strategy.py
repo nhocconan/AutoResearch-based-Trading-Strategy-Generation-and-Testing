@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_channel_breakout"
-timeframe = "1d"
+name = "6h_1d_donchian_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,58 +21,43 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate weekly Keltner Channel (20-period EMA, 2.0 ATR multiplier)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # EMA 20
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Donchian upper/lower bands
+    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align daily Donchian to 6h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
-    # Keltner Bands
-    upper_keltner = ema_20 + 2.0 * atr
-    lower_keltner = ema_20 - 2.0 * atr
-    
-    # Align weekly Keltner to daily timeframe
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
-    
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ADX for trend strength (14-period)
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
+    # ATR for stop loss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (tr_14 + 1e-10)
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / (tr_14 + 1e-10)
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Filter: Avoid choppy markets - require ATR ratio > 0.6
+    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / (atr_ma_50 + 1e-10)
+    trending_market = atr_ratio > 0.6
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
-            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
             signals[i] = 0.0
             continue
         
@@ -80,55 +65,48 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        upper = upper_keltner_aligned[i]
-        lower = lower_keltner_aligned[i]
-        ema = ema_20_aligned[i]
-        adx_val = adx_aligned[i]
+        upper = upper_1d_aligned[i]
+        lower = lower_1d_aligned[i]
+        atr_val = atr[i]
+        trending = trending_market[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.8 * vol_ma_20[i]
+        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Trend filter: ADX > 25
-        trending = adx_val > 25
-        
-        # Entry signals
+        # Entry signals - only in trending markets to avoid whipsaws
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above weekly upper Keltner with volume and trend
+        # Long: price breaks above daily upper Donchian with volume and trending
         if price_high > upper and volume_confirmed and trending:
             long_signal = True
         
-        # Short: price breaks below weekly lower Keltner with volume and trend
+        # Short: price breaks below daily lower Donchian with volume and trending
         if price_low < lower and volume_confirmed and trending:
             short_signal = True
         
         # Exit conditions
-        # Exit when price returns to weekly EMA
-        exit_long = position == 1 and price_close < ema
-        exit_short = position == -1 and price_close > ema
+        # Calculate daily midpoint for exit
+        midpoint_1d = (upper_1d + lower_1d) / 2
+        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)[i]
         
-        # Stop loss: 2x ATR from entry
-        # Calculate weekly ATR aligned for stop loss
-        atr_1w = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-        atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-        if not np.isnan(atr_1w_aligned[i]):
-            atr_val = atr_1w_aligned[i]
-            stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
-            stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
-        else:
-            stop_long = False
-            stop_short = False
+        # Stop loss conditions
+        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
+        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
+        
+        # Exit to midpoint
+        exit_long = position == 1 and price_close < midpoint_aligned
+        exit_short = position == -1 and price_close > midpoint_aligned
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
             entry_price = price_close
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
             entry_price = price_close
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and (exit_long or stop_long):
             position = 0
             signals[i] = 0.0
@@ -137,13 +115,14 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Weekly Keltner Channel breakout strategy with volume confirmation and ADX trend filter.
-# Enters long when daily price breaks above weekly 20-period Keltner upper band (EMA20 + 2*ATR) with volume > 1.8x average and ADX > 25.
-# Enters short when price breaks below weekly lower Keltner band with same conditions.
-# Exits when price returns to weekly EMA(20) or 2x ATR stop loss is hit.
-# Designed for daily timeframe to target 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Donchian breakout strategy with volume confirmation and trend filter.
+# Enters long when price breaks above daily 20-period Donchian upper band with volume confirmation (>1.5x avg volume) in trending markets (ATR ratio > 0.6).
+# Enters short when price breaks below daily 20-period Donchian lower band with volume confirmation and trending.
+# Uses volume confirmation to ensure institutional participation and trend filter to avoid whipsaws in sideways markets.
+# Exits when price returns to daily Donchian midpoint or ATR stop loss (2x) is hit.
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
 # Works in both bull and bear markets by trading breakouts in either direction with trend filter.
