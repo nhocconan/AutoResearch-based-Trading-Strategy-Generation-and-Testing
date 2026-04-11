@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_keltner_channel_breakout_v4"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 250:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,76 +19,70 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate 1d Camarilla Pivot Levels (standard formula)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Keltner Channel
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot point and levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Typical price
+    tp_1w = (high_1w + low_1w + close_1w) / 3.0
     
-    # Camarilla levels
-    r1 = pivot + (range_1d * 1.1 / 12)
-    r2 = pivot + (range_1d * 1.1 / 6)
-    r3 = pivot + (range_1d * 1.1 / 4)
-    r4 = pivot + (range_1d * 1.1 / 2)
+    # EMA of typical price (20-period)
+    ema_tp = pd.Series(tp_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    s1 = pivot - (range_1d * 1.1 / 12)
-    s2 = pivot - (range_1d * 1.1 / 6)
-    s3 = pivot - (range_1d * 1.1 / 4)
-    s4 = pivot - (range_1d * 1.1 / 2)
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]
     
-    # Shift by 1 to use only completed 1d bars (no look-ahead)
-    pivot = np.roll(pivot, 1)
-    r1 = np.roll(r1, 1)
-    r2 = np.roll(r2, 1)
-    r3 = np.roll(r3, 1)
-    r4 = np.roll(r4, 1)
-    s1 = np.roll(s1, 1)
-    s2 = np.roll(s2, 1)
-    s3 = np.roll(s3, 1)
-    s4 = np.roll(s4, 1)
-    pivot[0] = np.nan
-    r1[0] = np.nan
-    r2[0] = np.nan
-    r3[0] = np.nan
-    r4[0] = np.nan
-    s1[0] = np.nan
-    s2[0] = np.nan
-    s3[0] = np.nan
-    s4[0] = np.nan
+    # ATR (10-period)
+    atr_1w = pd.Series(tr_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align 1d Camarilla levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Keltner Bands (2.0 multiplier)
+    upper_keltner = ema_tp + (2.0 * atr_1w)
+    lower_keltner = ema_tp - (2.0 * atr_1w)
+    
+    # Shift by 1 to use only completed weekly bars
+    upper_keltner = np.roll(upper_keltner, 1)
+    lower_keltner = np.roll(lower_keltner, 1)
+    upper_keltner[0] = np.nan
+    lower_keltner[0] = np.nan
+    
+    # Align weekly Keltner bands to daily timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
+    
+    # Bollinger Bands on daily for squeeze detection (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2.0 * std_20)
+    lower_bb = sma_20 - (2.0 * std_20)
+    
+    # Squeeze condition: BB width < Keltner width
+    bb_width = upper_bb - lower_bb
+    kc_width = upper_keltner_aligned - lower_keltner_aligned
+    squeeze = bb_width < kc_width
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Trend filter: 4h EMA(50) > EMA(200) for long, < for short
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_up = ema_50 > ema_200
-    trend_down = ema_50 < ema_200
+    # Middle Keltner line (EMA of typical price)
+    middle_keltner_aligned = align_htf_to_ltf(prices, df_1w, ema_tp)
     
-    for i in range(200, n):
+    for i in range(250, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(middle_keltner_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -101,22 +95,27 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Long: price breaks above S3 with volume and trend up
-        long_signal = volume_confirmed and trend_up[i] and price_high > s3_aligned[i]
+        # Squeeze breakout conditions
+        squeeze_active = squeeze[i]
         
-        # Short: price breaks below R3 with volume and trend down
-        short_signal = volume_confirmed and trend_down[i] and price_low < r3_aligned[i]
+        # Long: price breaks above upper Keltner during squeeze release with volume
+        long_signal = squeeze_active and price_high > upper_keltner_aligned[i] and volume_confirmed
         
-        # Exit when price returns to pivot level
-        exit_long = position == 1 and price_close < pivot_aligned[i]
-        exit_short = position == -1 and price_close > pivot_aligned[i]
+        # Short: price breaks below lower Keltner during squeeze release with volume
+        short_signal = squeeze_active and price_low < lower_keltner_aligned[i] and volume_confirmed
+        
+        # Exit when price returns to the middle of Keltner channel
+        exit_long = position == 1 and price_close < middle_keltner_aligned[i]
+        exit_short = position == -1 and price_close > middle_keltner_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
+            entry_price = price_close
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
+            entry_price = price_close
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
@@ -130,11 +129,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla pivot breakout strategy on 4h timeframe.
-# Uses 1d Camarilla levels (S3/R3) for entry and pivot for exit.
-# Enters long when price breaks above S3 with volume confirmation (>1.5x avg volume) and uptrend (EMA50 > EMA200).
-# Enters short when price breaks below R3 with volume confirmation and downtrend (EMA50 < EMA200).
-# Exits when price returns to the daily pivot level.
-# Works in both bull and bear markets by trading breaks of key daily levels with trend and volume filters.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Based on proven Camarilla patterns from top performers in the database.
+# Hypothesis: Daily Keltner squeeze breakout with weekly trend filter.
+# Uses weekly Keltner Channel to identify volatility contractions (squeeze) on daily timeframe.
+# Enters long when price breaks above upper weekly Keltner Band during squeeze release with volume confirmation (>1.5x avg volume).
+# Enters short when price breaks below lower weekly Keltner Band during squeeze release with volume confirmation.
+# Exits when price returns to the middle of the weekly Keltner Channel (EMA of typical price).
+# The squeeze condition (BB width < KC width) identifies low volatility periods primed for breakouts.
+# Weekly timeframe provides trend filter to avoid counter-trend whipsaws.
+# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drift.
+# Works in both bull and bear markets by trading breakouts in either direction with trend alignment.
