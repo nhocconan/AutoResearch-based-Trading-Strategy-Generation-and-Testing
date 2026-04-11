@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v7"
+name = "4h_1d_camarilla_breakout_volume_trend_v8"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -67,7 +67,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
@@ -100,10 +100,10 @@ def generate_signals(prices):
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -111,7 +111,7 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
@@ -121,5 +121,6 @@ def generate_signals(prices):
 # Exits when price returns to the daily pivot level (mean reversion within the day's range).
 # Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
 # Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
+# Reduced position size to 0.25 to lower risk and drawdown.
 # Target: 20-50 trades per year to minimize fee drift while capturing strong daily trends.
 # Camarilla pivots work well in both bull and bear markets as they adapt to daily volatility ranges.
