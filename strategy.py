@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R mean reversion with 1d trend filter and volume spike
-# - Williams %R(14) < -80 = oversold (long signal), > -20 = overbought (short signal)
-# - Only take longs in 1d uptrend (EMA50 > EMA200) and shorts in 1d downtrend (EMA50 < EMA200)
-# - Require volume > 2.0x 20-period average for confirmation (avoid chop)
-# - Exit when Williams %R crosses -50 (mean reversion completion) or ATR stop
-# - Discrete position sizing ±0.25 to limit drawdown and fee churn
-# - Target: 20-35 trades/year (80-140 total over 4 years) to avoid fee drag
-# - Williams %R is effective in both trending and ranging markets when combined with trend filter
-# - Volume spike ensures participation, avoiding false signals in low-volume environments
+# Hypothesis: 1d Williams Alligator + Elder Ray + Volume Spike
+# - Uses 1d timeframe with 1w HTF filter for major trend alignment
+# - Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend direction and strength
+# - Elder Ray (Bull Power/Bear Power) measures trend strength relative to EMA(13)
+# - Volume spike (>2x 20-period average) confirms institutional participation
+# - Long: Alligator bullish (Lips>Teeth>Jaw) + Bull Power>0 + Volume spike
+# - Short: Alligator bearish (Lips<Teeth<Jaw) + Bear Power<0 + Volume spike
+# - Exit: Alligator reverses (Lips crosses Jaw) or volume drops below average
+# - Discrete position sizing: ±0.30 to balance return and drawdown
+# - Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
+# - Works in bull markets via trend following and in bear markets via short signals
 
-name = "4h_1d_williamsr_trend_volume_v1"
-timeframe = "4h"
+name = "1d_1w_alligator_elder_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,41 +31,42 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
-    # Load 1d data ONCE before loop for trend filter (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for major trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Pre-compute 1d EMAs for trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Pre-compute 1w EMA(50) for major trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 1d EMAs to 4h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # Pre-compute 1d Williams Alligator
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars
+    # Teeth (Red): 8-period SMMA, shifted 5 bars  
+    # Lips (Green): 5-period SMMA, shifted 3 bars
+    # SMMA = Smoothed Moving Average (Wilder's smoothing)
+    jaw = pd.Series(close).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # shift 8 bars forward
+    teeth = pd.Series(close).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # shift 5 bars forward
+    lips = pd.Series(close).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # shift 3 bars forward
     
-    # Pre-compute 4h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Pre-compute 1d Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13  # Bull Power = High - EMA(13)
+    bear_power = low - ema_13   # Bear Power = Low - EMA(13)
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Pre-compute 1d volume confirmation
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute ATR for stoploss
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,26 +74,31 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Williams %R levels
-        wr = williams_r[i]
+        # Major trend filter: price above/below 1w EMA(50)
+        uptrend_1w = close_price > ema_50_1w_aligned[i]
+        downtrend_1w = close_price < ema_50_1w_aligned[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
+        # Alligator conditions
+        alligator_bullish = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_bearish = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
+        # Elder Ray conditions
+        bull_strong = bull_power[i] > 0
+        bear_strong = bear_power[i] < 0
+        
+        # Volume confirmation: current volume > 2x 20-period average
         vol_confirm = volume_current > 2.0 * volume_sma_20[i]
-        
-        # Trend filter: 1d EMA50 > EMA200 for uptrend, < for downtrend
-        uptrend = ema_50_aligned[i] > ema_200_aligned[i]
-        downtrend = ema_50_aligned[i] < ema_200_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: oversold + volume confirmation + uptrend
-        if wr < -80 and vol_confirm and uptrend:
+        # Long: Alligator bullish + Bull Power positive + Volume spike + 1w uptrend
+        if alligator_bullish and bull_strong and vol_confirm and uptrend_1w:
             enter_long = True
         
-        # Short: overbought + volume confirmation + downtrend
-        if wr > -20 and vol_confirm and downtrend:
+        # Short: Alligator bearish + Bear Power negative + Volume spike + 1w downtrend
+        if alligator_bearish and bear_strong and vol_confirm and downtrend_1w:
             enter_short = True
         
         # Exit conditions
@@ -98,11 +106,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long when Williams %R crosses above -50 (mean reversion) or ATR stop
-            exit_long = (wr > -50) or (close_price <= entry_price - 2.0 * atr_14[i])
+            # Exit long if Alligator turns bearish or volume drops
+            exit_long = (not alligator_bullish) or (not vol_confirm)
         elif position == -1:
-            # Exit short when Williams %R crosses below -50 (mean reversion) or ATR stop
-            exit_short = (wr < -50) or (close_price >= entry_price + 2.0 * atr_14[i])
+            # Exit short if Alligator turns bullish or volume drops
+            exit_short = (not alligator_bearish) or (not vol_confirm)
         
         # Track entry price for stoploss calculation
         if enter_long or enter_short:
@@ -111,10 +119,10 @@ def generate_signals(prices):
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -123,6 +131,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
