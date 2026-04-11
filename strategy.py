@@ -1,9 +1,15 @@
+# 4h_1d_camarilla_breakout_volume_trend_v4
+# Hypothesis: Camarilla H3/L3 breakout with volume confirmation and ADX trend filter.
+# Works in both bull and bear markets by capturing intraday momentum when price breaks key support/resistance levels
+# with institutional volume and strong trend confirmation. Tight filters (volume >2.5x average, ADX>40) reduce trades
+# to ~20-30 per year to minimize fee drag while maintaining edge in trending conditions.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v3"
+name = "4h_1d_camarilla_breakout_volume_trend_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,25 +37,17 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: H4 = close + range * 1.1/2, L4 = close - range * 1.1/2
-    camarilla_h4 = close_1d + range_1d * 1.1 / 2
-    camarilla_l4 = close_1d - range_1d * 1.1 / 2
+    # Camarilla levels: H3 = close + range * 1.1/4, L3 = close - range * 1.1/4
     camarilla_h3 = close_1d + range_1d * 1.1 / 4
     camarilla_l3 = close_1d - range_1d * 1.1 / 4
     
     # Shift by 1 to use only completed 1d bars (previous day's levels)
-    camarilla_h4 = np.roll(camarilla_h4, 1)
-    camarilla_l4 = np.roll(camarilla_l4, 1)
     camarilla_h3 = np.roll(camarilla_h3, 1)
     camarilla_l3 = np.roll(camarilla_l3, 1)
-    camarilla_h4[0] = np.nan
-    camarilla_l4[0] = np.nan
     camarilla_h3[0] = np.nan
     camarilla_l3[0] = np.nan
     
     # Align 1d Camarilla levels to 4h timeframe
-    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -80,7 +78,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_4h[i]) or np.isnan(l4_4h[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
             np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
