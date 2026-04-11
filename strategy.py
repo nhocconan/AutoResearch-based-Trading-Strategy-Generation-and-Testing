@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_volume_trend_v1
-# Strategy: 12-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_volume_trend_v3
+# Strategy: 4-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
 # Hypothesis: Uses daily Camarilla pivot levels (R4/S4 for breakouts, R3/S3 for rejections)
 # filtered by 1-day EMA50 trend and volume spikes. Designed to capture multi-day momentum
-# bursts while filtering counter-trend noise. Targets 15-35 trades per year.
+# bursts while filtering counter-trend noise. Targets 20-50 trades per year.
+# This version adds stricter volume confirmation (2.0x average) and requires trend alignment
+# for both entry and exit to reduce false signals and overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,12 +40,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla pivot levels for previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (H-L) * 1.1/2
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    # S4 = C - (H-L) * 1.1/2
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     r4_1d = close_1d + range_1d * 1.1 / 2.0
@@ -54,7 +50,7 @@ def generate_signals(prices):
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d data to 12h timeframe (wait for daily close)
+    # Align 1d data to 4h timeframe (wait for daily close)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
@@ -64,7 +60,7 @@ def generate_signals(prices):
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (2.0 * vol_avg)  # Stricter volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
