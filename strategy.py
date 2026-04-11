@@ -1,15 +1,23 @@
+# 12h_1d_camarilla_breakout_volume_v4
+# 12-hour timeframe using daily Camarilla pivot levels with volume confirmation.
+# Enters on breakouts beyond R4/S4 levels with volume > 2x 20-period average.
+# Exits on return to S3/R3 levels.
+# Designed for fewer trades (target: 12-37/year) to minimize fee drag on 12h chart.
+# Works in bull/bear markets by capturing significant breakouts in either direction.
+# Uses 12h timeframe to reduce noise and increase signal quality.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_reverse_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v4"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,7 +30,7 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return signals
     
     # Calculate Camarilla pivot levels from daily data
@@ -31,25 +39,28 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
+    # Key levels: R4 = close + (range * 1.1/2), S4 = close - (range * 1.1/2)
+    # Exit levels: R3 = close + (range * 1.1/4), S3 = close - (range * 1.1/4)
     daily_range = high_1d - low_1d
-    
-    # Key levels for reversal: R3 and S3
+    r4 = close_1d + (daily_range * 1.1 / 2)
+    s4 = close_1d - (daily_range * 1.1 / 2)
     r3 = close_1d + (daily_range * 1.1 / 4)
     s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Volume confirmation: 4h volume > 2.0x 100-period average (tight filter for fewer trades)
-    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    # Volume confirmation: 12h volume > 2x 20-period average (higher threshold for fewer trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_100[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -57,29 +68,27 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.0 * vol_ma_100[i]
+        vol_confirm = volume_current > 2.0 * vol_ma_20[i]
         
-        # Reversal conditions at S3 and R3
-        # Long when price touches S3 with volume confirmation (potential bounce)
-        touch_s3 = abs(price_close - s3_aligned[i]) < (0.002 * price_close)  # Within 0.2% of S3
-        # Short when price touches R3 with volume confirmation (potential rejection)
-        touch_r3 = abs(price_close - r3_aligned[i]) < (0.002 * price_close)  # Within 0.2% of R3
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > r4_aligned[i]   # Break above R4
+        breakout_down = price_close < s4_aligned[i] # Break below S4
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Touch S3 with volume confirmation (bounce from support)
-        if touch_s3 and vol_confirm:
+        # Long: Break above R4 with volume confirmation
+        if breakout_up and vol_confirm:
             enter_long = True
         
-        # Short: Touch R3 with volume confirmation (rejection at resistance)
-        if touch_r3 and vol_confirm:
+        # Short: Break below S4 with volume confirmation
+        if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: move to opposite S3/R3 levels
-        exit_long = price_close > r3_aligned[i]  # Move to R3 level
-        exit_short = price_close < s3_aligned[i]  # Move to S3 level
+        # Exit conditions: return to opposite S3/R3 levels
+        exit_long = price_close < s3_aligned[i]  # Return to S3 level
+        exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
         # Trading logic
         if enter_long and position != 1:
@@ -100,11 +109,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla reversal strategy using daily S3/R3 levels with volume confirmation.
-# Enters long when price touches S3 (daily support) with volume > 2.0x 100-period average (bounce play).
-# Enters short when price touches R3 (daily resistance) with volume > 2.0x 100-period average (rejection play).
-# Exits when price reaches the opposite level (S3->R3 or R3->S3).
-# Uses tight tolerance (0.2%) and high volume threshold (2.0x) to reduce trade frequency.
+# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 2x 20-period average.
+# Enters short when price breaks below S4 with volume > 2x 20-period average.
+# Exits when price returns to S3/R3 levels respectively.
+# Uses higher volume threshold (2.0x) and shorter MA (20) to reduce trade frequency.
 # Position size set to 0.25 to manage risk.
-# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by capturing reversals at key daily levels.
+# Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag on 12h chart.
+# Works in both bull and bear markets by capturing significant breakouts in either direction.
