@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1d_donchian_breakout_volume_v1
-Strategy: 6h Donchian(20) breakout with volume confirmation and 1d trend filter
-Timeframe: 6h
+4h_12h_camarilla_breakout_volume_v1
+Strategy: 4h Camarilla pivot breakout with volume confirmation and 12h trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Uses 6h Donchian channel breakouts for entry, filtered by 1d EMA50 trend and volume confirmation (>1.5x average volume). Designed to capture strong trending moves while avoiding false breakouts in chop. Uses daily trend for direction and 6h only for timing. Target: 50-150 total trades over 4 years.
+Hypothesis: Uses 4h Camarilla pivot levels for breakout entries with volume confirmation (>1.5x average volume) filtered by 12h EMA50 trend. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Targets 20-40 trades per year (80-160 over 4 years) to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,70 +27,73 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 6-period ATR for Donchian band width (used in volatility filter)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[tr1[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=6, min_periods=6).mean().values
+    # 4h EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 6-period moving average of true range for volatility filter
-    atr_ma = pd.Series(atr).rolling(window=24, min_periods=24).mean().values
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)  # Volume > 1.5x average
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels from previous day's data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume average (24-period)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume confirmation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_cama = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or
-            np.isnan(atr[i]) or np.isnan(atr_ma[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(camarilla_H4_aligned[i]) or 
+            np.isnan(camarilla_L4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Volatility filter: only trade when volatility is expanding
-        vol_expanding = atr[i] > atr_ma[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = price_close > ema_50_12h_aligned[i]
+        downtrend = price_close < ema_50_12h_aligned[i]
         
-        # Trend filters: price above/below 1d EMA50
-        uptrend = price_close > ema_50_1d_aligned[i]
-        downtrend = price_close < ema_50_1d_aligned[i]
-        
-        # Breakout conditions using Donchian channels
-        breakout_up = price_close > donchian_high[i]
-        breakout_down = price_close < donchian_low[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > camarilla_H4_aligned[i]
+        breakout_down = price_close < camarilla_L4_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: upward breakout with volume in uptrend and expanding volatility
-        long_signal = breakout_up and vol_confirmed and uptrend and vol_expanding
+        # Long: upward breakout with volume in uptrend
+        long_signal = breakout_up and vol_confirmed and uptrend
         
-        # Short: downward breakout with volume in downtrend and expanding volatility
-        short_signal = breakout_down and vol_confirmed and downtrend and vol_expanding
+        # Short: downward breakout with volume in downtrend
+        short_signal = breakout_down and vol_confirmed and downtrend
         
-        # Exit when price returns to the opposite Donchian level or volatility contracts
-        exit_long = position == 1 and (price_close < donchian_low[i] or not vol_expanding)
-        exit_short = position == -1 and (price_close > donchian_high[i] or not vol_expanding)
+        # Exit when price returns to the 4h EMA20 or opposite Camarilla level
+        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
+        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
