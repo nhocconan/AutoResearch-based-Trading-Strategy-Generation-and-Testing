@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 1d_1w_kama_rsi_volume_v1
-# Strategy: 1d KAMA trend direction + RSI + volume confirmation
-# Timeframe: 1d
+# 12h_1d_cci_volatility_breakout_v1
+# Strategy: 12h CCI breakout with volatility filter and 1d trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction.
-# In trending markets, KAMA follows price with less lag than traditional MAs.
-# Combine with RSI for momentum confirmation and volume to filter weak moves.
-# Designed for very low frequency (<10 trades/year) to minimize fee decay in both bull and bear markets.
+# Hypothesis: CCI identifies overbought/oversold conditions. Breakouts above +100 or below -100
+# signal strong momentum. Combined with volatility filter (low ATR ratio) to avoid false breakouts
+# and 1d EMA50 trend filter to align with higher timeframe trend. Designed for low frequency
+# (15-25 trades/year) to minimize fee drag in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_volume_v1"
-timeframe = "1d"
+name = "12h_1d_cci_volatility_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,86 +27,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA(20) for trend filter (slower trend)
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # KAMA calculation (adaptive moving average)
-    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    # Avoid division by zero - add small epsilon
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else 1
-    # Proper ER calculation using rolling window
-    change_series = pd.Series(change)
-    volatility_series = pd.Series(np.abs(np.diff(close, prepend=close[0])))
-    er = change_series.rolling(window=10, min_periods=1).sum() / \
-         volatility_series.rolling(window=10, min_periods=1).sum().replace(0, 1e-10)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[9] = close[:10].mean()  # Start after first 10 periods
-    for i in range(10, n):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # ATR for volatility filter (14-period)
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # RSI calculation
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # ATR ratio: current ATR / 50-period average ATR (low volatility filter)
+    atr_series = pd.Series(atr)
+    atr_avg_50 = atr_series.rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / atr_avg_50  # < 1 = low volatility, > 1 = high volatility
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
+    # CCI calculation: (Typical Price - SMA) / (0.015 * Mean Deviation)
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
+    sma_20 = tp_series.rolling(window=20, min_periods=20).mean()
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp_series - sma_20) / (0.015 * mad)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi.iloc[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cci.iloc[i]) or 
+            np.isnan(atr_ratio[i]) or np.isnan(atr_avg_50[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filters: price above/below KAMA and 1w EMA20
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        price_above_1w_ema = close[i] > ema_20_1w_aligned[i]
-        price_below_1w_ema = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: strong momentum + volume + trend alignment
-        if (rsi.iloc[i] > 60 and  # Strong bullish momentum
-            price_above_kama and price_above_1w_ema and vol_confirm[i] and position != 1):
+        # Volatility filter: low volatility environment (ATR ratio < 0.8)
+        vol_filter = atr_ratio[i] < 0.8
+        
+        # Entry logic: CCI breakout + volatility filter + trend alignment
+        if (cci.iloc[i] > 100 and  # Strong uptrend breakout
+            vol_filter and uptrend and position != 1):
             position = 1
-            signals[i] = 0.20
-        elif (rsi.iloc[i] < 40 and  # Strong bearish momentum
-              price_below_kama and price_below_1w_ema and vol_confirm[i] and position != -1):
+            signals[i] = 0.25
+        elif (cci.iloc[i] < -100 and  # Strong downtrend breakout
+              vol_filter and downtrend and position != -1):
             position = -1
-            signals[i] = -0.20
-        # Exit: momentum weakening or trend change
-        elif position == 1 and (rsi.iloc[i] < 50 or not price_above_kama):
+            signals[i] = -0.25
+        # Exit: CCI returns to neutral zone or trend change or high volatility
+        elif position == 1 and (cci.iloc[i] <= 0 or not uptrend or not vol_filter):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi.iloc[i] > 50 or not price_below_kama):
+        elif position == -1 and (cci.iloc[i] >= 0 or not downtrend or not vol_filter):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
