@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-12h_1w_camarilla_volume
-Strategy: 12h breakout with 1-week volume confirmation and 1-day volatility filter
-Timeframe: 12h
+1d_1w_kama_rsi_chop
+Strategy: 1-day KAMA direction + RSI filter + weekly chop regime filter
+Timeframe: 1d
 Leverage: 1.0
-Hypothesis: Uses 1-week volume expansion (2.0x 10-period average) and 1-day low volatility regime (ATR ratio < 0.6) to filter 12h Camarilla breakouts. Designed for low trade frequency (<30/year) to minimize fee drag while capturing momentum in both bull and bear markets via volatility contraction/expansion cycles. Target: 12-25 trades/year.
+Hypothesis: Uses Kaufman's Adaptive Moving Average (KAMA) to identify adaptive trend direction,
+combined with RSI for momentum confirmation and weekly Choppiness Index to filter ranging markets.
+Designed for low trade frequency (<25/year) to minimize fee decay while capturing trends in
+both bull and bear markets via adaptive trend following. Target: 15-20 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_volume"
-timeframe = "12h"
+name = "1d_1w_kama_rsi_chop"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -25,113 +28,98 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Load higher timeframe data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 10 or len(df_1d) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 12h ATR for context
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === 1-day KAMA (adaptive trend) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 12h volume filter: volume > 2.0x 10-period average
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # === 1-day RSI (momentum) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === 1-week volume (expansion filter) ===
-    vol_1w = df_1w['volume'].values
-    vol_ma_10_1w = pd.Series(vol_1w).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_1w = vol_1w / vol_ma_10_1w
-    vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
+    # === 1-week Choppiness Index (regime filter) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 1-day ATR (volatility filter: low volatility regime) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 1-day ATR
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # ATR(14)
+    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
+    # Sum of TR over 14 periods
+    sum_tr_14 = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
     
-    # 1-day ATR ratio: current ATR / 20-period average ATR (low when < 0.6)
-    atr_ma_20_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio_1d = atr_1d / atr_ma_20_1d
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # Chop = 100 * log10(sum_tr_14 / (hh_14 - ll_14)) / log10(14)
+    # Avoid division by zero and log of zero
+    range_14 = hh_14 - ll_14
+    chop = np.where((range_14 > 0) & (sum_tr_14 > 0),
+                    100 * np.log10(sum_tr_14 / range_14) / np.log10(14),
+                    50)  # neutral when undefined
     
-    # === 1-day Close (prior close for context) ===
-    close_1d_shifted = np.roll(close_1d, 1)
-    close_1d_shifted[0] = np.nan
-    close_1d_prior = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
-    
-    # === 1-day Camarilla (entry levels from prior 1-day) ===
-    high_1d_shift = np.roll(high_1d, 1)
-    low_1d_shift = np.roll(low_1d, 1)
-    close_1d_shift = np.roll(close_1d, 1)
-    high_1d_shift[0] = np.nan
-    low_1d_shift[0] = np.nan
-    close_1d_shift[0] = np.nan
-    
-    pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
-    range_1d = high_1d_shift - low_1d_shift
-    r3_1d = close_1d_shift + range_1d * 1.166
-    s3_1d = close_1d_shift - range_1d * 1.166
-    
-    # Align 1-day Camarilla to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # Session filter: 08-20 UTC (major sessions)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(close_1d_prior[i]) or np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(vol_ratio_1w_aligned[i]) or np.isnan(vol_ma_10[i]) or
-            not in_session[i]):
+    for i in range(30, n):
+        # Skip if any required data is invalid
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        price_open = open_price[i]
-        volume_current = volume[i]
-        vol_ma = vol_ma_10[i]
         
-        # Volume confirmation: 12h volume must be expanded (2.0x 10-period average)
-        volume_expanded = volume_current > 2.0 * vol_ma
+        # Trend direction: price relative to KAMA
+        above_kama = price_close > kama[i]
+        below_kama = price_close < kama[i]
         
-        # 1-week volume expansion filter: current week volume > 2.0x 10-week average
-        week_volume_expanded = vol_ratio_1w_aligned[i] > 2.0
+        # RSI filters: avoid extremes, look for momentum
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
-        # Volatility filter: low volatility regime (1-day ATR ratio < 0.6)
-        low_volatility = atr_ratio_1d_aligned[i] < 0.6
+        # Chop filter: trending market (Chop < 38.2) OR ranging market (Chop > 61.8)
+        # We'll use trending filter for momentum entries
+        trending_market = chop_aligned[i] < 38.2
         
-        # Strong candle: close > open for longs, close < open for shorts
-        strong_bullish = price_close > price_open
-        strong_bearish = price_close < price_open
+        # Long conditions: price above KAMA + RSI bullish + trending market
+        long_signal = above_kama and rsi_bullish and trending_market
         
-        # Long conditions: 12h closes above prior 1-day's R3 with volume expansion + low volatility + strong bullish candle + weekly volume expansion
-        long_signal = volume_expanded and week_volume_expanded and low_volatility and strong_bullish and (price_close > r3_1d_aligned[i])
+        # Short conditions: price below KAMA + RSI bearish + trending market
+        short_signal = below_kama and rsi_bearish and trending_market
         
-        # Short conditions: 12h closes below prior 1-day's S3 with volume expansion + low volatility + strong bearish candle + weekly volume expansion
-        short_signal = volume_expanded and week_volume_expanded and low_volatility and strong_bearish and (price_close < s3_1d_aligned[i])
-        
-        # Exit when price returns to the 1-day pivot (mean reversion within prior 1-day's range)
-        exit_long = position == 1 and price_close < pivot_1d_aligned[i]
-        exit_short = position == -1 and price_close > pivot_1d_aligned[i]
+        # Exit when price crosses KAMA in opposite direction
+        exit_long = position == 1 and below_kama
+        exit_short = position == -1 and above_kama
         
         # Trading logic
         if long_signal and position != 1:
@@ -150,5 +138,3 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
-
-# Hypothesis: Uses 1-week volume expansion (2.0x 10-period average) and 1-day low volatility regime (ATR ratio < 0.6) to filter 12h Camarilla breakouts. Designed for low trade frequency (<30/year) to minimize fee drag while capturing momentum in both bull and bear markets via volatility contraction/expansion cycles. Target: 12-25 trades/year.
