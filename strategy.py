@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_donchian_breakout_v1
-# Strategy: 12h Donchian(20) breakout with 1d volume confirmation and RSI filter
-# Timeframe: 12h
+# 1d_1w_camarilla_pivot_volume_v1
+# Strategy: 1d Camarilla pivot levels (S3/S4 and R3/R4) with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture breakout momentum. Volume confirmation ensures institutional
-# participation. RSI filter avoids overbought/oversold extremes. Designed for low trade frequency (~15-30/year)
-# to minimize fee drag. Works in bull markets via upside breakouts and bear markets via downside breakdowns.
-# Uses 1d volume average and RSI for confirmation to reduce false signals.
+# Hypothesis: Camarilla pivot levels act as strong support/resistance. Long near S3/S4 with weekly uptrend,
+# short near R3/R4 with weekly downtrend. Volume confirmation filters false breaks. Designed for low trade frequency (~10-25/year) to minimize fee drift.
+# Works in bull markets via buying dips at support and bear markets via selling rallies at resistance.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,67 +26,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 12h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 12h RSI(14) for filter
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily high, low, close for Camarilla calculation
+    high_1d = df_1w['high'].values
+    low_1d = df_1w['low'].values
+    close_1d = df_1w['close'].values
     
-    # 1d volume average (20-period) for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Calculate Camarilla levels for previous weekly bar
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.0 * (high - low)
+    # S3 = close - 1.0 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    hl_range = high_1d - low_1d
+    r4 = close_1d + 1.5 * hl_range
+    r3 = close_1d + 1.0 * hl_range
+    s3 = close_1d - 1.0 * hl_range
+    s4 = close_1d - 1.5 * hl_range
     
-    # Align raw 1d volume for confirmation
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Align Camarilla levels to daily timeframe (previous weekly bar's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    
+    # Daily volume confirmation: volume > 1.5x 20-day average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_avg_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(rsi[i]) or \
-           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
+        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or \
+           np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.3 * vol_avg_20_1d_aligned[i]
+        # Weekly trend: close > EMA20 = uptrend, close < EMA20 = downtrend
+        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # RSI filter: avoid extremes (30 < RSI < 70)
-        rsi_filter = (rsi[i] > 30) & (rsi[i] < 70)
-        
-        # Breakout conditions
-        breakout_up = close[i] > high_20[i-1]  # break above prior 20-period high
-        breakdown_down = close[i] < low_20[i-1]  # break below prior 20-period low
-        
-        # Entry conditions
-        # Long: upward breakout AND volume confirmation AND RSI filter
-        if breakout_up and vol_confirm and rsi_filter and position != 1:
-            position = 1
-            signals[i] = 0.25
-        # Short: downward breakdown AND volume confirmation AND RSI filter
-        elif breakdown_down and vol_confirm and rsi_filter and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Exit: opposite breakout (trend reversal)
-        elif position == 1 and breakdown_down:
+        # Entry conditions with Camarilla levels
+        # Long: price crosses above S3/S4 with weekly uptrend and volume confirmation
+        if weekly_uptrend and vol_confirm[i] and position != 1:
+            if close[i] > s3_aligned[i] or close[i] > s4_aligned[i]:
+                position = 1
+                signals[i] = 0.25
+        # Short: price crosses below R3/R4 with weekly downtrend and volume confirmation
+        elif weekly_downtrend and vol_confirm[i] and position != -1:
+            if close[i] < r3_aligned[i] or close[i] < r4_aligned[i]:
+                position = -1
+                signals[i] = -0.25
+        # Exit: weekly trend reversal
+        elif position == 1 and weekly_downtrend:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and breakout_up:
+        elif position == -1 and weekly_uptrend:
             position = 0
             signals[i] = 0.0
         else:
