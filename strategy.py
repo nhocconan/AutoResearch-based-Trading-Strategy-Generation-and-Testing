@@ -1,79 +1,99 @@
 #!/usr/bin/env python3
-# 4h_1d_ema_rsi_v1
-# Strategy: 4h EMA crossover with 1d RSI filter
-# Timeframe: 4h
+# 1d_1w_camarilla_breakout_volume_v1
+# Strategy: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: EMA crossover (21/55) captures trends, while 1d RSI (40/60) filters out counter-trend entries. This reduces false signals and improves win rate. Designed for low trade frequency (~25-40/year) to avoid fee drag. Works in bull/bear via trend alignment.
+# Hypothesis: Camarilla pivot levels on daily chart act as strong support/resistance.
+# Breakouts with weekly EMA trend alignment and volume capture significant moves.
+# Designed for low trade frequency (~10-25/year) to avoid fee drag and work in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ema_rsi_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 60:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d RSI(14) for trend filter
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_values = rsi_14.values
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_values)
+    # Calculate Camarilla levels from previous 1d bar
+    # Using close of previous day as base
+    prev_close = close[np.roll(np.arange(n), 1)]  # Previous day's close
+    prev_close[0] = np.nan  # First day has no previous
+    prev_high = high[np.roll(np.arange(n), 1)]    # Previous day's high
+    prev_high[0] = np.nan
+    prev_low = low[np.roll(np.arange(n), 1)]      # Previous day's low
+    prev_low[0] = np.nan
     
-    # 4h EMA21 and EMA55
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # Camarilla levels: H3, L3 (primary levels for breakout)
+    # Range = prev_high - prev_low
+    # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    
+    rng = prev_high - prev_low
+    H3 = prev_close + 1.1 * rng / 4
+    L3 = prev_close - 1.1 * rng / 4
+    
+    # 20-period EMA on weekly for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(55, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_21[i]) or np.isnan(ema_55[i]) or 
-            np.isnan(rsi_14_aligned[i])):
+        if (np.isnan(H3[i]) or np.isnan(L3[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # EMA crossover signals
-        ema_cross_up = ema_21[i] > ema_55[i] and ema_21[i-1] <= ema_55[i-1]
-        ema_cross_down = ema_21[i] < ema_55[i] and ema_21[i-1] >= ema_55[i-1]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # 1d RSI filter: RSI > 50 = bullish bias, RSI < 50 = bearish bias
-        rsi_bullish = rsi_14_aligned[i] > 50
-        rsi_bearish = rsi_14_aligned[i] < 50
+        # Breakout signals using Camarilla levels
+        # Breakout above H3 (strong resistance)
+        breakout_up = high[i] > H3[i-1]
+        # Breakdown below L3 (strong support)
+        breakdown_down = low[i] < L3[i-1]
+        
+        # Weekly EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_20_1w_aligned[i]
+        trend_bearish = close[i] < ema_20_1w_aligned[i]
         
         # Entry conditions
-        # Long: EMA21 crosses above EMA55 AND RSI > 50
-        if ema_cross_up and rsi_bullish and position != 1:
+        # Long: Breakout above H3 AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: EMA21 crosses below EMA55 AND RSI < 50
-        elif ema_cross_down and rsi_bearish and position != -1:
+        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite EMA crossover
-        elif position == 1 and ema_cross_down:
+        # Exit: Opposite breakout using H3/L3 levels (reverse the breakout)
+        elif position == 1 and low[i] < L3[i-1]:  # Break back below L3
             position = 0
             signals[i] = 0.0
-        elif position == -1 and ema_cross_up:
+        elif position == -1 and high[i] > H3[i-1]:  # Break back above H3
             position = 0
             signals[i] = 0.0
         else:
