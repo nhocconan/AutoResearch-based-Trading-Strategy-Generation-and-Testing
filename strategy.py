@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-# 4h_1d_ichimoku_cloud_breakout_v1
-# Strategy: 4h Ichimoku Cloud Breakout with 1d Trend Filter and Volume Confirmation
+# 4h_1d_camarilla_breakout_v1
+# Strategy: 4h Camarilla pivot breakout with 1d volume confirmation and volatility filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Ichimoku Cloud (Kumo) acts as dynamic support/resistance. Price breaking above/below the cloud with 1d trend alignment and volume surge captures strong momentum moves. Works in bull markets (breakouts above cloud) and bear markets (breakdowns below cloud) by filtering with higher timeframe trend and avoiding false signals in choppy conditions via volume confirmation.
+# Hypothesis: Camarilla pivot levels (H4, L4, H3, L3) act as key support/resistance. 
+# Breakouts above H4 or below L4 with 1d volume > 2x average and ATR > 0.015 (avoiding low volatility) 
+# capture institutional moves. Works in both bull and bear markets by trading breakouts in the direction 
+# of volatility expansion, avoiding false signals in low-volatility chop.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ichimoku_cloud_breakout_v1"
+name = "4h_1d_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,68 +30,77 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 52:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
+    # Calculate 1d ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]
+    tr2[0] = high_1d[0]
+    tr3[0] = low_1d[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Ichimoku Cloud components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = (high_9 + low_9) / 2
+    # 1d average volume for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = (high_26 + low_26) / 2
+    # Calculate 4h Camarilla pivot levels from previous day
+    # Camarilla: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    #            H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+    # We use previous day's OHLC to avoid look-ahead
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # first bar uses current
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = ((tenkan + kijun) / 2).shift(26)  # Shifted 26 periods ahead
+    camarilla_height = 1.5 * (prev_high - prev_low)
+    camarilla_h4 = prev_close + camarilla_height
+    camarilla_l4 = prev_close - camarilla_height
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((high_52 + low_52) / 2).shift(26)  # Shifted 26 periods ahead
-    
-    # Current Kumo (Cloud) boundaries: use previously shifted values
-    upper_cloud = np.maximum(senkou_a, senkou_b)
-    lower_cloud = np.minimum(senkou_a, senkou_b)
-    
-    # Volume confirmation: volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_ratio = pd.Series(volume) / vol_ma
+    # Align 1d indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_cloud[i]) or 
-            np.isnan(lower_cloud[i]) or np.isnan(vol_ratio.iloc[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 2x average
-        vol_confirmed = vol_ratio.iloc[i] > 2.0
+        # Volume confirmation: current 4h volume > 2x 1d average volume
+        vol_confirmed = volume[i] > (2.0 * vol_avg_1d_aligned[i])
+        
+        # Volatility filter: 1d ATR > 0.015 (1.5%) to avoid low volatility chop
+        vol_filter = atr_1d_aligned[i] > 0.015
         
         # Entry conditions
-        # Long: Price breaks above upper cloud + price above 1d EMA50 (uptrend) + volume confirmation
-        if vol_confirmed and close[i] > upper_cloud[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Long: Close > H4 + volume confirmation + volatility filter
+        if vol_confirmed and vol_filter and close[i] > camarilla_h4_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price breaks below lower cloud + price below 1d EMA50 (downtrend) + volume confirmation
-        elif vol_confirmed and close[i] < lower_cloud[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
+        # Short: Close < L4 + volume confirmation + volatility filter
+        elif vol_confirmed and vol_filter and close[i] < camarilla_l4_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price re-enters the cloud or trend reversal
-        elif position == 1 and (close[i] < upper_cloud[i] or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: reversal signal or volatility collapse
+        elif position == 1 and (close[i] < camarilla_l4_aligned[i] or atr_1d_aligned[i] < 0.01):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > lower_cloud[i] or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > camarilla_h4_aligned[i] or atr_1d_aligned[i] < 0.01):
             position = 0
             signals[i] = 0.0
         else:
