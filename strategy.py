@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_volume_crsi_v1
-# Strategy: 12h Camarilla pivot breakout with volume confirmation and CRSI mean reversion filter
-# Timeframe: 12h
+# 4h_1d_rvol_breakout_v1
+# Strategy: 4h RVOL-based breakout with 1-day trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels on 1d provide strong support/resistance. Breakouts with volume confirmation
-# indicate institutional interest. CRSI(3,2,100) < 15 filters for oversold conditions in uptrends and > 85 for
-# overbought in downtrends, improving win rate by avoiding false breakouts. Works in both bull (breakouts) and
-# bear (mean reversion at pivots) markets. Target: 15-25 trades/year.
+# Hypothesis: Combines relative volume (RVOL) spikes with price breaking 20-period high/low
+# and 1-day EMA50 trend filter to capture momentum bursts in both bull and bear markets.
+# RVOL > 2.0 indicates institutional interest; breakout confirms direction; EMA50 filter
+# avoids counter-trend trades. Designed for low frequency (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_volume_crsi_v1"
-timeframe = "12h"
+name = "4h_1d_rvol_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,84 +30,59 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla formula: Close + (High-Low) * multiplier
-    # Key levels: H3/L3, H4/L4
-    camarilla_h4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_l4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # 20-period high/low for breakout detection
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
+    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # CRSI calculation: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
-    # RSI(3)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/3, adjust=False, min_periods=3).mean()
-    avg_loss = loss.ewm(alpha=1/3, adjust=False, min_periods=3).mean()
-    rs = avg_gain / avg_loss
-    rsi3 = 100 - (100 / (1 + rs))
-    
-    # Streak RSI (2-period)
-    up_days = (delta > 0).astype(int)
-    down_days = (delta < 0).astype(int)
-    streak_up = up_days * (up_days.groupby((up_days == 0).cumsum()).cumcount() + 1)
-    streak_down = down_days * (down_days.groupby((down_days == 0).cumsum()).cumcount() + 1)
-    streak_rsi_raw = streak_up - streak_down
-    streak_rsi = pd.Series(streak_rsi_raw).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    streak_rsi = 100 * (streak_rsi + 1) / 2  # Scale to 0-100
-    
-    # Percent Rank (100-period)
-    rank = pd.Series(close).rolling(window=100, min_periods=100).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    )
-    
-    crsi = (rsi3 + streak_rsi + rank) / 3
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume average for RVOL calculation
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after sufficient data
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or 
-            np.isnan(crsi.iloc[i]) if hasattr(crsi, 'iloc') else np.isnan(crsi[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or 
+            np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Get current CRSI value
-        crsi_val = crsi.iloc[i] if hasattr(crsi, 'iloc') else crsi[i]
+        # RVOL: current volume / 20-period average volume
+        rvol = volume[i] / vol_avg_20[i] if vol_avg_20[i] > 0 else 0
         
-        # Long signal: price breaks above H3/H4 with volume and CRSI not overbought
-        if (close[i] > h3_12h[i] and vol_confirm[i] and crsi_val < 85 and position != 1):
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = high[i] > highest_20[i-1]  # Current high exceeds prior 20-period high
+        breakout_down = low[i] < lowest_20[i-1]  # Current low exceeds prior 20-period low
+        
+        # Entry logic: RVOL spike + breakout + trend alignment
+        if (rvol > 2.0 and breakout_up and uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L3/L4 with volume and CRSI not oversold
-        elif (close[i] < l3_12h[i] and vol_confirm[i] and crsi_val > 15 and position != -1):
+        elif (rvol > 2.0 and breakout_down and downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to median level or CRSI extreme
-        elif position == 1 and (close[i] < (h3_12h[i] + l3_12h[i]) / 2 or crsi_val > 90):
+        # Exit: trend reversal or RVOL normalization
+        elif position == 1 and (not uptrend or rvol < 1.2):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > (h3_12h[i] + l3_12h[i]) / 2 or crsi_val < 10):
+        elif position == -1 and (not downtrend or rvol < 1.2):
             position = 0
             signals[i] = 0.0
         else:
