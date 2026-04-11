@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v20"
+name = "4h_1d_camarilla_breakout_volume_v21"
 timeframe = "4h"
 leverage = 1.0
 
@@ -65,12 +65,18 @@ def generate_signals(prices):
     # Price momentum filter: close above/below 20-period SMA on 4h
     close_sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
     
+    # Track consecutive triggers to prevent whipsaw
+    consecutive_long_trigger = 0
+    consecutive_short_trigger = 0
+    
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
             np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i]) or
             np.isnan(close_sma_20[i])):
             signals[i] = 0.0
+            consecutive_long_trigger = 0
+            consecutive_short_trigger = 0
             continue
         
         price_close = close[i]
@@ -86,17 +92,29 @@ def generate_signals(prices):
         mom_filter_long = price_close > close_sma_20[i]
         mom_filter_short = price_close < close_sma_20[i]
         
-        # Entry conditions
+        # Entry conditions with consecutive trigger requirement
         enter_long = False
         enter_short = False
         
         # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime + momentum filter
-        if price_close > camarilla_H4_aligned[i] and vol_confirm and vol_regime and mom_filter_long:
-            enter_long = True
+        price_above_H4 = price_close > camarilla_H4_aligned[i]
+        if price_above_H4 and vol_confirm and vol_regime and mom_filter_long:
+            consecutive_long_trigger += 1
+            consecutive_short_trigger = 0
+            if consecutive_long_trigger >= 2:  # Require 2 consecutive triggers
+                enter_long = True
+        else:
+            consecutive_long_trigger = 0
         
         # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime + momentum filter
-        if price_close < camarilla_L4_aligned[i] and vol_confirm and vol_regime and mom_filter_short:
-            enter_short = True
+        price_below_L4 = price_close < camarilla_L4_aligned[i]
+        if price_below_L4 and vol_confirm and vol_regime and mom_filter_short:
+            consecutive_short_trigger += 1
+            consecutive_long_trigger = 0
+            if consecutive_short_trigger >= 2:  # Require 2 consecutive triggers
+                enter_short = True
+        else:
+            consecutive_short_trigger = 0
         
         # Exit conditions: price crosses back through the Camarilla mid-point (C level)
         exit_long = False
