@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_donchian_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,25 +23,20 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate daily Camarilla pivots
+    # Calculate daily Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Pivot point and levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Donchian upper/lower bands
+    upper_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels (standard multipliers)
-    r4_1d = close_1d + range_1d * 1.1 / 2
-    s4_1d = close_1d - range_1d * 1.1 / 2
-    
-    # Align daily pivots to 4h timeframe
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align daily Donchian to 4h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,14 +49,15 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Filter: Avoid sideways markets - require price to be outside 5% of daily range
-    price_position = (close - s4_1d_aligned) / (r4_1d_aligned - s4_1d_aligned + 1e-10)
-    in_extreme_zone = (price_position < -0.05) | (price_position > 1.05)
+    # Filter: Avoid choppy markets - require ATR ratio > 0.6
+    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr / (atr_ma_50 + 1e-10)
+    trending_market = atr_ratio > 0.6
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(in_extreme_zone[i])):
+        if (np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
             signals[i] = 0.0
             continue
         
@@ -69,42 +65,38 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        r4 = r4_1d_aligned[i]
-        s4 = s4_1d_aligned[i]
+        upper = upper_1d_aligned[i]
+        lower = lower_1d_aligned[i]
         atr_val = atr[i]
-        extreme_zone = in_extreme_zone[i]
+        trending = trending_market[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Entry signals - only in extreme zones to avoid whipsaws
+        # Entry signals - only in trending markets to avoid whipsaws
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above R4 with volume and in extreme zone
-        if price_high > r4 and volume_confirmed and extreme_zone:
+        # Long: price breaks above daily upper Donchian with volume and trending
+        if price_high > upper and volume_confirmed and trending:
             long_signal = True
         
-        # Short: price breaks below S4 with volume and in extreme zone
-        if price_low < s4 and volume_confirmed and extreme_zone:
+        # Short: price breaks below daily lower Donchian with volume and trending
+        if price_low < lower and volume_confirmed and trending:
             short_signal = True
         
         # Exit conditions
-        # Calculate daily pivot for exit
-        if len(high_1d) > 0:
-            pivot_1d_val = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3
-        else:
-            pivot_1d_val = 0
-        pivot_array = np.full_like(high_1d, pivot_1d_val)
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
+        # Calculate daily midpoint for exit
+        midpoint_1d = (upper_1d + lower_1d) / 2
+        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)[i]
         
         # Stop loss conditions
         stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
         stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
         
-        # Exit to pivot
-        exit_long = position == 1 and price_close < pivot_aligned
-        exit_short = position == -1 and price_close > pivot_aligned
+        # Exit to midpoint
+        exit_long = position == 1 and price_close < midpoint_aligned
+        exit_short = position == -1 and price_close > midpoint_aligned
         
         # Trading logic
         if long_signal and position != 1:
@@ -127,11 +119,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy with volume confirmation, extreme zone filter, and ATR stop loss.
-# Enters long when price breaks above daily R4 with volume confirmation and only in extreme zones (<-0.05 or >1.05).
-# Enters short when price breaks below daily S4 with volume confirmation and only in extreme zones.
-# Uses volume confirmation (>1.5x 20-period average) to ensure institutional participation.
-# Extreme zone filter prevents whipsaws in sideways markets by only allowing breaks outside daily range with buffer.
-# Exits when price returns to daily pivot point or ATR stop loss (2x) is hit.
+# Hypothesis: 4h Donchian breakout strategy with volume confirmation and trend filter.
+# Enters long when price breaks above daily 20-period Donchian upper band with volume confirmation (>1.5x avg volume) in trending markets (ATR ratio > 0.6).
+# Enters short when price breaks below daily 20-period Donchian lower band with volume confirmation and trending.
+# Uses volume confirmation to ensure institutional participation and trend filter to avoid whipsaws in sideways markets.
+# Exits when price returns to daily Donchian midpoint or ATR stop loss (2x) is hit.
 # Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
-# Works in both bull and bear markets by trading breakouts in either direction.
+# Works in both bull and bear markets by trading breakouts in either direction with trend filter.
