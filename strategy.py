@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d trend filter and volume confirmation.
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when Bull Power > 0 and Bear Power < 0 with volume > 1.5x average and 1d EMA(50) bullish.
-# Short when Bear Power < 0 and Bull Power < 0 with volume > 1.5x average and 1d EMA(50) bearish.
-# Uses weekly pivot levels to filter entries: only trade when price is above weekly pivot (long) or below (short).
-# Designed for 12-37 trades/year on 6h timeframe with focus on institutional participation.
-# Volume filter reduces false signals, weekly pivot adds structural bias.
+# Hypothesis: 12h Camarilla pivot with 1d trend filter and volume confirmation.
+# Enters long when price touches Camarilla L3 support with bullish 1d trend and expanding volume.
+# Enters short when price touches Camarilla H3 resistance with bearish 1d trend and expanding volume.
+# Uses ATR(14) for dynamic stoploss and position sizing.
+# Designed for 12-37 trades/year on 12h timeframe with focus on mean reversion at key levels.
+# Volume filter ensures institutional participation, reducing false signals.
+# 1d trend filter prevents counter-trend trading in choppy markets.
 
-name = "6h_1d_1w_elder_ray_volume_pivot_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,89 +28,84 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     # Calculate 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 13-period EMA for Elder Ray (using 6h data)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate ATR(14) for volatility filtering and stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = low - ema_13   # Low - EMA13
+    # Calculate volume moving average (10-period)
+    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # We'll use the pivot as the main reference level
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Calculate Camarilla levels from previous 1d period
+    # Need previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    # Calculate volume moving average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # For first bar, use first available values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Camarilla formulas
+    # H3 = C + (H-L)*1.1/4
+    # L3 = C - (H-L)*1.1/4
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after EMA period
+    for i in range(10, n):  # Start after EMA period
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14[i]) or
+            np.isnan(vol_ma_10[i]) or np.isnan(camarilla_h3[i]) or
+            np.isnan(camarilla_l3[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period average volume
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume filter: current volume > 1.2 * 10-period average volume
+        vol_filter = volume[i] > 1.2 * vol_ma_10[i]
         
         # Determine 1d trend direction
         is_bullish_trend = close[i] > ema_50_1d_aligned[i]
         is_bearish_trend = close[i] < ema_50_1d_aligned[i]
         
-        # Determine price relative to weekly pivot
-        above_weekly_pivot = close[i] > weekly_pivot_aligned[i]
-        below_weekly_pivot = close[i] < weekly_pivot_aligned[i]
+        # Entry conditions: price touches Camarilla levels with volume and trend
+        # Long when price touches L3 support with bullish trend
+        long_entry = (low[i] <= camarilla_l3[i] * 1.001) and vol_filter and is_bullish_trend
+        # Short when price touches H3 resistance with bearish trend
+        short_entry = (high[i] >= camarilla_h3[i] * 0.999) and vol_filter and is_bearish_trend
         
-        # Elder Ray conditions
-        strong_bull_power = bull_power[i] > 0
-        strong_bear_power = bear_power[i] < 0
-        
-        # Entry conditions
-        bullish_entry = (strong_bull_power and strong_bear_power and  # Both conditions indicate strength
-                        vol_filter and is_bullish_trend and above_weekly_pivot)
-        
-        bearish_entry = (strong_bear_power and 
-                        vol_filter and is_bearish_trend and below_weekly_pivot)
-        
-        # Exit conditions: opposite signal or loss of momentum
+        # Exit conditions: opposite signal or trend reversal
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if bear power becomes positive (loss of selling pressure) or trend turns bearish
-            exit_long = (bear_power[i] >= 0) or (not is_bullish_trend)
+            # Exit long on bearish signal or trend reversal
+            exit_long = short_entry or not is_bullish_trend
         elif position == -1:
-            # Exit short if bull power becomes negative (loss of buying pressure) or trend turns bullish
-            exit_short = (bull_power[i] <= 0) or (not is_bearish_trend)
+            # Exit short on bullish signal or trend reversal
+            exit_short = long_entry or not is_bearish_trend
         
         # Priority: entry > exit > hold
-        if bullish_entry and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_entry and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
