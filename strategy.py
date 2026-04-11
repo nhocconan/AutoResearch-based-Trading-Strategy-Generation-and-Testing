@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-1d_1w_Weekly_Trend_With_Daily_Pullback_v1
-Hypothesis: Trade weekly trend direction with daily pullback entries. Uses weekly EMA20 for trend and daily RSI(14) for pullback entries.
-Designed for low trade frequency (10-25/year) to minimize fee drag while capturing major trends in both bull and bear markets.
-Weekly trend filter reduces whipsaws, daily RSI provides precise entry during pullbacks.
+6h_12h_Weekly_Pivot_Donchian_Breakout
+Hypothesis: Combines weekly pivot levels (direction) with 6-hour Donchian(20) breakouts and volume confirmation.
+Weekly pivots provide institutional support/resistance; breakouts with volume capture momentum.
+Works in bull markets (breakouts up) and bear markets (breakdowns down) by using pivot bias.
+Targets 100-200 total trades over 4 years (25-50/year) to avoid fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Weekly_Trend_With_Daily_Pullback_v1"
-timeframe = "1d"
+name = "6h_12h_Weekly_Pivot_Donchian_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -25,57 +26,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load weekly data ONCE before loop for pivot levels
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter (smooth, fewer whipsaws)
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate weekly pivot points: (H+L+C)/3
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
+    pivot_w = (high_w + low_w + close_w) / 3.0
     
-    # Daily RSI(14) for pullback entries
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values  # Neutral RSI when insufficient data
+    # Weekly bias: price above/below pivot
+    bias_up = close_w > pivot_w
+    bias_down = close_w < pivot_w
     
-    # Volume filter: above average to avoid low-liquidity noise
+    # Align weekly bias to 6h timeframe (wait for weekly close)
+    bias_up_aligned = align_htf_to_ltf(prices, df_w, bias_up.astype(float))
+    bias_down_aligned = align_htf_to_ltf(prices, df_w, bias_down.astype(float))
+    
+    # Calculate 6h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after RSI warmup
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(bias_up_aligned[i]) or 
+            np.isnan(bias_down_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.2x 20-day average
-        volume_filter = volume[i] > 1.2 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
         
-        # Weekly trend direction
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > high_max[i-1]  # Break above previous high
+        breakdown_down = close[i] < low_min[i-1]  # Break below previous low
         
-        # Daily RSI conditions for pullback entries
-        rsi_oversold = rsi_values[i] < 30  # Pullback in uptrend
-        rsi_overbought = rsi_values[i] > 70  # Pullback in downtrend
+        # Entry conditions: trade in direction of weekly bias
+        long_entry = breakout_up and volume_filter and bias_up_aligned[i] > 0.5
+        short_entry = breakdown_down and volume_filter and bias_down_aligned[i] > 0.5
         
-        # Entry conditions: trade with weekly trend on daily pullback
-        long_entry = weekly_uptrend and rsi_oversold and volume_filter
-        short_entry = weekly_downtrend and rsi_overbought and volume_filter
-        
-        # Exit conditions: reverse signal or RSI returns to neutral
-        long_exit = (not weekly_uptrend) or (rsi_values[i] > 50)  # Trend change or RSI > 50
-        short_exit = (not weekly_downtrend) or (rsi_values[i] < 50)  # Trend change or RSI < 50
+        # Exit conditions: opposite Donchian break or loss of bias
+        long_exit = (close[i] < low_min[i-1]) or (bias_up_aligned[i] < 0.5)
+        short_exit = (close[i] > high_max[i-1]) or (bias_down_aligned[i] < 0.5)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
