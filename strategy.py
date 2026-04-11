@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with daily ATR-based range and closing price position.
-# Uses daily ATR(14) to measure volatility and position within daily range for mean reversion.
-# Long when price closes in lower 30% of daily range with high volatility (ATR expansion).
-# Short when price closes in upper 30% of daily range with high volatility.
-# Volatility filter ensures trades occur during active market conditions.
-# Designed for 12-37 trades/year on 12h timeframe with volatility filtering.
+# Hypothesis: 1d timeframe with weekly Ichimoku cloud and volume confirmation.
+# Uses weekly Tenkan-sen/Kijun-sen cross for trend, price above/below cloud for bias,
+# and Senkou Span A/B cross for momentum. Volume filter confirms institutional participation.
+# Designed for 7-25 trades/year on daily timeframe to minimize fee drag and maximize edge.
 
-name = "12h_1d_atr_range_position_v1"
-timeframe = "12h"
+name = "1d_1w_ichimoku_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:  # Need at least 52 days for weekly calculations
         return np.zeros(n)
     
     # Price arrays
@@ -25,74 +23,108 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 26:  # Need at least 26 weeks for calculations
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for volatility measurement
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly Ichimoku calculations
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR is just high-low
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = np.array([np.max(high_1w[i-8:i+1]) if i >= 8 else np.nan for i in range(len(high_1w))])
+    period9_low = np.array([np.min(low_1w[i-8:i+1]) if i >= 8 else np.nan for i in range(len(low_1w))])
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # ATR(14) using Wilder's smoothing
-    atr_14 = np.full_like(tr, np.nan, dtype=float)
-    if len(tr) >= 14:
-        atr_14[13] = np.mean(tr[0:14])  # First ATR is simple average
-        for i in range(14, len(tr)):
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = np.array([np.max(high_1w[i-25:i+1]) if i >= 25 else np.nan for i in range(len(high_1w))])
+    period26_low = np.array([np.min(low_1w[i-25:i+1]) if i >= 25 else np.nan for i in range(len(low_1w))])
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Calculate daily range position (0 = low, 1 = high)
-    daily_range = high_1d - low_1d
-    range_position = np.full_like(close_1d, np.nan, dtype=float)
-    valid_range = daily_range > 0
-    range_position[valid_range] = (close_1d[valid_range] - low_1d[valid_range]) / daily_range[valid_range]
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = np.array([np.max(high_1w[i-51:i+1]) if i >= 51 else np.nan for i in range(len(high_1w))])
+    period52_low = np.array([np.min(low_1w[i-51:i+1]) if i >= 51 else np.nan for i in range(len(low_1w))])
+    senkou_span_b = ((period52_high + period52_low) / 2)
     
-    # Volatility filter: ATR > 1.5 * ATR(50) for volatility expansion
-    atr_50 = np.full_like(tr, np.nan, dtype=float)
-    if len(tr) >= 50:
-        for i in range(49, len(tr)):
-            atr_50[i] = np.mean(tr[i-49:i+1])
-    vol_expansion = atr_14 > (1.5 * atr_50)
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou_span = np.roll(close_1w, 26)
+    chikou_span[:26] = np.nan
     
-    # Align daily indicators to 12h
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
-    range_position_aligned = align_htf_to_ltf(prices, df_1d, range_position)
-    vol_expansion_aligned = align_htf_to_ltf(prices, df_1d, vol_expansion)
+    # Weekly average volume (20-period)
+    volume_1w = df_1w['volume'].values
+    vol_avg_20 = np.full_like(volume_1w, np.nan, dtype=float)
+    for i in range(19, len(volume_1w)):
+        vol_avg_20[i] = np.mean(volume_1w[i-19:i+1])
+    
+    # Align weekly indicators to daily
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    chikou_span_aligned = align_htf_to_ltf(prices, df_1w, chikou_span)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(52, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(range_position_aligned[i]) or 
-            np.isnan(atr_14_aligned[i]) or
-            np.isnan(vol_expansion_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(chikou_span_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions
-        # Long: price in lower 30% of daily range during volatility expansion
-        long_entry = (range_position_aligned[i] <= 0.30 and vol_expansion_aligned[i])
-        # Short: price in upper 30% of daily range during volatility expansion
-        short_entry = (range_position_aligned[i] >= 0.70 and vol_expansion_aligned[i])
+        # Volume filter: current volume > 1.8 * weekly average volume
+        vol_filter = volume[i] > 1.8 * vol_avg_aligned[i]
         
-        # Exit when price returns to middle 40% of daily range (30%-70%)
-        exit_long = (position == 1 and range_position_aligned[i] >= 0.30)
-        exit_short = (position == -1 and range_position_aligned[i] <= 0.70)
+        # Cloud color: green if Senkou Span A > Senkou Span B (bullish), red otherwise
+        cloud_green = senkou_span_a_aligned[i] > senkou_span_b_aligned[i]
+        cloud_red = senkou_span_a_aligned[i] < senkou_span_b_aligned[i]
         
-        # Generate signals
-        if long_entry and position != 1:
+        # Price above/below cloud
+        price_above_cloud = close[i] > max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        price_below_cloud = close[i] < min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
+        # TK cross: Tenkan-sen crosses Kijun-sen
+        tk_cross_up = (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                       tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1])
+        tk_cross_down = (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                         tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1])
+        
+        # Kumo twist: Senkou Span A crosses Senkou Span B (momentum shift)
+        kumo_twist_up = (senkou_span_a_aligned[i] > senkou_span_b_aligned[i] and 
+                         senkou_span_a_aligned[i-1] <= senkou_span_b_aligned[i-1])
+        kumo_twist_down = (senkou_span_a_aligned[i] < senkou_span_b_aligned[i] and 
+                           senkou_span_a_aligned[i-1] >= senkou_span_b_aligned[i-1])
+        
+        # Chikou confirmation: Chikou Span above/below price 26 periods ago
+        chikou_above_price = chikou_span_aligned[i] > close[i-26] if i >= 26 else False
+        chikou_below_price = chikou_span_aligned[i] < close[i-26] if i >= 26 else False
+        
+        # Long conditions: bullish cloud + TK cross up + price above cloud + Chikou confirmation
+        long_condition = (cloud_green and tk_cross_up and price_above_cloud and 
+                         chikou_above_price and vol_filter)
+        
+        # Short conditions: bearish cloud + TK cross down + price below cloud + Chikou confirmation
+        short_condition = (cloud_red and tk_cross_down and price_below_cloud and 
+                          chikou_below_price and vol_filter)
+        
+        # Exit conditions: TK cross in opposite direction or price enters opposite cloud
+        exit_long = (tk_cross_down or 
+                    (position == 1 and close[i] < min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])))
+        exit_short = (tk_cross_up or 
+                     (position == -1 and close[i] > max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])))
+        
+        # Entry logic
+        if long_condition and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
