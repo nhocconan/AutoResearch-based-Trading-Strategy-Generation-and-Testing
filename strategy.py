@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_cci_rsi_volume_v1
-# Strategy: 4h CCI + RSI reversal with volume confirmation and 1d trend filter
-# Timeframe: 4h
+# 12h_1w_donchian_breakout_volume_v1
+# Strategy: 12h Donchian Channel breakout with volume confirmation and 1w ADX trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: CCI < -100 + RSI < 30 signals oversold conditions in uptrends for long entries; CCI > 100 + RSI > 70 signals overbought in downtrends for shorts. Volume confirms momentum shift. 1d EMA50 filters trend direction. Low trade frequency (~20-40/year) to minimize fee drag.
+# Hypothesis: Donchian breakouts capture momentum. Volume confirms breakout strength. 1w ADX > 25 ensures trending markets. Works in bull (breakouts up) and bear (breakouts down). Low trade frequency (~15-30/year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_cci_rsi_volume_v1"
-timeframe = "4h"
+name = "12h_1w_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,38 +24,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1w ADX(14) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h CCI(20)
-    tp = (high + low + close) / 3.0
-    tp_series = pd.Series(tp)
-    ma = tp_series.rolling(window=20, min_periods=20).mean()
-    md = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=False)
-    cci = (tp - ma) / (0.015 * md)
-    cci = cci.values
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with index 0
     
-    # 4h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False).mean().values
+    
+    # Directional Indicators
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    
+    # ADX
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+    adx_1w = adx  # Already aligned to 1w
+    
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # 12h Donchian Channel (20)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
@@ -63,26 +79,26 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(cci[i]) or np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: 1w ADX > 25 indicates trending market
+        trending = adx_1w_aligned[i] > 25
         
-        # Entry logic: CCI/RSI reversal + volume + trend alignment
-        if cci[i] < -100 and rsi[i] < 30 and vol_confirm[i] and uptrend and position != 1:
+        # Entry logic: Donchian breakout + volume + trend filter
+        if close[i] > donch_high[i] and vol_confirm[i] and trending and position != 1:
             position = 1
             signals[i] = 0.25
-        elif cci[i] > 100 and rsi[i] > 70 and vol_confirm[i] and downtrend and position != -1:
+        elif close[i] < donch_low[i] and vol_confirm[i] and trending and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: CCI returns to neutral zone
-        elif position == 1 and cci[i] > 0:
+        # Exit: opposite Donchian breach (trailing stop)
+        elif position == 1 and close[i] < donch_low[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and cci[i] < 0:
+        elif position == -1 and close[i] > donch_high[i]:
             position = 0
             signals[i] = 0.0
         else:
