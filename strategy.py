@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-day/1-week Choppiness Index regime filter + Donchian breakout.
-# Uses Choppiness Index to identify trending vs ranging markets: >61.8 = range (mean revert),
-# <38.2 = trend (trend follow). In trending regimes, break Donchian(20) for momentum entries.
-# In ranging regimes, fade at Donchian bands for mean reversion. Volume confirmation filters noise.
-# Designed for 12-30 trades/year to minimize fee drag while adapting to market regimes.
-# Works in bull/bear markets by switching between trend-following and mean-reversion based on volatility regime.
+# Hypothesis: 4h timeframe with 12h Donchian breakout + volume confirmation + ADX trend filter.
+# Uses 12h Donchian channels to identify trend direction, enters on breakouts confirmed by volume.
+# ADX filter ensures we only trade in trending markets (ADX > 25), avoiding choppy conditions.
+# Designed for 20-50 trades/year to minimize fee decay while capturing strong trends.
+# Works in bull/bear markets by following the trend direction from higher timeframe.
 
-name = "12h_1d_1w_chop_donchian_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,142 +24,106 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 20:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate 14-period Choppiness Index on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Upper band: highest high over past 20 periods
+    upper_12h = np.full_like(high_12h, np.nan)
+    # Lower band: lowest low over past 20 periods
+    lower_12h = np.full_like(low_12h, np.nan)
+    
+    for i in range(19, len(high_12h)):
+        upper_12h[i] = np.max(high_12h[i-19:i+1])
+        lower_12h[i] = np.min(low_12h[i-19:i+1])
+    
+    # Calculate ADX for trend strength
+    # +DM and -DM calculation
+    high_diff = np.diff(high_12h, prepend=high_12h[0])
+    low_diff = np.diff(low_12h, prepend=low_12h[0])
+    
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
     
     # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(np.subtract(high_12h, np.roll(high_12h, 1)))
+    tr3 = np.abs(np.subtract(low_12h, np.roll(low_12h, 1)))
+    tr1[0] = high_12h[0] - low_12h[0]  # First period
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # ATR(14) - sum of TR over 14 periods
-    atr_14 = np.zeros_like(tr)
-    for i in range(13, len(tr)):
-        atr_14[i] = np.nansum(tr[i-13:i+1])
-    atr_14[:13] = np.nan
+    # Smoothing (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Sum of ATR(14) over 14 periods
-    atr_sum_14 = np.zeros_like(tr)
-    for i in range(26, len(tr)):  # 13 + 13
-        atr_sum_14[i] = np.nansum(atr_14[i-13:i+1])
-    atr_sum_14[:26] = np.nan
+    atr_12h = wilders_smoothing(tr, 14)
+    plus_di_12h = 100 * wilders_smoothing(plus_dm, 14) / atr_12h
+    minus_di_12h = 100 * wilders_smoothing(minus_dm, 14) / atr_12h
+    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
+    adx_12h = wilders_smoothing(dx_12h, 14)
     
-    # Choppiness Index: 100 * log10(ATR_sum / (ATR * period)) / log10(period)
-    chop = 100 * np.log10(atr_sum_14 / (atr_14 * 14)) / np.log10(14)
-    # Handle division by zero or invalid values
-    chop = np.where((atr_14 == 0) | np.isnan(atr_14) | np.isnan(atr_sum_14), 50.0, chop)
+    # Align 12h indicators to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Donchian Upper (20-period high)
-    donch_high_20 = np.full_like(high_1w, np.nan)
-    for i in range(19, len(high_1w)):
-        donch_high_20[i] = np.max(high_1w[i-19:i+1])
-    
-    # Donchian Lower (20-period low)
-    donch_low_20 = np.full_like(low_1w, np.nan)
-    for i in range(19, len(low_1w)):
-        donch_low_20[i] = np.min(low_1w[i-19:i+1])
-    
-    # Calculate daily average volume (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20 = np.zeros_like(volume_1d, dtype=float)
-    for i in range(19, len(volume_1d)):
-        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
-    vol_avg_20[:19] = np.nan
-    
-    # Align all indicators to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Volume confirmation: 4h volume > 1.5 * 20-period average
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    volume_filter = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(chop_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(vol_avg_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         
-        # Volume filter: current volume > 1.5 * daily average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trend_filter = adx_aligned[i] > 25
         
-        # Regime filters based on Choppiness Index
-        is_ranging = chop_aligned[i] > 61.8  # Range: mean revert
-        is_trending = chop_aligned[i] < 38.2  # Trend: trend follow
+        # Breakout conditions
+        breakout_long = high[i] >= upper_aligned[i] and volume_filter[i] and trend_filter
+        breakout_short = low[i] <= lower_aligned[i] and volume_filter[i] and trend_filter
         
-        if is_ranging:
-            # In ranging markets: fade at Donchian bands (mean reversion)
-            fade_long = low[i] <= donch_low_aligned[i] and vol_filter
-            fade_short = high[i] >= donch_high_aligned[i] and vol_filter
-            
-            # Exit when price returns to opposite Donchian band
-            exit_long = high[i] >= donch_high_aligned[i] if position == 1 else False
-            exit_short = low[i] <= donch_low_aligned[i] if position == -1 else False
-            
-            # Priority: fade > hold
-            if fade_long and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif fade_short and position != -1:
-                position = -1
-                signals[i] = -0.25
-            elif position == 1 and exit_long:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and exit_short:
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold current position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
-                
-        elif is_trending:
-            # In trending markets: break Donchian bands (momentum)
-            breakout_long = high[i] >= donch_high_aligned[i] and vol_filter
-            breakout_short = low[i] <= donch_low_aligned[i] and vol_filter
-            
-            # Exit when price returns to opposite Donchian band
-            exit_long = low[i] <= donch_low_aligned[i] if position == 1 else False
-            exit_short = high[i] >= donch_high_aligned[i] if position == -1 else False
-            
-            # Priority: breakout > hold
-            if breakout_long and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif breakout_short and position != -1:
-                position = -1
-                signals[i] = -0.25
-            elif position == 1 and exit_long:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and exit_short:
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold current position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        # Exit conditions: opposite Donchian touch or trend weakening
+        exit_long = low[i] <= lower_aligned[i] or adx_aligned[i] < 20
+        exit_short = high[i] >= upper_aligned[i] or adx_aligned[i] < 20
+        
+        # Entry logic: breakout in direction of trend
+        if breakout_long and position != 1:
+            position = 1
+            signals[i] = 0.30
+        elif breakout_short and position != -1:
+            position = -1
+            signals[i] = -0.30
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
+            position = 0
+            signals[i] = 0.0
         else:
-            # Choppy transition zone (38.2-61.8): stay flat
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
+            # Hold current position
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
