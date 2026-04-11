@@ -3,69 +3,46 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Trix + 1d Volume Spike + Choppiness Regime
-# - Trix(9): Triple-smoothed ROC, captures momentum with less lag
-# - Long when Trix crosses above zero AND 1d volume > 2x 20-day average AND Choppiness > 61.8 (range)
-# - Short when Trix crosses below zero AND 1d volume > 2x 20-day average AND Choppiness > 61.8 (range)
-# - Uses chop filter to avoid trending markets where momentum fails
-# - Volume spike confirms institutional participation
-# - Discrete position sizing ±0.25 to limit drawdown and reduce churn
-# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee limits
+# Hypothesis: 1d price closes above/below weekly 200 EMA + volume surge
+# - Weekly EMA200 defines long-term trend (bullish if price above, bearish if below)
+# - Daily close crosses the weekly EMA200 with volume > 2x 20-day average signals momentum shift
+# - Works in bull markets (breaks above weekly EMA200 with volume) and bear (breaks below)
+# - Weekly timeframe reduces noise; daily provides timely entry
+# - Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drag
+# - Position size: 0.25 to balance return and drawdown
 
-name = "4h_1d_trix_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_ema200_volume_breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for volume and chop filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return signals
     
-    # Pre-compute 1d volume SMA (20-period)
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Pre-compute weekly EMA200
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Pre-compute 1d Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low))))
-    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
-    tr1 = np.concatenate([[np.nan], tr1])  # align length
-    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr_sum_14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_raw = 100 * np.log10(atr_sum_14 / (np.log10(14) * (max_high_14 - min_low_14)))
-    chop_raw = np.where((max_high_14 - min_low_14) == 0, 50, chop_raw)  # avoid div by zero
-    chop = chop_raw
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Pre-compute daily volume SMA (20-period)
+    volume_series = pd.Series(volume)
+    volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute Trix (9) on 4h close
-    # TRIX = EMA(EMA(EMA(close, 9), 9), 9) - 1 period ago, then / previous
-    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
-    trix[0] = 0  # first value has no previous
-    
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or  # need previous for cross
-            np.isnan(volume_sma_20_1d_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -73,38 +50,35 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Trix zero-cross signals
-        trix_cross_up = trix[i-1] <= 0 and trix[i] > 0
-        trix_cross_down = trix[i-1] >= 0 and trix[i] < 0
+        # Volume confirmation: current volume > 2x 20-day average
+        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
         
-        # Volume confirmation: current 1d volume > 2x 20-day average
-        vol_confirm = volume_sma_20_1d_aligned[i] > 0 and volume[i] > 2.0 * volume_sma_20_1d_aligned[i]
-        
-        # Chop filter: range market (CHOP > 61.8)
-        chop_filter = chop_aligned[i] > 61.8
+        # Price relative to weekly EMA200
+        price_above_ema200 = price_close > ema200_1w_aligned[i]
+        price_below_ema200 = price_close < ema200_1w_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Trix crosses up + volume spike + chop (range)
-        if trix_cross_up and vol_confirm and chop_filter:
+        # Long: Price crosses above weekly EMA200 with volume surge
+        if price_above_ema200 and vol_confirm:
             enter_long = True
         
-        # Short: Trix crosses down + volume spike + chop (range)
-        if trix_cross_down and vol_confirm and chop_filter:
+        # Short: Price crosses below weekly EMA200 with volume surge
+        if price_below_ema200 and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Trix cross or chop breaks down (trending)
+        # Exit conditions: price crosses back through weekly EMA200
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if Trix crosses down OR chop breaks below 38.2 (trending)
-            exit_long = trix_cross_down or chop_aligned[i] < 38.2
+            # Exit long if price crosses below weekly EMA200
+            exit_long = price_below_ema200
         elif position == -1:
-            # Exit short if Trix crosses up OR chop breaks below 38.2 (trending)
-            exit_short = trix_cross_up or chop_aligned[i] < 38.2
+            # Exit short if price crosses above weekly EMA200
+            exit_short = price_above_ema200
         
         # Trading logic
         if enter_long and position != 1:
