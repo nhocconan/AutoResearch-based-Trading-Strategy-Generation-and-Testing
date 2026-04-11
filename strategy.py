@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Strategy: 4h Camarilla pivot breakout with volume confirmation and RSI filter
-# Timeframe: 4h
+# 6h_1d_1w_pivot_trend_v1
+# Strategy: 6h trading using daily and weekly pivot levels with trend alignment
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance on daily timeframe.
-# Breakouts above H3 or below L3 with volume surge and RSI momentum capture institutional moves.
-# Works in bull markets via breakout continuation and bear markets via breakdowns.
-# Low trade frequency (~20-50/year) minimizes fee drag.
+# Hypothesis: Price reacts to daily and weekly pivot levels (support/resistance).
+# In uptrend (price > weekly pivot), buy at daily S1/S2 with stop at S3.
+# In downtrend (price < weekly pivot), sell at daily R1/R2 with stop at R3.
+# Uses 1d and 1w pivots for institutional levels, reducing whipsaw.
+# Targets 2-4 trades/month (24-48/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_1w_pivot_trend_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P, R1, R2, S1, S2, R3, S3"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,73 +39,98 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 10 or len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # H4, H3, H2, H1, L1, L2, L3, L4
-    # Using formula: Close + (High - Low) * multiplier
-    # and Close - (High - Low) * multiplier
-    # We'll use H3 and L3 as primary breakout levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate daily pivot points
+    dh = df_1d['high'].values
+    dl = df_1d['low'].values
+    dc = df_1d['close'].values
+    dp, dr1, dr2, dr3, ds1, ds2, ds3 = calculate_pivot_points(dh, dl, dc)
     
-    # Calculate Camarilla levels
-    rang = prev_high - prev_low
-    h3 = prev_close + rang * 1.1 / 6
-    l3 = prev_close - rang * 1.1 / 6
+    # Calculate weekly pivot points
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
+    wp, wr1, wr2, wr3, ws1, ws2, ws3 = calculate_pivot_points(wh, wl, wc)
     
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # Align pivot levels to 6h timeframe
+    p_1d = align_htf_to_ltf(prices, df_1d, dp)
+    r1_1d = align_htf_to_ltf(prices, df_1d, dr1)
+    r2_1d = align_htf_to_ltf(prices, df_1d, dr2)
+    r3_1d = align_htf_to_ltf(prices, df_1d, dr3)
+    s1_1d = align_htf_to_ltf(prices, df_1d, ds1)
+    s2_1d = align_htf_to_ltf(prices, df_1d, ds2)
+    s3_1d = align_htf_to_ltf(prices, df_1d, ds3)
     
-    # Volume confirmation: current 4h volume > 1.5x 20-period average
+    p_1w = align_htf_to_ltf(prices, df_1w, wp)
+    r1_1w = align_htf_to_ltf(prices, df_1w, wr1)
+    r2_1w = align_htf_to_ltf(prices, df_1w, wr2)
+    r3_1w = align_htf_to_ltf(prices, df_1w, wr3)
+    s1_1w = align_htf_to_ltf(prices, df_1w, ws1)
+    s2_1w = align_htf_to_ltf(prices, df_1w, ws2)
+    s3_1w = align_htf_to_ltf(prices, df_1w, ws3)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > 1.5 * vol_ma
-    
-    # RSI filter: avoid overbought/oversold conditions
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # RSI range: 30-70 to avoid extremes
-    rsi_filter = (rsi > 30) & (rsi < 70)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(rsi[i]):
+        if np.isnan(p_1d[i]) or np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or \
+           np.isnan(p_1w[i]) or np.isnan(r1_1w[i]) or np.isnan(s1_1w[i]) or \
+           np.isnan(vol_confirm[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > h3_aligned[i]
-        breakdown_down = close[i] < l3_aligned[i]
+        # Determine trend based on weekly pivot
+        uptrend = close[i] > p_1w[i]
+        downtrend = close[i] < p_1w[i]
         
-        # Entry conditions with filters
-        # Long: breakout above H3 + volume confirmation + RSI not overbought
-        if breakout_up and vol_confirm[i] and rsi_filter[i] and position != 1:
+        # Long conditions: uptrend + price at daily support + volume
+        long_setup = (
+            uptrend and 
+            (close[i] <= s1_1d[i] * 1.005 or close[i] <= s2_1d[i] * 1.005) and  # Near S1 or S2
+            vol_confirm[i]
+        )
+        
+        # Short conditions: downtrend + price at daily resistance + volume
+        short_setup = (
+            downtrend and 
+            (close[i] >= r1_1d[i] * 0.995 or close[i] >= r2_1d[i] * 0.995) and  # Near R1 or R2
+            vol_confirm[i]
+        )
+        
+        # Exit conditions: opposite pivot level or trend change
+        exit_long = (
+            position == 1 and 
+            (close[i] >= r1_1d[i] or uptrend == False)  # Hit R1 or trend change
+        )
+        
+        exit_short = (
+            position == -1 and 
+            (close[i] <= s1_1d[i] or downtrend == False)  # Hit S1 or trend change
+        )
+        
+        # Entry logic
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: breakdown below L3 + volume confirmation + RSI not oversold
-        elif breakdown_down and vol_confirm[i] and rsi_filter[i] and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to pivot level (mean reversion)
-        elif position == 1 and close[i] < prev_close[i//16 if i>=16 else 0]:
+        # Exit logic
+        elif exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > prev_close[i//16 if i>=16 else 0]:
+        elif exit_short:
             position = 0
             signals[i] = 0.0
         else:
