@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_rsi_trend_v1
-# Strategy: 1h RSI mean reversion with 4h trend and 1d volume filter
-# Timeframe: 1h
+# 6h_1w_1d_vwap_mean_reversion_v1
+# Strategy: 6h VWAP mean reversion with 1w/1d trend filter
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: In strong trends (4h EMA50), RSI extremes on 1h offer high-probability mean reversion entries. 1d volume filter ensures participation. Works in bull/bear by trading pullbacks in trend direction. Targets 15-30 trades/year via tight entry conditions.
+# Hypothesis: Price tends to revert to VWAP during ranging markets. Strong weekly and daily trends filter out false signals. Works in bull/bear by only taking mean-reversion trades in the direction of the higher timeframe trend, reducing whipsaws.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_rsi_trend_v1"
-timeframe = "1h"
+name = "6h_1w_1d_vwap_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,78 +24,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (precomputed)
-    hours = prices.index.hour
+    # Calculate VWAP (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, np.nan)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 50 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d volume average (20-period) for filter
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    
-    # 1h RSI(14) for entry signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # 1w EMA20 for trend filter (slower)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if np.isnan(vwap[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            continue
+        # Trend filters: price above/below EMA
+        uptrend_1d = close[i] > ema_50_1d_aligned[i]
+        uptrend_1w = close[i] > ema_20_1w_aligned[i]
+        downtrend_1d = close[i] < ema_50_1d_aligned[i]
+        downtrend_1w = close[i] < ema_20_1w_aligned[i]
         
-        # Trend filter
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # Deviation from VWAP
+        dev_pct = (close[i] - vwap[i]) / vwap[i] if vwap[i] != 0 else 0
         
-        # Volume filter: current 1d volume > 20-day average (use aligned values)
-        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
-        vol_filter = vol_1d_aligned[i] > vol_avg_20_1d_aligned[i] if not np.isnan(vol_1d_aligned[i]) else False
-        
-        # Entry conditions: RSI extremes in trend direction with volume
-        # Long: RSI < 30 (oversold) in uptrend + volume
-        # Short: RSI > 70 (overbought) in downtrend + volume
-        if uptrend and rsi[i] < 30 and vol_filter and position != 1:
+        # Entry conditions: mean reversion in direction of trend
+        # Long: Price below VWAP AND both timeframes uptrend
+        if dev_pct < -0.008 and uptrend_1d and uptrend_1w and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif downtrend and rsi[i] > 70 and vol_filter and position != -1:
+            signals[i] = 0.25
+        # Short: Price above VWAP AND both timeframes downtrend
+        elif dev_pct > 0.008 and downtrend_1d and downtrend_1w and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit: RSI returns to neutral zone (40-60)
-        elif position == 1 and rsi[i] > 40:
+            signals[i] = -0.25
+        # Exit: Price crosses VWAP (mean reversion complete)
+        elif position == 1 and close[i] > vwap[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and rsi[i] < 60:
+        elif position == -1 and close[i] < vwap[i]:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
