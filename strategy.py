@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_Pivot_Breakout_Volume_Trend
-Hypothesis: Uses weekly and daily price action to derive key levels (1w high/low, 1d pivots) for breakout entries on 12h chart.
-Adds volume confirmation and 12h trend filter to avoid false breaks. Designed to work in both bull and bear markets by
-following the higher timeframe trend direction. Targets 12-37 trades per year (50-150 total over 4 years).
+1d_1w_Camarilla_Pivot_Breakout_Volume
+Hypothesis: Uses daily price action relative to weekly Camarilla pivot levels for breakout entries with volume confirmation.
+Designed to capture multi-day institutional breakouts with volume confirmation, filtering by weekly trend via EMA20.
+Works in bull/bear by following weekly trend direction - avoids counter-trend losses.
+Targets 10-25 trades/year per symbol with focus on high-probability setups.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_Pivot_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1d_1w_Camarilla_Pivot_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,77 +26,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly and daily data ONCE before loop
+    # Load weekly data ONCE before loop for trend filter and Camarilla pivots
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 2 or len(df_1d) < 2:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly high/low for context
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Daily data for Camarilla pivots
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate weekly volume average for confirmation
+    volume_1w = df_1w['volume'].values
+    vol_avg_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20_1w)
     
-    # Calculate 12h EMA25 for trend filter (slower to match timeframe)
-    ema_25_12h = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
+    # Calculate weekly Camarilla levels: R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    camarilla_r3_1w = close_1w + 1.1 * (high_1w - low_1w)
+    camarilla_s3_1w = close_1w - 1.1 * (high_1w - low_1w)
+    camarilla_r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
+    camarilla_s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
     
-    # Volume filter: 20-period average
+    # Daily volume confirmation: current volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate weekly high/low levels (breakout levels)
-    weekly_high_level = weekly_high
-    weekly_low_level = weekly_low
-    
-    # Calculate daily Camarilla levels (using standard formula)
-    # Camarilla: R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
-    # We'll use R3/S3 equivalent: R3 = C + 1.1*(H-L), S3 = C - 1.1*(H-L)
-    camarilla_r3 = daily_close + 1.1 * (daily_high - daily_low)
-    camarilla_s3 = daily_close - 1.1 * (daily_high - daily_low)
-    
-    # Align weekly levels to 12h timeframe (wait for weekly close)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_level)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_level)
-    
-    # Align daily Camarilla levels to 12h timeframe (wait for daily close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(25, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_25_12h[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_20_1w_aligned[i]) or 
+            np.isnan(camarilla_r3_1w_aligned[i]) or np.isnan(camarilla_s3_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: daily volume > 1.5x 20-day average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Trend filter: price above/below 12h EMA25
-        uptrend = close[i] > ema_25_12h[i]
-        downtrend = close[i] < ema_25_12h[i]
+        # Weekly volume confirmation: current week's volume > 1.3x 20-week average
+        weekly_volume_filter = False
+        # Find the index in the weekly aligned arrays for current week
+        # We use the current value as proxy for weekly volume condition
+        weekly_volume_filter = volume[i] > 1.3 * vol_avg_20_1w_aligned[i]
         
-        # Breakout conditions: weekly breakout OR Camarilla level break
-        weekly_breakout_up = close[i] > weekly_high_aligned[i]
-        weekly_breakdown_down = close[i] < weekly_low_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
-        camarilla_breakout_up = close[i] > camarilla_r3_aligned[i]
-        camarilla_breakdown_down = close[i] < camarilla_s3_aligned[i]
+        # Breakout conditions using weekly Camarilla levels
+        breakout_up = close[i] > camarilla_r3_1w_aligned[i]  # Break above weekly R3
+        breakdown_down = close[i] < camarilla_s3_1w_aligned[i]  # Break below weekly S3
         
-        # Entry conditions: require volume and trend alignment
-        long_entry = volume_filter and uptrend and (weekly_breakout_up or camarilla_breakout_up)
-        short_entry = volume_filter and downtrend and (weekly_breakdown_down or camarilla_breakdown_down)
+        # Entry conditions: only trade in direction of weekly trend with volume confirmation
+        long_entry = breakout_up and volume_filter and weekly_volume_filter and uptrend
+        short_entry = breakdown_down and volume_filter and weekly_volume_filter and downtrend
         
-        # Exit conditions: opposite breakout or trend reversal
-        long_exit = (close[i] < camarilla_s3_aligned[i]) or (not uptrend)
-        short_exit = (close[i] > camarilla_r3_aligned[i]) or (not downtrend)
+        # Exit conditions: return to opposite weekly Camarilla level or trend reversal
+        long_exit = (close[i] < camarilla_s3_1w_aligned[i]) or (not uptrend)  # Break below S3 or trend change
+        short_exit = (close[i] > camarilla_r3_1w_aligned[i]) or (not downtrend)  # Break above R3 or trend change
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
