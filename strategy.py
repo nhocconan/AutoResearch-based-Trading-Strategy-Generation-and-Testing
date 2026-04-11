@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_volume_breakout_v1"
+# Hypothesis: 4h-1d strategy combining daily VWAP pullback with volume confirmation and volatility filter.
+# Works in bull/bear: VWAP acts as dynamic support/resistance, volume confirms institutional interest,
+# volatility filter avoids low-momentum whipsaws. Target: 20-30 trades/year.
+
+name = "4h_1d_vwap_pullback_volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,6 +29,14 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return signals
     
+    # Calculate 1d VWAP using typical price * volume / cumulative volume
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d = vwap_1d.values
+    
+    # Align VWAP to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
     # Calculate 1d ATR for volatility filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -44,28 +56,12 @@ def generate_signals(prices):
     # Calculate 1d ATR ratio (current / MA) for regime detection
     atr_ratio_1d = np.where(atr_ma_20_1d > 0, atr_14_1d_aligned / atr_ma_20_1d, 1.0)
     
-    # Calculate Camarilla levels on 1d data (using previous 1d bar's range)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
-    
-    camarilla_H4 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
-    camarilla_L4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    
     # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i])):
             signals[i] = 0.0
             continue
         
@@ -82,30 +78,27 @@ def generate_signals(prices):
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime
-        price_above_H4 = price_close > camarilla_H4_aligned[i]
-        if price_above_H4 and vol_confirm and vol_regime:
+        # Long: Price pulls back to VWAP (within 0.5%) and closes above it + volume + volatility
+        near_vwap = abs(price_close - vwap_1d_aligned[i]) / vwap_1d_aligned[i] < 0.005
+        above_vwap = price_close > vwap_1d_aligned[i]
+        if near_vwap and above_vwap and vol_confirm and vol_regime:
             enter_long = True
         
-        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime
-        price_below_L4 = price_close < camarilla_L4_aligned[i]
-        if price_below_L4 and vol_confirm and vol_regime:
+        # Short: Price pulls back to VWAP (within 0.5%) and closes below it + volume + volatility
+        below_vwap = price_close < vwap_1d_aligned[i]
+        if near_vwap and below_vwap and vol_confirm and vol_regime:
             enter_short = True
         
-        # Exit conditions: price crosses back through the Camarilla mid-point (C level)
+        # Exit conditions: price moves 1.5% away from VWAP in opposite direction
         exit_long = False
         exit_short = False
         
-        # Calculate Camarilla C level (close of previous 1d bar)
-        camarilla_C = prev_close_1d
-        camarilla_C_aligned = align_htf_to_ltf(prices, df_1d, camarilla_C)
-        
         if position == 1:
-            # Exit long if price crosses below Camarilla C level
-            exit_long = price_close < camarilla_C_aligned[i]
+            # Exit long if price drops 1.5% below VWAP
+            exit_long = price_close < vwap_1d_aligned[i] * (1 - 0.015)
         elif position == -1:
-            # Exit short if price crosses above Camarilla C level
-            exit_short = price_close > camarilla_C_aligned[i]
+            # Exit short if price rises 1.5% above VWAP
+            exit_short = price_close > vwap_1d_aligned[i] * (1 + 0.015)
         
         # Trading logic
         if enter_long and position != 1:
