@@ -1,11 +1,10 @@
-#2021-024
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_alligator_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,41 +21,42 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return signals
     
-    # Calculate weekly Camarilla levels (based on previous week's OHLC)
-    # Camarilla: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
-    # H3 = C + 1.125*(H-L), L3 = C - 1.125*(H-L)
-    # H2 = C + 0.75*(H-L), L2 = C - 0.75*(H-L)
-    # H1 = C + 0.5*(H-L), L1 = C - 0.5*(H-L)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Williams Alligator on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ranges and levels
-    weekly_range = weekly_high - weekly_low
+    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
+    jaw = pd.Series((high_1d + low_1d) / 2).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)
     
-    # H4 and L4 levels (strongest resistance/support)
-    h4 = weekly_close + 1.5 * weekly_range
-    l4 = weekly_close - 1.5 * weekly_range
+    # Teeth (Red): 8-period SMMA, shifted 5 bars forward
+    teeth = pd.Series((high_1d + low_1d) / 2).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)
     
-    # H3 and L3 levels
-    h3 = weekly_close + 1.125 * weekly_range
-    l3 = weekly_close - 1.125 * weekly_range
+    # Lips (Green): 5-period SMMA, shifted 3 bars forward
+    lips = pd.Series((high_1d + low_1d) / 2).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)
     
-    # Align weekly Camarilla levels to daily timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    # Convert to numpy arrays and handle NaN from shift
+    jaw = jaw.fillna(0).values
+    teeth = teeth.fillna(0).values
+    lips = lips.fillna(0).values
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stop loss and volatility filter
+    # ATR for stop loss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -64,15 +64,15 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volatility filter: avoid extremely low volatility periods
+    # Trend strength filter: avoid weak trends
     atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr > (0.5 * atr_ma_50)  # Require ATR > 50% of its MA
+    atr_ratio = atr / (atr_ma_50 + 1e-10)
+    strong_trend = atr_ratio > 0.7
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(volatility_filter[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(strong_trend[i])):
             signals[i] = 0.0
             continue
         
@@ -80,35 +80,40 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        h4_val = h4_aligned[i]
-        l4_val = l4_aligned[i]
-        h3_val = h3_aligned[i]
-        l3_val = l3_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         atr_val = atr[i]
-        vol_filter = volatility_filter[i]
+        strong_trend_val = strong_trend[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.8 * vol_ma_20[i]
+        volume_confirmed = volume_current > 1.3 * vol_ma_20[i]
+        
+        # Alligator alignment conditions
+        # Bullish alignment: Lips > Teeth > Jaw (green above red above blue)
+        bullish_aligned = lips_val > teeth_val and teeth_val > jaw_val
+        # Bearish alignment: Lips < Teeth < Jaw (green below red below blue)
+        bearish_aligned = lips_val < teeth_val and teeth_val < jaw_val
         
         # Entry signals
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above weekly H4 with volume and volatility
-        if price_high > h4_val and volume_confirmed and vol_filter:
+        # Long: Bullish alignment + price above teeth + volume + strong trend
+        if bullish_aligned and price_close > teeth_val and volume_confirmed and strong_trend_val:
             long_signal = True
         
-        # Short: price breaks below weekly L4 with volume and volatility
-        if price_low < l4_val and volume_confirmed and vol_filter:
+        # Short: Bearish alignment + price below teeth + volume + strong trend
+        if bearish_aligned and price_close < teeth_val and volume_confirmed and strong_trend_val:
             short_signal = True
         
-        # Exit conditions: return to H3/L3 levels
-        exit_long = position == 1 and price_close < h3_val
-        exit_short = position == -1 and price_close > l3_val
+        # Exit conditions: when alignment breaks
+        exit_long = position == 1 and not bullish_aligned
+        exit_short = position == -1 and not bearish_aligned
         
-        # Stop loss conditions (2x ATR)
-        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
-        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
+        # Stop loss conditions
+        stop_long = position == 1 and price_low < (entry_price - 2.5 * atr_val)
+        stop_short = position == -1 and price_high > (entry_price + 2.5 * atr_val)
         
         # Trading logic
         if long_signal and position != 1:
@@ -131,10 +136,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla breakout with weekly levels, volume confirmation, and volatility filter.
-# Enters long when price breaks above weekly H4 level (C + 1.5*(H-L)) with volume > 1.8x 20-day average.
-# Enters short when price breaks below weekly L4 level (C - 1.5*(H-L)) with volume confirmation.
-# Uses volatility filter to avoid low-volatility environments where breakouts fail.
-# Exits when price returns to weekly H3/L3 levels or ATR stop loss (2x) is hit.
-# Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
-# Works in both bull and bear markets by trading breakouts in either direction with volume/volatility filters.
+# Hypothesis: 6s Williams Alligator trend-following strategy with volume confirmation.
+# Uses Williams Alligator (Jaw/Teeth/Lips) on daily timeframe to identify trend direction and alignment.
+# Enters long when Lips > Teeth > Jaw (bullish alignment) and price is above Teeth with volume confirmation.
+# Enters short when Lips < Teeth < Jaw (bearish alignment) and price is below Teeth with volume confirmation.
+# Includes ATR-based trend strength filter to avoid weak/choppy markets.
+# Exits when Alligator alignment breaks or ATR stop loss (2.5x) is hit.
+# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
+# Works in both bull and bear markets by following established trends identified by the Alligator.
