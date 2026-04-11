@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_v1
-# Strategy: 12h Camarilla pivot with 1d EMA trend filter and volume confirmation
+# 12h_1d_camarilla_breakout_v1
+# Strategy: 12h Camarilla breakout with 1d EMA trend filter and volume confirmation
 # Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance. In trending markets (1d EMA filter), price reacts strongly at these levels. Volume confirmation ensures institutional participation. Works in both bull/bear by trading breakouts in trend direction, avoiding false signals in chop. Lower trade frequency on 12h reduces fee drag.
+# Hypothesis: Camarilla pivot levels (H3/L3) from daily chart act as strong support/resistance. Breakouts in the direction of the 1d EMA trend with volume confirmation capture institutional moves. Works in both bull/bear by trading breakouts in trend direction, avoiding false signals in chop. Lower frequency (12h) reduces trade frequency and fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_v1"
+name = "12h_1d_camarilla_breakout_v1"
 timeframe = "12h"
 leverage = 1.0
 
