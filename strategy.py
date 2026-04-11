@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-# 4h_1d_trix_volume_breakout_v2
-# Strategy: 4-hour TRIX momentum with volume confirmation and 1-day trend filter
-# Timeframe: 4h
+# 1d_1w_cci_volume_breakout_v1
+# Strategy: Daily CCI momentum with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: TRIX (triple-smoothed EMA) captures momentum with less noise than MACD.
-# Bullish when TRIX crosses above zero with volume confirmation (VOL > 1.5x 20-period average) and price above 1-day EMA50.
-# Bearish when TRIX crosses below zero with volume confirmation and price below 1-day EMA50.
-# Works in bull markets by capturing momentum continuations and in bear markets by catching breakdowns with volume.
-# Uses tight entry conditions to limit trades (~30-50/year) and avoid fee drag.
-# Added: stricter volume threshold (2.0x) and reduced position size (0.20) to reduce trade frequency and improve robustness.
+# Hypothesis: CCI captures cyclical momentum with weekly trend filter (weekly EMA50) for trend alignment.
+# Long when CCI crosses above +100 with volume > 1.5x 20-day average and price above weekly EMA50.
+# Short when CCI crosses below -100 with volume > 1.5x 20-day average and price below weekly EMA50.
+# Exit on opposite CCI cross with volume confirmation. Uses tight conditions to limit trades (~15-25/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_trix_volume_breakout_v2"
-timeframe = "4h"
+name = "1d_1w_cci_volume_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,64 +27,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 60:
+    if len(df_1w) < 60:
         return np.zeros(n)
     
-    # Daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 4h TRIX (15-period triple EMA)
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    trix = trix.fillna(0).values
+    # Daily CCI (20-period)
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
+    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp_series - sma_tp) / (0.015 * mad)
+    cci = cci.fillna(0).values
     
-    # 4h Volume confirmation: current volume > 2.0x 20-period average (stricter)
+    # Daily Volume confirmation: current volume > 1.5x 20-day average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_avg_20)
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after TRIX warmup
+    for i in range(20, n):  # Start after CCI warmup
         # Skip if any required data is invalid
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
-            np.isnan(ema_50_1d_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(cci[i]) or np.isnan(cci[i-1]) or 
+            np.isnan(ema_50_1w_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # TRIX zero-line crosses
-        trix_cross_up = trix[i-1] <= 0 and trix[i] > 0
-        trix_cross_down = trix[i-1] >= 0 and trix[i] < 0
+        # CCI crosses
+        cci_cross_up = cci[i-1] <= 100 and cci[i] > 100
+        cci_cross_down = cci[i-1] >= -100 and cci[i] < -100
         
-        # Trend filter: price above/below daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry logic: TRIX cross + volume + trend alignment
-        if trix_cross_up and vol_confirm[i] and uptrend and position != 1:
+        # Entry logic: CCI cross + volume + trend alignment
+        if cci_cross_up and vol_confirm[i] and uptrend and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif trix_cross_down and vol_confirm[i] and downtrend and position != -1:
+            signals[i] = 0.25
+        elif cci_cross_down and vol_confirm[i] and downtrend and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit: opposite TRIX cross with volume confirmation
-        elif position == 1 and trix_cross_down and vol_confirm[i]:
+            signals[i] = -0.25
+        # Exit: opposite CCI cross with volume confirmation
+        elif position == 1 and cci_cross_down and vol_confirm[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and trix_cross_up and vol_confirm[i]:
+        elif position == -1 and cci_cross_up and vol_confirm[i]:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
