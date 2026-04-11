@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_vwap_bounce_v1"
-timeframe = "4h"
+name = "12h_1d_trix_volume_signal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,8 +12,6 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -25,34 +23,25 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return signals
     
-    # Calculate daily VWAP
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    vwap_num_1d = np.cumsum(typical_price_1d * df_1d['volume'].values)
-    vwap_den_1d = np.cumsum(df_1d['volume'].values)
-    vwap_1d = vwap_num_1d / vwap_den_1d
+    # Calculate TRIX on daily close
+    # TRIX = EMA(EMA(EMA(close, period), period), period) - 1-period ago value, then % change
+    close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # TRIX = (ema3 - ema3_previous) / ema3_previous * 100
+    trix_raw = np.diff(ema3, prepend=ema3[0])
+    trix = (trix_raw / ema3) * 100
     
-    # Align VWAP to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Align TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Daily ATR for volatility filter
-    high_low_1d = df_1d['high'].values - df_1d['low'].values
-    high_close_1d = np.abs(df_1d['high'].values - df_1d['close'].values)
-    low_close_1d = np.abs(df_1d['low'].values - df_1d['close'].values)
-    tr_1d = np.maximum(high_low_1d, np.maximum(high_close_1d, low_close_1d))
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # 4h price relative to VWAP bands
-    upper_band = vwap_1d_aligned + 0.5 * atr_1d_aligned
-    lower_band = vwap_1d_aligned - 0.5 * atr_1d_aligned
-    
-    # Volume confirmation: 4h volume > 1.5x 20-period average
+    # Volume confirmation: 12h volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -60,27 +49,26 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
+        vol_confirm = volume_current > 1.3 * vol_ma_20[i]
         
-        # VWAP bounce conditions
-        touch_lower = price_close <= lower_band[i]
-        touch_upper = price_close >= upper_band[i]
+        # TRIX signal: positive = bullish momentum, negative = bearish momentum
+        trix_signal = trix_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price touches or goes below VWAP - 0.5*ATR + volume confirmation
-        if touch_lower and vol_confirm:
+        # Long: TRIX > 0 (bullish momentum) + volume confirmation
+        if trix_signal > 0 and vol_confirm:
             enter_long = True
         
-        # Short: Price touches or goes above VWAP + 0.5*ATR + volume confirmation
-        if touch_upper and vol_confirm:
+        # Short: TRIX < 0 (bearish momentum) + volume confirmation
+        if trix_signal < 0 and vol_confirm:
             enter_short = True
         
-        # Exit conditions: price returns to VWAP
-        exit_long = price_close >= vwap_1d_aligned[i]
-        exit_short = price_close <= vwap_1d_aligned[i]
+        # Exit conditions: TRIX crosses zero
+        exit_long = trix_signal <= 0
+        exit_short = trix_signal >= 0
         
         # Trading logic
         if enter_long and position != 1:
@@ -101,7 +89,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily VWAP acts as dynamic support/resistance. Price tends to revert to VWAP after
-# deviations, especially with volume confirmation. Works in both bull and bear markets as VWAP
-# adapts to price action. Bands at ±0.5*ATR provide entry zones with volatility adjustment.
-# Position size 0.25 limits drawdown. Target: 30-80 trades/year.
+# Hypothesis: TRIX (Triple Exponential Moving Average) on daily timeframe measures momentum
+# by showing the rate of change of a triple-smoothed EMA. Positive TRIX indicates bullish
+# momentum, negative indicates bearish momentum. Combined with volume confirmation on 12h
+# timeframe to ensure participation. Works in both bull and bear markets by following
+# momentum direction. Position size 0.25 limits drawdown. Target: 50-150 trades over 4 years.
