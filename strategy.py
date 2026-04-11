@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1d_obv_divergence_v1
-Strategy: 6s On-Balance Volume (OBV) divergence with 1d trend filter
-Timeframe: 6h
+12h_1d_ema_bounce_volume_v1
+Strategy: 12h EMA bounce with volume confirmation and 1d trend filter
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses OBV divergence to detect weakening momentum and potential reversals. 
-- Bullish divergence: price makes lower low, OBV makes higher low → long
-- Bearish divergence: price makes higher high, OBV makes lower high → short
-Filtered by 1d EMA50 trend (only trade in direction of higher timeframe trend).
-OBV is a volume-based indicator that often leads price, making it effective for early reversal detection.
-In bear markets (2025+), bullish divergences at support can capture bounces; in bull markets, bearish divergences at resistance can capture pullbacks.
-Designed for low trade frequency (10-30/year) with high win rate by requiring both divergence and trend alignment.
+Hypothesis: Price tends to bounce off the 1d EMA50 on 12h timeframe during pullbacks in trending markets. Uses 1d EMA50 as dynamic support/resistance, enters on 12h close near EMA50 with volume confirmation (>1.5x average volume). Trend filter requires 12h price above/below 1d EMA200 to ensure alignment with higher timeframe trend. Designed to work in both bull and bear markets by trading pullbacks in the direction of the 1d trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_obv_divergence_v1"
-timeframe = "6h"
+name = "12h_1d_ema_bounce_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,66 +32,52 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate OBV
-    obv = np.zeros(n)
-    obv[0] = volume[0]
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            obv[i] = obv[i-1] + volume[i]
-        elif close[i] < close[i-1]:
-            obv[i] = obv[i-1] - volume[i]
-        else:
-            obv[i] = obv[i-1]
-    
-    # 1d EMA50 for trend filter
+    # 1d EMA50 for dynamic support/resistance
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Lookback period for divergence detection
-    lookback = 10  # 10 periods (~60 hours) to find swing points
+    # 1d EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(ema_50_1d_aligned[i]):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Find recent swing low and high in price and OBV
-        # Look for lowest low and highest high in the lookback window
-        price_low_idx = np.argmin(low[i-lookback:i+1]) + (i - lookback)
-        price_high_idx = np.argmax(high[i-lookback:i+1]) + (i - lookback)
-        obv_low_idx = np.argmin(obv[i-lookback:i+1]) + (i - lookback)
-        obv_high_idx = np.argmax(obv[i-lookback:i+1]) + (i - lookback)
-        
-        price_low = low[price_low_idx]
-        price_high = high[price_high_idx]
-        obv_low = obv[obv_low_idx]
-        obv_high = obv[obv_high_idx]
-        
-        # Current values
         price_close = close[i]
-        obv_current = obv[i]
+        ema_50 = ema_50_1d_aligned[i]
+        ema_200 = ema_200_1d_aligned[i]
         
-        # Bullish divergence: price makes lower low, OBV makes higher low
-        bullish_div = (price_low < low[i-1]) and (obv_low > obv[i-1])
-        # Bearish divergence: price makes higher high, OBV makes lower high
-        bearish_div = (price_high > high[i-1]) and (obv_high < obv[i-1])
+        # Trend filter: price above EMA200 for long, below for short
+        uptrend = price_close > ema_200
+        downtrend = price_close < ema_200
         
-        # Trend filters
-        uptrend_1d = price_close > ema_50_1d_aligned[i]
-        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        # Proximity to EMA50: within 1% of EMA50
+        near_ema50 = abs(price_close - ema_50) / ema_50 < 0.01
         
-        # Entry conditions
-        long_signal = bullish_div and uptrend_1d
-        short_signal = bearish_div and downtrend_1d
+        # Volume confirmation
+        vol_confirmed = vol_spike[i]
         
-        # Exit when opposite divergence occurs or trend changes
-        exit_long = position == 1 and (bearish_div or not uptrend_1d)
-        exit_short = position == -1 and (bullish_div or not downtrend_1d)
+        # Long: near EMA50 from below in uptrend with volume
+        long_signal = near_ema50 and price_close > ema_50 and uptrend and vol_confirmed
+        
+        # Short: near EMA50 from above in downtrend with volume
+        short_signal = near_ema50 and price_close < ema_50 and downtrend and vol_confirmed
+        
+        # Exit when price moves 2% away from EMA50 or trend changes
+        exit_long = position == 1 and (price_close < ema_50 * 0.98 or price_close > ema_50 * 1.02 or not uptrend)
+        exit_short = position == -1 and (price_close > ema_50 * 1.02 or price_close < ema_50 * 0.98 or not downtrend)
         
         # Trading logic
         if long_signal and position != 1:
