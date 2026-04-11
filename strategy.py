@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_trend_v2
-Strategy: 4h Camarilla pivot breakout with 1d volume confirmation and trend filter
-Timeframe: 4h
+12h_1w_camarilla_breakout_volume_v1
+Strategy: 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses 4h price breakout above/below Camarilla pivot levels (H3/L3) calculated from previous 1d candle, confirmed by 1d volume spike (>1.5x 20-period average) and 1d EMA50 trend filter. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Works in both bull/bear markets by following 1d trend direction. Target: 20-50 trades per year.
+Hypothesis: Uses Camarilla pivot levels from daily data to identify potential reversal zones, combined with 1-week trend filter and volume confirmation to avoid false breakouts. Designed to capture institutional order flow around key pivot levels in both trending and ranging markets. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v2"
-timeframe = "4h"
+name = "12h_1w_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
-    if n < 50:
+    n = len(prices)
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,72 +26,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 30 or len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d close
-    close_1d = df_1d['close'].values
+    # 1d Camarilla pivot levels (using previous day's data)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels: H3/L3 = close ± 1.1*(high-low)/2
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Calculate pivot and levels (using previous day's data)
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Camarilla levels
+    r3 = pivot + (range_1d * 1.1 / 2)
+    r2 = pivot + (range_1d * 1.1 / 4)
+    r1 = pivot + (range_1d * 1.1 / 6)
+    s1 = pivot - (range_1d * 1.1 / 6)
+    s2 = pivot - (range_1d * 1.1 / 4)
+    s3 = pivot - (range_1d * 1.1 / 2)
     
-    # 1d volume confirmation: volume > 1.5x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = vol_1d > (1.5 * vol_ma_20)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Shift levels forward by 1 to use previous day's levels for current day
+    pivot = np.concatenate([[np.nan], pivot[:-1]])
+    r3 = np.concatenate([[np.nan], r3[:-1]])
+    r2 = np.concatenate([[np.nan], r2[:-1]])
+    r1 = np.concatenate([[np.nan], r1[:-1]])
+    s1 = np.concatenate([[np.nan], s1[:-1]])
+    s2 = np.concatenate([[np.nan], s2[:-1]])
+    s3 = np.concatenate([[np.nan], s3[:-1]])
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Camarilla levels to 12h timeframe
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(pivot_12h[i]) or np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         
-        # Trend filter: price above/below EMA50
-        uptrend = price_close > ema_50_1d_aligned[i]
-        downtrend = price_close < ema_50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend_1w = price_close > ema_50_1w_aligned[i]
+        downtrend_1w = price_close < ema_50_1w_aligned[i]
         
-        # Breakout conditions
-        breakout_long = price_high > camarilla_h3_aligned[i] and vol_spike_aligned[i]
-        breakout_short = price_low < camarilla_l3_aligned[i] and vol_spike_aligned[i]
+        # Camarilla breakout conditions
+        breakout_long = (price_close > r3_12h[i]) and volume_spike[i]
+        breakdown_short = (price_close < s3_12h[i]) and volume_spike[i]
         
-        # Entry logic: follow trend direction
-        long_signal = breakout_long and uptrend
-        short_signal = breakout_short and downtrend
+        # Pullback entries (more frequent)
+        pullback_long = (price_close <= r1_12h[i] and price_close >= pivot_12h[i]) and uptrend_1w and volume_spike[i]
+        pullback_short = (price_close >= s1_12h[i] and price_close <= pivot_12h[i]) and downtrend_1w and volume_spike[i]
         
-        # Exit when price returns to pivot level (close price)
-        pivot_1d = close_1d
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        exit_long = position == 1 and price_close < pivot_aligned[i]
-        exit_short = position == -1 and price_close > pivot_aligned[i]
+        # Exit conditions
+        exit_long = position == 1 and (price_close < pivot_12h[i] or not volume_spike[i])
+        exit_short = position == -1 and (price_close > pivot_12h[i] or not volume_spike[i])
         
         # Trading logic
-        if long_signal and position != 1:
+        if (breakout_long or pullback_long) and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif (breakdown_short or pullback_short) and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
@@ -105,4 +123,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Uses 4h price breakout above/below Camarilla pivot levels (H3/L3) calculated from previous 1d candle, confirmed by 1d volume spike (>1.5x 20-period average) and 1d EMA50 trend filter. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Works in both bull/bear markets by following 1d trend direction. Target: 20-50 trades per year.
+# Hypothesis: Uses Camarilla pivot levels from daily data to identify potential reversal zones, combined with 1-week trend filter and volume confirmation to avoid false breakouts. Designed to capture institutional order flow around key pivot levels in both trending and ranging markets. Target: 50-150 total trades over 4 years.
