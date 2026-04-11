@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v2"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -39,17 +39,17 @@ def generate_signals(prices):
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Volume confirmation: 12h volume > 3.5x 40-period average (more selective to reduce trades)
-    vol_ma_40 = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
+    # Volume confirmation: 4h volume > 3x 50-period average (balanced to avoid overtrading)
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma_40[i])):
+            np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
         
@@ -57,7 +57,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 3.5 * vol_ma_40[i]
+        vol_confirm = volume_current > 3.0 * vol_ma_50[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -104,12 +104,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 3.5x 40-period average.
-# Enters short when price breaks below S4 with volume > 3.5x 40-period average.
+# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 3x 50-period average.
+# Enters short when price breaks below S4 with volume > 3x 50-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (3.5x vs 3x) and longer MA (40 vs 30) to further reduce false breakouts and overtrading.
-# Position size set to 0.25 to improve risk-adjusted returns.
-# Target: 10-20 trades per year (40-80 total over 4 years) to minimize fee drag.
+# Uses volume threshold (3x) and MA length (50) to balance signal quality and trade frequency.
+# Position size set to 0.25 to manage risk in volatile markets.
+# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 12h timeframe reduces trade frequency compared to lower timeframes, minimizing fee drag while capturing significant moves.
+# 4h timeframe provides good balance between signal quality and trade frequency.
