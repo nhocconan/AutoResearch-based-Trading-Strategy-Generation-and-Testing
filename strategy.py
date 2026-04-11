@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v9"
+name = "12h_1d_camarilla_breakout_v10"
 timeframe = "12h"
 leverage = 1.0
 
@@ -52,7 +52,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h volume filter: volume > 2.5x 20-period average (adjusted for trade frequency)
+    # 12h volume filter: volume > 2.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 12h ADX for trend strength (14 period)
