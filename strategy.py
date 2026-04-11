@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels from 12h + volume spike + volatility regime filter
-# - Long when price breaks above Camarilla H4 resistance with volume > 2.0x 20-period average (strong conviction)
-# - Short when price breaks below Camarilla L4 support with volume > 2.0x 20-period average
-# - Uses 12h data to calculate Camarilla levels (more stable than shorter timeframes)
-# - Volatility filter: only trade when ATR(14) > ATR(50) to avoid low volatility chop
-# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits for 4h
-# - Camarilla levels provide natural support/resistance based on previous day's price action
-# - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
+# Hypothesis: 6h Elder Ray Power + 1w/1d regime filter
+# - Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+# - Strong trend when Bull Power > 0 and Bear Power < 0 (both bulls and bears in control)
+# - Regime filter: Only trade when 1w ADX > 25 (trending market) to avoid chop
+# - Entry: Go long when Bull Power crosses above 0 with regime confirmation
+# - Entry: Go short when Bear Power crosses above 0 with regime confirmation (Bear Power rising = weakening bears)
+# - Exit: Opposite cross or regime breakdown (ADX < 20)
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) for 6f
+# - Works in bull markets (strong bull power) and bear markets (strong bear power)
+# - Weekly ADX ensures we only trade in strong trends, avoiding whipsaws in ranging markets
 
-name = "4h_12h_camarilla_volume_volatility_v1"
-timeframe = "4h"
+name = "6h_1w_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,97 +24,108 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load weekly data ONCE before loop for ADX regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate Camarilla levels for each 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 13-period EMA for Elder Ray (using daily close as proxy)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return signals
     
-    # Camarilla formulas: H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
-    camarilla_h4 = close_12h + (high_12h - low_12h) * 1.1 / 2
-    camarilla_l4 = close_12h - (high_12h - low_12h) * 1.1 / 2
+    close_1d = df_1d['close'].values
+    # Calculate EMA13 on daily closes
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
+    # Align daily EMA13 to 6h timeframe
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # 12h volume SMA (20-period)
-    volume_12h = df_12h['volume'].values
-    volume_series = pd.Series(volume_12h)
-    volume_sma_20_12h = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    # Calculate Elder Ray components
+    bull_power = high - ema13_aligned  # High - EMA13
+    bear_power = ema13_aligned - low   # EMA13 - Low
     
-    # Volatility filter: ATR(14) > ATR(50) to avoid low volatility chop
-    tr1 = pd.Series(high_12h).shift(1) - pd.Series(low_12h).shift(1)
-    tr2 = abs(pd.Series(high_12h).shift(1) - pd.Series(close_12h).shift(1))
-    tr3 = abs(pd.Series(low_12h).shift(1) - pd.Series(close_12h).shift(1))
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50_12h = pd.Series(tr_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    atr_50_aligned = align_htf_to_ltf(prices, df_12h, atr_50_12h)
+    # Calculate weekly ADX for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pre-compute 4h price series for efficiency
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
+    # True Range
+    tr1 = pd.Series(high_1w).shift(1) - pd.Series(low_1w).shift(1)
+    tr2 = abs(pd.Series(high_1w).shift(1) - pd.Series(close_1w).shift(1))
+    tr3 = abs(pd.Series(low_1w).shift(1) - pd.Series(close_1w).shift(1))
+    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    plus_dm = pd.Series(high_1w).diff()
+    minus_dm = pd.Series(low_1w).diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align weekly ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_14)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current price data
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
-        volume_current = volume[i]
+        # Previous values for crossover detection
+        bull_power_prev = bull_power[i-1]
+        bear_power_prev = bear_power[i-1]
         
-        # Camarilla breakout conditions
-        breakout_long = price_close > camarilla_h4_aligned[i-1]  # Close above previous period's H4
-        breakout_short = price_close < camarilla_l4_aligned[i-1]  # Close below previous period's L4
+        # Regime filter: only trade in trending markets (ADX > 25)
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # Exit regime
         
-        # Volume confirmation: current volume > 2.0x 20-period average (using 12h aligned volume)
-        vol_confirm = volume_current > 2.0 * volume_sma_20_aligned[i]
-        
-        # Volatility filter: trade only when short-term ATR > long-term ATR (avoid low volatility chop)
-        vol_filter = atr_14_aligned[i] > atr_50_aligned[i]
+        # Elder Ray signals
+        bull_crossover = (bull_power_prev <= 0) and (bull_power[i] > 0)  # Bull power crosses above zero
+        bear_crossover = (bear_power_prev <= 0) and (bear_power[i] > 0)  # Bear power crosses above zero (weakening bears)
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Camarilla H4 breakout + volume confirmation + volatility filter
-        if breakout_long and vol_confirm and vol_filter:
+        # Long: Bull power crosses above zero in strong trend
+        if bull_crossover and strong_trend:
             enter_long = True
         
-        # Short: Camarilla L4 breakdown + volume confirmation + volatility filter
-        if breakout_short and vol_confirm and vol_filter:
+        # Short: Bear power crosses above zero (indicating weakening bearish momentum) in strong trend
+        # This suggests bears are losing control, potential for trend continuation or reversal
+        if bear_crossover and strong_trend:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla breakout or volatility collapse
+        # Exit conditions
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below L4 OR volatility filter fails
-            exit_long = (price_close < camarilla_l4_aligned[i-1]) or (not vol_filter)
+            # Exit long if bear power crosses above zero OR trend weakens
+            exit_long = bear_crossover or weak_trend
         elif position == -1:
-            # Exit short if price breaks above H4 OR volatility filter fails
-            exit_short = (price_close > camarilla_h4_aligned[i-1]) or (not vol_filter)
+            # Exit short if bull power crosses above zero OR trend weakens
+            exit_short = bull_crossover or weak_trend
         
         # Trading logic
         if enter_long and position != 1:
