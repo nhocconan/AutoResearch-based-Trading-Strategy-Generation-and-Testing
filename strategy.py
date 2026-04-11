@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_12h_kama_rsi_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,104 +20,87 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Calculate 14-period KAMA on weekly close
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1w, n=1)), axis=0)  # 10-period volatility
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full_like(close_1w, np.nan)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA trend: 1 if close > KAMA, -1 if close < KAMA
-    kama_trend = np.where(close_1w > kama, 1, -1)
+    # Camarilla formula: range = high - low
+    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
+    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
+    daily_range = high_1d - low_1d
     
-    # Align weekly KAMA trend to daily
-    kama_trend_aligned = align_htf_to_ltf(prices, df_1w, kama_trend)
+    # Key levels for breakout: R4 (resistance) and S4 (support)
+    r4 = close_1d + (daily_range * 1.1 / 2)
+    s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Load 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return signals
+    # Exit levels: R3 and S3
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Calculate 20-period average volume on 12h
-    volume_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 12h volume > 2.0x 50-period average (very strict to reduce trades)
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # Align 12h volume MA to daily
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # ATR for dynamic position sizing (optional - using fixed size for simplicity)
+    # atr_period = 14
+    # tr1 = high[1:] - low[1:]
+    # tr2 = np.abs(high[1:] - close[:-1])
+    # tr3 = np.abs(low[1:] - close[:-1])
+    # tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align daily levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_trend_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current daily volume > 1.5x 12h volume MA
-        vol_confirm = volume_current > 1.5 * vol_ma_20_aligned[i]
+        # Volume confirmation - very strict
+        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        
-        # Trend filter from weekly KAMA
-        uptrend = kama_trend_aligned[i] == 1
-        downtrend = kama_trend_aligned[i] == -1
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > r4_aligned[i]  # Break above R4
+        breakout_down = price_close < s4_aligned[i]  # Break below S4
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: RSI oversold + uptrend + volume confirmation
-        if rsi_oversold and uptrend and vol_confirm:
+        # Long: Break above R4 with volume confirmation
+        if breakout_up and vol_confirm:
             enter_long = True
         
-        # Short: RSI overbought + downtrend + volume confirmation
-        if rsi_overbought and downtrend and vol_confirm:
+        # Short: Break below S4 with volume confirmation
+        if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: RSI returns to neutral zone (40-60)
-        exit_long = rsi[i] > 40
-        exit_short = rsi[i] < 60
+        # Exit conditions: return to opposite S3/R3 levels
+        exit_long = price_close < s3_aligned[i]  # Return to S3 level
+        exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -126,17 +109,16 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Daily KAMA + RSI breakout with weekly trend filter and 12h volume confirmation.
-# Uses weekly KAMA for trend direction (avoids counter-trend trades in strong trends).
-# Enters long when daily RSI < 30 (oversold) in weekly uptrend with volume > 1.5x 12h average.
-# Enters short when daily RSI > 70 (overbought) in weekly downtrend with volume > 1.5x 12h average.
-# Exits when RSI returns to neutral zone (40 for longs, 60 for shorts).
-# Volume confirmation from 12h timeframe reduces false signals.
-# Position size 0.25 balances risk and return.
-# Target: 10-20 trades per year (40-80 total over 4 years) to minimize fee drag.
-# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
-# Avoids whipsaws by requiring trend alignment and volume confirmation.
+# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 2.0x 50-period average.
+# Enters short when price breaks below S4 with volume > 2.0x 50-period average.
+# Exits when price returns to S3/R3 levels respectively.
+# Uses very strict volume threshold (2.0x) and moderate MA (50) to achieve 15-30 trades per year.
+# Position size set to 0.30 to balance risk and reward.
+# Target: 15-30 trades per year (60-120 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# 12h timeframe reduces noise and 1d Camarilla levels provide institutional reference points.
