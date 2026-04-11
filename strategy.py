@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_v33
-Strategy: 4h breakout with 1d volume confirmation and volatility filter
-Timeframe: 4h
+12h_1d_camarilla_breakout_volume_v1
+Strategy: 12h breakout with 1d volume confirmation and close-based stoploss
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 25-45 trades/year to minimize fee drift.
+Hypothesis: Buy when 12h closes above prior 1d R3 with volume expansion; sell when 12h closes below prior 1d S3 with volume expansion. Exit when price returns to prior 1d pivot. Uses volume to confirm breakouts and pivot for mean-reversion exit. Designed for both bull and bear markets by trading breakouts from daily ranges, which capture momentum in trending markets and reversals in ranging markets. Low-frequency design targets 15-25 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v33"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,39 +32,19 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4h ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 4h volume filter: volume > 1.5x 20-period average
+    # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d ATR (volatility filter: low volatility regime) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ATR
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # 1d ATR ratio: current ATR / 20-period average ATR (low when < 0.8)
-    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1d / atr_ma_20
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
     # === 1d Close (prior close for context) ===
+    close_1d = df_1d['close'].values
     close_1d_shifted = np.roll(close_1d, 1)
     close_1d_shifted[0] = np.nan
     close_1d_prior = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
     
     # === 1d Camarilla (entry levels from prior 1d) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
     high_1d_shift = np.roll(high_1d, 1)
     low_1d_shift = np.roll(low_1d, 1)
     close_1d_shift = np.roll(close_1d, 1)
@@ -77,23 +57,18 @@ def generate_signals(prices):
     r3_1d = close_1d_shift + range_1d * 1.166
     s3_1d = close_1d_shift - range_1d * 1.166
     
-    # Align 1d Camarilla to 4h timeframe
+    # Align 1d Camarilla to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # Session filter: 08-20 UTC (major sessions)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if any required data is invalid or outside session
+        # Skip if any required data is invalid
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(close_1d_prior[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
-            not in_session[i]):
+            np.isnan(close_1d_prior[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -101,17 +76,14 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: 4h volume must be expanded
+        # Volume confirmation: 12h volume must be expanded
         volume_expanded = volume_current > 1.5 * vol_ma
         
-        # Volatility filter: low volatility regime (ATR ratio < 0.8)
-        low_volatility = atr_ratio_aligned[i] < 0.8
+        # Long conditions: 12h closes above prior 1d's R3 with volume expansion
+        long_signal = volume_expanded and (price_close > r3_1d_aligned[i])
         
-        # Long conditions: 4h closes above prior 1d's R3 with volume expansion + low volatility
-        long_signal = volume_expanded and low_volatility and (price_close > r3_1d_aligned[i])
-        
-        # Short conditions: 4h closes below prior 1d's S3 with volume expansion + low volatility
-        short_signal = volume_expanded and low_volatility and (price_close < s3_1d_aligned[i])
+        # Short conditions: 12h closes below prior 1d's S3 with volume expansion
+        short_signal = volume_expanded and (price_close < s3_1d_aligned[i])
         
         # Exit when price returns to the 1d pivot (mean reversion within prior 1d's range)
         exit_long = position == 1 and price_close < pivot_1d_aligned[i]
@@ -135,4 +107,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 25-45 trades/year to minimize fee drift.
+# Hypothesis: Buy when 12h closes above prior 1d R3 with volume expansion; sell when 12h closes below prior 1d S3 with volume expansion. Exit when price returns to prior 1d pivot. Uses volume to confirm breakouts and pivot for mean-reversion exit. Designed for both bull and bear markets by trading breakouts from daily ranges, which capture momentum in trending markets and reversals in ranging markets. Low-frequency design targets 15-25 trades/year to minimize fee drag.
