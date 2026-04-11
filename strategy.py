@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_divergence_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,43 +18,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop (primary timeframe)
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop (higher timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Calculate 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 14-period RSI on 1d closes
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Upper band: highest high of last 20 days
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 days
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 14-period RSI on 1w closes (for trend filter)
-    delta_1w = pd.Series(df_1w['close']).diff()
-    gain_1w = delta_1w.clip(lower=0)
-    loss_1w = -delta_1w.clip(upper=0)
-    avg_gain_1w = gain_1w.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss_1w = loss_1w.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs_1w = avg_gain_1w / avg_loss_1w
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    rsi_1w_values = rsi_1w.values
+    # Calculate 1d average volume (20-period) for volume filter
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all indicators to 1d timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
-    
-    # Calculate 20-period SMA on 1w closes for trend filter
-    sma_20_1w = pd.Series(df_1w['close']).rolling(window=20, min_periods=20).mean().values
-    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
+    # Align all 1d indicators to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -62,49 +47,29 @@ def generate_signals(prices):
     # Start from index 30 to ensure sufficient data
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(sma_20_1w_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Current 1d volume (aligned)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        vol_spike = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]  # 50% above average
+        
         price = close[i]
         
-        # RSI divergence conditions
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        # Bullish divergence: price makes lower low, RSI makes higher low
+        # Long when price breaks above Donchian upper band with volume spike
+        long_breakout = price > donchian_high_aligned[i]
+        long_signal = long_breakout and vol_spike
         
-        # Look back 3 periods for divergence detection
-        if i >= 3:
-            price_higher_high = (high[i] > high[i-1] and high[i-1] > high[i-2]) or \
-                               (high[i] > high[i-2] and high[i-1] > high[i-3])
-            price_lower_low = (low[i] < low[i-1] and low[i-1] < low[i-2]) or \
-                             (low[i] < low[i-2] and low[i-1] < low[i-3])
-            
-            rsi_lower_high = (rsi_aligned[i] < rsi_aligned[i-1] and rsi_aligned[i-1] < rsi_aligned[i-2]) or \
-                            (rsi_aligned[i] < rsi_aligned[i-2] and rsi_aligned[i-1] < rsi_aligned[i-3])
-            rsi_higher_low = (rsi_aligned[i] > rsi_aligned[i-1] and rsi_aligned[i-1] > rsi_aligned[i-2]) or \
-                            (rsi_aligned[i] > rsi_aligned[i-2] and rsi_aligned[i-1] > rsi_aligned[i-3])
-        else:
-            price_higher_high = False
-            price_lower_low = False
-            rsi_lower_high = False
-            rsi_higher_low = False
+        # Short when price breaks below Donchian lower band with volume spike
+        short_breakout = price < donchian_low_aligned[i]
+        short_signal = short_breakout and vol_spike
         
-        # Trend filter: 1w price above/below 20-period SMA
-        uptrend = price > sma_20_1w_aligned[i]
-        downtrend = price < sma_20_1w_aligned[i]
-        
-        # Long signal: bullish divergence + uptrend + RSI not overbought
-        long_signal = (price_lower_low and rsi_higher_low and uptrend and 
-                      rsi_aligned[i] < 70)
-        
-        # Short signal: bearish divergence + downtrend + RSI not oversold
-        short_signal = (price_higher_high and rsi_lower_high and downtrend and 
-                       rsi_aligned[i] > 30)
-        
-        # Exit conditions
-        exit_long = rsi_aligned[i] > 70  # Overbought exit
-        exit_short = rsi_aligned[i] < 30  # Oversold exit
+        # Exit when price returns to the middle of the Donchian channel
+        donchian_middle = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+        exit_long = price < donchian_middle
+        exit_short = price > donchian_middle
         
         if long_signal and position != 1:
             position = 1
