@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_ichimoku_trend_follow_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,137 +20,94 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
-        return signals
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 2:
         return signals
     
-    # Calculate Ichimoku components on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
-    
-    # Calculate ADX on daily data for trend strength filter
+    # Calculate daily ATR for volatility filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[1:])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate daily ATR MA (20-period) for volatility regime filter
+    atr_ma_20_1d = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values
     
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
+    # Calculate daily ATR ratio (current / MA) for regime detection
+    atr_ratio_1d = np.where(atr_ma_20_1d > 0, atr_14_1d_aligned / atr_ma_20_1d, 1.0)
     
-    # DI+ and DI-
-    di_plus = np.where(tr14 > 0, 100 * dm_plus_14 / tr14, 0)
-    di_minus = np.where(tr14 > 0, 100 * dm_minus_14 / tr14, 0)
+    # Calculate daily ATR MA (50-period) for trend filter
+    atr_ma_50_1d = pd.Series(atr_14_1d_aligned).rolling(window=50, min_periods=50).mean().values
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Calculate Camarilla levels on daily data (using previous day's range)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    camarilla_H4_1d = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
+    camarilla_L4_1d = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
+    camarilla_C_1d = prev_close_1d  # Camarilla C level is previous close
     
-    # Volume confirmation: 20-period average on 6h
+    # Align Camarilla levels to 12h timeframe
+    camarilla_H4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4_1d)
+    camarilla_L4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4_1d)
+    camarilla_C_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_C_1d)
+    
+    # Volume confirmation: 20-period average on 12h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(52, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(camarilla_H4_1d_aligned[i]) or np.isnan(camarilla_L4_1d_aligned[i]) or
+            np.isnan(camarilla_C_1d_aligned[i]) or np.isnan(volume_sma_20[i]) or
+            np.isnan(atr_ratio_1d[i]) or np.isnan(atr_ma_50_1d[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (stricter filter)
+        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
         
-        # Trend strength filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
-        
-        # Ichimoku signals
-        tk_cross_bull = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-        tk_cross_bear = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-        
-        # Cloud (Kumo) - future cloud from Senkou Span A/B
-        # Senkou Span A/B are plotted 26 periods ahead, so we check current price vs cloud
-        # For simplicity, we use the current Senkou Span values (properly aligned)
-        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
-        # Price above cloud = bullish, below cloud = bearish
-        price_above_cloud = price_close > cloud_top
-        price_below_cloud = price_close < cloud_bottom
+        # Trend filter: trade only when ATR is above its 50-period MA (trending market)
+        trending = atr_14_1d_aligned[i] > atr_ma_50_1d[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: TK cross bullish + price above cloud + volume confirmation + strong trend
-        if tk_cross_bull and price_above_cloud and vol_confirm and strong_trend:
+        # Long: Price breaks above Camarilla H4 level + volume confirmation + trending
+        price_above_H4 = price_close > camarilla_H4_1d_aligned[i]
+        if price_above_H4 and vol_confirm and trending:
             enter_long = True
         
-        # Short: TK cross bearish + price below cloud + volume confirmation + strong trend
-        if tk_cross_bear and price_below_cloud and vol_confirm and strong_trend:
+        # Short: Price breaks below Camarilla L4 level + volume confirmation + trending
+        price_below_L4 = price_close < camarilla_L4_1d_aligned[i]
+        if price_below_L4 and vol_confirm and trending:
             enter_short = True
         
-        # Exit conditions: TK cross in opposite direction OR price enters cloud
+        # Exit conditions: price crosses back through the Camarilla C level (previous day's close)
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if TK cross bearish OR price enters cloud
-            exit_long = (tk_cross_bear) or (not price_above_cloud and not price_below_cloud)
+            # Exit long if price crosses below Camarilla C level
+            exit_long = price_close < camarilla_C_1d_aligned[i]
         elif position == -1:
-            # Exit short if TK cross bullish OR price enters cloud
-            exit_short = (tk_cross_bull) or (not price_above_cloud and not price_below_cloud)
+            # Exit short if price crosses above Camarilla C level
+            exit_short = price_close > camarilla_C_1d_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
@@ -171,10 +128,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Ichimoku on weekly timeframe provides strong trend direction and support/resistance levels.
-# Uses TK cross (Tenkan-sen/Kijun-sen) for momentum signals, cloud (Kumo) for dynamic S/R,
-# ADX on daily timeframe for trend strength filtering, and volume confirmation.
-# Weekly Ichimoku filters out noise and captures major trends, while daily ADX ensures we only
-# trade in strong trending conditions. This combination should work in both bull and bear markets
-# by following the dominant trend on higher timeframes.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: Camarilla breakout on 12h timeframe with daily trend and volatility filters.
+# Uses daily Camarilla levels (H4/L4) for entry and C level (previous close) for exit.
+# Volume confirmation (>2.0x 20-period average) ensures strong institutional participation.
+# ATR trend filter (ATR > 50-period MA) ensures we only trade in trending markets.
+# Target: 20-40 trades/year to minimize fee drift while capturing major moves.
