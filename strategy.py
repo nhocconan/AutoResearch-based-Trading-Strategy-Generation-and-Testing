@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1w_donchian_breakout_volume_v1
-# Strategy: 12h Donchian Channel breakout with volume confirmation and 1w ADX trend filter
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_volume_v2
+# Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d EMA trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture momentum. Volume confirms breakout strength. 1w ADX > 25 ensures trending markets. Works in bull (breakouts up) and bear (breakouts down). Low trade frequency (~15-30/year) minimizes fee drag.
+# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
+# Price breaking above/below these levels with volume confirmation and aligned daily trend
+# provides high-probability entries. Works in both bull and bear markets by following
+# the dominant daily trend. Low trade frequency (~20-40/year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,54 +27,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 30:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w ADX(14) for trend filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    # Calculate Camarilla pivot levels from previous day
+    # Using typical Camarilla formulas based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1w[1:] - high_1w[:-1]
-    down_move = low_1w[:-1] - low_1w[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    # Pivot point and levels
+    pivot = (high_1d + low_1d + close_1d_vals) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False).mean().values
+    # Camarilla levels (using standard multipliers)
+    # Resistance levels
+    r1 = pivot + (range_1d * 1.1 / 12)
+    r2 = pivot + (range_1d * 1.1 / 6)
+    r3 = pivot + (range_1d * 1.1 / 4)
+    r4 = pivot + (range_1d * 1.1 / 2)
+    # Support levels
+    s1 = pivot - (range_1d * 1.1 / 12)
+    s2 = pivot - (range_1d * 1.1 / 6)
+    s3 = pivot - (range_1d * 1.1 / 4)
+    s4 = pivot - (range_1d * 1.1 / 2)
     
-    # Directional Indicators
-    plus_di_14 = 100 * plus_dm_14 / tr_14
-    minus_di_14 = 100 * minus_dm_14 / tr_14
-    
-    # ADX
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
-    adx_1w = adx  # Already aligned to 1w
-    
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # 12h Donchian Channel (20)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
@@ -79,26 +80,30 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: 1w ADX > 25 indicates trending market
-        trending = adx_1w_aligned[i] > 25
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: Donchian breakout + volume + trend filter
-        if close[i] > donch_high[i] and vol_confirm[i] and trending and position != 1:
+        # Entry logic: Camarilla breakout + volume + trend alignment
+        # Long when price breaks above R3 with volume and uptrend
+        if close[i] > r3_aligned[i] and vol_confirm[i] and uptrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif close[i] < donch_low[i] and vol_confirm[i] and trending and position != -1:
+        # Short when price breaks below S3 with volume and downtrend
+        elif close[i] < s3_aligned[i] and vol_confirm[i] and downtrend and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: opposite Donchian breach (trailing stop)
-        elif position == 1 and close[i] < donch_low[i]:
+        # Exit: price returns to pivot level
+        elif position == 1 and close[i] < pivot[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > donch_high[i]:
+        elif position == -1 and close[i] > pivot[i]:
             position = 0
             signals[i] = 0.0
         else:
