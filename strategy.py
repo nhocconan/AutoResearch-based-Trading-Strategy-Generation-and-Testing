@@ -3,24 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and ATR-based stoploss
-# - Long: Price breaks above Donchian upper channel (20-period high) + 1w volume > 1.5x 20-period average
-# - Short: Price breaks below Donchian lower channel (20-period low) + 1w volume > 1.5x 20-period average
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ATR-based stoploss
+# - Long: Price breaks above Donchian upper channel (20-period high) + volume > 1.5x 20-period average
+# - Short: Price breaks below Donchian lower channel (20-period low) + volume > 1.5x 20-period average
 # - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Donchian breakout
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
 # - Donchian channels provide clear structure for breakouts in both bull and bear markets
 # - Volume confirmation filters out weak breakouts and increases signal quality
 # - ATR stoploss manages risk during volatile periods
-# - Weekly timeframe helps avoid false signals during low-volume periods
 
-name = "1d_1w_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:  # Increased warmup for 1d timeframe
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,26 +33,26 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Load 1w data ONCE before loop for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1w volume confirmation (20-period average)
-    volume_1w = df_1w['volume'].values
-    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
+    # Pre-compute 1d volume confirmation (20-period average)
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute Donchian channels on 1d timeframe
+    # Pre-compute Donchian channels on 12h timeframe
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute ATR for stoploss (1d timeframe)
+    # Pre-compute ATR for stoploss (12h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_sma_20_aligned[i]) or
             np.isnan(atr_14[i])):
