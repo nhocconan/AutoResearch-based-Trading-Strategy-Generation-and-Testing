@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_v1
-# Strategy: Daily timeframe using weekly Camarilla pivot breakouts with volume confirmation
-# Timeframe: 1d
+# 6h_12h_trix_volume_regime_v1
+# Strategy: 6s TRIX momentum with 12h volume confirmation and regime filter
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Weekly Camarilla levels provide strong support/resistance. Daily breakouts
-# with volume confirmation capture multi-day moves. Designed for low trade frequency
-# (7-25/year) to minimize fee drag and work in both bull and bear markets via trend filter.
+# Hypothesis: TRIX captures momentum shifts in 6h bars. Volume confirmation filters weak moves, while a regime filter (using 12h ATR ratio) distinguishes trending vs ranging markets to avoid whipsaws. Designed for low trade frequency (~15-30/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+name = "6h_12h_trix_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,90 +24,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 10:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous weekly bar
-    # Using close of previous week as base
-    prev_close = df_1w['close'].shift(1).values  # Previous week's close
-    prev_high = df_1w['high'].shift(1).values    # Previous week's high
-    prev_low = df_1w['low'].shift(1).values      # Previous week's low
+    # TRIX calculation (15-period EMA of EMA of EMA of price, then ROC)
+    def ema(series, span):
+        return pd.Series(series).ewm(span=span, adjust=False).values
     
-    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
-    # Range = prev_high - prev_low
-    # H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    # L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
-    # H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    # L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    # H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    # L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # TRIX on close
+    ema1 = ema(close, 15)
+    ema2 = ema(ema1, 15)
+    ema3 = ema(ema2, 15)
+    trix = np.zeros_like(close)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100  # ROC of triple EMA
     
-    rng = prev_high - prev_low
-    H4 = prev_close + 1.1 * rng / 2
-    L4 = prev_close - 1.1 * rng / 2
-    H3 = prev_close + 1.1 * rng / 4
-    L3 = prev_close - 1.1 * rng / 4
-    H2 = prev_close + 1.1 * rng / 6
-    L2 = prev_close - 1.1 * rng / 6
-    H1 = prev_close + 1.1 * rng / 12
-    L1 = prev_close - 1.1 * rng / 12
+    # 12h ATR ratio for regime filter (ATR(12) / ATR(36))
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align Camarilla levels to daily timeframe (use previous week's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1w, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1w, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
+    # True Range for 12h
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_12h = np.concatenate([[np.nan], tr_12h])  # align with index
     
-    # Weekly EMA20 for trend filter (using weekly close)
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    atr_12 = pd.Series(tr_12h).rolling(window=12, min_periods=12).mean().values
+    atr_36 = pd.Series(tr_12h).rolling(window=36, min_periods=36).mean().values
+    atr_ratio = atr_12 / atr_36  # >1 = expanding volatility (trending), <1 = contracting (ranging)
     
-    # 20-period volume average for confirmation (daily)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align TRIX and ATR ratio to 6h
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
+    
+    # 12h volume average for confirmation (20-period)
+    vol_12h = df_12h['volume'].values
+    vol_avg_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(60, n):  # warmup for TRIX and ATR
         # Skip if any required data is invalid
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(vol_avg_20_12h_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        vol_confirm = volume[i] > 1.8 * vol_avg_20[i]
+        # Volume confirmation: current volume > 1.5x 12h 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20_12h_aligned[i]
         
-        # Breakout signals using weekly Camarilla levels
-        # Breakout above H3 (strong resistance)
-        breakout_up = high[i] > H3_aligned[i-1]
-        # Breakdown below L3 (strong support)
-        breakdown_down = low[i] < L3_aligned[i-1]
+        # Regime filter: ATR ratio > 1.1 = trending regime (favor momentum)
+        trending_regime = atr_ratio_aligned[i] > 1.1
         
-        # Weekly EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_20_1w_aligned[i]
-        trend_bearish = close[i] < ema_20_1w_aligned[i]
+        # TRIX signals: zero-cross with momentum
+        trix_cross_up = trix_aligned[i] > 0 and trix_aligned[i-1] <= 0
+        trix_cross_down = trix_aligned[i] < 0 and trix_aligned[i-1] >= 0
         
         # Entry conditions
-        # Long: Breakout above H3 AND bullish trend AND volume confirmation
-        if breakout_up and trend_bullish and vol_confirm and position != 1:
+        # Long: TRIX crosses up AND trending regime AND volume confirmation
+        if trix_cross_up and trending_regime and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
-        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
+        # Short: TRIX crosses down AND trending regime AND volume confirmation
+        elif trix_cross_down and trending_regime and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
-        elif position == 1 and low[i] < L4_aligned[i-1]:  # Break below L4
+        # Exit: TRIX crosses zero in opposite direction (mean reversion in ranging markets)
+        elif position == 1 and trix_cross_down:  # Exit long on TRIX cross down
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] > H4_aligned[i-1]:  # Break above H4
+        elif position == -1 and trix_cross_up:   # Exit short on TRIX cross up
             position = 0
             signals[i] = 0.0
         else:
