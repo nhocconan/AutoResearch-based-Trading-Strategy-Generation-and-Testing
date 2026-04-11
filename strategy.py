@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-1d_1w_river_oscillator_volume_v1
-Strategy: 1d River Oscillator with volume confirmation and 1w trend filter
-Timeframe: 1d
+4h_1d_donchian_breakout_volume_v1
+Strategy: 4h Donchian breakout with volume confirmation and 1d EMA trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Uses daily River Oscillator (34-day RSI of price changes) for mean reversion signals, filtered by weekly trend (price > weekly EMA200) and confirmed by volume spikes (>2x average volume). Designed to capture oversold bounces in bull markets and overbought reversals in bear markets. Target: 20-50 trades over 4 years.
+Hypothesis: Uses 4h Donchian(20) breakouts confirmed by volume (>1.5x average) and filtered by 1d EMA50 trend. Designed to capture strong trending moves with low trade frequency. Works in both bull and bear markets by following the trend. Target: 20-50 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_river_oscillator_volume_v1"
-timeframe = "1d"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -26,81 +26,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load higher timeframe data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # River Oscillator: 34-period RSI of daily price changes
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[34] = np.mean(gain[1:35])  # First average of gains
-    avg_loss[34] = np.mean(loss[1:35])  # First average of losses
-    
-    for i in range(35, n):
-        avg_gain[i] = (avg_gain[i-1] * 33 + gain[i]) / 34
-        avg_loss[i] = (avg_loss[i-1] * 33 + loss[i]) / 34
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    river_osc = 100 - (100 / (1 + rs))
-    
-    # Weekly EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 200:
-        ema_200_1w[199] = np.mean(close_1w[:200])
-        for i in range(200, len(close_1w)):
-            ema_200_1w[i] = (close_1w[i] * 2 + ema_200_1w[i-1] * 198) / 200
-    
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period)
-    vol_avg = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_avg[19] = np.mean(volume[:20])
-        for i in range(20, n):
-            vol_avg[i] = (volume[i] + vol_avg[i-1] * 19) / 20
-    
-    vol_spike = volume > (2.0 * vol_avg)  # Volume spike filter
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(river_osc[i]) or np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below weekly EMA200
-        uptrend_1w = price_close > ema_200_1w_aligned[i]
-        downtrend_1w = price_close < ema_200_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # River Oscillator signals
-        oversold = river_osc[i] < 30
-        overbought = river_osc[i] > 70
+        # Breakout conditions
+        breakout_up = price_close > donchian_high[i]
+        breakout_down = price_close < donchian_low[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: oversold with volume in uptrend
-        long_signal = oversold and vol_confirmed and uptrend_1w
+        # Long: upward breakout with volume in uptrend
+        long_signal = breakout_up and vol_confirmed and uptrend_1d
         
-        # Short: overbought with volume in downtrend
-        short_signal = overbought and vol_confirmed and downtrend_1w
+        # Short: downward breakout with volume in downtrend
+        short_signal = breakout_down and vol_confirmed and downtrend_1d
         
-        # Exit when River Oscillator returns to neutral zone (40-60)
-        exit_long = position == 1 and river_osc[i] > 40
-        exit_short = position == -1 and river_osc[i] < 60
+        # Exit when price returns to the middle of the Donchian channel
+        donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+        exit_long = position == 1 and price_close < donchian_mid
+        exit_short = position == -1 and price_close > donchian_mid
         
         # Trading logic
         if long_signal and position != 1:
