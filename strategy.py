@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_camarilla_breakout_volume_v1
-Strategy: 12h Camarilla pivot breakout with volume confirmation and 1d trend filter
-Timeframe: 12h
+6h_1d_obv_divergence_v1
+Strategy: 6s On-Balance Volume (OBV) divergence with 1d trend filter
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses daily Camarilla pivot levels (based on previous day's OHLC) for breakout entries with volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend. Targets 12-37 trades per year (50-150 over 4 years) to minimize fee drag. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses higher timeframe for direction (1d) and 12h only for timing. Works in both bull and bear markets by following the trend.
+Hypothesis: Uses OBV divergence to detect weakening momentum and potential reversals. 
+- Bullish divergence: price makes lower low, OBV makes higher low → long
+- Bearish divergence: price makes higher high, OBV makes lower high → short
+Filtered by 1d EMA50 trend (only trade in direction of higher timeframe trend).
+OBV is a volume-based indicator that often leads price, making it effective for early reversal detection.
+In bear markets (2025+), bullish divergences at support can capture bounces; in bull markets, bearish divergences at resistance can capture pullbacks.
+Designed for low trade frequency (10-30/year) with high win rate by requiring both divergence and trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "6h_1d_obv_divergence_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,67 +35,69 @@ def generate_signals(prices):
     # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA20 for trend filter (optional, using price vs EMA)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate OBV
+    obv = np.zeros(n)
+    obv[0] = volume[0]
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            obv[i] = obv[i-1] + volume[i]
+        elif close[i] < close[i-1]:
+            obv[i] = obv[i-1] - volume[i]
+        else:
+            obv[i] = obv[i-1]
     
     # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)
-    
-    # Calculate Camarilla levels from previous day's data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_for_cama = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
-    camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    # Lookback period for divergence detection
+    lookback = 10  # 10 periods (~60 hours) to find swing points
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_avg[i]) or
-            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
+        if np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        price_close = close[i]
+        # Find recent swing low and high in price and OBV
+        # Look for lowest low and highest high in the lookback window
+        price_low_idx = np.argmin(low[i-lookback:i+1]) + (i - lookback)
+        price_high_idx = np.argmax(high[i-lookback:i+1]) + (i - lookback)
+        obv_low_idx = np.argmin(obv[i-lookback:i+1]) + (i - lookback)
+        obv_high_idx = np.argmax(obv[i-lookback:i+1]) + (i - lookback)
         
-        # Trend filter: price above/below 1d EMA50
+        price_low = low[price_low_idx]
+        price_high = high[price_high_idx]
+        obv_low = obv[obv_low_idx]
+        obv_high = obv[obv_high_idx]
+        
+        # Current values
+        price_close = close[i]
+        obv_current = obv[i]
+        
+        # Bullish divergence: price makes lower low, OBV makes higher low
+        bullish_div = (price_low < low[i-1]) and (obv_low > obv[i-1])
+        # Bearish divergence: price makes higher high, OBV makes lower high
+        bearish_div = (price_high > high[i-1]) and (obv_high < obv[i-1])
+        
+        # Trend filters
         uptrend_1d = price_close > ema_50_1d_aligned[i]
         downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > camarilla_H4_aligned[i]
-        breakout_down = price_close < camarilla_L4_aligned[i]
+        # Entry conditions
+        long_signal = bullish_div and uptrend_1d
+        short_signal = bearish_div and downtrend_1d
         
-        # Volume confirmation
-        vol_confirmed = vol_spike[i]
-        
-        # Long: upward breakout with volume in uptrend
-        long_signal = breakout_up and vol_confirmed and uptrend_1d
-        
-        # Short: downward breakout with volume in downtrend
-        short_signal = breakout_down and vol_confirmed and downtrend_1d
-        
-        # Exit when price returns to the EMA20 (12h) or opposite Camarilla level
-        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
-        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
+        # Exit when opposite divergence occurs or trend changes
+        exit_long = position == 1 and (bearish_div or not uptrend_1d)
+        exit_short = position == -1 and (bullish_div or not downtrend_1d)
         
         # Trading logic
         if long_signal and position != 1:
