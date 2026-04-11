@@ -1,21 +1,15 @@
-# 12h_1w_engulfing_pattern_volume_filter_v1
-# Hypothesis: On 12h timeframe, weekly bullish/bearish engulfing patterns combined with volume confirmation (>1.5x average volume) and ADX filter (>25) capture high-probability trend continuations.
-# Weekly engulfing patterns identify strong weekly reversals/continuations. Volume confirms institutional interest. ADX>25 ensures trades only in strong trends, reducing whipsaw.
-# Target: 15-25 trades per year to minimize fee drag while capturing strong weekly moves.
-# Works in bull markets (captures continuations) and bear markets (captures trend continuations during rallies/sell-offs).
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_engulfing_pattern_volume_filter_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_pivot_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,75 +17,118 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Load daily data for Camarilla pivot levels (1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly OHLC for engulfing pattern detection
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    open_1w = df_1w['open'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla pivot levels from daily OHLC
+    # Standard Camarilla: H4 = C + ((H-L) * 1.1/2), L4 = C - ((H-L) * 1.1/2)
+    # Also calculate H3, L3, H2, L2, H1, L1 for reference
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly bullish and bearish engulfing patterns
-    # Bullish engulfing: current week closes above prior week's open AND opens below prior week's close
-    bullish_engulf = (close_1w > open_1w) & (open_1w < close_1w) & \
-                     (close_1w > open_1w[:-1]) & (open_1w < close_1w[:-1]) & \
-                     (close_1w > close_1w[:-1]) & (open_1w < open_1w[:-1])
-    # Bearish engulfing: current week closes below prior week's open AND opens above prior week's close
-    bearish_engulf = (close_1w < open_1w) & (open_1w > close_1w) & \
-                     (close_1w < open_1w[:-1]) & (open_1w > close_1w[:-1]) & \
-                     (close_1w < close_1w[:-1]) & (open_1w > open_1w[:-1])
+    # Daily range
+    daily_range = high_1d - low_1d
     
-    # Handle first week (no prior week)
-    bullish_engulf[0] = False
-    bearish_engulf[0] = False
+    # Camarilla levels (using close of previous day)
+    # H4 = C + (range * 1.1/2)
+    # L4 = C - (range * 1.1/2)
+    camarilla_h4 = close_1d + (daily_range * 1.1 / 2)
+    camarilla_l4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Align weekly engulfing signals to 12h timeframe (use signal from prior week's close)
-    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bullish_engulf.astype(float))
-    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bearish_engulf.astype(float))
+    # Also calculate H3 and L3 for additional reference
+    camarilla_h3 = close_1d + (daily_range * 1.1/4)
+    camarilla_l3 = close_1d - (daily_range * 1.1/4)
     
-    # 12h volume filter: volume > 1.5x 20-period average
+    # Shift by 1 to use only completed daily bars (previous day's levels)
+    camarilla_h4 = np.roll(camarilla_h4, 1)
+    camarilla_l4 = np.roll(camarilla_l4, 1)
+    camarilla_h3 = np.roll(camarilla_h3, 1)
+    camarilla_l3 = np.roll(camarilla_l3, 1)
+    camarilla_h4[0] = np.nan
+    camarilla_l4[0] = np.nan
+    camarilla_h3[0] = np.nan
+    camarilla_l3[0] = np.nan
+    
+    # Align daily Camarilla levels to 4h timeframe
+    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # 4h ATR for volatility filter (14 period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 4h volume filter: volume > 1.3x 20-period average (slightly lower than before to allow more trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 12h ADX for trend strength (14 period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr_dm = np.concatenate([[np.nan], np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))])
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # 12h ADX for trend strength (14 period) - using HTF for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate ADX on 12h data
+    tr1_12h = high_12h[1:] - low_12h[1:]
+    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
+    tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+    
+    plus_dm_12h = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), np.maximum(h_12h[1:] - high_12h[:-1], 0), 0)
+    minus_dm_12h = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    
+    plus_di_12h = 100 * pd.Series(plus_dm_12h).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    minus_di_12h = 100 * pd.Series(minus_dm_12h).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
+    adx_12h = pd.Series(dx_12h).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 12h ADX to 4h timeframe
+    adx_12h_4h = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+        if (np.isnan(h4_4h[i]) or np.isnan(l4_4h[i]) or 
+            np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx_12h_4h[i])):
             signals[i] = 0.0
             continue
         
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation (1.5x average)
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        # Volume confirmation (1.3x average - balanced to avoid overtrading)
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
-        # Trend filter: ADX > 25 (strong trend filter to reduce trades)
-        trend_filter = adx[i] > 25
+        # Trend filter: ADX > 20 on 12h (moderate trend to allow more trades in ranging markets)
+        trend_filter = adx_12h_4h[i] > 20
         
-        # Long conditions: weekly bullish engulfing with volume and trend
-        long_signal = volume_confirmed and trend_filter and bullish_engulf_aligned[i] > 0.5
+        # Long conditions: price touches or breaks above H3 or H4 with volume and trend
+        # Using H3 as entry level for more frequent signals, H4 as stronger breakout
+        long_signal = volume_confirmed and trend_filter and (price_high > h3_4h[i])
         
-        # Short conditions: weekly bearish engulfing with volume and trend
-        short_signal = volume_confirmed and trend_filter and bearish_engulf_aligned[i] > 0.5
+        # Short conditions: price touches or breaks below L3 or L4 with volume and trend
+        short_signal = volume_confirmed and trend_filter and (price_low < l3_4h[i])
         
-        # Exit when opposite engulfing pattern appears (pattern completion)
-        exit_long = position == 1 and bearish_engulf_aligned[i] > 0.5
-        exit_short = position == -1 and bullish_engulf_aligned[i] > 0.5
+        # Exit when price returns to the opposite Camarilla level (mean reversion)
+        # Exit long when price returns to L3 level
+        exit_long = position == 1 and price_close < l3_4h[i]
+        # Exit short when price returns to H3 level
+        exit_short = position == -1 and price_close > h3_4h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -110,3 +147,14 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
+
+# Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance levels.
+# Strategy enters long when 4h price touches or breaks above H3 level (close + range*1.1/4) 
+# with volume confirmation (>1.3x 20-period average) and trend filter (12h ADX > 20).
+# Enters short when price touches or breaks below L3 level with same conditions.
+# Exits when price returns to the opposite level (L3 for long exits, H3 for short exits).
+# Uses 12h ADX for trend filtering to avoid whipsaws in ranging markets while allowing 
+# participation in trends. The combination of Camarilla levels (mathematically derived 
+# support/resistance), volume confirmation, and trend filtering creates a robust edge
+# that works in both bull and bear markets by adapting to market conditions.
+# Target: 20-40 trades per year to balance opportunity with cost efficiency.
