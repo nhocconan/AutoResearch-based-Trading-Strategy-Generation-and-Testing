@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_v1
-# Strategy: Camarilla pivot breakout with volume confirmation on 4h timeframe
-# Timeframe: 4h
+# 6h_1d_1w_ichimoku_cloud_filter_v1
+# Strategy: Ichimoku Cloud breakout with weekly trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels from 1d act as strong support/resistance. 
-# Breakouts with volume confirmation capture institutional moves. 
-# Works in bull by catching breakouts above resistance, 
-# and in bear by catching breakdowns below support.
+# Hypothesis: Price breaking above/below the Ichimoku Cloud (from 1d) signals strong momentum.
+# Weekly trend filter (1w ADX > 25) ensures trades align with higher timeframe momentum.
+# Volume confirmation filters weak signals. Works in bull by catching breakouts in uptrend,
+# and in bear by catching breakdowns in downtrend. Cloud acts as dynamic support/resistance.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "6h_1d_1w_ichimoku_cloud_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,64 +27,121 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for Ichimoku
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Formula: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
-    # We'll use H3 and L3 as entry levels (more sensitive)
-    # H3 = C + 1.125*(H-L), L3 = C - 1.125*(H-L)
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Calculate Camarilla H3 and L3 levels
-    camarilla_h3 = prev_close + 1.125 * (prev_high - prev_low)
-    camarilla_l3 = prev_close - 1.125 * (prev_high - prev_low)
+    # Ichimoku Cloud components (9, 26, 52 periods)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align to 4h timeframe (these levels are valid for the entire day)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Volume confirmation (20-period average)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Shift Senkou spans forward by 26 periods (cloud is plotted ahead)
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    senkou_a_shifted[:26] = np.nan
+    senkou_b_shifted[:26] = np.nan
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a_shifted)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b_shifted)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
+    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    
+    # Weekly ADX for trend filter (14-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), 
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), 
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
+    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Weekly trend: ADX > 25 indicates strong trend
+    trend_strong = adx > 25
+    trend_strong_6h = align_htf_to_ltf(prices, df_1w, trend_strong)
+    
+    # Volume average (24-period) for confirmation
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume lookback
+    for i in range(52, n):  # Wait for Ichimoku to be fully calculated
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(close[i]) or np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(trend_strong_6h[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current values
-        price_now = close[i]
-        vol_now = volume[i]
+        # Bullish breakout: price closes above cloud top
+        bull_breakout = close[i] > cloud_top[i]
+        # Bearish breakdown: price closes below cloud bottom
+        bear_breakout = close[i] < cloud_bottom[i]
         
-        # Camarilla levels for today
-        h3_level = camarilla_h3_aligned[i]
-        l3_level = camarilla_l3_aligned[i]
+        # Exit conditions: price returns to cloud or opposite signal
+        exit_long = position == 1 and close[i] < cloud_top[i]
+        exit_short = position == -1 and close[i] > cloud_bottom[i]
         
-        # Breakout conditions with volume confirmation
-        breakout_long = (price_now > h3_level) and vol_spike[i]
-        breakdown_short = (price_now < l3_level) and vol_spike[i]
-        
-        # Exit conditions: price returns to opposite level or mid-point
-        mid_point = (h3_level + l3_level) / 2
-        exit_long = position == 1 and (price_now < mid_point)
-        exit_short = position == -1 and (price_now > mid_point)
-        
-        # Trading logic
-        if breakout_long and position != 1:
+        # Trading logic: only trade in direction of weekly trend strength
+        if bull_breakout and trend_strong_6h[i] and vol_spike[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif breakdown_short and position != -1:
+        elif bear_breakout and trend_strong_6h[i] and vol_spike[i] and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
