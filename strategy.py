@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_v2"
+name = "4h_12h_camarilla_breakout_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -75,8 +75,8 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        vol_confirm = volume_current > 1.8 * volume_sma_20[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (stricter filter)
+        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
         
         # Trend filter: trade only when ATR is above its 50-period MA (trending market)
         trending = atr_14_12h_aligned[i] > atr_ma_50_12h[i]
@@ -113,10 +113,10 @@ def generate_signals(prices):
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -125,13 +125,12 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Camarilla breakout on 12h timeframe with volume confirmation and ATR trend filter.
+# Hypothesis: Camarilla breakout on 12h timeframe with stricter volume confirmation (2.0x) and ATR trend filter.
 # Uses 12h Camarilla levels (H4/L4) for entry and C level for exit.
-# Volume confirmation (>1.8x 20-period average) ensures institutional participation.
+# Volume confirmation (>2.0x 20-period average) ensures strong institutional participation.
 # ATR trend filter (ATR > 50-period MA) ensures we only trade in trending markets.
-# Works in both bull and bear markets by capturing breakouts from key 12h levels during trends.
-# Target: 20-40 trades/year to minimize fee drag.
+# Reduced position size to 0.25 to manage risk. Target: 15-30 trades/year to minimize fee drag.
