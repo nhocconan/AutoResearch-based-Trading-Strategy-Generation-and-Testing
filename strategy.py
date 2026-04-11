@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_camarilla_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,63 +44,41 @@ def generate_signals(prices):
     s3_1d = close_1d - range_1d * 1.1 / 4
     s4_1d = close_1d - range_1d * 1.1 / 2
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return signals
-    
-    # Weekly EMA50 for trend direction
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily pivots to 6h timeframe
+    # Align daily pivots to 12h timeframe
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Align weekly EMA to 6h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5x 30-period average
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         r4 = r4_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
         s4 = s4_1d_aligned[i]
-        ema_trend = ema_50_1w_aligned[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
-        
-        # Trend filter: price relative to weekly EMA50
-        above_trend = price_close > ema_trend
-        below_trend = price_close < ema_trend
+        volume_confirmed = volume_current > 1.5 * vol_ma_30[i]
         
         # Camarilla-based signals
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above R4 with volume and above weekly trend
-        if price_close > r4 and volume_confirmed and above_trend:
+        # Long: price breaks above R4 with volume
+        if price_close > r4 and volume_confirmed:
             long_signal = True
         
-        # Short: price breaks below S4 with volume and below weekly trend
-        if price_close < s4 and volume_confirmed and below_trend:
+        # Short: price breaks below S4 with volume
+        if price_close < s4 and volume_confirmed:
             short_signal = True
         
-        # Exit conditions: return to pivot or opposite extreme
+        # Exit conditions: return to daily pivot
         pivot_1d_val = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3 if len(high_1d) > 0 else 0
         pivot_array = np.full_like(high_1d, pivot_1d_val)
         pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
@@ -127,11 +105,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Camarilla breakout strategy with weekly EMA50 trend filter and volume confirmation.
-# Enters long when price breaks above R4 (strong bullish breakout) with volume confirmation and above weekly EMA50 trend.
-# Enters short when price breaks below S4 (strong bearish breakdown) with volume confirmation and below weekly EMA50 trend.
+# Hypothesis: 12h Camarilla breakout strategy with volume confirmation and daily pivot exit.
+# Enters long when price breaks above R4 (strong bullish breakout) with volume confirmation.
+# Enters short when price breaks below S4 (strong bearish breakdown) with volume confirmation.
 # Exits when price returns to daily pivot point (mean reversion to equilibrium).
-# Uses weekly EMA50 to filter trades in direction of higher timeframe trend.
-# Volume confirmation (>1.5x 20-period average) ensures institutional participation in breakouts.
-# Target: 20-40 trades per year to minimize fee decay while capturing strong directional moves.
-# Works in both bull and bear markets by trading breakouts in direction of weekly trend.
+# Uses volume confirmation (>1.5x 30-period average) to ensure institutional participation.
+# Target: 15-25 trades per year to minimize fee decay while capturing strong directional moves.
+# Works in both bull and bear markets by trading breakouts in either direction.
