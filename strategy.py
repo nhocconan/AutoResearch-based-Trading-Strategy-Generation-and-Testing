@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_trend_v33
-Strategy: 4h breakout with 1d Camarilla levels, volume confirmation, and trend filter
-Timeframe: 4h
+12h_1d_camarilla_breakout_momentum_v1
+Strategy: 12h breakout of prior day's Camarilla levels with momentum confirmation
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses 1d Camarilla levels (S3/R3) as breakout levels with volume confirmation (2.0x 20-period average) and EMA trend filter (price > EMA20 for longs, < EMA20 for shorts). Designed to capture strong momentum moves while minimizing false breakouts. Target: 20-40 trades/year to avoid fee drag while maintaining edge in both bull and bear markets.
+Hypothesis: Uses prior day's Camarilla S3/R3 levels as breakout levels, confirmed by 12h price momentum (close > open for longs, close < open for shorts) and volume expansion (>1.5x 20-period average). Only trades during active sessions (08-20 UTC). Designed for low trade frequency (~20-40/year) to avoid fee drag while capturing momentum moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v33"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_momentum_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,35 +33,24 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4h EMA for trend filter
-    close_s = pd.Series(close)
-    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).values
-    
-    # 4h volume filter: volume > 2.0x 20-period average
+    # 12h volume average for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d Close (prior close for context) ===
-    close_1d = df_1d['close'].values
-    close_1d_shifted = np.roll(close_1d, 1)
-    close_1d_shifted[0] = np.nan
-    close_1d_prior = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
-    
-    # === 1d Camarilla (entry levels from prior 1d) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_shift = np.roll(close_1d, 1)
-    high_1d_shift = np.roll(high_1d, 1)
-    low_1d_shift = np.roll(low_1d, 1)
+    # === 1d OHLC (prior day) ===
+    high_1d_shift = np.roll(df_1d['high'].values, 1)
+    low_1d_shift = np.roll(df_1d['low'].values, 1)
+    close_1d_shift = np.roll(df_1d['close'].values, 1)
     high_1d_shift[0] = np.nan
     low_1d_shift[0] = np.nan
     close_1d_shift[0] = np.nan
     
+    # Prior day's Camarilla levels
     pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
     range_1d = high_1d_shift - low_1d_shift
-    r3_1d = close_1d_shift + range_1d * 1.166
-    s3_1d = close_1d_shift - range_1d * 1.166
+    r3_1d = close_1d_shift + range_1d * 1.166  # Camarilla R3
+    s3_1d = close_1d_shift - range_1d * 1.166  # Camarilla S3
     
-    # Align 1d Camarilla to 4h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
@@ -76,7 +65,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid or outside session
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(close_1d_prior[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -86,20 +75,20 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: 4h volume must be expanded
-        volume_expanded = volume_current > 2.0 * vol_ma
+        # Volume confirmation: expanded volume (>1.5x 20-period average)
+        volume_expanded = volume_current > 1.5 * vol_ma
         
-        # Trend filter: price above/below EMA20
-        uptrend = price_close > ema_20[i]
-        downtrend = price_close < ema_20[i]
+        # Momentum confirmation: strong directional candle
+        bullish_momentum = price_close > price_open
+        bearish_momentum = price_close < price_open
         
-        # Long conditions: 4h closes above prior 1d's R3 with volume expansion + uptrend
-        long_signal = volume_expanded and uptrend and (price_close > r3_1d_aligned[i])
+        # Long conditions: price breaks above prior day's R3 with volume expansion + bullish momentum
+        long_signal = volume_expanded and bullish_momentum and (price_close > r3_1d_aligned[i])
         
-        # Short conditions: 4h closes below prior 1d's S3 with volume expansion + downtrend
-        short_signal = volume_expanded and downtrend and (price_close < s3_1d_aligned[i])
+        # Short conditions: price breaks below prior day's S3 with volume expansion + bearish momentum
+        short_signal = volume_expanded and bearish_momentum and (price_close < s3_1d_aligned[i])
         
-        # Exit when price returns to the 1d pivot (mean reversion within prior 1d's range)
+        # Exit when price returns to prior day's pivot level (mean reversion)
         exit_long = position == 1 and price_close < pivot_1d_aligned[i]
         exit_short = position == -1 and price_close > pivot_1d_aligned[i]
         
@@ -120,5 +109,3 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
-
-# Hypothesis: Uses 1d Camarilla levels (S3/R3) as breakout levels with volume confirmation (2.0x 20-period average) and EMA trend filter (price > EMA20 for longs, < EMA20 for shorts). Designed to capture strong momentum moves while minimizing false breakouts. Target: 20-40 trades/year to avoid fee drag while maintaining edge in both bull and bear markets.
