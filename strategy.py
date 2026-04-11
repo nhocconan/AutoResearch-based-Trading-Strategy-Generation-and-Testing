@@ -1,65 +1,90 @@
 #!/usr/bin/env python3
-# 1d_1w_funding_zscore_v1
-# Strategy: Funding rate mean-reversion using Z-score of 30-day funding rate
-# Timeframe: 1d
+# 12h_1d_camarilla_breakout_volume_v1
+# Strategy: 12h Camarilla pivot breakout with daily volume confirmation and 1d trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Extreme funding rates indicate crowd sentiment extremes. 
-# When funding rate Z-score < -2 (extreme pessimism), go long.
-# When funding rate Z-score > +2 (extreme optimism), go short.
-# Mean-reverts as funding returns to normal. Works in both bull and bear markets.
-# Low frequency (~10-30/year) to minimize fee drag.
+# Hypothesis: Camarilla levels (derived from prior day's range) act as strong support/resistance.
+# Breakouts above H4 or below L4 with volume confirmation and daily EMA50 trend filter.
+# Works in bull (breakouts up) and bear (breakouts down) markets. Low frequency to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_funding_zscore_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load funding rate data (assumed to be available via external source)
-    # For this implementation, we'll simulate funding rate from price action
-    # In practice, replace with actual funding rate data loading
-    returns = np.diff(np.log(close), prepend=0)
-    funding_rate = returns * 0.01  # Proxy: funding correlates with returns
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 30-day Z-score of funding rate
-    funding_series = pd.Series(funding_rate)
-    funding_mean = funding_series.rolling(window=30, min_periods=30).mean()
-    funding_std = funding_series.rolling(window=30, min_periods=30).std()
-    funding_zscore = (funding_rate - funding_mean) / funding_std.replace(0, 1e-8)
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from prior day's OHLC
+    # H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    # These are the key breakout levels
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Daily EMA(50) for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        # Skip if Z-score is invalid
-        if np.isnan(funding_zscore.iloc[i]):
+    for i in range(50, n):
+        # Skip if any required data is invalid
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        z = funding_zscore.iloc[i]
+        # Breakout conditions
+        breakout_up = close[i] > camarilla_h4_aligned[i]
+        breakout_down = close[i] < camarilla_l4_aligned[i]
         
-        # Entry: extreme funding rate mean reversion
-        if z < -2.0 and position != 1:  # Extreme pessimism -> long
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Entry logic: Camarilla breakout + volume + trend alignment
+        if breakout_up and vol_confirm[i] and uptrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif z > 2.0 and position != -1:  # Extreme optimism -> short
+        elif breakout_down and vol_confirm[i] and downtrend and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: funding returns to neutral
-        elif position == 1 and z > -0.5:  # Exit long when fear subsides
+        # Exit: breakout failure or trend change
+        elif position == 1 and (not breakout_up or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and z < 0.5:  # Exit short when greed subsides
+        elif position == -1 and (not breakout_down or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
