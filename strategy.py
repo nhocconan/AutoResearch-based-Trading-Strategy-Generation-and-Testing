@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d: fade at R3/S3 with volume confirmation
-# - Long: price touches or slightly breaks S3 with volume spike and closes above S3
-# - Short: price touches or slightly breaks R3 with volume spike and closes below R3
-# - Exit: price moves to opposite Camarilla level (S3 to R3 or R3 to S3) or reaches R4/S4
-# - Uses 1d Camarilla levels calculated from prior 1d OHLC, aligned to 12h
-# - Works in ranging markets by fading extremes, avoids strong trends via volume filter
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR-based trend filter
+# - Long: price breaks above 20-period Donchian high with volume > 1.5x 20-period average and price > 50-period EMA
+# - Short: price breaks below 20-period Donchian low with volume > 1.5x 20-period average and price < 50-period EMA
+# - Exit: price returns to opposite Donchian level (mean reversion at channel midpoint)
+# - Uses 1d HTF trend filter: only take longs when price > 1d 200-period EMA, shorts when price < 1d 200-period EMA
+# - Target: 20-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
+# - Works in both bull and bear markets by combining breakout momentum with trend filtering
 
-name = "12h_1d_camarilla_pivot_fade_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,35 +27,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla levels (MTF rule compliance)
+    # Load 1d data ONCE before loop for HTF trend filter (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return signals
     
-    # Pre-compute 1d Camarilla levels (based on prior day OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d 200-period EMA for trend filter
     close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Camarilla levels: based on previous day's range
-    # R3 = close + 1.1*(high-low)*1.1/4
-    # S3 = close - 1.1*(high-low)*1.1/4
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.1 * range_1d * 1.1 / 4
-    camarilla_s3 = close_1d - 1.1 * range_1d * 1.1 / 4
+    # Pre-compute 4h Donchian channels (20-period)
+    # Donchian high = max(high, lookback=20)
+    # Donchian low = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     volume = prices['volume'].values
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-compute 4h 50-period EMA for additional trend filter
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(volume_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_50[i]) or
+            np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -65,39 +66,41 @@ def generate_signals(prices):
         low_price = low[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average (strict filter)
-        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Price position relative to Camarilla S3/R3 levels
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
+        # Donchian levels
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
         
-        # Entry conditions with hysteresis: require clear rejection of level
+        # Trend filters
+        price_above_50ema = close_price > ema_50[i]
+        price_below_50ema = close_price < ema_50[i]
+        price_above_1d_200ema = close_price > ema_200_1d_aligned[i]
+        price_below_1d_200ema = close_price < ema_200_1d_aligned[i]
+        
+        # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long fade: price touches S3 from below with volume and closes above S3
-        # Require low touched S3 and close recovered above S3 (bullish rejection)
-        if low_price <= s3 and close_price > s3 and vol_confirm:
+        # Long breakout: price breaks above Donchian high with volume and EMA filters
+        if close_price > upper_channel and vol_confirm and price_above_50ema and price_above_1d_200ema:
             enter_long = True
         
-        # Short fade: price touches R3 from above with volume and closes below R3
-        # Require high touched R3 and close dropped below R3 (bearish rejection)
-        if high_price >= r3 and close_price < r3 and vol_confirm:
+        # Short breakout: price breaks below Donchian low with volume and EMA filters
+        if close_price < lower_channel and vol_confirm and price_below_50ema and price_below_1d_200ema:
             enter_short = True
         
-        # Exit conditions: mean reversion to opposite level or extreme levels
+        # Exit conditions: mean reversion at opposite Donchian level
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price reaches R3 (mean reversion) or breaks S4 (stop)
-            s4 = camarilla_s3_aligned[i] - (r3 - s3)  # S4 = S3 - (R3-S3)
-            exit_long = close_price >= r3 or close_price <= s4
+            # Exit long if price drops back to Donchian low
+            exit_long = close_price <= lower_channel
         elif position == -1:
-            # Exit short if price reaches S3 (mean reversion) or breaks R4 (stop)
-            r4 = camarilla_r3_aligned[i] + (r3 - s3)  # R4 = R3 + (R3-S3)
-            exit_short = close_price <= s3 or close_price >= r4
+            # Exit short if price rises back to Donchian high
+            exit_short = close_price >= upper_channel
         
         # Trading logic
         if enter_long and position != 1:
