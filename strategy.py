@@ -1,20 +1,27 @@
-# 12h_1d_donchian_breakout_v1
-# Strategy: 12h Donchian breakout with daily trend filter and volume confirmation
-# Timeframe: 12h
-# Leverage: 1.0
-# Hypothesis: Breakouts of 20-period Donchian channels capture trends. Daily trend filter (EMA50) ensures alignment with higher timeframe momentum. Volume confirmation filters false breakouts. Works in bull by catching breakouts in uptrend and in bear by catching breakdowns in downtrend.
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+"""
+4h_1d_camarilla_breakout_v1
+Strategy: 4-hour Camarilla pivot breakout with daily trend filter and volume confirmation
+Timeframe: 4h
+Leverage: 1.0
+Hypothesis: Price breaking above/below Camarilla pivot levels (H3/L3) on 4h timeframe,
+            confirmed by daily trend (EMA50 > EMA200 for long, EMA50 < EMA200 for short)
+            and volume spike, captures institutional breakouts. Works in bull/bear
+            by aligning with higher timeframe trend while using intraday precision.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price arrays
@@ -29,15 +36,31 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
+    # Daily EMA50 and EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d = close_1d > ema_50_1d  # Uptrend when close > EMA50
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    daily_uptrend = ema50_1d > ema200_1d  # Uptrend when EMA50 > EMA200
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend)
     
-    # 20-period Donchian channels
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for each 4h bar
+    # Using previous bar's OHLC (standard pivot calculation)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # Set first value to current to avoid NaN
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels
+    H3 = pivot + (range_hl * 1.1 / 4)
+    L3 = pivot - (range_hl * 1.1 / 4)
+    H4 = pivot + (range_hl * 1.1 / 2)
+    L4 = pivot - (range_hl * 1.1 / 2)
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,26 +69,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema50_1d[i]) or np.isnan(ema200_1d[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(H3[i]) or np.isnan(L3[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions
-        long_break = close[i] > high_max[i-1] and trend_1d_aligned[i] and vol_spike[i]
-        short_break = close[i] < low_min[i-1] and not trend_1d_aligned[i] and vol_spike[i]
+        # Breakout conditions
+        breakout_long = close[i] > H3[i] and vol_spike[i]
+        breakout_short = close[i] < L3[i] and vol_spike[i]
         
-        # Exit conditions: opposite breakout
-        exit_long = position == 1 and close[i] < low_min[i-1]
-        exit_short = position == -1 and close[i] > high_max[i-1]
+        # Exit conditions: reverse breakout or volume drop
+        exit_long = position == 1 and (close[i] < pivot[i] or not vol_spike[i])
+        exit_short = position == -1 and (close[i] > pivot[i] or not vol_spike[i])
         
-        # Trading logic
-        if long_break and position != 1:
+        # Trading logic: only trade in direction of daily trend
+        if breakout_long and daily_uptrend_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_break and position != -1:
+        elif breakout_short and not daily_uptrend_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
