@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,43 +22,46 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate 1d Camarilla pivot levels
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels (H3, L3) from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Pivot and range from previous day
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
     
-    # Camarilla levels
-    range_ = prev_high - prev_low
-    camarilla_h3 = prev_close + range_ * 1.1 / 4
-    camarilla_l3 = prev_close - range_ * 1.1 / 4
-    camarilla_h4 = prev_close + range_ * 1.1 / 2
-    camarilla_l4 = prev_close - range_ * 1.1 / 2
+    # Camarilla levels: H3/L3 for day trading
+    h3 = close_1d + range_ * 1.1 / 4
+    l3 = close_1d - range_ * 1.1 / 4
     
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Shift by 1 to use only completed daily bars
+    h3 = np.roll(h3, 1)
+    l3 = np.roll(l3, 1)
+    h3[0] = np.nan
+    l3[0] = np.nan
+    
+    # Align daily levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     
     # Volume filter: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(20, n):
+    # ATR for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - low[:-1])
+    tr3 = np.abs(low[1:] - high[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -67,19 +70,20 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
+        atr_val = atr[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Long conditions: price breaks above H3 with volume
-        long_signal = volume_confirmed and (price_high > camarilla_h3_aligned[i])
+        # Long when price touches or breaks above H3 with volume
+        long_signal = volume_confirmed and price_high >= h3_aligned[i]
         
-        # Short conditions: price breaks below L3 with volume
-        short_signal = volume_confirmed and (price_low < camarilla_l3_aligned[i])
+        # Short when price touches or breaks below L3 with volume
+        short_signal = volume_confirmed and price_low <= l3_aligned[i]
         
-        # Exit when price returns to H4/L4 levels
-        exit_long = position == 1 and (price_low < camarilla_h4_aligned[i] or price_high > camarilla_h4_aligned[i])
-        exit_short = position == -1 and (price_high > camarilla_l4_aligned[i] or price_low < camarilla_l4_aligned[i])
+        # Exit conditions
+        exit_long = position == 1 and price_close < h3_aligned[i] - 0.5 * atr_val
+        exit_short = position == -1 and price_close > l3_aligned[i] + 0.5 * atr_val
         
         # Trading logic
         if long_signal and position != 1:
@@ -100,12 +104,8 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla pivot breakout with volume confirmation on 12h timeframe.
-# Uses daily Camarilla levels (H3/L3 for entry, H4/L4 for exit) to identify
-# institutional support/resistance. Enters long when price breaks above H3 with
-# volume confirmation (>1.8x average volume), short when breaks below L3.
-# Exits when price returns to H4/L4 levels. Works in both bull and bear markets
-# by capturing institutional breakouts. Target: 50-150 total trades over 4 years
-# (12-37/year) to minimize fee drag on 12h timeframe. Camarilla levels are
-# widely watched by institutions, providing reliable breakout signals.
-# Volume confirmation ensures participation from market actors, reducing false breakouts.
+# Hypothesis: Camarilla H3/L3 levels act as intraday support/resistance. 
+# Price touching H3 with volume indicates bullish breakout; touching L3 indicates bearish breakout.
+# Uses 1d Camarilla levels (H3/L3) for intraday reference, volume confirmation to filter weak moves,
+# and ATR-based exit to manage risk. Works in both bull and bear markets by capturing
+# breakouts from key levels. Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
