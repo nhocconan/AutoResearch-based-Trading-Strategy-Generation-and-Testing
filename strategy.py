@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_volume_v1
-# Strategy: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-# Timeframe: 1d
+# 12h_1d_camarilla_breakout_volume_v1
+# Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels on daily chart act as strong support/resistance.
-# Breakouts with weekly EMA trend alignment and volume capture significant moves.
-# Designed for low trade frequency (~10-25/year) to avoid fee drag and work in both bull and bear markets.
+# Hypothesis: Camarilla pivot levels act as strong support/resistance on 1d charts.
+# Breakouts at 12h timeframe with 1d EMA trend alignment and volume confirmation
+# capture significant moves while minimizing false breakouts. Designed for low
+# trade frequency (~12-37/year) to avoid fee drag in ranging/bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,33 +27,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous 1d bar
     # Using close of previous day as base
-    prev_close = close[np.roll(np.arange(n), 1)]  # Previous day's close
-    prev_close[0] = np.nan  # First day has no previous
-    prev_high = high[np.roll(np.arange(n), 1)]    # Previous day's high
-    prev_high[0] = np.nan
-    prev_low = low[np.roll(np.arange(n), 1)]      # Previous day's low
-    prev_low[0] = np.nan
+    prev_close = df_1d['close'].shift(1).values  # Previous day's close
+    prev_high = df_1d['high'].shift(1).values    # Previous day's high
+    prev_low = df_1d['low'].shift(1).values      # Previous day's low
     
-    # Camarilla levels: H3, L3 (primary levels for breakout)
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
     # Range = prev_high - prev_low
+    # H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    # L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
     # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
     # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    # L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
+    # H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    # L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
     rng = prev_high - prev_low
+    H4 = prev_close + 1.1 * rng / 2
+    L4 = prev_close - 1.1 * rng / 2
     H3 = prev_close + 1.1 * rng / 4
     L3 = prev_close - 1.1 * rng / 4
+    H2 = prev_close + 1.1 * rng / 6
+    L2 = prev_close - 1.1 * rng / 6
+    H1 = prev_close + 1.1 * rng / 12
+    L1 = prev_close - 1.1 * rng / 12
     
-    # 20-period EMA on weekly for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # 20-period volume average for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,10 +76,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(H3[i]) or np.isnan(L3[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -72,13 +89,13 @@ def generate_signals(prices):
         
         # Breakout signals using Camarilla levels
         # Breakout above H3 (strong resistance)
-        breakout_up = high[i] > H3[i-1]
+        breakout_up = high[i] > H3_aligned[i-1]
         # Breakdown below L3 (strong support)
-        breakdown_down = low[i] < L3[i-1]
+        breakdown_down = low[i] < L3_aligned[i-1]
         
-        # Weekly EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_20_1w_aligned[i]
-        trend_bearish = close[i] < ema_20_1w_aligned[i]
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
         # Long: Breakout above H3 AND bullish trend AND volume confirmation
@@ -89,11 +106,11 @@ def generate_signals(prices):
         elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite breakout using H3/L3 levels (reverse the breakout)
-        elif position == 1 and low[i] < L3[i-1]:  # Break back below L3
+        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
+        elif position == 1 and low[i] < L4_aligned[i-1]:  # Break below L4
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] > H3[i-1]:  # Break back above H3
+        elif position == -1 and high[i] > H4_aligned[i-1]:  # Break above H4
             position = 0
             signals[i] = 0.0
         else:
