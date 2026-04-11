@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1-day Keltner Channel + RSI mean reversion.
-# Uses Keltner Channel (ATR-based) to identify overextended moves and RSI for momentum exhaustion.
-# Long when price touches lower KC and RSI < 30, short when price touches upper KC and RSI > 70.
-# Volume confirmation ensures institutional participation. Designed for 20-40 trades/year.
-# Works in bull/bear markets by adapting to volatility via ATR and using RSI extremes.
+# Hypothesis: 12h timeframe with 1-day/1-week Williams Alligator and Elder Ray
+# Uses Williams Alligator (3 SMAs) for trend direction and Elder Ray (bull/bear power)
+# for momentum confirmation. Volume filter confirms institutional participation.
+# Designed for 12-37 trades/year to minimize fee drag while capturing trend moves.
+# Works in bull/bear markets by using Alligator jaws/teeth/lips to identify trends
+# and Elder Ray to measure bull/bear power behind the move.
 
-name = "4h_1d_keltner_rsi_v1"
-timeframe = "4h"
+name = "12h_1d_1w_alligator_elder_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,95 +25,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load daily and weekly data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily ATR for Keltner Channel
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Williams Alligator from daily data
+    # Jaw: 13-period SMMA, 8 bars into future
+    # Teeth: 8-period SMMA, 5 bars into future
+    # Lips: 5-period SMMA, 3 bars into future
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev * (period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # ATR(10)
-    atr_10 = np.full_like(tr, np.nan, dtype=float)
-    for i in range(9, len(tr)):
-        if not np.isnan(tr[i-9:i+1]).any():
-            atr_10[i] = np.nanmean(tr[i-9:i+1])
+    jaw = smma(close_1d, 13)
+    teeth = smma(close_1d, 8)
+    lips = smma(close_1d, 5)
     
-    # Keltner Channel (20-period EMA ± 2*ATR)
-    close_series = pd.Series(close_1d)
-    ema_20 = close_series.ewm(span=20, adjust=False).mean().values
-    kc_upper = ema_20 + 2 * atr_10
-    kc_lower = ema_20 - 2 * atr_10
+    # Calculate Elder Ray from weekly data
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Daily RSI(14)
-    delta = np.diff(close_1d, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # EMA 13 for weekly
+    ema_13 = np.full_like(close_1w, np.nan, dtype=float)
+    if len(close_1w) >= 13:
+        multiplier = 2 / (13 + 1)
+        ema_13[12] = np.mean(close_1w[:13])
+        for i in range(13, len(close_1w)):
+            ema_13[i] = (close_1w[i] - ema_13[i-1]) * multiplier + ema_13[i-1]
     
-    avg_gain = np.full_like(gain, np.nan, dtype=float)
-    avg_loss = np.full_like(loss, np.nan, dtype=float)
-    for i in range(14, len(gain)):
-        if i == 14:
-            avg_gain[i] = np.nanmean(gain[1:15])
-            avg_loss[i] = np.nanmean(loss[1:15])
-        else:
-            if not np.isnan(avg_gain[i-1]) and not np.isnan(gain[i]):
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            else:
-                avg_gain[i] = np.nan
-            if not np.isnan(avg_loss[i-1]) and not np.isnan(loss[i]):
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-            else:
-                avg_loss[i] = np.nan
+    bull_power = high_1w - ema_13
+    bear_power = low_1w - ema_13
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align daily indicators to 4h timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align indicators to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1w, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1w, bear_power)
     
     # Volume filter: 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = np.full_like(volume, np.nan, dtype=float)
+    for i in range(19, len(volume)):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume filter: current volume > 1.5 * 20-period average
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        vol_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # Mean reversion signals
-        touch_lower = low[i] <= kc_lower_aligned[i]
-        touch_upper = high[i] >= kc_upper_aligned[i]
-        rsi_oversold = rsi_aligned[i] < 30
-        rsi_overbought = rsi_aligned[i] > 70
+        # Williams Alligator conditions
+        # Uptrend: Lips > Teeth > Jaw
+        # Downtrend: Jaw > Teeth > Lips
+        uptrend = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        downtrend = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
         
-        long_signal = touch_lower and rsi_oversold and vol_filter
-        short_signal = touch_upper and rsi_overbought and vol_filter
+        # Elder Ray conditions
+        # Strong bull power: positive and increasing
+        # Strong bear power: negative and decreasing
+        strong_bull = bull_power_aligned[i] > 0 and (i == 1 or bull_power_aligned[i] > bull_power_aligned[i-1])
+        strong_bear = bear_power_aligned[i] < 0 and (i == 1 or bear_power_aligned[i] < bear_power_aligned[i-1])
         
-        # Exit when price returns to middle of KC (EMA20)
-        exit_long = position == 1 and close[i] >= ema_20[i] if not np.isnan(ema_20[i]) else False
-        exit_short = position == -1 and close[i] <= ema_20[i] if not np.isnan(ema_20[i]) else False
+        # Entry conditions
+        # Long: Uptrend + Strong bull power + Volume
+        # Short: Downtrend + Strong bear power + Volume
+        long_signal = uptrend and strong_bull and vol_filter
+        short_signal = downtrend and strong_bear and vol_filter
         
-        # Entry/exit logic
+        # Exit conditions
+        # Exit long when trend weakens or bear power appears
+        exit_long = not uptrend or strong_bear
+        # Exit short when trend weakens or bull power appears
+        exit_short = not downtrend or strong_bull
+        
+        # Update position
         if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
