@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_fibonacci_retracement_v1"
-timeframe = "6h"
+name = "12h_1w_keltner_channel_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,64 +20,55 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return signals
     
-    # Calculate daily pivot points (classic)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Keltner Channel: EMA20 ± ATR(10)*2
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # 20-period EMA of close
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Shift by 1 to use only completed daily bars
-    pivot = np.roll(pivot, 1)
-    r1 = np.roll(r1, 1)
-    s1 = np.roll(s1, 1)
-    r2 = np.roll(r2, 1)
-    s2 = np.roll(s2, 1)
-    r3 = np.roll(r3, 1)
-    s3 = np.roll(s3, 1)
-    pivot[0] = np.nan
-    r1[0] = np.nan
-    s1[0] = np.nan
-    r2[0] = np.nan
-    s2[0] = np.nan
-    r3[0] = np.nan
-    s3[0] = np.nan
+    # True Range for ATR
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align daily pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Keltner Channel bands
+    upper_keltner = ema_20 + 2 * atr_10
+    lower_keltner = ema_20 - 2 * atr_10
     
-    # Calculate 6-period ATR for dynamic sizing and volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=6, min_periods=6).mean().values
+    # Shift by 1 to use only completed weekly bars
+    upper_keltner = np.roll(upper_keltner, 1)
+    lower_keltner = np.roll(lower_keltner, 1)
+    ema_20 = np.roll(ema_20, 1)
+    upper_keltner[0] = np.nan
+    lower_keltner[0] = np.nan
+    ema_20[0] = np.nan
     
-    # Volume filter: volume > 1.3x 20-period average
+    # Align weekly indicators to 12h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    
+    # Calculate 12h ATR for stop loss
+    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or np.isnan(atr_12h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -86,38 +77,39 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
-        atr_val = atr[i]
+        atr = atr_12h[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Price position relative to pivot and S1/R1
-        near_support = price_low <= s1_aligned[i] + 0.5 * atr_val and price_close > s1_aligned[i]
-        near_resistance = price_high >= r1_aligned[i] - 0.5 * atr_val and price_close < r1_aligned[i]
+        # Long conditions: Close > Upper Keltner with volume
+        long_signal = volume_confirmed and (price_close > upper_keltner_aligned[i])
         
-        # Breakout conditions with volume
-        breakout_up = price_close > r1_aligned[i] and volume_confirmed
-        breakout_down = price_close < s1_aligned[i] and volume_confirmed
+        # Short conditions: Close < Lower Keltner with volume
+        short_signal = volume_confirmed and (price_close < lower_keltner_aligned[i])
         
-        # Retracement entry conditions
-        long_signal = volume_confirmed and near_support and price_close > pivot_aligned[i]
-        short_signal = volume_confirmed and near_resistance and price_close < pivot_aligned[i]
+        # Exit when price crosses back to EMA20 (mean reversion)
+        exit_long = position == 1 and price_close < ema_20_aligned[i]
+        exit_short = position == -1 and price_close > ema_20_aligned[i]
         
-        # Exit when price moves to opposite S1/R1 level
-        exit_long = position == 1 and price_close >= r1_aligned[i]
-        exit_short = position == -1 and price_close <= s1_aligned[i]
+        # Stop loss: 2 * ATR
+        stop_long = position == 1 and price_low < (entry_price - 2 * atr)
+        stop_short = position == -1 and price_high > (entry_price + 2 * atr)
+        
+        # Track entry price for stop loss
+        if 'entry_price' not in locals():
+            entry_price = 0
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
+            entry_price = price_close
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
+            entry_price = price_close
             signals[i] = -0.25
-        elif position == 1 and exit_long:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif (position == 1 and (exit_long or stop_long)) or (position == -1 and (exit_short or stop_short)):
             position = 0
             signals[i] = 0.0
         else:
@@ -126,12 +118,15 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily pivot point retracement strategy on 6h timeframe.
-# Uses classic pivot points (P, R1, S1, R2, S2, R3, S3) calculated from daily OHLC.
-# Enters long near S1 support when price shows rejection (wick below S1 but close above it)
-# with volume confirmation (>1.3x average). Enters short near R1 resistance when price
-# shows rejection (wick above R1 but close below it) with volume confirmation.
-# Exits when price reaches opposite R1/S1 level. Works in both ranging and trending
-# markets by fading extremes and capturing mean reversion. Target: 50-150 total trades
-# over 4 years (12-37/year) to minimize fee drag on 6h timeframe. Pivot points act as
-# natural support/resistance levels where institutional order flow often concentrates.
+# Hypothesis: Weekly Keltner Channel breakout with volume confirmation on 12h.
+# Uses weekly EMA20 ± ATR(10)*2 as dynamic support/resistance. Enters long when price
+# breaks above upper channel with volume confirmation (>1.5x average volume).
+# Enters short when price breaks below lower channel with volume confirmation.
+# Exits when price crosses back to the weekly EMA20 (mean reversion) or hits
+# 2x ATR stop loss. Works in both bull and bear markets by capturing breakouts
+# from volatility contractions. Weekly timeframe filters noise, 12h provides
+# timely execution. Target: 50-150 total trades over 4 years (12-37/year) to
+# minimize fee drag on 12h timeframe. Keltner Channels adapt to volatility,
+# providing better breakout signals than fixed channels. Volume confirmation
+# ensures institutional participation. EMA20 exit captures mean reversion
+# after overextended moves.
