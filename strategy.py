@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v4"
+name = "4h_1d_camarilla_breakout_volume_trend_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,17 +36,14 @@ def generate_signals(prices):
     s3 = close_1d - range_1d * 1.166
     
     # Shift by 1 to use only completed daily bars (previous day's levels)
-    pivot = np.roll(pivot, 1)
     r3 = np.roll(r3, 1)
     s3 = np.roll(s3, 1)
-    pivot[0] = np.nan
     r3[0] = np.nan
     s3[0] = np.nan
     
     # Align daily Camarilla levels to 4h timeframe
     r3_4h = align_htf_to_ltf(prices, df_1d, r3)
     s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
     
     # 4h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
@@ -72,12 +69,11 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(pivot_4h[i]) or
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        price_close = close[i]
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
@@ -95,9 +91,10 @@ def generate_signals(prices):
         # Short conditions: price breaks below S3 with volume and trend
         short_signal = volume_confirmed and trend_filter and (price_low < s3_4h[i])
         
-        # Exit when price returns to the pivot (mean reversion)
-        exit_long = position == 1 and price_close < pivot_4h[i]
-        exit_short = position == -1 and price_close > pivot_4h[i]
+        # Exit when price returns to the midpoint between S3 and R3 (mean reversion)
+        midpoint = (r3_4h[i] + s3_4h[i]) / 2
+        exit_long = position == 1 and close[i] < midpoint
+        exit_short = position == -1 and close[i] > midpoint
         
         # Trading logic
         if long_signal and position != 1:
@@ -117,11 +114,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla pivot breakout strategy for 4h timeframe with volume confirmation (>1.5x average volume) and ADX filter (>25).
+# Hypothesis: Daily Camarilla R3/S3 breakout strategy for 4h timeframe with volume confirmation (>1.5x average volume) and ADX filter (>25).
 # Enters long when 4h price breaks above daily R3 level (close + 1.166*range) with volume >1.5x average and ADX>25.
 # Enters short when price breaks below daily S3 level (close - 1.166*range) with same conditions.
-# Exits when price returns to the daily pivot level (mean reversion within the day's range).
-# Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
+# Exits when price returns to the midpoint between S3 and R3 (mean reversion within the day's range).
+# Uses only R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
 # Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
 # Target: 20-30 trades per year to minimize fee drift while capturing strong daily trends.
 # Camarilla pivots work well in both bull and bear markets as they adapt to daily volatility ranges.
