@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,63 +20,64 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Weekly high, low, close
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Calculate daily components for Elder Ray
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Keltner Channels (20-period EMA, 2x ATR)
-    atr_period = 20
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Daily EMA(13) as the trend reference
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 2.0 * atr
-    kc_lower = ema_20 - 2.0 * atr
+    # Bull Power = High - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    # Bear Power = Low - EMA13
+    bear_power_1d = low_1d - ema13_1d
     
-    # Volume: 20-period SMA
-    volume_sma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    # Align to 6h timeframe
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Align to daily timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1w, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1w, kc_lower)
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20)
+    # Volume confirmation: 6h volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or
-            np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period weekly average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
+        
+        # Elder Ray signals
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
         
         # Entry conditions
-        enter_long = price_close > kc_upper_aligned[i] and vol_confirm
-        enter_short = price_close < kc_lower_aligned[i] and vol_confirm
+        enter_long = False
+        enter_short = False
         
-        # Exit: reverse signal or volatility contraction
-        exit_long = price_close < ema_20_aligned[i] if 'ema_20_aligned' in locals() else False
-        exit_short = price_close > ema_20_aligned[i] if 'ema_20_aligned' in locals() else False
+        # Long: Bull Power > 0 (bulls in control) + price above EMA13 + volume confirmation
+        if bull_power > 0 and price_close > ema13_aligned[i] and vol_confirm:
+            enter_long = True
         
-        # Align EMA for exit
-        if i >= 20:
-            ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
-            exit_long = price_close < ema_20_aligned[i]
-            exit_short = price_close > ema_20_aligned[i]
+        # Short: Bear Power < 0 (bears in control) + price below EMA13 + volume confirmation
+        if bear_power < 0 and price_close < ema13_aligned[i] and vol_confirm:
+            enter_short = True
+        
+        # Exit conditions: power signal reverses
+        exit_long = bull_power <= 0
+        exit_short = bear_power >= 0
         
         # Trading logic
         if enter_long and position != 1:
@@ -97,9 +98,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Keltner breakout on weekly timeframe with volume confirmation.
-# Buys when daily price breaks above weekly upper Keltner band (EMA20 + 2*ATR) with volume surge.
-# Sells when breaks below lower band with volume surge.
-# Works in both bull (breakouts above upper band) and bear (breakdowns below lower band).
-# Volume confirmation ensures institutional participation. Weekly timeframe reduces noise.
-# Position size 0.25 balances risk and return. Target: 15-25 trades/year to minimize fee drag.
+# Hypothesis: Elder Ray Power (Bull Power = High - EMA13, Bear Power = Low - EMA13) on daily timeframe
+# with 6h execution. Works in bull markets (Bull Power > 0) and bear markets (Bear Power < 0) by
+# measuring actual bull/bear strength relative to trend. Volume confirmation ensures participation.
+# EMA13 filter prevents counter-trend trades. Position size 0.25 limits drawdown. Target: 50-150 trades.
