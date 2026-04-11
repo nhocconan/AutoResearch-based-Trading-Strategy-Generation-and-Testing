@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_ema_vwap_volatility_breakout_v1
-# Strategy: 4h VWAP breakout with 1d EMA trend filter and volatility filter
+# 4h_1d_donchian_breakout_volume_trend_v1
+# Strategy: 4h Donchian breakout with 1d EMA trend and volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: VWAP acts as a dynamic support/resistance level. Breakouts above/below VWAP with
-# institutional volume (volume > 1.5x 20-period average) and aligned with 1d EMA50 trend
-# capture sustainable moves. Volatility filter (ATR ratio) avoids ranging markets.
-# Designed for low trade frequency (<30/year) to minimize fee drag.
+# Hypothesis: Breakouts above/below 4h Donchian channels (20-period) with volume > 1.5x 20-period average
+# and aligned with 1d EMA50 trend capture sustained moves in both bull and bear markets.
+# Volume and trend filters reduce false breakouts. Target 20-40 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ema_vwap_volatility_breakout_v1"
+name = "4h_1d_donchian_breakout_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,18 +32,16 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h VWAP calculation
-    typical_price = (high + low + close) / 3
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = vwap_numerator / vwap_denominator
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h ATR for volatility filter
+    # 4h ATR for stop (not used in signal but for volatility context)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # 1d EMA50 for trend filter
@@ -65,18 +62,10 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(vwap[i]) or np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]) or \
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_50_1d_aligned[i]) or \
            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
-        
-        # Volatility filter: avoid low volatility (range) markets
-        # ATR ratio: current ATR vs 50-period average ATR
-        if i >= 50:
-            atr_ma = pd.Series(atr[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1]
-            vol_filter = atr[i] > 0.8 * atr_ma  # Only trade when volatility is above 80% of average
-        else:
-            vol_filter = True
         
         # Volume confirmation: current 1d volume > 1.5x 20-period average
         vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
@@ -85,28 +74,28 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Price relative to VWAP
-        above_vwap = close[i] > vwap[i]
-        below_vwap = close[i] < vwap[i]
+        # Price relative to Donchian channels
+        breakout_up = close[i] > donchian_high[i]
+        breakout_down = close[i] < donchian_low[i]
         
         # Entry conditions
-        # Long: Price crosses above VWAP AND uptrend AND volume confirmation AND volatility filter
-        if above_vwap and uptrend and vol_confirm and vol_filter and position != 1:
-            # Additional check: ensure we didn't just cross above VWAP in previous bar
-            if i == 50 or close[i-1] <= vwap[i-1]:
+        # Long: Donchian breakout up AND uptrend AND volume confirmation
+        if breakout_up and uptrend and vol_confirm and position != 1:
+            # Additional check: ensure we didn't just breakout in previous bar
+            if i == 50 or close[i-1] <= donchian_high[i-1]:
                 position = 1
                 signals[i] = 0.25
-        # Short: Price crosses below VWAP AND downtrend AND volume confirmation AND volatility filter
-        elif below_vwap and downtrend and vol_confirm and vol_filter and position != -1:
-            # Additional check: ensure we didn't just cross below VWAP in previous bar
-            if i == 50 or close[i-1] >= vwap[i-1]:
+        # Short: Donchian breakout down AND downtrend AND volume confirmation
+        elif breakout_down and downtrend and vol_confirm and position != -1:
+            # Additional check: ensure we didn't just breakout in previous bar
+            if i == 50 or close[i-1] >= donchian_low[i-1]:
                 position = -1
                 signals[i] = -0.25
-        # Exit: Price crosses back through VWAP (mean reversion signal)
-        elif position == 1 and below_vwap:
+        # Exit: Price returns to the middle of the Donchian channel (mean reversion)
+        elif position == 1 and close[i] < (donchian_high[i] + donchian_low[i]) / 2:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and above_vwap:
+        elif position == -1 and close[i] > (donchian_high[i] + donchian_low[i]) / 2:
             position = 0
             signals[i] = 0.0
         else:
