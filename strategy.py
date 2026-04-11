@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v3"
+name = "4h_1d_camarilla_breakout_volume_trend_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,44 +32,21 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     
     # Resistance and support levels (previous day's data)
-    r4 = close_1d + range_1d * 1.500
     r3 = close_1d + range_1d * 1.166
-    r2 = close_1d + range_1d * 1.083
-    r1 = close_1d + range_1d * 1.083
-    s1 = close_1d - range_1d * 1.083
-    s2 = close_1d - range_1d * 1.083
     s3 = close_1d - range_1d * 1.166
-    s4 = close_1d - range_1d * 1.500
     
     # Shift by 1 to use only completed daily bars (previous day's levels)
     pivot = np.roll(pivot, 1)
-    r1 = np.roll(r1, 1)
-    r2 = np.roll(r2, 1)
     r3 = np.roll(r3, 1)
-    r4 = np.roll(r4, 1)
-    s1 = np.roll(s1, 1)
-    s2 = np.roll(s2, 1)
     s3 = np.roll(s3, 1)
-    s4 = np.roll(s4, 1)
     pivot[0] = np.nan
-    r1[0] = np.nan
-    r2[0] = np.nan
     r3[0] = np.nan
-    r4[0] = np.nan
-    s1[0] = np.nan
-    s2[0] = np.nan
     s3[0] = np.nan
-    s4[0] = np.nan
     
     # Align daily Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
     r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
     s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
     
     # 4h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
@@ -95,8 +72,7 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or
-            np.isnan(s1_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(pivot_4h[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
@@ -120,7 +96,6 @@ def generate_signals(prices):
         short_signal = volume_confirmed and trend_filter and (price_low < s3_4h[i])
         
         # Exit when price returns to the pivot (mean reversion)
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
         exit_long = position == 1 and price_close < pivot_4h[i]
         exit_short = position == -1 and price_close > pivot_4h[i]
         
