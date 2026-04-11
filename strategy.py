@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_trend_v1
-Strategy: 4h breakout with 1d trend filter
+4h_1d_camarilla_breakout_volatility_v1
+Strategy: 4h breakout with 1d volatility filter and volume confirmation
 Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Buy when 4h closes above prior 1d R3 with volume confirmation and 1d uptrend; sell when 4h closes below prior 1d S3 with 1d downtrend. Uses 1d Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 20-50 trades/year to minimize fee drag.
+Hypothesis: Buy when 4h closes above prior 1d R3 with volume compression breakout and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_trend_v1"
+name = "4h_1d_camarilla_breakout_volatility_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,18 +42,29 @@ def generate_signals(prices):
     # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d Close (trend filter: use prior 1d's close) ===
-    close_1d = df_1d['close'].values
-    close_1d_shifted = np.roll(close_1d, 1)
-    close_1d_shifted[0] = np.nan
-    close_1d_trend = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
-    
-    # === 1d Camarilla (entry levels from prior 1d) ===
+    # === 1d ATR (volatility filter: low volatility regime) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Prior 1d's Camarilla levels (use shifted values to avoid look-ahead)
+    # Calculate 1d ATR
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d ATR ratio: current ATR / 20-period average ATR (low when < 0.8)
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_20
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # === 1d Close (prior close for context) ===
+    close_1d_shifted = np.roll(close_1d, 1)
+    close_1d_shifted[0] = np.nan
+    close_1d_prior = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
+    
+    # === 1d Camarilla (entry levels from prior 1d) ===
     high_1d_shift = np.roll(high_1d, 1)
     low_1d_shift = np.roll(low_1d, 1)
     close_1d_shift = np.roll(close_1d, 1)
@@ -80,7 +91,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid or outside session
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(close_1d_trend[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(close_1d_prior[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -89,21 +100,22 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: 4h volume must be elevated
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        # Volume confirmation: 4h volume must be expanded
+        volume_expanded = volume_current > 1.5 * vol_ma
         
-        # Trend filter: price close vs prior 1d close (1d trend)
-        uptrend_1d = price_close > close_1d_trend[i]
-        downtrend_1d = price_close < close_1d_trend[i]
+        # Volatility filter: low volatility regime (ATR ratio < 0.8)
+        low_volatility = atr_ratio_aligned[i] < 0.8
         
-        # Long conditions: 4h closes above prior 1d's R3 with volume + 1d uptrend
-        long_signal = volume_confirmed and (price_close > r3_1d_aligned[i]) and uptrend_1d
+        # Price vs prior 1d close for context (not trend filter)
+        price_vs_prior_close = price_close > close_1d_prior[i]
         
-        # Short conditions: 4h closes below prior 1d's S3 with volume + 1d downtrend
-        short_signal = volume_confirmed and (price_close < s3_1d_aligned[i]) and downtrend_1d
+        # Long conditions: 4h closes above prior 1d's R3 with volume expansion + low volatility
+        long_signal = volume_expanded and low_volatility and (price_close > r3_1d_aligned[i])
+        
+        # Short conditions: 4h closes below prior 1d's S3 with volume expansion + low volatility
+        short_signal = volume_expanded and low_volatility and (price_close < s3_1d_aligned[i])
         
         # Exit when price returns to the 1d pivot (mean reversion within prior 1d's range)
-        pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
         pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
         exit_long = position == 1 and price_close < pivot_1d_aligned[i]
         exit_short = position == -1 and price_close > pivot_1d_aligned[i]
@@ -126,4 +138,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when 4h closes above prior 1d R3 with volume confirmation and 1d uptrend; sell when 4h closes below prior 1d S3 with 1d downtrend. Uses 1d Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 20-50 trades/year to minimize fee drag.
+# Hypothesis: Buy when 4h closes above prior 1d R3 with volume compression breakout and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
