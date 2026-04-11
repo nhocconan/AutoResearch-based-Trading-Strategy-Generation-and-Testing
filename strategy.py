@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v2"
+name = "4h_1d_donchian_breakout_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,33 +23,24 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate daily Camarilla levels (based on previous day's range)
+    # Calculate daily Donchian channels (20-period high/low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla levels for each day
-    # Using previous day's data to avoid look-ahead
-    range_1d = high_1d - low_1d
-    # Shift by 1 to use previous day's data
-    range_1d_prev = np.roll(range_1d, 1)
-    range_1d_prev[0] = 0  # First day has no previous
+    # 20-period Donchian high and low (using previous day's data to avoid look-ahead)
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    close_1d_prev = np.roll(close_1d, 1)
-    close_1d_prev[0] = close_1d[0]
+    # Fill first 20 values with NaN (already handled by shift)
     
-    # Camarilla levels: H4, L4 (main levels)
-    H4 = close_1d_prev + 1.1 * range_1d_prev / 2
-    L4 = close_1d_prev - 1.1 * range_1d_prev / 2
+    # Align daily Donchian to 4h timeframe
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
-    # Align daily Camarilla to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Volume confirmation: volume > 1.5x 20-period average (stricter filter)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Trend filter: ADX > 25 for trending market
@@ -79,9 +70,9 @@ def generate_signals(prices):
     
     trending_market = adx > 25
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
             np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
@@ -90,8 +81,8 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        H4 = H4_aligned[i]
-        L4 = L4_aligned[i]
+        upper_channel = donchian_high_20_aligned[i]
+        lower_channel = donchian_low_20_aligned[i]
         adx_val = adx[i]
         trending = trending_market[i]
         
@@ -102,26 +93,23 @@ def generate_signals(prices):
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above H4 with volume and trend
-        if price_high > H4 and volume_confirmed and trending:
+        # Long: price breaks above upper Donchian channel with volume and trend
+        if price_high > upper_channel and volume_confirmed and trending:
             long_signal = True
         
-        # Short: price breaks below L4 with volume and trend
-        if price_low < L4 and volume_confirmed and trending:
+        # Short: price breaks below lower Donchian channel with volume and trend
+        if price_low < lower_channel and volume_confirmed and trending:
             short_signal = True
         
         # Exit conditions
-        # Calculate midpoint for exit (using previous day's close)
-        midpoint_prev = close_1d_prev
-        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_prev)[i]
-        
         # Stop loss conditions
-        stop_long = position == 1 and price_low < (entry_price - 1.5 * atr[i])
-        stop_short = position == -1 and price_high > (entry_price + 1.5 * atr[i])
+        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr[i])
+        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr[i])
         
-        # Exit to midpoint
-        exit_long = position == 1 and price_close < midpoint_aligned
-        exit_short = position == -1 and price_close > midpoint_aligned
+        # Exit when price returns to middle of channel (mean reversion within trend)
+        middle_channel = (upper_channel + lower_channel) / 2.0
+        exit_long = position == 1 and price_close < middle_channel
+        exit_short = position == -1 and price_close > middle_channel
         
         # Trading logic
         if long_signal and position != 1:
@@ -144,11 +132,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla breakout strategy with stricter volume confirmation and ADX trend filter.
-# Enters long when price breaks above daily Camarilla H4 level with volume confirmation (>1.5x avg volume) in trending markets (ADX > 25).
-# Enters short when price breaks below daily Camarilla L4 level with volume confirmation and ADX > 25.
-# Uses previous day's data to calculate Camarilla levels to avoid look-ahead.
+# Hypothesis: Donchian breakout strategy with volume confirmation and ADX trend filter.
+# Enters long when price breaks above 20-day Donchian high with volume confirmation (>1.5x avg volume) in trending markets (ADX > 25).
+# Enters short when price breaks below 20-day Donchian low with volume confirmation and ADX > 25.
+# Uses daily timeframe for Donchian channels to capture multi-day breakouts.
 # Volume confirmation ensures institutional participation, ADX filter avoids whipsaws in sideways markets.
-# Exits when price returns to previous day's close or ATR stop loss (1.5x) is hit.
-# Designed for 4h timeframe with tighter entry conditions to target 75-200 total trades over 4 years.
+# Exits when price returns to the middle of the channel or ATR stop loss (2.0x) is hit.
+# Designed for 4h timeframe with tight entry conditions to target 75-200 total trades over 4 years.
 # Works in both bull and bear markets by trading breakouts in either direction with trend filter.
