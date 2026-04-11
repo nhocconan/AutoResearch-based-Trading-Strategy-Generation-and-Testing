@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-# 4h_12h_camarilla_breakout_volume_v1
-# Strategy: 4-hour Camarilla pivot breakout with volume confirmation and 12-hour trend filter
-# Timeframe: 4h
+# 1h_4h_1d_rsi_momentum_v1
+# Strategy: 1-hour RSI momentum with 4-hour trend filter and 1-day volatility regime
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (H4/L4) act as strong support/resistance. 
-# Breakouts above H4 or below L4 with volume confirmation and 12h trend alignment 
-# provide high-probability entries. Works in bull markets via upside breakouts and 
-# in bear markets via downside breakdowns. Volume filter reduces false breakouts.
-# 12h trend filter ensures trades align with higher-timeframe momentum.
-# Target: 20-40 trades/year to minimize fee drag.
+# Hypothesis: RSI(14) captures short-term momentum while 4h EMA50 filters trend direction and 1d ATR percentile avoids choppy markets.
+# Long: RSI crosses above 50 with 4h uptrend and low volatility regime (ATR < 50th percentile).
+# Short: RSI crosses below 50 with 4h downtrend and low volatility regime.
+# Uses volatility regime filter to reduce whipsaws in ranging markets, targeting 15-30 trades/year.
+# Volatility filter based on 1d ATR(14) percentile to distinguish trending vs ranging markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_rsi_momentum_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,71 +28,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for Camarilla pivot levels and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 30:
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 60:
         return np.zeros(n)
     
-    # 12h Camarilla pivot levels (based on previous day's OHLC)
-    # Using 12h high/low/close as proxy for daily pivot calculation
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1d data ONCE before loop for volatility regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels: H4/L4 = close ± 1.1*(high-low)/2
-    # These are the key breakout levels
-    hl_range = high_12h - low_12h
-    camarilla_h4 = close_12h + 1.1 * hl_range / 2
-    camarilla_l4 = close_12h - 1.1 * hl_range / 2
+    # 4h EMA(50) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
+    # 1d ATR(14) for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = np.abs(high_1d[0] - low_1d[0])  # first bar
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 50th percentile of ATR for regime detection (using expanding window to avoid look-ahead)
+    atr_percentile = pd.Series(atr_14).expanding(min_periods=30).quantile(0.50).values
+    atr_low_regime = atr_14 < atr_percentile  # Low volatility regime
+    atr_low_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_low_regime, additional_delay_bars=0)
     
-    # 12h EMA(25) for trend filter
-    ema_25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema_25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_25_12h)
+    # 1h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Neutral when undefined
     
-    # 4h Volume confirmation: current volume > 1.3x 20-period average
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.3 * vol_avg_20)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema_25_12h_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or 
+            np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(atr_low_regime_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > camarilla_h4_aligned[i]
-        breakout_down = close[i] < camarilla_l4_aligned[i]
+        # RSI centerline crosses
+        rsi_cross_up = rsi[i-1] < 50 and rsi[i] >= 50
+        rsi_cross_down = rsi[i-1] > 50 and rsi[i] <= 50
         
-        # Trend filter: price above/below 12h EMA25
-        uptrend = close[i] > ema_25_12h_aligned[i]
-        downtrend = close[i] < ema_25_12h_aligned[i]
+        # Trend filter: price above/below 4h EMA50
+        uptrend = close[i] > ema_50_4h_aligned[i]
+        downtrend = close[i] < ema_50_4h_aligned[i]
         
-        # Entry logic: Breakout + volume + trend alignment
-        if breakout_up and vol_confirm[i] and uptrend and position != 1:
+        # Volatility regime: low volatility (trending market)
+        low_vol = atr_low_regime_aligned[i]
+        
+        # Session filter
+        in_session = session_filter[i]
+        
+        # Entry logic: RSI cross + trend + low vol + session
+        if rsi_cross_up and uptrend and low_vol and in_session and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif breakout_down and vol_confirm[i] and downtrend and position != -1:
+            signals[i] = 0.20
+        elif rsi_cross_down and downtrend and low_vol and in_session and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit: price returns to midpoint of Camarilla range (neutral zone)
-        elif position == 1 and close[i] < (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2:
+            signals[i] = -0.20
+        # Exit: opposite RSI cross with volume confirmation (using price action as proxy)
+        elif position == 1 and rsi_cross_down and in_session:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2:
+        elif position == -1 and rsi_cross_up and in_session:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
