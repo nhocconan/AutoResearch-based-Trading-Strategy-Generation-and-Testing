@@ -1,10 +1,9 @@
-# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_trend_v8"
+name = "4h_12h_camarilla_breakout_volume_trend_v9"
 timeframe = "4h"
 leverage = 1.0
 
