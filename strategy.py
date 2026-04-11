@@ -1,93 +1,78 @@
 #!/usr/bin/env python3
 """
-1d_1w_kama_volume_v1
-Strategy: 1d KAMA trend with volume confirmation and weekly trend filter
-Timeframe: 1d
+6h_1w_elliott_wave_fib_v1
+Strategy: 6h Elliott Wave-inspired Fibonacci retracement with weekly trend filter
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses KAMA on daily timeframe to capture trend direction, confirmed by volume spikes (>2x average volume), and filtered by weekly EMA21 trend. KAMA adapts to market noise, reducing false signals in choppy markets. Volume confirmation ensures institutional participation. Weekly trend filter avoids counter-trend trades. Designed to work in both bull and bear markets by following the dominant trend on higher timeframe.
+Hypothesis: Combines Fibonacci retracement levels from weekly swing points with 60-period EMA trend filter on 6h. Enters long at 0.618 Fib support in uptrend, short at 0.382 Fib resistance in downtrend. Uses weekly swing high/low to define the trend leg, avoiding chop. Designed to work in both bull (buy dips) and bear (sell rallies) by following the higher timeframe trend. Low trade frequency expected due to strict Fib + trend confluence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_volume_v1"
-timeframe = "1d"
+name = "6h_1w_elliott_wave_fib_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def kama(close, er_length=10, fast=2, slow=30):
-    """Kaufman's Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change.shape) > 1 else np.convolve(np.abs(np.diff(close)), np.ones(er_length), 'same')
-    # For 1D array
-    volatility = np.array([np.sum(np.abs(np.diff(close[max(0, i-er_length+1):i+1]))) for i in range(len(close))])
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load higher timeframe data ONCE before loop
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 21:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # KAMA on daily timeframe
-    kama_val = kama(close, er_length=10, fast=2, slow=30)
+    # 60-period EMA on 6h for trend filter
+    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Weekly EMA21 for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Weekly swing points: find highest high and lowest low over lookback
+    lookback = 12  # ~3 months of weekly data
+    roll_max = pd.Series(df_1w['high']).rolling(window=lookback, min_periods=lookback).max().values
+    roll_min = pd.Series(df_1w['low']).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)  # Volume spike filter
+    # Align weekly swing points to 6h
+    swing_high_aligned = align_htf_to_ltf(prices, df_1w, roll_max)
+    swing_low_aligned = align_htf_to_ltf(prices, df_1w, roll_min)
+    
+    # Calculate Fibonacci levels: 0.382 and 0.618
+    swing_range = swing_high_aligned - swing_low_aligned
+    fib_0382 = swing_low_aligned + 0.382 * swing_range
+    fib_0618 = swing_low_aligned + 0.618 * swing_range
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_val[i]) or np.isnan(ema_21_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema_60[i]) or np.isnan(swing_high_aligned[i]) or 
+            np.isnan(swing_low_aligned[i]) or np.isnan(fib_0382[i]) or 
+            np.isnan(fib_0618[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filters: price above/below KAMA and weekly EMA
-        above_kama = price_close > kama_val[i]
-        above_weekly_ema = price_close > ema_21_1w_aligned[i]
-        below_kama = price_close < kama_val[i]
-        below_weekly_ema = price_close < ema_21_1w_aligned[i]
+        # Trend filter: price above/below 60 EMA
+        uptrend = price_close > ema_60[i]
+        downtrend = price_close < ema_60[i]
         
-        # Volume confirmation
-        vol_confirmed = vol_spike[i]
+        # Long at 0.618 Fib support in uptrend
+        long_signal = uptrend and price_close <= fib_0618[i]
         
-        # Long: price above KAMA and weekly EMA with volume
-        long_signal = above_kama and above_weekly_ema and vol_confirmed
+        # Short at 0.382 Fib resistance in downtrend
+        short_signal = downtrend and price_close >= fib_0382[i]
         
-        # Short: price below KAMA and weekly EMA with volume
-        short_signal = below_kama and below_weekly_ema and vol_confirmed
-        
-        # Exit when price crosses KAMA in opposite direction
-        exit_long = position == 1 and price_close < kama_val[i]
-        exit_short = position == -1 and price_close > kama_val[i]
+        # Exit when price crosses the 60 EMA
+        exit_long = position == 1 and price_close < ema_60[i]
+        exit_short = position == -1 and price_close > ema_60[i]
         
         # Trading logic
         if long_signal and position != 1:
