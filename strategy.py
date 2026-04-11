@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v20
+# 4h_1d_camarilla_breakout_v21
 # Strategy: 4h breakout at Camarilla levels calculated from 1d close, with volume confirmation and ADX trend filter
 # Timeframe: 4h
 # Leverage: 1.0
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v20"
+name = "4h_1d_camarilla_breakout_v21"
 timeframe = "4h"
 leverage = 1.0
 
