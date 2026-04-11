@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
-# 6h_1d_camdash_breakout_v1
-# Strategy: 6h price crossing Camarilla pivot levels from 1d with volume confirmation
-# Timeframe: 6h
+# 4h_1d_kama_rsi_volume_v1
+# Strategy: 4h KAMA trend with RSI filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (R3/S3, R4/S4) act as strong support/resistance.
-# In trending markets, breaks above R4 or below S4 with volume continuation signal strong momentum.
-# In ranging markets, reversals at R3/S3 offer mean-reversion opportunities.
-# Volume filter ensures institutional participation, reducing false breaks.
-# Works in bull markets via R4 breakouts and in bear markets via S4 breakdowns.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: KAMA adapts to market noise, reducing false signals in ranging markets.
+# Combined with RSI momentum filter and volume confirmation, it captures strong trends
+# while avoiding whipsaws. Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# Works in bull markets via trend continuation and bear markets via adaptive trend detection.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camdash_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_kama_rsi_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -32,74 +30,80 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    # Formula: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h KAMA(10,2,30) - adaptive moving average
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle first 10 values
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility[10:]])
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start after first 10 periods
+    for i in range(10, n):
+        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + 1.5 * range_1d
-    r3_1d = close_1d + 1.1 * range_1d
-    s3_1d = close_1d - 1.1 * range_1d
-    s4_1d = close_1d - 1.5 * range_1d
+    # 4h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 6h timeframe
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # 1d volume average (20-period) for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # Volume confirmation: 6h volume > 1.5x 20-period average of 6h volume
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_avg_20
+    # Align raw 1d volume for confirmation
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or \
-           np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or \
+           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > r4_1d_aligned[i]  # Break above R4
-        breakout_down = close[i] < s4_1d_aligned[i]  # Break below S4
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        vol_confirm = vol_1d_aligned[i] > 1.3 * vol_avg_20_1d_aligned[i]
         
-        # Reversal conditions
-        reversal_long = close[i] < s3_1d_aligned[i] and close[i-1] >= s3_1d_aligned[i-1]  # Cross above S3
-        reversal_short = close[i] > r3_1d_aligned[i] and close[i-1] <= r3_1d_aligned[i-1]  # Cross below R3
+        # KAMA trend: price above/below KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # Entry logic
-        if breakout_up and vol_confirm[i] and position != 1:
-            # Bullish breakout with volume
+        # RSI momentum filter: >50 for bullish, <50 for bearish
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # Entry conditions
+        # Long: Price above KAMA AND RSI bullish AND volume confirmation
+        if price_above_kama and rsi_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        elif breakout_down and vol_confirm[i] and position != -1:
-            # Bearish breakdown with volume
+        # Short: Price below KAMA AND RSI bearish AND volume confirmation
+        elif price_below_kama and rsi_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        elif reversal_long and not vol_confirm[i] and position != 1:
-            # Mean reversion long at S3 (only in low volume - ranging market)
-            position = 1
-            signals[i] = 0.25
-        elif reversal_short and not vol_confirm[i] and position != -1:
-            # Mean reversion short at R3 (only in low volume - ranging market)
-            position = -1
-            signals[i] = -0.25
-        # Exit conditions
-        elif position == 1 and (close[i] < s3_1d_aligned[i] or breakout_down):
-            # Exit long if price returns below S3 or bearish breakdown occurs
+        # Exit: Opposite condition (trend change)
+        elif position == 1 and (not price_above_kama or not rsi_bullish):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > r3_1d_aligned[i] or breakout_up):
-            # Exit short if price returns above R3 or bullish breakout occurs
+        elif position == -1 and (not price_below_kama or not rsi_bearish):
             position = 0
             signals[i] = 0.0
         else:
