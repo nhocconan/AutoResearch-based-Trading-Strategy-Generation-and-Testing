@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_volatility_filter_v1
-Strategy: Daily Camarilla pivot breakout with volatility filter and weekly trend filter
-Timeframe: 1d
+6h_1d_kama_volume_regime_v1
+Strategy: 6h KAMA trend with volume confirmation and 1d volatility regime filter
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses daily Camarilla pivot levels (H4/L4) for breakout entries, filtered by weekly trend (price above/below weekly EMA20) and volatility expansion (current ATR > 1.5x ATR(20)). Designed to capture strong breakouts in trending markets while avoiding false breakouts in low volatility. Weekly trend filter ensures alignment with higher timeframe momentum, volatility filter ensures sufficient momentum for breakout to succeed. Target: 20-50 total trades over 4 years.
+Hypothesis: KAMA adapts to market noise, reducing whipsaws in chop. Combined with volume confirmation and low-volatility regime (using 1d Bollinger Band width percentile), it captures sustainable trends while avoiding false signals in high noise. Designed to work in both bull (trend following) and bear (mean reversion in low vol) markets by switching logic based on volatility regime.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_volatility_filter_v1"
-timeframe = "1d"
+name = "6h_1d_kama_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +24,90 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Daily ATR(20) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # 6h KAMA (adaptive moving average)
+    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum of absolute changes
+    # Handle edge cases for convolution-like sum
+    volatility_padded = np.concatenate([np.zeros(9), volatility])
+    volatility_sum = np.convolve(volatility_padded, np.ones(10), mode='valid')
+    # Avoid division by zero
+    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
+    # Smoothing constants
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d Bollinger Band width for volatility regime
+    close_1d = df_1d['close'].values
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_width = (bb_std * 2) / bb_middle  # Normalized width
+    # Percentile rank of BB width over 60 days
+    bb_width_series = pd.Series(bb_width)
+    bb_percentile = bb_width_series.rolling(window=60, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    # Align BB percentile to 6h
+    bb_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_percentile)
     
-    # Daily Camarilla levels (based on previous day's OHLC)
-    # We need previous day's high, low, close for each day
-    # Shift by 1 to get previous day's values
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    close_prev = np.roll(close, 1)
-    # Set first day's previous values to NaN (no prior day)
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
-    
-    # Camarilla levels: H4 = Close + 1.1*(High-Low)/2, L4 = Close - 1.1*(High-Low)/2
-    camarilla_H4 = close_prev + 1.1 * (high_prev - low_prev) / 2
-    camarilla_L4 = close_prev - 1.1 * (high_prev - low_prev) / 2
+    # Volume confirmation (20-period average)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr[i]) or np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(camarilla_H4[i]) or np.isnan(camarilla_L4[i])):
+        if (np.isnan(kama[i]) or np.isnan(bb_percentile_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
+        kama_val = kama[i]
+        bb_percentile_val = bb_percentile_aligned[i]
+        vol_confirmed = vol_spike[i]
         
-        # Volatility filter: current ATR > 1.5 * ATR(20)
-        vol_filter = atr[i] > (1.5 * atr[i-20] if i >= 20 and not np.isnan(atr[i-20]) else atr[i])
+        # Regime filter: low volatility (trending) vs high volatility (choppy)
+        # Low vol: BB percentile < 40% (narrow bands = trending)
+        # High vol: BB percentile > 60% (wide bands = choppy)
+        low_vol = bb_percentile_val < 0.4
+        high_vol = bb_percentile_val > 0.6
         
-        # Weekly trend filter
-        uptrend_1w = price_close > ema_20_1w_aligned[i]
-        downtrend_1w = price_close < ema_20_1w_aligned[i]
+        # In low volatility regime: trend following with KAMA
+        # In high volatility regime: mean reversion (fade extreme moves)
+        if low_vol:
+            # Trend following: price > KAMA = long, price < KAMA = short
+            long_signal = price_close > kama_val and vol_confirmed
+            short_signal = price_close < kama_val and vol_confirmed
+        elif high_vol:
+            # Mean reversion: fade moves away from KAMA
+            # Long when price significantly below KAMA
+            # Short when price significantly above KAMA
+            deviation = (price_close - kama_val) / kama_val
+            long_signal = deviation < -0.015 and vol_confirmed  # >1.5% below KAMA
+            short_signal = deviation > 0.015 and vol_confirmed   # >1.5% above KAMA
+        else:
+            # Neutral regime: no trades
+            long_signal = False
+            short_signal = False
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > camarilla_H4[i]
-        breakout_down = price_close < camarilla_L4[i]
-        
-        # Long: upward breakout with volatility expansion in uptrend
-        long_signal = breakout_up and vol_filter and uptrend_1w
-        
-        # Short: downward breakout with volatility expansion in downtrend
-        short_signal = breakout_down and vol_filter and downtrend_1w
-        
-        # Exit when price returns to the opposite Camarilla level
-        exit_long = position == 1 and price_close < camarilla_L4[i]
-        exit_short = position == -1 and price_close > camarilla_H4[i]
+        # Exit conditions
+        exit_long = position == 1 and price_close < kama_val
+        exit_short = position == -1 and price_close > kama_val
         
         # Trading logic
         if long_signal and position != 1:
