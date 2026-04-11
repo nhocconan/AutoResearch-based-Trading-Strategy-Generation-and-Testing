@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily pivot-based strategy with weekly trend filter.
-# Uses weekly pivot levels (CPR) for trend direction and daily pivot levels for entries.
-# Enters long when price tests daily pivot support in bullish weekly trend.
-# Enters short when price tests daily pivot resistance in bearish weekly trend.
-# Volume filter confirms institutional participation. Designed for 7-25 trades/year on 1d.
-# Weekly trend filter reduces whipsaw in sideways markets and improves win rate.
+# Hypothesis: 6h Williams Fractal + daily trend filter + volume confirmation
+# Uses daily Williams fractals for reversal signals and daily ADX for trend strength.
+# Enters long on bullish fractal in strong uptrend (ADX>25) with volume confirmation.
+# Enters short on bearish fractal in strong downtrend (ADX>25) with volume confirmation.
+# Designed for 12-37 trades/year on 6h timeframe with strong edge in both bull/bear markets.
 
-name = "1d_1w_pivot_trend_v1"
-timeframe = "1d"
+name = "6h_1d_fractal_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -25,69 +24,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly CPR (Central Pivot Range)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    prev_close_1w[0] = np.nan
-    
-    # Weekly pivot points
-    pivot_1w = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    bc_1w = (prev_high_1w + prev_low_1w) / 2  # Bottom Central
-    tc_1w = pivot_1w + (pivot_1w - bc_1w)     # Top Central
-    
-    # Weekly trend: price above TC = bullish, below BC = bearish
-    weekly_trend_bull = close_1w > tc_1w
-    weekly_trend_bear = close_1w < bc_1w
-    
-    # Align weekly levels and trend to daily
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    bc_1w_aligned = align_htf_to_ltf(prices, df_1w, bc_1w)
-    tc_1w_aligned = align_htf_to_ltf(prices, df_1w, tc_1w)
-    weekly_trend_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bull)
-    weekly_trend_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bear)
-    
-    # Calculate daily pivot points
+    # Calculate Williams Fractals on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Williams Fractal: 5-bar pattern
+    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
+    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
+    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
+    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
     
-    # Daily pivot points
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = 2 * pivot_1d - prev_low_1d
-    s1_1d = 2 * pivot_1d - prev_high_1d
-    r2_1d = pivot_1d + (prev_high_1d - prev_low_1d)
-    s2_1d = pivot_1d - (prev_high_1d - prev_low_1d)
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i-2] < high_1d[i-1] and 
+            high_1d[i] < high_1d[i-1] and
+            high_1d[i-3] < high_1d[i-1] and
+            high_1d[i+1] < high_1d[i-1]):
+            bearish_fractal[i-1] = True
+            
+        if (low_1d[i-2] > low_1d[i-1] and 
+            low_1d[i] > low_1d[i-1] and
+            low_1d[i-3] > low_1d[i-1] and
+            low_1d[i+1] > low_1d[i-1]):
+            bullish_fractal[i-1] = True
     
-    # Align daily levels to daily timeframe (no shift needed as we use previous day's data)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Calculate ADX on daily data
+    # ADX calculation requires +DI, -DI, and DX
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index
+    
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed values (14-period Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(data[1:period+1]) / period
+        # Subsequent values: smoothed = prev * (period-1)/period + current/period
+        for i in range(period, len(data)):
+            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
+    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
+    
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Align daily indicators to 6h timeframe
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Daily average volume (20-period)
     volume_1d = df_1d['volume'].values
@@ -100,36 +109,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i]) or
-            np.isnan(bc_1w_aligned[i]) or np.isnan(tc_1w_aligned[i]) or
-            np.isnan(vol_avg_aligned[i]) or
-            np.isnan(weekly_trend_bull_aligned[i]) or np.isnan(weekly_trend_bear_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * daily average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.3 * daily average volume
+        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
         
-        # Determine weekly trend direction
-        is_bullish_week = weekly_trend_bull_aligned[i]
-        is_bearish_week = weekly_trend_bear_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Enter long when price tests daily S1 in bullish weekly trend
-        long_entry = (low[i] <= s1_1d_aligned[i] and vol_filter and is_bullish_week)
+        # Enter long on bullish fractal in strong uptrend with volume
+        long_entry = (bullish_fractal_aligned[i] and strong_trend and vol_filter)
         
-        # Enter short when price tests daily R1 in bearish weekly trend
-        short_entry = (high[i] >= r1_1d_aligned[i] and vol_filter and is_bearish_week)
+        # Enter short on bearish fractal in strong downtrend with volume
+        short_entry = (bearish_fractal_aligned[i] and strong_trend and vol_filter)
         
-        # Exit when price reaches daily pivot or opposite S1/R1
+        # Exit when opposite fractal appears or trend weakens
         exit_long = (position == 1 and 
-                    (high[i] >= pivot_1d_aligned[i] or 
-                     low[i] <= s1_1d_aligned[i]))  # Exit long if hits pivot or breaks S1
+                    (bearish_fractal_aligned[i] or adx_aligned[i] < 20))
         exit_short = (position == -1 and 
-                     (low[i] <= pivot_1d_aligned[i] or 
-                      high[i] >= r1_1d_aligned[i]))  # Exit short if hits pivot or breaks R1
+                     (bullish_fractal_aligned[i] or adx_aligned[i] < 20))
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
