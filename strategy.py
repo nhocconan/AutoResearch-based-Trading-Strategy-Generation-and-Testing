@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_breakout_v1"
+name = "1d_1w_rsi_momentum_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -12,8 +12,6 @@ def generate_signals(prices):
     if n < 30:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -22,65 +20,62 @@ def generate_signals(prices):
     
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 14:
         return signals
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly RSI (14-period)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1w = 100 - (100 / (1 + rs))
     
     # Shift by 1 to use only completed weekly bars
-    upper_1w = np.roll(upper_1w, 1)
-    lower_1w = np.roll(lower_1w, 1)
-    upper_1w[0] = np.nan
-    lower_1w[0] = np.nan
+    rsi_1w = np.roll(rsi_1w, 1)
+    rsi_1w[0] = np.nan
     
-    # Align weekly indicators to daily timeframe
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    # Align weekly RSI to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate daily ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily RSI (14-period)
+    delta_d = np.diff(close, prepend=close[0])
+    gain_d = np.where(delta_d > 0, delta_d, 0)
+    loss_d = np.where(delta_d < 0, -delta_d, 0)
+    avg_gain_d = pd.Series(gain_d).rolling(window=14, min_periods=14).mean().values
+    avg_loss_d = pd.Series(loss_d).rolling(window=14, min_periods=14).mean().values
+    rs_d = np.where(avg_loss_d != 0, avg_gain_d / avg_loss_d, 0)
+    rsi_d = 100 - (100 / (1 + rs_d))
     
-    # Volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.3x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_d[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
+        rsi_weekly = rsi_1w_aligned[i]
+        rsi_daily = rsi_d[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
-        atr_val = atr[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
-        # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_val > 0.01 * price_close  # ATR > 1% of price
+        # Momentum conditions: 
+        # Long when weekly RSI > 50 (bullish bias) and daily RSI crosses above 50
+        # Short when weekly RSI < 50 (bearish bias) and daily RSI crosses below 50
+        long_signal = volume_confirmed and (rsi_weekly > 50) and (rsi_daily > 50) and (rsi_d[i-1] <= 50)
+        short_signal = volume_confirmed and (rsi_weekly < 50) and (rsi_daily < 50) and (rsi_d[i-1] >= 50)
         
-        # Long conditions: price breaks above weekly upper Donchian with volume and vol filter
-        long_signal = volume_confirmed and vol_filter and (price_high > upper_1w_aligned[i])
-        
-        # Short conditions: price breaks below weekly lower Donchian with volume and vol filter
-        short_signal = volume_confirmed and vol_filter and (price_low < lower_1w_aligned[i])
-        
-        # Exit when price returns to the midpoint of the weekly channel
-        mid_1w = (upper_1w_aligned[i] + lower_1w_aligned[i]) / 2
-        exit_long = position == 1 and price_close < mid_1w
-        exit_short = position == -1 and price_close > mid_1w
+        # Exit when RSI reaches opposite extreme (overbought/oversold)
+        exit_long = position == 1 and (rsi_daily >= 70)
+        exit_short = position == -1 and (rsi_daily <= 30)
         
         # Trading logic
         if long_signal and position != 1:
@@ -101,13 +96,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Donchian breakout with volume and volatility filters on daily timeframe.
-# Uses 20-week Donchian channels to identify major support/resistance levels.
-# Enters long when daily price breaks above weekly upper channel with volume confirmation (>1.5x average)
-# and sufficient volatility (ATR > 1% of price). Enters short when price breaks below weekly lower channel
-# under same conditions. Exits when price returns to the midpoint of the weekly channel.
-# Works in both bull and bear markets by capturing major breakouts. Target: 20-80 total trades
-# over 4 years (5-20/year) to minimize fee drag on daily timeframe. Weekly timeframe reduces noise
-# and captures multi-week trends. Volume confirmation ensures institutional participation.
-# Volatility filter prevents whipsaws in low-volatility environments. Midpoint exit provides
-# systematic profit-taking while allowing trends to develop.
+# Hypothesis: Weekly RSI momentum with daily RSI confirmation on daily timeframe.
+# Uses weekly RSI to establish long-term trend bias (above/below 50) and daily RSI for entry timing.
+# Enters long when weekly RSI > 50 (bullish bias) AND daily RSI crosses above 50 with volume confirmation.
+# Enters short when weekly RSI < 50 (bearish bias) AND daily RSI crosses below 50 with volume confirmation.
+# Exits when daily RSI reaches overbought (>=70) for longs or oversold (<=30) for shorts.
+# Works in both bull and bear markets by following the weekly momentum while using daily RSI for precise entries.
+# Volume confirmation ensures institutional participation and reduces false signals.
+# Target: 20-60 total trades over 4 years (5-15/year) to minimize fee drag on daily timeframe.
+# Weekly timeframe reduces noise and captures multi-week trends. RSI provides clear overbought/oversold levels.
+# This strategy avoids the overtrading pitfalls of previous RSI-based strategies by requiring both weekly bias
+# and daily crossover with volume confirmation, resulting in fewer but higher-quality signals.
