@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_elder_ray_power_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -13,61 +13,80 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Daily EMA13 for Elder Ray
-    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Weekly EMA26 for trend filter
-    ema26_1w = pd.Series(df_1w['close'].values).ewm(span=26, adjust=False, min_periods=26).mean().values
-    
-    # Align indicators to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    ema26_1w_aligned = align_htf_to_ltf(prices, df_1w, ema26_1w)
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(26, n):  # Wait for weekly EMA26
-        # Skip if any data is invalid
-        if np.isnan(ema13_1d_aligned[i]) or np.isnan(ema26_1w_aligned[i]):
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return signals
+    
+    # Calculate weekly OHLC for Camarilla levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Camarilla levels: H3, L3 (tighter than H4/L4 for more entries)
+    hl_range = high_1w - low_1w
+    camarilla_h3 = close_1w + 1.1 * hl_range / 4
+    camarilla_l3 = close_1w - 1.1 * hl_range / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    
+    # Volume confirmation: 10-period average on weekly volume
+    volume_sma_10 = pd.Series(df_1w['volume'].values).rolling(window=10, min_periods=10).mean().values
+    volume_sma_10_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_10)
+    
+    # Trend filter: 20-period EMA on weekly close
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    
+    for i in range(50, n):
+        # Skip if any required data is invalid
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_sma_10_aligned[i]) or np.isnan(ema_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Elder Ray components
-        bull_power = high[i] - ema13_1d_aligned[i]
-        bear_power = low[i] - ema13_1d_aligned[i]
+        price_close = close[i]
+        volume_current = volume[i]
         
-        # Trend filter from weekly EMA26
-        above_weekly_ema = close[i] > ema26_1w_aligned[i]
-        below_weekly_ema = close[i] < ema26_1w_aligned[i]
+        # Volume confirmation: current volume > 1.5x 10-period weekly average
+        vol_confirm = volume_current > 1.5 * volume_sma_10_aligned[i]
+        
+        # Trend filter: only trade in direction of 20 EMA
+        above_ema = price_close > ema_20_aligned[i]
+        below_ema = price_close < ema_20_aligned[i]
         
         # Entry conditions
-        enter_long = bull_power > 0 and above_weekly_ema
-        enter_short = bear_power < 0 and below_weekly_ema
+        enter_long = False
+        enter_short = False
         
-        # Exit conditions: opposite Elder Ray power
-        exit_long = bear_power < 0
-        exit_short = bull_power > 0
+        # Long: Price breaks above Camarilla H3 + volume confirmation + above EMA20
+        if price_close > camarilla_h3_aligned[i] and vol_confirm and above_ema:
+            enter_long = True
+        
+        # Short: Price breaks below Camarilla L3 + volume confirmation + below EMA20
+        if price_close < camarilla_l3_aligned[i] and vol_confirm and below_ema:
+            enter_short = True
+        
+        # Exit conditions: price returns to the week's close (pivot point)
+        prev_close_1w = np.concatenate([[np.nan], close_1w[:-1]])
+        prev_close_aligned = align_htf_to_ltf(prices, df_1w, prev_close_1w)
+        exit_long = price_close < prev_close_aligned[i]
+        exit_short = price_close > prev_close_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -76,14 +95,12 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Elder Ray Power (Bull/Bear) with weekly EMA trend filter on 6h timeframe.
-# Bull Power = High - Daily EMA13, Bear Power = Low - Daily EMA13.
-# Long when Bull Power > 0 AND price above Weekly EMA26 (uptrend).
-# Short when Bear Power < 0 AND price below Weekly EMA26 (downtrend).
-# Exits when opposite power appears, preventing adverse moves.
-# Works in bull markets (captures strength via Bull Power) and bear markets (captures weakness via Bear Power).
-# Position size 0.25 balances risk and return. Target: 50-100 total trades over 4 years (12-25/year).
+# Hypothesis: Camarilla H3/L3 breakout on weekly timeframe with volume confirmation and EMA20 trend filter.
+# Uses tighter Camarilla H3/L3 levels (Close ± 1.1*(High-Low)/4) for more frequent but still filtered entries.
+# Works in both bull (breakouts above H3) and bear (breakdowns below L3) by capturing institutional activity.
+# Volume confirmation (>1.5x 10-week average) ensures participation. EMA20 filter avoids counter-trend trades.
+# Position size 0.30 balances risk and return. Target: 10-25 trades/year to minimize fee drag.
