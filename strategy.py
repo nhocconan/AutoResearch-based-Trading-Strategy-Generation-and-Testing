@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12h Donchian breakout + volume confirmation + ADX trend filter.
-# Uses 12h Donchian channels to identify trend direction, enters on breakouts confirmed by volume.
-# ADX filter ensures we only trade in trending markets (ADX > 25), avoiding choppy conditions.
-# Designed for 20-50 trades/year to minimize fee decay while capturing strong trends.
-# Works in bull/bear markets by following the trend direction from higher timeframe.
+# Hypothesis: 6h timeframe with weekly Bollinger Band squeeze + daily trend confirmation.
+# Uses weekly Bollinger Band width percentile to detect low volatility (squeeze) conditions.
+# When squeeze occurs (<20th percentile), trades in direction of daily EMA(50) trend.
+# Volume filter confirms breakout validity.
+# Designed for 12-30 trades/year to minimize fee drift while capturing explosive moves after consolidation.
+# Works in bull/bear markets by trading breakouts from squeezes regardless of trend direction.
 
-name = "4h_12h_donchian_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "6h_1w_bb_squeeze_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,106 +25,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Upper band: highest high over past 20 periods
-    upper_12h = np.full_like(high_12h, np.nan)
-    # Lower band: lowest low over past 20 periods
-    lower_12h = np.full_like(low_12h, np.nan)
+    # Weekly Bollinger Bands (20, 2)
+    close_1w = df_1w['close'].values
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = upper_bb - lower_bb
     
-    for i in range(19, len(high_12h)):
-        upper_12h[i] = np.max(high_12h[i-19:i+1])
-        lower_12h[i] = np.min(low_12h[i-19:i+1])
+    # Weekly BB width percentile (lookback 50 weeks)
+    bb_width_pct = np.full_like(bb_width, np.nan, dtype=float)
+    for i in range(49, len(bb_width)):
+        window = bb_width[i-49:i+1]
+        if not np.any(np.isnan(window)):
+            bb_width_pct[i] = (np.sum(window <= bb_width[i]) / len(window)) * 100
     
-    # Calculate ADX for trend strength
-    # +DM and -DM calculation
-    high_diff = np.diff(high_12h, prepend=high_12h[0])
-    low_diff = np.diff(low_12h, prepend=low_12h[0])
+    # Daily EMA(50) for trend
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
-    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+    # Daily average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = np.full_like(volume_1d, np.nan, dtype=float)
+    for i in range(19, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(np.subtract(high_12h, np.roll(high_12h, 1)))
-    tr3 = np.abs(np.subtract(low_12h, np.roll(low_12h, 1)))
-    tr1[0] = high_12h[0] - low_12h[0]  # First period
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Smoothing (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_12h = wilders_smoothing(tr, 14)
-    plus_di_12h = 100 * wilders_smoothing(plus_dm, 14) / atr_12h
-    minus_di_12h = 100 * wilders_smoothing(minus_dm, 14) / atr_12h
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h)
-    adx_12h = wilders_smoothing(dx_12h, 14)
-    
-    # Align 12h indicators to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # Volume confirmation: 4h volume > 1.5 * 20-period average
-    vol_ma_20 = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    volume_filter = volume > 1.5 * vol_ma_20
+    # Align weekly indicators to 6h timeframe
+    bb_width_pct_aligned = align_htf_to_ltf(prices, df_1w, bb_width_pct)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
+        if (np.isnan(bb_width_pct_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trend_filter = adx_aligned[i] > 25
+        # Squeeze condition: BB width < 20th percentile (low volatility)
+        squeeze = bb_width_pct_aligned[i] < 20
         
-        # Breakout conditions
-        breakout_long = high[i] >= upper_aligned[i] and volume_filter[i] and trend_filter
-        breakout_short = low[i] <= lower_aligned[i] and volume_filter[i] and trend_filter
+        # Volume filter: current volume > 1.5 * daily average volume
+        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Exit conditions: opposite Donchian touch or trend weakening
-        exit_long = low[i] <= lower_aligned[i] or adx_aligned[i] < 20
-        exit_short = high[i] >= upper_aligned[i] or adx_aligned[i] < 20
+        # Trend condition: price relative to daily EMA(50)
+        above_ema = close[i] > ema_50_aligned[i]
+        below_ema = close[i] < ema_50_aligned[i]
         
-        # Entry logic: breakout in direction of trend
-        if breakout_long and position != 1:
+        # Entry logic: breakout from squeeze in trend direction
+        long_entry = squeeze and above_ema and vol_filter
+        short_entry = squeeze and below_ema and vol_filter
+        
+        # Exit conditions: opposite squeeze or loss of volatility
+        long_exit = not squeeze or (close[i] < ema_50_aligned[i])
+        short_exit = not squeeze or (close[i] > ema_50_aligned[i])
+        
+        # Priority: entry > exit > hold
+        if long_entry and position != 1:
             position = 1
-            signals[i] = 0.30
-        elif breakout_short and position != -1:
+            signals[i] = 0.25
+        elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.30
-        elif position == 1 and exit_long:
+            signals[i] = -0.25
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
