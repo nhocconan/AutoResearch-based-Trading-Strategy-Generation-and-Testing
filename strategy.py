@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_inside_bar_breakout_v1
-Strategy: 4h inside bar breakout with 1d trend filter
+4h_1d_camarilla_breakout_volume_trend_v6
+Strategy: 4h price action with 1d Camarilla confluence
 Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Inside bars indicate consolidation. Breakout from inside bar range with volume confirmation and aligned with 1d EMA trend yields high-probability trades. Works in bull/bear by only trading in direction of higher timeframe trend.
+Hypothesis: Buy when 4h closes above daily R3 with volume confirmation and 1d trend filter; sell when 4h closes below daily S3 with volume confirmation and 1d trend filter. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend. Added 1d ADX filter to avoid choppy markets and reduce false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_inside_bar_breakout_v1"
+name = "4h_1d_camarilla_breakout_volume_trend_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,7 +32,7 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4x ATR for volatility filter (not used but placeholder)
+    # 4h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -47,28 +47,68 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Inside bar detection on 4h ===
-    # Inside bar: current high < previous high AND current low > previous low
-    inside_bar = (high < np.roll(high, 1)) & (low > np.roll(low, 1))
-    inside_bar[0] = False  # First bar has no previous
+    # === 1d ADX (trend strength filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Inside bar range
-    inside_high = np.where(inside_bar, high, np.nan)
-    inside_low = np.where(inside_bar, low, np.nan)
+    # Calculate True Range
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
     
-    # Forward fill inside bar ranges until broken
-    inside_high_ff = pd.Series(inside_high).ffill().values
-    inside_low_ff = pd.Series(inside_low).ffill().values
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Breakout conditions
-    breakout_up = (high > inside_high_ff) & inside_bar
-    breakout_down = (low < inside_low_ff) & inside_bar
+    # Smooth TR, +DM, -DM using Wilder's smoothing (14-period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nansum(arr[1:period]) if period > 1 else arr[0]
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1]/period) + arr[i]
+        return result
+    
+    atr_1d = wilder_smooth(tr_1d, 14)
+    plus_di_1d = 100 * wilder_smooth(plus_dm, 14) / atr_1d
+    minus_di_1d = 100 * wilder_smooth(minus_dm, 14) / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = wilder_smooth(dx_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 1d Camarilla (entry levels) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's Camarilla levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + range_1d * 1.166
+    s3_1d = close_1d - range_1d * 1.166
+    
+    # Shift to use only completed daily bars
+    r3_1d = np.roll(r3_1d, 1)
+    s3_1d = np.roll(s3_1d, 1)
+    r3_1d[0] = np.nan
+    s3_1d[0] = np.nan
+    
+    # Align daily Camarilla to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # Session filter: 0-23 UTC (covers major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 0) & (hours <= 23)
     
-    # Minimum holding period: 2 bars (8 hours) to reduce churn
+    # Minimum holding period: 3 bars (12 hours) to reduce churn
     hold_count = np.zeros(n, dtype=int)
     
     signals = np.zeros(n)
@@ -80,7 +120,9 @@ def generate_signals(prices):
             hold_count[i] -= 1
         
         # Skip if any required data is invalid or outside session or holding
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i] or hold_count[i] > 0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -91,6 +133,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         ema_50 = ema_50_1d_aligned[i]
+        adx = adx_1d_aligned[i]
         
         # Volume confirmation: 4h volume must be elevated
         volume_confirmed = volume_current > 1.5 * vol_ma
@@ -99,25 +142,29 @@ def generate_signals(prices):
         uptrend_1d = price_close > ema_50
         downtrend_1d = price_close < ema_50
         
-        # Long conditions: breakout up from inside bar with volume + 1d uptrend
-        long_signal = volume_confirmed and breakout_up[i] and uptrend_1d
+        # Trend strength filter: ADX > 25 indicates trending market
+        strong_trend = adx > 25
         
-        # Short conditions: breakout down from inside bar with volume + 1d downtrend
-        short_signal = volume_confirmed and breakout_down[i] and downtrend_1d
+        # Long conditions: 4h closes above 1d R3 with volume + 1d uptrend + strong trend
+        long_signal = volume_confirmed and (price_close > r3_1d_aligned[i]) and uptrend_1d and strong_trend
         
-        # Exit when price returns to the inside bar midpoint (mean reversion)
-        inside_mid = (inside_high_ff[i] + inside_low_ff[i]) / 2
-        exit_long = position == 1 and price_close < inside_mid
-        exit_short = position == -1 and price_close > inside_mid
+        # Short conditions: 4h closes below 1d S3 with volume + 1d downtrend + strong trend
+        short_signal = volume_confirmed and (price_close < s3_1d_aligned[i]) and downtrend_1d and strong_trend
+        
+        # Exit when price returns to the 1d pivot (mean reversion within 1d range)
+        pivot_1d_today = (high_1d + low_1d + close_1d) / 3
+        pivot_1d_4h = align_htf_to_ltf(prices, df_1d, pivot_1d_today)
+        exit_long = position == 1 and price_close < pivot_1d_4h[i]
+        exit_short = position == -1 and price_close > pivot_1d_4h[i]
         
         # Trading logic with minimum holding period
         if long_signal and position != 1:
             position = 1
-            hold_count[i] = 2  # Hold for 2 bars minimum
+            hold_count[i] = 3  # Hold for 3 bars minimum
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            hold_count[i] = 2  # Hold for 2 bars minimum
+            hold_count[i] = 3  # Hold for 3 bars minimum
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
@@ -130,4 +177,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Inside bars indicate consolidation. Breakout from inside bar range with volume confirmation and aligned with 1d EMA trend yields high-probability trades. Works in bull/bear by only trading in direction of higher timeframe trend.
+# Hypothesis: Buy when 4h closes above daily R3 with volume confirmation and 1d trend filter; sell when 4h closes below daily S3 with volume confirmation and 1d trend filter. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend. Added 1d ADX filter to avoid choppy markets and reduce false breakouts.
