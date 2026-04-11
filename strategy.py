@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v5"
+name = "4h_1d_rsi_vwap_reversion"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,42 +23,54 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4h ATR for volatility filter (14 period)
+    # 4h VWAP calculation
+    vwap_num = (high + low + close) * volume
+    vwap_den = volume
+    vwap_cumsum_num = np.cumsum(vwap_num)
+    vwap_cumsum_den = np.cumsum(vwap_den)
+    vwap = vwap_cumsum_num / vwap_cumsum_den
+    
+    # 4h RSI (14 period)
+    delta = np.diff(close)
+    delta = np.concatenate([[0], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # 4h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 2.5x 20-period average (stricter to reduce trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Daily OHLC for Camarilla pivot levels
+    # Daily VWAP from 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Previous day's Camarilla pivot levels (to avoid look-ahead)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + range_1d * 1.166
-    s3_1d = close_1d - range_1d * 1.166
+    volume_1d = df_1d['volume'].values
+    vwap_num_1d = (high_1d + low_1d + close_1d) * volume_1d
+    vwap_den_1d = volume_1d
+    vwap_cumsum_num_1d = np.cumsum(vwap_num_1d)
+    vwap_cumsum_den_1d = np.cumsum(vwap_den_1d)
+    vwap_1d = vwap_cumsum_num_1d / vwap_cumsum_den_1d
     
     # Shift by 1 to use only completed daily bars
-    r3_1d = np.roll(r3_1d, 1)
-    s3_1d = np.roll(s3_1d, 1)
-    r3_1d[0] = np.nan
-    s3_1d[0] = np.nan
+    vwap_1d = np.roll(vwap_1d, 1)
+    vwap_1d[0] = np.nan
     
-    # Align daily Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align daily VWAP to 4h timeframe
+    vwap_1d_4h = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     # Session filter: 0-23 UTC (4h bars cover full day)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 0) & (hours <= 23)
     
-    # Minimum holding period: 5 bars (20 hours) to reduce churn
+    # Minimum holding period: 4 bars (16 hours) to reduce churn
     hold_count = np.zeros(n, dtype=int)
     
     signals = np.zeros(n)
@@ -70,41 +82,35 @@ def generate_signals(prices):
             hold_count[i] -= 1
         
         # Skip if any required data is invalid or outside session or holding
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(vwap[i]) or np.isnan(rsi[i]) or
+            np.isnan(atr[i]) or np.isnan(vwap_1d_4h[i]) or
             not in_session[i] or hold_count[i] > 0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
-        volume_current = volume[i]
-        vol_ma = vol_ma_20[i]
+        rsi_val = rsi[i]
+        atr_val = atr[i]
         
-        # Volume confirmation: 4h volume must be elevated (stricter threshold)
-        volume_confirmed = volume_current > 2.5 * vol_ma
+        # Distance from VWAP in ATR units
+        vwap_dist = (price_close - vwap[i]) / atr_val if atr_val > 0 else 0
         
-        # Long conditions: price breaks above R3 with volume
-        long_signal = volume_confirmed and (price_high > r3_4h[i])
+        # Mean reversion conditions
+        long_signal = (vwap_dist < -1.5) and (rsi_val < 30)
+        short_signal = (vwap_dist > 1.5) and (rsi_val > 70)
         
-        # Short conditions: price breaks below S3 with volume
-        short_signal = volume_confirmed and (price_low < s3_4h[i])
-        
-        # Exit when price returns to the daily pivot (mean reversion)
-        pivot_1d_today = (high_1d + low_1d + close_1d) / 3
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d_today)
-        exit_long = position == 1 and price_close < pivot_4h[i]
-        exit_short = position == -1 and price_close > pivot_4h[i]
+        # Exit when price returns to VWAP or RSI neutralizes
+        exit_long = position == 1 and ((vwap_dist > -0.5) or (rsi_val > 50))
+        exit_short = position == -1 and ((vwap_dist < 0.5) or (rsi_val < 50))
         
         # Trading logic with minimum holding period
         if long_signal and position != 1:
             position = 1
-            hold_count[i] = 5  # Hold for 5 bars minimum
+            hold_count[i] = 4  # Hold for 4 bars minimum
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            hold_count[i] = 5  # Hold for 5 bars minimum
+            hold_count[i] = 4  # Hold for 4 bars minimum
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
@@ -117,11 +123,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout using daily pivot levels with stricter volume confirmation.
-# Uses daily Camarilla R3/S3 levels (previous day's high/low/close) for intraday structure.
-# Enters long when 4h price breaks above daily R3 with volume >2.5x 4h 20-period average.
-# Enters short when 4h price breaks below daily S3 with same volume conditions.
-# Exits when price returns to the daily pivot level (mean reversion within the daily range).
-# Even stricter volume filter (2.5x vs 2.0x) and longer hold period (5 bars vs 4) to reduce trades.
-# Target: 30-60 total trades over 4 years (7-15/year) to minimize fee drag.
-# Works in both bull and bear markets by capturing breakouts with volume confirmation.
+# Hypothesis: 4h RSI-VWAP mean reversion strategy for BTC/ETH.
+# Combines VWAP deviation with RSI extremes to identify mean reversion opportunities.
+# Enters long when price is >1.5 ATR below VWAP and RSI < 30 (oversold).
+# Enters short when price is >1.5 ATR above VWAP and RSI > 70 (overbought).
+# Exits when price returns within 0.5 ATR of VWAP or RSI crosses 50.
+# Uses daily VWAP as longer-term reference to align with institutional levels.
+# Minimum holding period of 4 bars reduces churn and fee drag.
+# Works in both bull and bear markets by capturing mean reversion moves.
+# Target: 40-80 total trades over 4 years (10-20/year) to minimize fee drag.
