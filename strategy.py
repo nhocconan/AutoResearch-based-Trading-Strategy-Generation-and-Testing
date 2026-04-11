@@ -3,66 +3,55 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4 with volume confirmation
-# - Long: price breaks above R4 with volume confirmation and closes in upper half of 12h bar
-# - Short: price breaks below S4 with volume confirmation and closes in lower half of 12h bar
-# - Exit: price returns to R3/S3 levels (mean reversion at Camarilla levels)
-# - Uses 1d Camarilla levels calculated from prior 1d OHLC, aligned to 12h
-# - Works in both bull and bear markets by fading extremes and capturing breakouts
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# Hypothesis: 1d Donchian(20) breakout + volume confirmation + ATR stoploss
+# - Long: price breaks above 20-day high with volume > 1.5x 20-day avg volume
+# - Short: price breaks below 20-day low with volume > 1.5x 20-day avg volume
+# - Exit: ATR-based trailing stop (3*ATR from extreme) or opposite Donchian breakout
+# - Uses 1d timeframe for structure, avoids overtrading
+# - Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag
+# - Works in bull markets via breakouts, bear markets via short breakdowns
 
-name = "12h_1d_camarilla_breakout_fade_v1"
-timeframe = "12h"
+name = "1d_donchian_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    highest_high = 0.0
+    lowest_low = 0.0
     
-    # Load 1d data ONCE before loop for Camarilla levels (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return signals
+    # Pre-compute 20-period indicators
+    # Donchian channels: 20-period high/low
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20)
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20)
+    donchian_high = high_roll.max().values
+    donchian_low = low_roll.min().values
     
-    # Pre-compute 1d Camarilla levels (based on prior day OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Volume confirmation: 20-period average volume
+    volume_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Camarilla levels: based on previous day's range
-    # R4 = close + 1.1*(high-low)*1.1/2
-    # R3 = close + 1.1*(high-low)*1.1/4
-    # S3 = close - 1.1*(high-low)*1.1/4
-    # S4 = close - 1.1*(high-low)*1.1/2
-    range_1d = high_1d - low_1d
-    camarilla_r4 = close_1d + 1.1 * range_1d * 1.1 / 2
-    camarilla_r3 = close_1d + 1.1 * range_1d * 1.1 / 4
-    camarilla_s3 = close_1d - 1.1 * range_1d * 1.1 / 4
-    camarilla_s4 = close_1d - 1.1 * range_1d * 1.1 / 2
+    # ATR(14) for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Pre-compute 12h volume confirmation (20-period average)
-    volume = prices['volume'].values
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(20, n):  # Start after 20-bar warmup for indicators
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(volume_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_sma[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -73,51 +62,63 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        vol_confirm = volume_current > 1.5 * volume_sma[i]
         
-        # Price position relative to Camarilla levels
-        r4 = camarilla_r4_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        s4 = camarilla_s4_aligned[i]
+        # Donchian levels
+        upper_band = donchian_high[i]
+        lower_band = donchian_low[i]
         
-        # 12h bar close position (upper/lower half)
-        bar_range = high_price - low_price
-        if bar_range > 0:
-            close_position = (close_price - low_price) / bar_range  # 0=low, 1=high
-        else:
-            close_position = 0.5
+        # ATR for stoploss
+        atr_value = atr[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price breaks above R4 with volume and closes in upper half
-        if close_price > r4 and vol_confirm and close_position > 0.5:
+        # Long breakout: price breaks above upper Donchian band with volume
+        if close_price > upper_band and vol_confirm:
             enter_long = True
         
-        # Short breakout: price breaks below S4 with volume and closes in lower half
-        if close_price < s4 and vol_confirm and close_position < 0.5:
+        # Short breakout: price breaks below lower Donchian band with volume
+        if close_price < lower_band and vol_confirm:
             enter_short = True
         
-        # Exit conditions: mean reversion at R3/S3 levels
+        # Exit conditions
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price drops back to R3
-            exit_long = close_price <= r3
+            # Update highest high for trailing stop
+            highest_high = max(highest_high, high_price)
+            # ATR trailing stop: exit if price drops 3*ATR from highest high
+            if close_price < highest_high - 3.0 * atr_value:
+                exit_long = True
+            # Opposite breakout exit: exit long if price breaks below lower band
+            elif close_price < lower_band:
+                exit_long = True
         elif position == -1:
-            # Exit short if price rises back to S3
-            exit_short = close_price >= s3
+            # Update lowest low for trailing stop
+            lowest_low = min(lowest_low, low_price)
+            # ATR trailing stop: exit if price rises 3*ATR from lowest low
+            if close_price > lowest_low + 3.0 * atr_value:
+                exit_short = True
+            # Opposite breakout exit: exit short if price breaks above upper band
+            elif close_price > upper_band:
+                exit_short = True
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            entry_price = close_price
+            highest_high = high_price
+            lowest_low = low_price
+            signals[i] = 0.30
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            entry_price = close_price
+            highest_high = high_price
+            lowest_low = low_price
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -126,6 +127,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
