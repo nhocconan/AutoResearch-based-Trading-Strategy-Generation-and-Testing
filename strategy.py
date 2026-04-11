@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,35 +20,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop for 12h data (48 bars of 4h)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate 12h Donchian channels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian(20) on 12h timeframe
-    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Camarilla formula: range = high - low
+    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), etc.
+    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), etc.
+    daily_range = high_1d - low_1d
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Key levels for breakout: R3, R4, S3, S4 (most significant)
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    r4 = close_1d + (daily_range * 1.1 / 2)
+    s3 = close_1d - (daily_range * 1.1 / 4)
+    s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Align 12h indicators to 4h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
-    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume confirmation: 4h volume > 1.5x 20-period average
+    # Volume confirmation: 12h volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align daily levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -58,29 +64,25 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_up = price_close > donch_high_aligned[i]
-        breakout_down = price_close < donch_low_aligned[i]
-        
-        # Trend filter: price relative to 12h EMA50
-        above_trend = price_close > ema50_aligned[i]
-        below_trend = price_close < ema50_aligned[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > r4_aligned[i]  # Break above R4
+        breakout_down = price_close < s4_aligned[i]  # Break below S4
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Donchian breakout up + above 12h EMA50 + volume confirmation
-        if breakout_up and above_trend and vol_confirm:
+        # Long: Break above R4 with volume confirmation
+        if breakout_up and vol_confirm:
             enter_long = True
         
-        # Short: Donchian breakout down + below 12h EMA50 + volume confirmation
-        if breakout_down and below_trend and vol_confirm:
+        # Short: Break below S4 with volume confirmation
+        if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Donchian breakout
-        exit_long = breakout_down
-        exit_short = breakout_up
+        # Exit conditions: opposite Camarilla level touch
+        exit_long = price_close < s3_aligned[i]  # Return to S3 level
+        exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
         # Trading logic
         if enter_long and position != 1:
@@ -101,7 +103,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Donchian(20) breakouts with trend filter (12h EMA50) and volume confirmation on 4h timeframe.
-# Works in both bull and bear markets by only taking breakouts in the direction of the higher timeframe trend.
-# Volume confirmation ensures genuine breakouts with participation. Position size 0.25 limits drawdown.
-# Target: 20-50 trades per year (80-200 total over 4 years). Uses 12h timeframe for structure, 4h for execution.
+# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels.
+# Enters long when price breaks above R4 with volume confirmation, short when breaks below S4.
+# Exits when price returns to S3/R3 levels respectively.
+# Uses volume confirmation to avoid false breakouts and Camarilla levels for precise entry/exit.
+# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# Position size 0.25 limits drawdown during volatile periods.
+# Target: 20-40 trades per year (80-160 total over 4 years) to minimize fee drag.
