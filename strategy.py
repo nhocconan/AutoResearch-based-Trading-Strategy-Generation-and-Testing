@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_camarilla_breakout_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,50 +23,66 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return signals
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate daily Camarilla levels (based on previous day's range)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # Camarilla levels for each day
-    camarilla_h3 = []
-    camarilla_l3 = []
-    for i in range(len(df_1d)):
-        high_val = high_1d[i]
-        low_val = low_1d[i]
-        close_val = close_1d[i]
-        camarilla_h3.append(close_val + (high_val - low_val) * 1.1 / 4)
-        camarilla_l3.append(close_val - (high_val - low_val) * 1.1 / 4)
-    camarilla_h3 = np.array(camarilla_h3)
-    camarilla_l3 = np.array(camarilla_l3)
+    # Using previous day's data to avoid look-ahead
+    range_1d = high_1d - low_1d
+    # Shift by 1 to use previous day's data
+    range_1d_prev = np.roll(range_1d, 1)
+    range_1d_prev[0] = 0  # First day has no previous
     
-    # Align daily Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Camarilla levels: H4, L4 (main levels)
+    H4 = close_1d_prev + 1.1 * range_1d_prev / 2
+    L4 = close_1d_prev - 1.1 * range_1d_prev / 2
+    
+    # Align daily Camarilla to 4h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stop loss
+    # Trend filter: ADX > 25 for trending market
+    # Calculate ADX components
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
+    
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Filter: Avoid choppy markets - require ATR ratio > 0.6
-    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / (atr_ma_50 + 1e-10)
-    trending_market = atr_ratio > 0.6
+    # Smooth +DM and -DM
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    trending_market = adx > 25
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
@@ -74,37 +90,38 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        h3 = h3_aligned[i]
-        l3 = l3_aligned[i]
-        atr_val = atr[i]
+        H4 = H4_aligned[i]
+        L4 = L4_aligned[i]
+        adx_val = adx[i]
         trending = trending_market[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
+        volume_confirmed = volume_current > 1.3 * vol_ma_20[i]
         
-        # Entry signals - only in trending markets to avoid whipsaws
+        # Entry signals - only in trending markets
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above daily Camarilla H3 with volume and trending
-        if price_high > h3 and volume_confirmed and trending:
+        # Long: price breaks above H4 with volume and trend
+        if price_high > H4 and volume_confirmed and trending:
             long_signal = True
         
-        # Short: price breaks below daily Camarilla L3 with volume and trending
-        if price_low < l3 and volume_confirmed and trending:
+        # Short: price breaks below L4 with volume and trend
+        if price_low < L4 and volume_confirmed and trending:
             short_signal = True
         
         # Exit conditions
-        # Calculate daily midpoint for exit: (H3 + L3) / 2
-        midpoint = (h3 + l3) / 2
+        # Calculate midpoint for exit (using previous day's close)
+        midpoint_prev = close_1d_prev
+        midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_prev)[i]
         
         # Stop loss conditions
-        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
-        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
+        stop_long = position == 1 and price_low < (entry_price - 1.5 * atr[i])
+        stop_short = position == -1 and price_high > (entry_price + 1.5 * atr[i])
         
         # Exit to midpoint
-        exit_long = position == 1 and price_close < midpoint
-        exit_short = position == -1 and price_close > midpoint
+        exit_long = position == 1 and price_close < midpoint_aligned
+        exit_short = position == -1 and price_close > midpoint_aligned
         
         # Trading logic
         if long_signal and position != 1:
@@ -127,11 +144,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy with volume confirmation and trend filter.
-# Enters long when price breaks above daily Camarilla H3 level with volume confirmation (>1.5x avg volume) in trending markets (ATR ratio > 0.6).
-# Enters short when price breaks below daily Camarilla L3 level with volume confirmation and trending.
-# Uses Camarilla levels from daily timeframe for key support/resistance levels.
-# Uses volume confirmation to ensure institutional participation and trend filter to avoid whipsaws in sideways markets.
-# Exits when price returns to daily midpoint or ATR stop loss (2x) is hit.
-# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: Camarilla breakout strategy with volume confirmation and ADX trend filter.
+# Enters long when price breaks above daily Camarilla H4 level with volume confirmation (>1.3x avg volume) in trending markets (ADX > 25).
+# Enters short when price breaks below daily Camarilla L4 level with volume confirmation and ADX > 25.
+# Uses previous day's data to calculate Camarilla levels to avoid look-ahead.
+# Volume confirmation ensures institutional participation, ADX filter avoids whipsaws in sideways markets.
+# Exits when price returns to previous day's close or ATR stop loss (1.5x) is hit.
+# Designed for 4h timeframe with tight entry conditions to target 75-200 total trades over 4 years.
 # Works in both bull and bear markets by trading breakouts in either direction with trend filter.
