@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_1d_elder_ray_volume_v1
-# Strategy: 4h Elder Ray Index with volume confirmation and 1d trend filter
+# 4h_1d_camarilla_breakout_volume_v1
+# Strategy: 4h Camarilla pivot levels with volume confirmation and 1d trend filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Elder Ray measures bull/bear power via EMA13. Bull Power > 0 with rising Bear Power and volume confirmation indicates strength in uptrends; Bear Power < 0 with falling Bull Power and volume indicates weakness in downtrends. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Targets 20-40 trades/year to minimize fee drag.
+# Hypothesis: Camarilla pivot levels provide strong support/resistance. Price breaking above/below these levels with volume confirmation and aligned with daily trend (price above/below EMA50) indicates momentum continuation. Works in both bull and bear markets by only trading in direction of higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_elder_ray_volume_v1"
+name = "4h_1d_camarilla_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,33 +26,53 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
+    # 1d OHLC for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    # Camarilla formulas:
+    # H5 = close + 1.1*(high-low)*1.5
+    # H4 = close + 1.1*(high-low)*1.25
+    # H3 = close + 1.1*(high-low)*1.0
+    # L3 = close - 1.1*(high-low)*1.0
+    # L4 = close - 1.1*(high-low)*1.25
+    # L5 = close - 1.1*(high-low)*1.5
+    # We'll use H3, L3 for breakout and H4, L4 for stronger breakout
+    
+    daily_range = high_1d - low_1d
+    camarilla_H3 = close_1d + 1.1 * daily_range * 1.0
+    camarilla_L3 = close_1d - 1.1 * daily_range * 1.0
+    camarilla_H4 = close_1d + 1.1 * daily_range * 1.25
+    camarilla_L4 = close_1d - 1.1 * daily_range * 1.25
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    
+    # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 4h EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # Bull Power: high minus EMA13
-    bear_power = low - ema_13   # Bear Power: low minus EMA13
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
+    vol_confirm = volume > (1.8 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i])):
+        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -60,20 +80,22 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: Elder Ray + volume + trend alignment
-        if (bull_power[i] > 0 and bear_power[i] > bear_power[i-1] and  # Bull power positive and rising
+        # Entry logic: Camarilla breakout + volume + trend alignment
+        # Long: break above H3 or H4 with volume and uptrend
+        if ((close[i] > camarilla_H3_aligned[i] or close[i] > camarilla_H4_aligned[i]) and
             vol_confirm[i] and uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        elif (bear_power[i] < 0 and bull_power[i] < bull_power[i-1] and  # Bear power negative and falling
+        # Short: break below L3 or L4 with volume and downtrend
+        elif ((close[i] < camarilla_L3_aligned[i] or close[i] < camarilla_L4_aligned[i]) and
               vol_confirm[i] and downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: Elder Ray divergence or trend change
-        elif position == 1 and (bull_power[i] <= 0 or not uptrend):
+        # Exit: price returns to midpoint or trend changes
+        elif position == 1 and (close[i] < camarilla_H3_aligned[i] or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bear_power[i] >= 0 or not downtrend):
+        elif position == -1 and (close[i] > camarilla_L3_aligned[i] or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
