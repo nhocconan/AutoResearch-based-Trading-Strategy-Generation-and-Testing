@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_ma_deviation_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,75 +18,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_12h) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 12h EMA(20) for trend
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    # Calculate 1d ATR(14) for deviation threshold
+    # Calculate Camarilla pivot levels for 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Calculate 1d RSI(14) for mean reversion signals
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
+    # Pivot point = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_1d = high_1d - low_1d
     
-    # Align all indicators to 6h timeframe
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Camarilla levels
+    # Resistance levels
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    r2 = close_1d + (range_1d * 1.1 / 6)
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    r4 = close_1d + (range_1d * 1.1 / 2)
+    # Support levels
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    s2 = close_1d - (range_1d * 1.1 / 6)
+    s3 = close_1d - (range_1d * 1.1 / 4)
+    s4 = close_1d - (range_1d * 1.1 / 2)
+    
+    # Calculate 1d average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all 1d indicators to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure sufficient data
+    # Start from index 20 to ensure sufficient data for calculations
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(rsi_14_1d_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Current 1d volume (aligned)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        vol_surge = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]  # 50% above average
+        
         price = close[i]
-        ema_trend = ema_20_12h_aligned[i]
-        atr_dev = atr_14_1d_aligned[i]
-        rsi = rsi_14_1d_aligned[i]
         
-        # Calculate deviation from 12h EMA
-        deviation = price - ema_trend
+        # Long when price touches S3 with volume surge (strong support)
+        long_signal = price <= s3_aligned[i] and vol_surge
+        # Short when price touches R3 with volume surge (strong resistance)
+        short_signal = price >= r3_aligned[i] and vol_surge
         
-        # Long: price below EMA + RSI oversold + mean reversion expected
-        long_condition = (deviation < -0.5 * atr_dev) and (rsi < 35)
+        # Exit when price returns to pivot (mean reversion to mean)
+        exit_long = price >= pivot_aligned[i]
+        exit_short = price <= pivot_aligned[i]
         
-        # Short: price above EMA + RSI overbought + mean reversion expected
-        short_condition = (deviation > 0.5 * atr_dev) and (rsi > 65)
-        
-        # Exit when price returns toward EMA (mean reversion complete)
-        exit_long = deviation > -0.2 * atr_dev
-        exit_short = deviation < 0.2 * atr_dev
-        
-        if long_condition and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_condition and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
