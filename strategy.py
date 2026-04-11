@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_v1
-# Strategy: 4h Camarilla pivot breakout with 1d volume confirmation and 1d trend filter
+# 4h_1d_donchian_breakout_volume_v1
+# Strategy: 4h Donchian breakout with 1d volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels act as intraday support/resistance. Breakouts above R4 or below S4 with 1d volume above average and aligned with 1d trend (price above/below 1d EMA50) capture strong moves. Works in bull/bear by trading breakouts in direction of higher timeframe trend.
+# Hypothesis: Donchian breakouts capture momentum in trending markets. Volume confirmation ensures breakout validity. Works in both bull and bear by trading breakouts in the direction of the 1d trend (using EMA50). Designed for low trade frequency to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_donchian_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -30,80 +30,79 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Donchian channels on 4h (20-period)
+    period = 20
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    upper_band = highest_high.values
+    lower_band = lowest_low.values
+    
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d average volume for volume filter
+    # 1d volume average (20-period) for confirmation
     volume_1d = df_1d['volume'].values
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume_1d_aligned[i])):
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or \
+           np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Calculate Camarilla levels for current day using previous day's OHLC
-        # Need to get previous day's data - we'll use the 1d data shifted by 1
-        if i < len(prices) and hasattr(prices.index, 'date'):
-            # Simpler approach: use current 4h bar's price to approximate
-            # For Camarilla, we need daily OHLC - we'll approximate using rolling window
-            pass
-        
-        # Since we don't have easy access to previous day's OHLC in 4h data,
-        # we'll use a simplified approach: calculate pivot based on recent 4h data
-        # This is not perfect but avoids look-ahead and uses available data
-        if i >= 20:
-            # Use last 20 periods (approx 5 days of 4h data) to calculate range
-            recent_high = np.max(high[i-20:i])
-            recent_low = np.min(low[i-20:i])
-            recent_close = close[i-1]  # previous close
-            
-            # Calculate Camarilla levels
-            range_val = recent_high - recent_low
-            if range_val <= 0:
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-                continue
-                
-            # Camarilla levels
-            r4 = recent_close + (range_val * 1.1 / 2)
-            r3 = recent_close + (range_val * 1.1 / 4)
-            s3 = recent_close - (range_val * 1.1 / 4)
-            s4 = recent_close - (range_val * 1.1 / 2)
-            
-            # Volume confirmation: current volume > 1.5x average 1d volume
-            volume_confirm = volume[i] > 1.5 * avg_volume_1d_aligned[i]
-            
-            # Trend filter: price above/below 1d EMA50
-            price_above_ema = close[i] > ema_50_1d_aligned[i]
-            price_below_ema = close[i] < ema_50_1d_aligned[i]
-            
-            # Entry conditions
-            # Long: Price breaks above R4 with volume and uptrend
-            if volume_confirm and price_above_ema and close[i] > r4 and position != 1:
-                position = 1
-                signals[i] = 0.25
-            # Short: Price breaks below S4 with volume and downtrend
-            elif volume_confirm and price_below_ema and close[i] < s4 and position != -1:
-                position = -1
-                signals[i] = -0.25
-            # Exit: Reverse signal or loss of momentum
-            elif position == 1 and (close[i] < s3 or not price_above_ema):
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and (close[i] > r3 or not price_below_ema):
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold current position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        # Volume confirmation: current 1d volume > 20-period average
+        # Note: current 1d volume is not directly available, so we use the aligned value
+        # which represents the last completed 1d bar's volume average
+        vol_confirm = volume_1d[-1] > vol_avg_20_1d_aligned[i] if len(volume_1d) > 0 else False
+        # Simplified: use the aligned volume average as threshold for current bar
+        # More practical: check if current volume is above average
+        # We approximate by comparing current 4h volume to a threshold, but better to use 1d
+        # Since we don't have current 1d volume, we skip vol_confirm and rely on breakout + trend
+        # Instead, we use the fact that vol_avg_20_1d_aligned is based on completed bars
+        # and assume current volume is reflective if we see a breakout
+        # For simplicity, we'll use a placeholder: always allow if breakout occurs
+        # In practice, we could use the current 4h volume vs its own average, but per instructions
+        # we should use 1d volume. We'll use the last available 1d volume (aligned) vs its average
+        # Get the last completed 1d bar's volume (aligned value represents the average, not the volume)
+        # This is a limitation; we approximate by using the close price's alignment
+        # Better approach: use the 1d volume series directly
+        vol_1d_series = df_1d['volume'].values
+        if len(vol_1d_series) == 0:
+            vol_confirm = False
         else:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            # Align the raw 1d volume to 4h
+            vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_series)
+            vol_confirm = vol_1d_aligned[i] > vol_avg_20_1d_aligned[i] if not np.isnan(vol_1d_aligned[i]) else False
+        
+        # Trend filter: close vs 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Entry conditions
+        # Long: Price breaks above upper band AND uptrend AND volume confirmation
+        if not np.isnan(upper_band[i]) and close[i] > upper_band[i] and uptrend and vol_confirm and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short: Price breaks below lower band AND downtrend AND volume confirmation
+        elif not np.isnan(lower_band[i]) and close[i] < lower_band[i] and downtrend and vol_confirm and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit: Price crosses opposite band
+        elif position == 1 and close[i] < lower_band[i]:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and close[i] > upper_band[i]:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
