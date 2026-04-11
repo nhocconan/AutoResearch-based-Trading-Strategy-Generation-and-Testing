@@ -3,76 +3,80 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d trend filter.
-# Long: price breaks above Donchian high (20) + volume > 1.5x 20-bar average + close > 1d EMA(50)
-# Short: price breaks below Donchian low (20) + volume > 1.5x 20-bar average + close < 1d EMA(50)
-# Exit: opposite Donchian breakout or trend reversal.
-# Designed for 20-40 trades/year on 4h timeframe with focus on high-conviction breakouts.
-# Volume filter ensures breakouts have conviction, reducing false signals.
-# 1d trend filter prevents counter-trend trading in choppy markets.
+# Hypothesis: 4h Bollinger Band squeeze + volume spike + 12h trend filter.
+# In low volatility squeeze (BB width < 20th percentile), price breaks out with volume confirmation (>2x avg volume).
+# Trend filter uses 12h EMA(50) to avoid counter-trend trades.
+# Works in both bull/bear: squeeze captures breakout energy regardless of direction.
+# Target: 20-40 trades/year on 4h with high win rate via volatility breakout edge.
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
+name = "4h_12h_bb_squeeze_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bb_width = (upper - lower) / sma  # normalized width
+    
+    # Bollinger Band squeeze: width < 20th percentile (lookback 50)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20).values
+    squeeze = bb_width < bb_width_percentile
+    
+    # Volume spike: volume > 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma
+    
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align 1d EMA to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Calculate volume moving average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Trend direction
+    uptrend = close > ema_50_12h_aligned
+    downtrend = close < ema_50_12h_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian period
+    for i in range(50, n):  # Start after BB period
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(squeeze[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(uptrend[i]) or np.isnan(downtrend[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period average volume
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
-        
         # Breakout conditions
-        breakout_up = close[i] > donchian_high[i-1]  # Break above previous Donchian high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below previous Donchian low
+        breakout_up = close[i] > upper[i]
+        breakout_down = close[i] < lower[i]
         
-        # Trend filter
-        is_uptrend = close[i] > ema_50_1d_aligned[i]
-        is_downtrend = close[i] < ema_50_1d_aligned[i]
+        # Entry: squeeze + volume spike + breakout + trend alignment
+        long_entry = squeeze[i] and volume_spike[i] and breakout_up and uptrend[i]
+        short_entry = squeeze[i] and volume_spike[i] and breakout_down and downtrend[i]
         
-        # Entry conditions
-        long_entry = breakout_up and vol_filter and is_uptrend
-        short_entry = breakout_down and vol_filter and is_downtrend
-        
-        # Exit conditions: opposite breakout or trend reversal
-        exit_long = breakout_down or not is_uptrend
-        exit_short = breakout_up or not is_downtrend
+        # Exit: opposite breakout or loss of trend
+        exit_long = close[i] < sma[i] or not uptrend[i]
+        exit_short = close[i] > sma[i] or not downtrend[i]
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
