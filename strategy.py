@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 4h_1d_rsi_divergence_v1
-# Strategy: 4h RSI divergence with 1d trend filter and volume confirmation
-# Timeframe: 4h
+# 12h_1d_camarilla_volume_v1
+# Strategy: 12h Camarilla pivot levels with 1d volume confirmation and EMA trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: RSI divergences signal reversals; 1d EMA filters trend direction; volume confirms momentum.
-# Long when bullish RSI divergence + price > 1d EMA50 + volume > 1.5x avg; short when bearish RSI divergence + price < 1d EMA50 + volume > 1.5x avg.
-# Designed for low frequency (~25-35 trades/year) to minimize fee drag while capturing reversals in all market regimes.
+# Hypothesis: Price reversals at Camarilla pivot levels (L3, H3) with volume confirmation and trend alignment.
+# Long when price crosses above L3 with volume > 1.5x average and price > 50 EMA.
+# Short when price crosses below H3 with volume > 1.5x average and price < 50 EMA.
+# Designed for low frequency (12-37 trades/year) to minimize fee drag in ranging and trending markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_rsi_divergence_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,70 +33,62 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
+    # 1d close for Camarilla calculation
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    # H3 = C + 1.1*(H-L)/4, L3 = C - 1.1*(H-L)/4
+    # H2 = C + 1.1*(H-L)/6, L2 = C - 1.1*(H-L)/6
+    # H1 = C + 1.1*(H-L)/12, L1 = C - 1.1*(H-L)/12
+    daily_range = high_1d - low_1d
+    camarilla_H4 = close_1d + 1.1 * daily_range / 2
+    camarilla_L4 = close_1d - 1.1 * daily_range / 2
+    camarilla_H3 = close_1d + 1.1 * daily_range / 4
+    camarilla_L3 = close_1d - 1.1 * daily_range / 4
+    camarilla_H2 = close_1d + 1.1 * daily_range / 6
+    camarilla_L2 = close_1d - 1.1 * daily_range / 6
+    camarilla_H1 = close_1d + 1.1 * daily_range / 12
+    camarilla_L1 = close_1d - 1.1 * daily_range / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    
+    # 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # RSI calculation (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Average volume for confirmation
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # 12h volume average (20-period)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
+    for i in range(50, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi.iloc[i]) or 
-            np.isnan(avg_volume.iloc[i]) or i < 30):
+        if (np.isnan(camarilla_L3_aligned[i]) or np.isnan(camarilla_H3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
-        
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * avg_volume.iloc[i]
-        
-        # Bullish RSI divergence: price makes lower low, RSI makes higher low
-        bullish_div = False
-        if i >= 3:
-            # Look for price making lower low over last 3 periods
-            if low[i] < low[i-1] and low[i-1] < low[i-2]:
-                # RSI making higher low over same period
-                if rsi.iloc[i] > rsi.iloc[i-1] and rsi.iloc[i-1] > rsi.iloc[i-2]:
-                    bullish_div = True
-        
-        # Bearish RSI divergence: price makes higher high, RSI makes lower high
-        bearish_div = False
-        if i >= 3:
-            # Look for price making higher high over last 3 periods
-            if high[i] > high[i-1] and high[i-1] > high[i-2]:
-                # RSI making lower high over same period
-                if rsi.iloc[i] < rsi.iloc[i-1] and rsi.iloc[i-1] < rsi.iloc[i-2]:
-                    bearish_div = True
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > 1.5 * volume_ma.iloc[i]
         
         # Entry conditions
-        if bullish_div and uptrend and vol_confirm and position != 1:
+        if volume_confirm and close[i] > camarilla_L3_aligned[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_div and downtrend and vol_confirm and position != -1:
+        elif volume_confirm and close[i] < camarilla_H3_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: trend reversal or loss of momentum
-        elif position == 1 and (not uptrend or rsi.iloc[i] > 70):
+        # Exit conditions: opposite signal or trend reversal
+        elif position == 1 and (close[i] < camarilla_L3_aligned[i] or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not downtrend or rsi.iloc[i] < 30):
+        elif position == -1 and (close[i] > camarilla_H3_aligned[i] or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
