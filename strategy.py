@@ -1,162 +1,109 @@
 #!/usr/bin/env python3
 """
-1d_1w_kama_rsi_chop_v1
-Strategy: 1d KAMA trend with RSI filter and Chop regime filter
-Timeframe: 1d
+6h_12h_1d_williams_alligator_trend_v1
+Strategy: 6s Williams Alligator trend following with 12h/1d trend filter
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses KAMA (Kaufman Adaptive Moving Average) to capture adaptive trend direction, combined with RSI for momentum confirmation and Chop index to avoid ranging markets. Designed to work in both bull and bear markets by only taking trades when trend is strong (KAMA divergence) and market is not choppy (Chop < 61.8). Weekly trend filter ensures alignment with higher timeframe momentum. Target: 20-60 total trades over 4 years.
+Hypothesis: The Williams Alligator (Jaw, Teeth, Lips) identifies trending markets. 
+Enter long when Lips > Teeth > Jaw (bullish alignment) and price above 12h EMA50.
+Enter short when Lips < Teeth < Jaw (bearish alignment) and price below 12h EMA50.
+Use 1d ADX > 25 to filter for trending conditions only, avoiding whipsaws in ranging markets.
+Designed to capture sustained trends in both bull and bear markets while avoiding chop.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_12h_1d_williams_alligator_trend_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def williams_alligator(high, low, close):
+    """Calculate Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs of median price"""
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    return jaw, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load higher timeframe data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 30:
+    if len(df_12h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
+    # Williams Alligator on 6h
+    jaw, teeth, lips = williams_alligator(high, low, close)
     
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Calculate ER using rolling window
-    er = np.zeros(n)
-    for i in range(er_len, n):
-        price_change = np.abs(close[i] - close[i-er_len])
-        price_volatility = np.sum(np.abs(np.diff(close[i-er_len:i+1])))
-        if price_volatility > 0:
-            er[i] = price_change / price_volatility
-        else:
-            er[i] = 0
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # 1d ADX for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate ADX (14-period)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # RSI calculation
-    rsi_len = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    plus_dm = np.concatenate([[np.nan], np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                                                  np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)])
+    minus_dm = np.concatenate([[np.nan], np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                                                  np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)])
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(1, n):
-        if i < rsi_len:
-            avg_gain[i] = np.mean(gain[1:i+1]) if i > 0 else 0
-            avg_loss[i] = np.mean(loss[1:i+1]) if i > 0 else 0
-        else:
-            avg_gain[i] = (avg_gain[i-1] * (rsi_len-1) + gain[i]) / rsi_len
-            avg_loss[i] = (avg_loss[i-1] * (rsi_len-1) + loss[i]) / rsi_len
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Chop index calculation
-    chop_len = 14
-    atr = np.zeros(n)
-    tr = np.zeros(n)
-    for i in range(n):
-        if i == 0:
-            tr[i] = high[i] - low[i]
-        else:
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # Calculate ATR using smoothed moving average
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = (atr[i-1] * (chop_len-1) + tr[i]) / chop_len
-    
-    # Calculate Chop index
-    sum_tr = np.zeros(n)
-    max_h = np.zeros(n)
-    min_l = np.zeros(n)
-    for i in range(chop_len-1, n):
-        sum_tr[i] = np.sum(tr[i-chop_len+1:i+1])
-        max_h[i] = np.max(high[i-chop_len+1:i+1])
-        min_l[i] = np.min(low[i-chop_len+1:i+1])
-        range_max_min = max_h[i] - min_l[i]
-        if range_max_min > 0:
-            chop = 100 * np.log10(sum_tr[i] / range_max_min) / np.log10(chop_len)
-        else:
-            chop = 50
-        if i == chop_len-1:
-            chop_vals = chop
-        else:
-            chop_vals = np.append(chop_vals, chop) if 'chop_vals' in locals() else chop
-    
-    chop_final = np.full(n, 50.0)
-    if 'chop_vals' in locals():
-        chop_final[chop_len-1:len(chop_vals)+chop_len-1] = chop_vals
-    
-    # Weekly trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Signals
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_final[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend condition: price relative to KAMA
-        above_kama = price_close > kama[i]
-        below_kama = price_close < kama[i]
+        # Williams Alligator alignment
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Momentum condition: RSI
-        rsi_overbought = rsi[i] > 60
-        rsi_oversold = rsi[i] < 40
+        # Trend filters
+        uptrend_12h = price_close > ema_50_12h_aligned[i]
+        downtrend_12h = price_close < ema_50_12h_aligned[i]
+        trending_market = adx_aligned[i] > 25
         
-        # Regime condition: Chop < 61.8 (trending market)
-        not_choppy = chop_final[i] < 61.8
+        # Entry conditions
+        long_signal = bullish_alignment and uptrend_12h and trending_market
+        short_signal = bearish_alignment and downtrend_12h and trending_market
         
-        # Weekly trend filter
-        weekly_uptrend = price_close > ema_20_1w_aligned[i]
-        weekly_downtrend = price_close < ema_20_1w_aligned[i]
-        
-        # Long: price above KAMA, RSI not overbought, not choppy, weekly uptrend
-        long_signal = above_kama and not rsi_overbought and not_choppy and weekly_uptrend
-        
-        # Short: price below KAMA, RSI not oversold, not choppy, weekly downtrend
-        short_signal = below_kama and not rsi_oversold and not_choppy and weekly_downtrend
-        
-        # Exit conditions
-        exit_long = position == 1 and (price_close < kama[i] or chop_final[i] > 61.8)
-        exit_short = position == -1 and (price_close > kama[i] or chop_final[i] > 61.8)
+        # Exit when Alligator alignment reverses or ADX drops below 20 (trend weakening)
+        exit_long = position == 1 and (not bullish_alignment or adx_aligned[i] < 20)
+        exit_short = position == -1 and (not bearish_alignment or adx_aligned[i] < 20)
         
         # Trading logic
         if long_signal and position != 1:
