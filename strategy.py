@@ -3,22 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Elder Ray Index + 1d EMA200 trend filter + volume confirmation
-# - Elder Ray: BullPower = High - EMA13, BearPower = Low - EMA13
-# - Long when BullPower > 0, BearPower rising (less negative), price > 1d EMA200, volume > 1.5x 20-period average
-# - Short when BearPower < 0, BullPower falling (less positive), price < 1d EMA200, volume > 1.5x 20-period average
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits for 4h
-# - Works in both bull (strong BullPower with volume) and bear (strong BearPower with volume) markets
-# - 1d EMA200 provides strong trend filter, reducing false signals in choppy markets
+# Hypothesis: 6h Donchian breakout with 1d pivot confirmation and volume filter
+# - Long when price breaks above 6h Donchian(20) high + price > 1d pivot point + volume > 1.5x 20-period avg
+# - Short when price breaks below 6h Donchian(20) low + price < 1d pivot point + volume > 1.5x 20-period avg
+# - Uses 1d pivot point (PP) from daily OHLC as trend filter to avoid counter-trend trades
+# - Volume confirmation ensures breakouts have conviction
+# - Designed for 6h timeframe: targets 12-37 trades/year (50-150 total over 4 years)
+# - Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume)
+# - Pivot point filter reduces false breakouts in ranging markets
+# - Discrete position sizing (±0.25) to limit drawdown and reduce fee churn
 
-name = "4h_1d_elder_ray_volume_trend_v1"
-timeframe = "4h"
+name = "6h_1d_donchian_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,71 +30,74 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop for pivot point
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 1:
         return signals
     
-    # Pre-compute 1d EMA200
+    # Calculate 1d pivot point: PP = (High + Low + Close) / 3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    pivot_point = (high_1d + low_1d + close_1d) / 3.0
+    pivot_point_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
     
-    # Pre-compute Elder Ray on 4h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # High - EMA13
-    bear_power = low - ema13   # Low - EMA13
+    # Pre-compute 6h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 4h volume SMA (20-period)
+    # Pre-compute 6h volume SMA (20-period)
     volume_series = pd.Series(volume)
     volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(20, n):  # Start after 20-bar warmup for Donchian
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(pivot_point_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         
-        # Elder Ray signals
-        bull_positive = bull_power[i] > 0
-        bear_negative = bear_power[i] < 0
-        bull_rising = i > 100 and bull_power[i] > bull_power[i-1]  # BullPower increasing
-        bear_falling = i > 100 and bear_power[i] < bear_power[i-1]  # BearPower decreasing (more negative)
+        # Donchian breakout conditions
+        breakout_up = price_high > donchian_high[i]  # New 20-period high
+        breakdown_down = price_low < donchian_low[i]  # New 20-period low
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # 1d EMA200 trend filter
-        price_above_ema200 = price_close > ema200_1d_aligned[i]
-        price_below_ema200 = price_close < ema200_1d_aligned[i]
+        # 1d pivot point trend filter
+        price_above_pivot = price_close > pivot_point_aligned[i]
+        price_below_pivot = price_close < pivot_point_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: BullPower positive AND rising + price above 1d EMA200 + volume confirmation
-        if bull_positive and bull_rising and price_above_ema200 and vol_confirm:
+        # Long: Donchian breakout up + price above pivot + volume confirmation
+        if breakout_up and price_above_pivot and vol_confirm:
             enter_long = True
         
-        # Short: BearPower negative AND falling + price below 1d EMA200 + volume confirmation
-        if bear_negative and bear_falling and price_below_ema200 and vol_confirm:
+        # Short: Donchian breakdown down + price below pivot + volume confirmation
+        if breakdown_down and price_below_pivot and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Elder Ray conditions or price crosses 1d EMA200
+        # Exit conditions: opposite Donchian breakout or price crosses pivot
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if BearPower becomes positive OR price crosses below 1d EMA200
-            exit_long = bear_power[i] > 0 or (not price_above_ema200)
+            # Exit long if breakdown OR price crosses below pivot
+            exit_long = breakdown_down or (not price_above_pivot)
         elif position == -1:
-            # Exit short if BullPower becomes negative OR price crosses above 1d EMA200
-            exit_short = bull_power[i] < 0 or (not price_below_ema200)
+            # Exit short if breakout OR price crosses above pivot
+            exit_short = breakout_up or (not price_below_pivot)
         
         # Trading logic
         if enter_long and position != 1:
