@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h TRIX momentum with 1w volume regime filter and 1d ATR stoploss
-# - Long: TRIX(12) crosses above zero (bullish momentum) AND 1w volume > 1.5x 20-period average (institutional participation)
-# - Short: TRIX(12) crosses below zero (bearish momentum) AND 1w volume > 1.5x 20-period average
-# - Exit: TRIX returns to zero line OR ATR-based stop (2.5 ATR)
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + 1d choppiness regime filter
+# - Long: Price breaks above Donchian(20) high, volume > 1.5x 20-period average, 1d CHOP(14) > 61.8 (ranging market for mean reversion failure avoidance)
+# - Short: Price breaks below Donchian(20) low, volume > 1.5x 20-period average, 1d CHOP(14) > 61.8
+# - Exit: Price returns to Donchian(20) midpoint or ATR-based stop (2.0 ATR)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - TRIX is a triple-smoothed EMA momentum oscillator that reduces noise and false signals
-# - Volume regime filter ensures we only trade when there is genuine market participation
-# - ATR stoploss adapts to volatility conditions
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
+# - Donchian breakouts capture sustained moves in both bull and bear markets
+# - Volume confirmation ensures institutional participation
+# - Choppiness filter avoids whipsaw in strong trends where breakouts fail
 
-name = "12h_1d_1w_trix_volume_atrstop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_chop_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,53 +31,54 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load 1w data ONCE before loop for volume regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return signals
-    
-    # Pre-compute 1w volume SMA(20) for regime filter
-    volume_1w = df_1w['volume'].values
-    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
-    
-    # Load 1d data ONCE before loop for TRIX calculation
+    # Load 1d data ONCE before loop for choppiness filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d TRIX(12,9,9) - triple smoothed EMA
+    # Pre-compute 1d Choppiness Index(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # First EMA
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # Second EMA of first EMA
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # Third EMA of second EMA
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # True Range
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
     
-    # TRIX = percentage change of third EMA
-    trix = np.zeros_like(ema3)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    # Handle first value
-    trix[0] = 0.0
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
     
-    # Align 1d TRIX to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # Pre-compute 1d TRIX previous value for crossover detection
-    trix_prev = np.roll(trix_aligned, 1)
-    trix_prev[0] = trix_aligned[0]  # first value
+    # Choppiness Index = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    # Avoid division by zero and log of zero
+    hl_range = hh_14 - ll_14
+    chop = np.where((hl_range > 0) & (tr_sum_14 > 0), 
+                    100 * np.log10(tr_sum_14 / hl_range) / np.log10(14), 
+                    50.0)  # neutral value when undefined
     
-    # Pre-compute ATR for stoploss (12h timeframe)
+    # Align 1d Choppiness Index to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Pre-compute Donchian(20) channels on 4h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
+    # Pre-compute volume confirmation (20-period average)
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute ATR for stoploss (4h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_prev[i]) or np.isnan(volume_sma_20_aligned[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -85,23 +86,27 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # TRIX values
-        trix_current = trix_aligned[i]
-        trix_previous = trix_prev[i]
+        # Donchian levels
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        midpoint = donchian_mid[i]
         
-        # Volume regime filter: current 12h volume > 1.5x 1w volume SMA(20)
-        vol_regime = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        
+        # Regime filter: 1d Choppiness Index > 61.8 (ranging market)
+        chop_filter = chop_aligned[i] > 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long entry: TRIX crosses above zero (bullish momentum) with volume regime
-        if trix_previous <= 0 and trix_current > 0 and vol_regime:
+        # Long breakout: price breaks above Donchian upper channel
+        if close_price > upper_channel and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short entry: TRIX crosses below zero (bearish momentum) with volume regime
-        if trix_previous >= 0 and trix_current < 0 and vol_regime:
+        # Short breakout: price breaks below Donchian lower channel
+        if close_price < lower_channel and vol_confirm and chop_filter:
             enter_short = True
         
         # Exit conditions
@@ -109,11 +114,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if TRIX returns to zero or ATR-based stop
-            exit_long = (trix_current <= 0) or (close_price <= entry_price - 2.5 * atr_14[i])
+            # Exit long if price returns to midpoint or ATR-based stop
+            exit_long = (close_price <= midpoint) or (close_price <= entry_price - 2.0 * atr_14[i])
         elif position == -1:
-            # Exit short if TRIX returns to zero or ATR-based stop
-            exit_short = (trix_current >= 0) or (close_price >= entry_price + 2.5 * atr_14[i])
+            # Exit short if price returns to midpoint or ATR-based stop
+            exit_short = (close_price >= midpoint) or (close_price >= entry_price + 2.0 * atr_14[i])
         
         # Track entry price for stoploss calculation
         if enter_long or enter_short:
