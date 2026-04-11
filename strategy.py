@@ -1,18 +1,20 @@
+# 4h_1d_alligator_volume_trend_v1
+# Hypothesis: 4h Williams Alligator + 1d EMA trend filter + volume confirmation
+# - Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs on median price
+# - Long when Lips > Teeth > Jaw (bullish alignment) + price > 1d EMA200 + volume > 1.5x 20-period average
+# - Short when Lips < Teeth < Jaw (bearish alignment) + price < 1d EMA200 + volume > 1.5x 20-period average
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits for 4h
+# - Works in both bull (trend continuation with volume) and bear (trend reversal with volume) markets
+# - 1d EMA200 provides strong trend filter, reducing false signals in choppy markets
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-# - Donchian breakout: price breaks above 20-period high (long) or below 20-period low (short)
-# - Weekly pivot direction: price above/below weekly pivot point from prior week
-# - Volume confirmation: current volume > 1.5x 20-period average volume
-# - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
-# - Weekly pivot adds structural bias, reducing false breakouts in choppy markets
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 6h
-
-name = "6h_1w_donchian_pivot_volume_v1"
-timeframe = "6h"
+name = "4h_1d_alligator_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,74 +30,71 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Load 1d data ONCE before loop for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return signals
     
-    # Pre-compute weekly pivot point (standard: (H+L+C)/3)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Pre-compute 1d EMA200
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Pre-compute Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Pre-compute Williams Alligator on 4h data
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values
     
-    # Pre-compute 6h volume SMA (20-period)
+    # Pre-compute 4h volume SMA (20-period)
     volume_series = pd.Series(volume)
     volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
+        price_median = median_price[i]
         volume_current = volume[i]
         
-        # Donchian breakout conditions
-        breakout_long = price_high > donchian_high[i]  # New 20-period high
-        breakout_short = price_low < donchian_low[i]   # New 20-period low
-        
-        # Weekly pivot direction
-        price_above_pivot = price_close > pivot_1w_aligned[i]
-        price_below_pivot = price_close < pivot_1w_aligned[i]
+        # Williams Alligator alignment
+        alligator_bullish = lips[i] > teeth[i] > jaw[i]  # Lips > Teeth > Jaw
+        alligator_bearish = lips[i] < teeth[i] < jaw[i]  # Lips < Teeth < Jaw
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        
+        # 1d EMA200 trend filter
+        price_above_ema200 = price_close > ema200_1d_aligned[i]
+        price_below_ema200 = price_close < ema200_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Donchian breakout high + price above weekly pivot + volume confirmation
-        if breakout_long and price_above_pivot and vol_confirm:
+        # Long: Bullish Alligator + price above 1d EMA200 + volume confirmation
+        if alligator_bullish and price_above_ema200 and vol_confirm:
             enter_long = True
         
-        # Short: Donchian breakout low + price below weekly pivot + volume confirmation
-        if breakout_short and price_below_pivot and vol_confirm:
+        # Short: Bearish Alligator + price below 1d EMA200 + volume confirmation
+        if alligator_bearish and price_below_ema200 and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Donchian breakout or price crosses weekly pivot
+        # Exit conditions: opposite Alligator alignment or price crosses 1d EMA200
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if Donchian breakdown OR price crosses below weekly pivot
-            exit_long = (price_low < donchian_low[i]) or (not price_above_pivot)
+            # Exit long if bearish Alligator alignment OR price crosses below 1d EMA200
+            exit_long = alligator_bearish or (not price_above_ema200)
         elif position == -1:
-            # Exit short if Donchian breakout OR price crosses above weekly pivot
-            exit_short = (price_high > donchian_high[i]) or (not price_below_pivot)
+            # Exit short if bullish Alligator alignment OR price crosses above 1d EMA200
+            exit_short = alligator_bullish or (not price_below_ema200)
         
         # Trading logic
         if enter_long and position != 1:
