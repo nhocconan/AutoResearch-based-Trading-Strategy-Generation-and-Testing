@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v27
-# Strategy: 4h breakout of Camarilla pivot levels from 1d with volume confirmation and RSI filter
+# 4h_1d_camarilla_breakout_v28
+# Strategy: 4h price breaking above/below Camarilla pivot levels (from 1d) with volume confirmation and volatility filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels act as key support/resistance on daily timeframe.
-# Breakouts above H4 or below L4 with volume confirmation signal institutional participation.
-# RSI filter avoids counter-trend entries. Designed for low trade frequency (~20-40/year).
-# Works in bull markets via breakout continuation and bear markets via breakdowns.
+# Hypothesis: Camarilla pivot levels act as strong support/resistance. Breakouts with volume indicate institutional participation.
+# Volatility filter (ATR-based) avoids whipsaws in low-volatility environments. Works in bull markets via breakout continuation
+# and bear markets via breakdown continuation. Designed for low trade frequency (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v27"
+name = "4h_1d_camarilla_breakout_v28"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,83 +32,64 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L), H3 = C + 1.1*(H-L), L3 = C - 1.1*(H-L)
-    # H2 = C + 0.5*(H-L), L2 = C - 0.5*(H-L), H1 = C + 0.25*(H-L), L1 = C - 0.25*(H-L)
-    # Pivot = (H+L+C)/3
+    # Calculate 1d Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values (shifted by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # Set first day's values to zero (will be handled by min_periods later)
-    prev_high[0] = 0
-    prev_low[0] = 0
-    prev_close[0] = 0
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
+    # Formula: Close + (High - Low) * multiplier / 11
+    # We use H3, L3 for breakout/breakdown
+    rng = high_1d - low_1d
+    camarilla_h3 = close_1d + rng * 1.1 / 11
+    camarilla_l3 = close_1d - rng * 1.1 / 11
     
-    # Calculate Camarilla levels for previous day
-    rang = prev_high - prev_low
-    H4 = prev_close + 1.5 * rang
-    L4 = prev_close - 1.5 * rang
-    H3 = prev_close + 1.1 * rang
-    L3 = prev_close - 1.1 * rang
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Align to 4h timeframe (these levels are valid for the entire day after the 1d bar closes)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_avg_20
     
-    # Volume confirmation: current 1d volume > 1.5x 20-period average
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    
-    # RSI filter on 4h timeframe
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volatility filter: ATR(14) > 20-period ATR average (avoid low-volatility whipsaws)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr > atr_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or np.isnan(H3_aligned[i]) or \
-           np.isnan(L3_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]) or \
-           np.isnan(rsi[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or \
+           np.isnan(vol_confirm[i]) or np.isnan(vol_filter[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
-        
-        # RSI filter: >50 for bullish bias, <50 for bearish bias
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
+        # Breakout conditions
+        breakout_up = close[i] > camarilla_h3_aligned[i]
+        breakout_down = close[i] < camarilla_l3_aligned[i]
         
         # Entry conditions
-        # Long: Break above H4 with volume confirmation and bullish RSI
-        if close[i] > H4_aligned[i] and vol_confirm and rsi_bullish and position != 1:
+        # Long: price breaks above H3 with volume and volatility confirmation
+        if breakout_up and vol_confirm[i] and vol_filter[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Break below L4 with volume confirmation and bearish RSI
-        elif close[i] < L4_aligned[i] and vol_confirm and rsi_bearish and position != -1:
+        # Short: price breaks below L3 with volume and volatility confirmation
+        elif breakout_down and vol_confirm[i] and vol_filter[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Price returns to mean reversion zone (between H3 and L3)
-        elif position == 1 and close[i] < H3_aligned[i]:
+        # Exit: price returns to the opposite Camarilla level (mean reversion)
+        elif position == 1 and close[i] < camarilla_l3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > L3_aligned[i]:
+        elif position == -1 and close[i] > camarilla_h3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
