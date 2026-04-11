@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v4"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,41 +17,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly Donchian channel (20-period high/low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate Camarilla levels for the previous day (to avoid look-ahead)
-    camarilla_high = (close_1d + (high_1d - low_1d) * 1.1 / 6)
-    camarilla_low = (close_1d - (high_1d - low_1d) * 1.1 / 6)
+    # Calculate rolling max/min for Donchian channels
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Shift by 1 to use only completed daily bars (previous day's levels)
-    camarilla_high = np.roll(camarilla_high, 1)
-    camarilla_low = np.roll(camarilla_low, 1)
-    camarilla_high[0] = np.nan
-    camarilla_low[0] = np.nan
+    # Shift by 1 to use only completed weekly bars (previous week's levels)
+    donchian_high = np.roll(donchian_high, 1)
+    donchian_low = np.roll(donchian_low, 1)
+    donchian_high[0] = np.nan
+    donchian_low[0] = np.nan
     
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_high_4h = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_4h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_daily = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # 4h ATR for volatility filter (14 period)
+    # Daily ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 1.5x 20-period average
+    # Daily volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 4h ADX for trend strength (14 period)
+    # Daily ADX for trend strength (14 period)
     plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
     minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
     tr_dm = tr[1:]
@@ -63,9 +62,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_high_4h[i]) or np.isnan(camarilla_low_4h[i]) or 
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
@@ -82,16 +81,16 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 (strong trend filter to reduce trades)
         trend_filter = adx[i] > 25
         
-        # Long conditions: price breaks above upper Camarilla level with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > camarilla_high_4h[i])
+        # Long conditions: price breaks above weekly Donchian high with volume and trend
+        long_signal = volume_confirmed and trend_filter and (price_high > donchian_high_daily[i])
         
-        # Short conditions: price breaks below lower Camarilla level with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < camarilla_low_4h[i])
+        # Short conditions: price breaks below weekly Donchian low with volume and trend
+        short_signal = volume_confirmed and trend_filter and (price_low < donchian_low_daily[i])
         
-        # Exit when price returns to the midpoint of the Camarilla range (mean reversion)
-        camarilla_mid = (camarilla_high_4h[i] + camarilla_low_4h[i]) / 2
-        exit_long = position == 1 and price_close < camarilla_mid
-        exit_short = position == -1 and price_close > camarilla_mid
+        # Exit when price returns to the opposite side of the weekly median line
+        weekly_mid = (donchian_high_daily[i] + donchian_low_daily[i]) / 2
+        exit_long = position == 1 and price_close < weekly_mid
+        exit_short = position == -1 and price_close > weekly_mid
         
         # Trading logic
         if long_signal and position != 1:
@@ -111,12 +110,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla breakout strategy for 4h timeframe with ADX filter (>25) and volume confirmation (>1.5x average volume).
-# Enters long when 4h price breaks above daily upper Camarilla level (close + 1.1*(H-L)/6) with volume >1.5x average and ADX>25.
-# Enters short when price breaks below daily lower Camarilla level (close - 1.1*(H-L)/6) with same conditions.
-# Exits when price returns to the midpoint of the Camarilla range (mean reversion within the day's range).
-# Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
-# Target: 20-30 trades per year to minimize fee drift while capturing strong daily trends.
-# Camarilla levels provide dynamic support/resistance based on previous day's volatility, adapting to both bull and bear markets.
-# The 4h timeframe provides a balance between capturing daily moves and reducing noise compared to lower timeframes.
-# Daily timeframe is used to capture longer-term trends and avoid noise from shorter-term fluctuations.
+# Hypothesis: Daily Donchian breakout strategy based on weekly Donchian channels (20-period) with volume confirmation (>1.5x average volume) and ADX filter (>25).
+# Enters long when daily price breaks above the weekly Donchian high (20-period high) with volume >1.5x average and ADX>25.
+# Enters short when price breaks below the weekly Donchian low (20-period low) with same conditions.
+# Exits when price returns to the weekly Donchian midpoint (mean reversion within the week's range).
+# Weekly timeframe captures longer-term trends while reducing noise from daily fluctuations.
+# ADX > 25 ensures we only trade in strong trending markets, reducing whipsaws in ranging conditions.
+# Volume confirmation ensures breakouts are supported by participation.
+# Target: 10-25 trades per year to minimize fee drift while capturing significant weekly breakouts.
+# Works in both bull and bear markets by capturing strong directional moves regardless of overall trend.
