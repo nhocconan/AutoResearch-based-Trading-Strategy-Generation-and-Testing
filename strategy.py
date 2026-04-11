@@ -1,76 +1,93 @@
 #!/usr/bin/env python3
-# 6h_1w_elder_ray_regime_v1
-# Strategy: 6h Elder Ray (Bull/Bear Power) with weekly trend regime filter
-# Timeframe: 6h
+# 12h_1d_donchian_breakout_v1
+# Strategy: 12h Donchian(20) breakout with 1d volume confirmation and RSI filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Elder Ray measures bull/bear power via EMA(13). Combined with weekly trend (EMA40),
-# it avoids counter-trend trades. Long when Bull Power > 0 and weekly trend up; short when Bear Power < 0 and weekly trend down.
-# Works in bull via trend-following longs, in bear via trend-following shorts. Low turnover expected.
+# Hypothesis: Donchian breakouts capture breakout momentum. Volume confirmation ensures institutional
+# participation. RSI filter avoids overbought/oversold extremes. Designed for low trade frequency (~15-30/year)
+# to minimize fee drag. Works in bull markets via upside breakouts and bear markets via downside breakdowns.
+# Uses 1d volume average and RSI for confirmation to reduce false signals.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_elder_ray_regime_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 6-day EMA13 for Elder Ray (using close)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 12h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    # 12h RSI(14) for filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Weekly EMA40 for trend filter
-    ema40_1w = pd.Series(df_1w['close'].values).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    # 1d volume average (20-period) for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    
+    # Align raw 1d volume for confirmation
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(13, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
-           np.isnan(ema40_1w_aligned[i]):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(rsi[i]) or \
+           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Weekly trend: up if close > EMA40, down if close < EMA40
-        weekly_up = close[i] > ema40_1w_aligned[i]
-        weekly_down = close[i] < ema40_1w_aligned[i]
+        # Volume confirmation: current 1d volume > 1.3x 20-period average
+        vol_confirm = vol_1d_aligned[i] > 1.3 * vol_avg_20_1d_aligned[i]
+        
+        # RSI filter: avoid extremes (30 < RSI < 70)
+        rsi_filter = (rsi[i] > 30) & (rsi[i] < 70)
+        
+        # Breakout conditions
+        breakout_up = close[i] > high_20[i-1]  # break above prior 20-period high
+        breakdown_down = close[i] < low_20[i-1]  # break below prior 20-period low
         
         # Entry conditions
-        # Long: Bull Power > 0 AND weekly trend up
-        if bull_power[i] > 0 and weekly_up and position != 1:
+        # Long: upward breakout AND volume confirmation AND RSI filter
+        if breakout_up and vol_confirm and rsi_filter and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Bear Power < 0 AND weekly trend down
-        elif bear_power[i] < 0 and weekly_down and position != -1:
+        # Short: downward breakdown AND volume confirmation AND RSI filter
+        elif breakdown_down and vol_confirm and rsi_filter and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite Elder Ray signal OR weekly trend reversal
-        elif position == 1 and (bull_power[i] <= 0 or not weekly_up):
+        # Exit: opposite breakout (trend reversal)
+        elif position == 1 and breakdown_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bear_power[i] >= 0 or not weekly_down):
+        elif position == -1 and breakout_up:
             position = 0
             signals[i] = 0.0
         else:
