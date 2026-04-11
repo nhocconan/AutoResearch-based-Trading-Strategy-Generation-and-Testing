@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 12-hour VWAP deviation and volume confirmation.
-# Uses deviation from VWAP as mean reversion signal, filtered by volume spike.
-# Works in both bull and bear markets by adapting to volatility regimes and using volume as confirmation.
-# Target: 20-50 trades per year to minimize fee drag while capturing mean reversion moves.
+# Hypothesis: 12h timeframe with 1-day Donchian breakout + volume confirmation + ADX trend filter.
+# Uses 1-day Donchian channels for breakout entries, volume filter to confirm institutional participation,
+# and ADX to filter for trending conditions. Designed for 12-37 trades/year to minimize fee drag.
+# Works in bull markets via breakouts and in bear markets via short breakdowns.
+# ADX filter prevents whipsaws in ranging markets.
 
-name = "4h_12h_vwap_deviation_volume_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,71 +24,126 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate VWAP for 12h period
-    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    vwap_numerator = (typical_price * df_12h['volume']).cumsum()
-    vwap_denominator = df_12h['volume'].cumsum()
-    vwap = vwap_numerator / vwap_denominator
-    vwap_values = vwap.values
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate deviation from VWAP as percentage
-    deviation = (df_12h['close'] - vwap_values) / vwap_values * 100
+    # Upper band = highest high over past 20 days
+    upper_20 = np.full(len(high_1d), np.nan)
+    for i in range(19, len(high_1d)):
+        upper_20[i] = np.max(high_1d[i-19:i+1])
     
-    # Calculate 20-period standard deviation of deviation for z-score
-    dev_series = pd.Series(deviation)
-    dev_mean = dev_series.rolling(window=20, min_periods=20).mean().values
-    dev_std = dev_series.rolling(window=20, min_periods=20).std().values
-    z_score = np.where(dev_std != 0, (deviation - dev_mean) / dev_std, 0)
+    # Lower band = lowest low over past 20 days
+    lower_20 = np.full(len(low_1d), np.nan)
+    for i in range(19, len(low_1d)):
+        lower_20[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate 20-period average volume for 12h
-    vol_12h = df_12h['volume'].values
-    vol_avg_20 = np.zeros_like(vol_12h, dtype=float)
-    for i in range(19, len(vol_12h)):
-        vol_avg_20[i] = np.mean(vol_12h[i-19:i+1])
-    vol_avg_20[:19] = np.nan
+    # Calculate daily average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = np.full(len(volume_1d), np.nan)
+    for i in range(19, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Align 12h indicators to 4h timeframe
-    z_score_aligned = align_htf_to_ltf(prices, df_12h, z_score)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
+    # Calculate daily ADX (14-period) for trend strength
+    # First calculate +DM and -DM
+    plus_dm = np.zeros(len(high_1d))
+    minus_dm = np.zeros(len(high_1d))
+    tr = np.zeros(len(high_1d))
+    
+    for i in range(1, len(high_1d)):
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - high_1d[i-1]),
+            abs(low_1d[i] - low_1d[i-1])
+        )
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    atr = np.zeros(len(high_1d))
+    plus_dm_smooth = np.zeros(len(high_1d))
+    minus_dm_smooth = np.zeros(len(high_1d))
+    
+    # Initial values (first 14 periods)
+    if len(high_1d) >= 14:
+        atr[13] = np.mean(tr[1:15])
+        plus_dm_smooth[13] = np.mean(plus_dm[1:15])
+        minus_dm_smooth[13] = np.mean(minus_dm[1:15])
+        
+        # Wilder smoothing for rest
+        for i in range(14, len(high_1d)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
+    
+    # Calculate DI+ and DI-
+    plus_di = np.zeros(len(high_1d))
+    minus_di = np.zeros(len(high_1d))
+    dx = np.zeros(len(high_1d))
+    
+    for i in range(14, len(high_1d)):
+        if atr[i] != 0:
+            plus_di[i] = (plus_dm_smooth[i] / atr[i]) * 100
+            minus_di[i] = (minus_dm_smooth[i] / atr[i]) * 100
+            if plus_di[i] + minus_di[i] != 0:
+                dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+    
+    # Calculate ADX (smoothed DX)
+    adx = np.zeros(len(high_1d))
+    if len(high_1d) >= 27:  # Need 14 for DX + 14 for smoothing
+        adx[26] = np.mean(dx[14:28])
+        for i in range(27, len(high_1d)):
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Align daily indicators to 12h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(1, n):
         # Skip if any required data is invalid
-        if np.isnan(z_score_aligned[i]) or np.isnan(vol_avg_aligned[i]):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * 12h average volume
+        # Volume filter: current volume > 1.5 * daily average volume
         vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Mean reversion signals: extreme deviations from VWAP
-        long_signal = z_score_aligned[i] < -2.0 and vol_filter
-        short_signal = z_score_aligned[i] > 2.0 and vol_filter
+        # ADX filter: trending market (ADX > 25)
+        trend_filter = adx_aligned[i] > 25
         
-        # Exit when deviation returns to zero (VWAP)
-        exit_long = position == 1 and z_score_aligned[i] > -0.5
-        exit_short = position == -1 and z_score_aligned[i] < 0.5
+        # Breakout conditions
+        breakout_long = high[i] >= upper_20_aligned[i] and vol_filter and trend_filter
+        breakout_short = low[i] <= lower_20_aligned[i] and vol_filter and trend_filter
         
-        # Priority: exit first, then entries
-        if exit_long:
-            position = 0
-            signals[i] = 0.0
-        elif exit_short:
-            position = 0
-            signals[i] = 0.0
-        elif long_signal and position != 1:
+        # Exit conditions: reverse signal or loss of trend
+        exit_long = position == 1 and (breakout_short or adx_aligned[i] < 20)
+        exit_short = position == -1 and (breakout_long or adx_aligned[i] < 20)
+        
+        # Update position
+        if breakout_long and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -0.25
+        elif exit_long or exit_short:
+            position = 0
+            signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
