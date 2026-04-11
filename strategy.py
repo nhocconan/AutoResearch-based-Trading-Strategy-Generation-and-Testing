@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with volume confirmation and 1d trend filter
-# Long when price touches S3 support + volume spike + 1d uptrend (reversal long)
-# Short when price touches R3 resistance + volume spike + 1d downtrend (reversal short)
-# Exit when price reaches opposite pivot level or trend reverses
-# Designed for 20-40 trades/year on 4h with mean reversion in ranging markets and trend filtering
+# Hypothesis: 6h Elder Ray + 1d RSI divergence + volume confirmation
+# Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) measures bull/bear strength
+# Divergence: price makes new high/low but Elder Ray does not confirms weakness
+# Long when: Bear Power divergence (price new low, Bear Power higher) + RSI(14) < 30 + volume > 1.5x avg
+# Short when: Bull Power divergence (price new high, Bull Power lower) + RSI(14) > 70 + volume > 1.5x avg
+# Exit when Elder Ray crosses zero or RSI returns to neutral zone (40-60)
+# Designed for 15-30 trades/year on 6h to capture exhaustion moves in BTC/ETH bull and bear markets
 
-name = "4h_1d_camarilla_reversion_v1"
-timeframe = "4h"
+name = "6h_1d_elder_ray_divergence_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,67 +28,81 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1-day pivot levels (HLC of previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 13-period EMA for Elder Ray (using close)
     close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Previous day's values for pivot calculation (shift by 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan  # First day has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Elder Ray components
+    bull_power_1d = high - ema13_1d  # High - EMA13
+    bear_power_1d = low - ema13_1d   # Low - EMA13
     
-    # Calculate Camarilla levels for current day based on previous day
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We use R3 and S3 for reversals
-    hl_range = prev_high - prev_low
-    camarilla_r3 = prev_close + (hl_range * 1.1 / 4)
-    camarilla_s3 = prev_close - (hl_range * 1.1 / 4)
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Align 1d Camarilla levels to 4h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 14-period RSI on 1d close
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Calculate 1-day EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate 20-period average volume for volume filter
+    # 20-period average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Arrays to track divergence conditions
+    bull_div = np.full(n, False)  # Price new high but Bull Power lower (bearish divergence)
+    bear_div = np.full(n, False)  # Price new low but Bear Power higher (bullish divergence)
+    
+    # Lookback period for divergence detection (10 periods)
+    lookback = 10
+    
+    for i in range(lookback, n):
+        # Skip if any required data is invalid
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
+            continue
+            
+        # Bullish divergence: price makes new low but Bear Power is higher (less negative)
+        price_low_lookback = np.min(low[i-lookback:i+1])
+        bear_power_low_lookback = np.min(bear_power_aligned[i-lookback:i+1])
+        price_new_low = low[i] == price_low_lookback
+        bear_power_higher = bear_power_aligned[i] > bear_power_aligned[i-1]
+        bear_div[i] = price_new_low and bear_power_higher
+        
+        # Bearish divergence: price makes new high but Bull Power is lower (weaker)
+        price_high_lookback = np.max(high[i-lookback:i+1])
+        bull_power_high_lookback = np.max(bull_power_aligned[i-lookback:i+1])
+        price_new_high = high[i] == price_high_lookback
+        bull_power_lower = bull_power_aligned[i] < bull_power_aligned[i-1]
+        bull_div[i] = price_new_high and bull_power_lower
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if any required data is invalid
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
+    for i in range(lookback, n):
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average
-        volume_filter = volume[i] > 1.8 * vol_ma_20[i]
+        # RSI conditions
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
+        rsi_neutral = (rsi_aligned[i] >= 40) & (rsi_aligned[i] <= 60)
         
-        # Trend filter: price relative to 1d EMA50
-        is_uptrend = close[i] > ema_50_1d_aligned[i]
-        is_downtrend = close[i] < ema_50_1d_aligned[i]
+        # Entry conditions
+        long_entry = bear_div[i] and volume_filter and rsi_oversold
+        short_entry = bull_div[i] and volume_filter and rsi_overbought
         
-        # Entry conditions: price touches S3/R3 with volume and trend alignment
-        touches_s3 = low[i] <= camarilla_s3_aligned[i]  # Touched or pierced S3 support
-        touches_r3 = high[i] >= camarilla_r3_aligned[i]  # Touched or pierced R3 resistance
-        
-        long_entry = touches_s3 and volume_filter and is_uptrend
-        short_entry = touches_r3 and volume_filter and is_downtrend
-        
-        # Exit conditions: price reaches opposite level or trend reverses
-        long_exit = (high[i] >= camarilla_r3_aligned[i]) or (not is_uptrend)
-        short_exit = (low[i] <= camarilla_s3_aligned[i]) or (not is_downtrend)
+        # Exit conditions: Elder Ray crosses zero OR RSI returns to neutral
+        long_exit = (bear_power_aligned[i] > 0) or rsi_neutral
+        short_exit = (bull_power_aligned[i] < 0) or rsi_neutral
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
