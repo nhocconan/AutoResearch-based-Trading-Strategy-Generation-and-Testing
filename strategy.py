@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1w_donchian_weekly_pivot_volume_v1
-# Strategy: 6h Donchian channel breakout with weekly pivot direction and volume confirmation
-# Timeframe: 6h
+# 12h_1d_cci_rsi_volume_v1
+# Strategy: 12h CCI combined with 1d RSI and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: In both bull and bear markets, price tends to continue in the direction of
-# weekly pivot levels after breaking the 6h Donchian channel (20-period). Volume
-# confirmation ensures breakout strength. Weekly pivot provides institutional-level
-# support/resistance that works across regimes. Low frequency (~20-30/year) to minimize
-# fee drag while capturing strong momentum moves.
+# Hypothesis: CCI identifies cyclical turning points while RSI confirms overbought/oversold conditions. 
+# Volume ensures conviction. Works in both bull and bear markets by fading extremes during high volume.
+# Target: 20-40 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_1d_cci_rsi_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,39 +26,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d RSI(14)
+    close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    
-    # Donchian channel (20-period) on 6h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # CCI(20) on 12h data
+    typical_price = (high + low + close) / 3
+    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
+    tp_mean_dev = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+    cci = (typical_price - tp_mean) / (0.015 * tp_mean_dev)
+    cci_values = cci.values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -72,27 +61,22 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or 
-            np.isnan(s3_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(cci_values[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long entry: price breaks above Donchian high AND above weekly R3 (bullish bias)
-        if (close[i] > donchian_high[i] and close[i] > r3_1w_aligned[i] and 
-            vol_confirm[i] and position != 1):
+        # Entry logic: CCI extreme + RSI confirmation + volume
+        if (cci_values[i] < -100 and rsi_1d_aligned[i] < 30 and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price breaks below Donchian low AND below weekly S3 (bearish bias)
-        elif (close[i] < donchian_low[i] and close[i] < s3_1w_aligned[i] and 
-              vol_confirm[i] and position != -1):
+        elif (cci_values[i] > 100 and rsi_1d_aligned[i] > 70 and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to weekly pivot level (mean reversion to institutional level)
-        elif position == 1 and close[i] < pivot_1w_aligned[i]:
+        # Exit: CCI returns to neutral zone
+        elif position == 1 and cci_values[i] > -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > pivot_1w_aligned[i]:
+        elif position == -1 and cci_values[i] < 50:
             position = 0
             signals[i] = 0.0
         else:
