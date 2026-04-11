@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_v5"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -16,6 +16,9 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Pre-calculate session hours (08-20 UTC)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -31,8 +34,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
     daily_range = high_1d - low_1d
     
     # Key levels for breakout: R4 (resistance) and S4 (support)
@@ -43,10 +44,10 @@ def generate_signals(prices):
     r3 = close_1d + (daily_range * 1.1 / 4)
     s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Volume confirmation: 4h volume > 2.0x 100-period average (higher threshold for fewer trades)
-    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    # Volume confirmation: 1h volume > 2.0x 48-period average (48h = 2 days)
+    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 1h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -56,7 +57,13 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_100[i])):
+            np.isnan(vol_ma_48[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
@@ -64,7 +71,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.0 * vol_ma_100[i]
+        vol_confirm = volume_current > 2.0 * vol_ma_48[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -89,10 +96,10 @@ def generate_signals(prices):
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -101,16 +108,16 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 2.0x 100-period average.
-# Enters short when price breaks below S4 with volume > 2.0x 100-period average.
+# Hypothesis: 1h Camarilla breakout strategy using daily pivot levels with volume confirmation and session filter.
+# Enters long when price breaks above R4 with volume > 2.0x 48-period average during 08-20 UTC.
+# Enters short when price breaks below S4 with volume > 2.0x 48-period average during 08-20 UTC.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (2.0x) and longer MA (100) to reduce trade frequency.
-# Position size set to 0.25 to manage risk in volatile markets.
-# Target: 10-20 trades per year (40-80 total over 4 years) to minimize fee drag.
+# Uses higher volume threshold (2.0x) and session filter to reduce trade frequency.
+# Position size set to 0.20 to manage risk.
+# Target: 15-37 trades per year (60-150 total over 4 years) to minimize fee drag.
+# Uses 1h for entry timing with 1d for signal direction to balance responsiveness and noise reduction.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 4h timeframe provides good balance between signal quality and trade frequency.
