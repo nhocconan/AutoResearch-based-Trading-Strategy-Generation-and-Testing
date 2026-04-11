@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_volume_v1
-# Strategy: 4h Donchian(20) breakout with volume confirmation and 1d EMA(50) trend filter
+# 4h_1d_camarilla_pivot_v1
+# Strategy: 4h Camarilla pivot with 1d EMA trend filter and volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture momentum bursts. Volume confirmation ensures institutional participation.
-# The 1d EMA filter keeps us in the dominant trend, reducing whipsaws in both bull and bear markets.
-# Discrete position sizing (0.25) minimizes fee churn.
+# Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance. In trending markets (1d EMA filter), price reacts strongly at these levels. Volume confirmation ensures institutional participation. Works in both bull/bear by trading breakouts in trend direction, avoiding false signals in chop.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_v1"
+name = "4h_1d_camarilla_pivot_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,7 +27,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # 1d EMA(50) for trend filter
@@ -37,9 +35,18 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla levels: H3/L3 = C +- (H-L)*1.1/2
+    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -50,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ratio.iloc[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ratio.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -59,19 +66,19 @@ def generate_signals(prices):
         vol_confirmed = vol_ratio.iloc[i] > 1.5
         
         # Entry conditions
-        # Long: Price breaks above 20-period high + above 1d EMA50 (uptrend) + volume confirmation
-        if vol_confirmed and close[i] > high_20[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Long: Price breaks above H3 + above 1d EMA50 (uptrend) + volume confirmation
+        if vol_confirmed and close[i] > camarilla_h3_aligned[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price breaks below 20-period low + below 1d EMA50 (downtrend) + volume confirmation
-        elif vol_confirmed and close[i] < low_20[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
+        # Short: Price breaks below L3 + below 1d EMA50 (downtrend) + volume confirmation
+        elif vol_confirmed and close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price retracement to middle of channel or trend reversal
-        elif position == 1 and (close[i] < (high_20[i] + low_20[i]) / 2 or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: price returns to midpoint or trend reversal
+        elif position == 1 and (close[i] < (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2 or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > (high_20[i] + low_20[i]) / 2 or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2 or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
