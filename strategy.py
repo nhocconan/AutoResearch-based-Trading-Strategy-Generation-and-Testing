@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_volume_v1
-# Strategy: 12h Camarilla pivot levels from 1d with volume confirmation
-# Timeframe: 12h
+# 4h_1d_trix_volume_regime_v1
+# Strategy: 4h TRIX with volume confirmation and 1d Choppiness regime filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (S3/S4 for longs, R3/R4 for shorts) act as strong support/resistance.
-# Enter long when price touches S3/S4 with volume confirmation in uptrend (price > 1d EMA200).
-# Enter short when price touches R3/R4 with volume confirmation in downtrend (price < 1d EMA200).
-# Uses 12h close for signal generation to avoid look-ahead. Low frequency (~20-40/year) to minimize fee drag.
+# Hypothesis: TRIX filters noise and identifies momentum. In trending regimes (CHOP < 38.2), go long when TRIX crosses above zero with volume confirmation, short when crosses below zero. In ranging regimes (CHOP > 61.8), fade extreme TRIX readings (>0.1 or <-0.1) with volume confirmation. Uses 1d Choppiness to avoid whipsaws. Low frequency (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_1d_trix_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,8 +19,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -33,73 +28,123 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d OHLC for Camarilla calculation
+    # 1d Choppiness Index (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
-    typical = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels: S1=close - 1.1*range/12, S2=close - 1.1*range/6, S3=close - 1.1*range/4, S4=close - 1.1*range/2
-    # R1=close + 1.1*range/12, R2=close + 1.1*range/6, R3=close + 1.1*range/4, R4=close + 1.1*range/2
-    s3 = close_1d - 1.1 * range_hl / 4
-    s4 = close_1d - 1.1 * range_hl / 2
-    r3 = close_1d + 1.1 * range_hl / 4
-    r4 = close_1d + 1.1 * range_hl / 2
+    # +DM and -DM
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    # Smoothed DM and TR
+    def smooth_series(series, period):
+        smoothed = np.zeros_like(series)
+        smoothed[period-1] = np.nansum(series[:period])
+        for i in range(period, len(series)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + series[i]
+        return smoothed
     
-    # 1d EMA(200) for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    tr_smoothed = smooth_series(tr, 14)
+    dm_plus_smoothed = smooth_series(dm_plus, 14)
+    dm_minus_smoothed = smooth_series(dm_minus, 14)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smoothed / tr_smoothed
+    di_minus = 100 * dm_minus_smoothed / tr_smoothed
+    
+    # DX and Choppiness
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    chop = 100 * np.log10(tr_smoothed.sum() / (np.abs(di_plus - di_minus).sum() + 1e-10)) / np.log10(14)
+    # Simplified: use standard chop calculation
+    chop = 100 * np.log10(atr.sum() / (np.abs(di_plus - di_minus).sum() + 1e-10)) / np.log10(14)
+    chop = np.where(np.isnan(chop), 50, chop)
+    
+    # Align Choppiness to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 4h TRIX (15-period)
+    # EMA1
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA2
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA3
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # TRIX = 100 * (EMA3 - prev_EMA3) / prev_EMA3
+    trix = np.zeros_like(close)
+    trix[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
+    trix[0] = 0
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
+    vol_confirm = volume > (1.3 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(trix[i]) or 
+            np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below 1d EMA200
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        downtrend = close[i] < ema_200_1d_aligned[i]
+        chop_val = chop_aligned[i]
+        trix_val = trix[i]
         
-        # Entry logic: Camarilla touch + volume + trend alignment
-        # Long when price touches S3 or S4 in uptrend with volume
-        long_condition = ((close[i] <= s3_aligned[i] * 1.001) or (close[i] <= s4_aligned[i] * 1.001)) and vol_confirm[i] and uptrend and position != 1
-        # Short when price touches R3 or R4 in downtrend with volume
-        short_condition = ((close[i] >= r3_aligned[i] * 0.999) or (close[i] >= r4_aligned[i] * 0.999)) and vol_confirm[i] and downtrend and position != -1
-        
-        if long_condition:
-            position = 1
+        # Regime-based logic
+        if chop_val < 38.2:  # Trending regime
+            # Long: TRIX crosses above zero with volume
+            if i > 0 and trix_val > 0 and trix[i-1] <= 0 and vol_confirm[i] and position != 1:
+                position = 1
+                signals[i] = 0.25
+            # Short: TRIX crosses below zero with volume
+            elif i > 0 and trix_val < 0 and trix[i-1] >= 0 and vol_confirm[i] and position != -1:
+                position = -1
+                signals[i] = -0.25
+            # Exit: TRIX returns to zero
+            elif position == 1 and trix_val <= 0:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and trix_val >= 0:
+                position = 0
+                signals[i] = 0.0
+        elif chop_val > 61.8:  # Ranging regime
+            # Long: TRIX < -0.1 (oversold) with volume
+            if trix_val < -0.1 and vol_confirm[i] and position != 1:
+                position = 1
+                signals[i] = 0.25
+            # Short: TRIX > 0.1 (overbought) with volume
+            elif trix_val > 0.1 and vol_confirm[i] and position != -1:
+                position = -1
+                signals[i] = -0.25
+            # Exit: TRIX returns to neutral zone
+            elif position == 1 and trix_val >= -0.05:
+                position = 0
+                signals[i] = 0.0
+            elif position == -1 and trix_val <= 0.05:
+                position = 0
+                signals[i] = 0.0
+        else:  # Transition regime - hold or flat
+            signals[i] = 0.0
+            position = 0
+        # Hold position if no action taken
+        if chop_val < 38.2 and position == 1 and trix_val > 0:
             signals[i] = 0.25
-        elif short_condition:
-            position = -1
+        elif chop_val < 38.2 and position == -1 and trix_val < 0:
             signals[i] = -0.25
-        # Exit: price moves back toward midpoint (mean reversion) or trend change
-        elif position == 1 and (close[i] >= (s3_aligned[i] + s4_aligned[i]) / 2 * 1.001 or not uptrend):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] <= (r3_aligned[i] + r4_aligned[i]) / 2 * 0.999 or not downtrend):
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        elif chop_val > 61.8 and ((position == 1 and trix_val < -0.05) or (position == -1 and trix_val > 0.05)):
+            signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
