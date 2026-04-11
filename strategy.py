@@ -1,17 +1,18 @@
-# 4h_1d_camarilla_pivot_volume_v1
-# Strategy: 4h Camarilla pivot level touch with 1d volume confirmation
+#!/usr/bin/env python3
+# 4h_1d_rsi_momentum_v1
+# Strategy: 4h RSI momentum with 1d EMA trend filter and volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (S3/S4 for long, R3/R4 for short) act as strong
-# support/resistance. Price touching these levels with above-average 1d volume indicates
-# institutional interest and potential reversal. Works in both bull (buy dips) and bear
-# (sell rallies) by fading extreme moves at key levels. Low trade frequency expected.
+# Hypothesis: RSI momentum combined with higher timeframe trend and volume confirmation captures
+# sustainable moves in both bull and bear markets. The 1d EMA filter ensures we trade with the
+# dominant trend, while volume confirmation filters out false signals. Low trade frequency
+# (~25-35 per year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_volume_v1"
+name = "4h_1d_rsi_momentum_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,84 +25,88 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 4h RSI (14-period)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 4h ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: S1,S2,S3,S4 and R1,R2,R3,R4
-    s1 = close_1d - (range_1d * 1.0 / 6)
-    s2 = close_1d - (range_1d * 2.0 / 6)
-    s3 = close_1d - (range_1d * 3.0 / 6)
-    s4 = close_1d - (range_1d * 4.0 / 6)
-    r1 = close_1d + (range_1d * 1.0 / 6)
-    r2 = close_1d + (range_1d * 2.0 / 6)
-    r3 = close_1d + (range_1d * 3.0 / 6)
-    r4 = close_1d + (range_1d * 4.0 / 6)
-    
-    # Use S3/S4 for long, R3/R4 for short (more extreme levels)
-    long_level = s3  # More conservative than S4
-    short_level = r3  # More conservative than R4
-    
-    # Align Camarilla levels to 4h
-    long_level_aligned = align_htf_to_ltf(prices, df_1d, long_level)
-    short_level_aligned = align_htf_to_ltf(prices, df_1d, short_level)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # 1d volume average (20-period) for confirmation
     volume_1d = df_1d['volume'].values
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # Align raw 1d volume
+    # Align raw 1d volume for confirmation
     vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(long_level_aligned[i]) or np.isnan(short_level_aligned[i]) or \
+        if np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]) or \
            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.3 * vol_avg_20_1d_aligned[i]
+        # Volatility filter: avoid low volatility (range) markets
+        if i >= 50:
+            atr_ma = pd.Series(atr[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1]
+            vol_filter = atr[i] > 0.8 * atr_ma
+        else:
+            vol_filter = True
         
-        # Price touching Camarilla levels (with small buffer)
-        # Long: touches or goes below S3 level
-        touch_long = low[i] <= long_level_aligned[i] * 1.001  # 0.1% buffer
-        # Short: touches or goes above R3 level
-        touch_short = high[i] >= short_level_aligned[i] * 0.999  # 0.1% buffer
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
+        
+        # Trend filter: close vs 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # RSI momentum conditions
+        rsi_overbought = rsi[i] > 70
+        rsi_oversold = rsi[i] < 30
+        rsi_rising = rsi[i] > rsi[i-1] if i > 0 else False
+        rsi_falling = rsi[i] < rsi[i-1] if i > 0 else False
         
         # Entry conditions
-        # Long: Price touches S3 AND volume confirmation AND not already long
-        if touch_long and vol_confirm and position != 1:
-            # Additional check: ensure we didn't already touch in previous bar (avoid chattering)
-            if i == 30 or low[i-1] > long_level_aligned[i-1] * 1.001:
-                position = 1
-                signals[i] = 0.25
-        # Short: Price touches R3 AND volume confirmation AND not already short
-        elif touch_short and vol_confirm and position != -1:
-            # Additional check: ensure we didn't already touch in previous bar
-            if i == 30 or high[i-1] < short_level_aligned[i-1] * 0.999:
-                position = -1
-                signals[i] = -0.25
-        # Exit: Price moves back toward midpoint (mean reversion)
-        elif position == 1 and close[i] >= (long_level_aligned[i] + short_level_aligned[i]) / 2:
+        # Long: RSI oversold AND rising AND uptrend AND volume confirmation AND volatility filter
+        if rsi_oversold and rsi_rising and uptrend and vol_confirm and vol_filter and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short: RSI overbought AND falling AND downtrend AND volume confirmation AND volatility filter
+        elif rsi_overbought and rsi_falling and downtrend and vol_confirm and vol_filter and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit: RSI crosses back to neutral territory (50) or opposite extreme
+        elif position == 1 and (rsi[i] >= 50 or rsi[i] > 70):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= (long_level_aligned[i] + short_level_aligned[i]) / 2:
+        elif position == -1 and (rsi[i] <= 50 or rsi[i] < 30):
             position = 0
             signals[i] = 0.0
         else:
