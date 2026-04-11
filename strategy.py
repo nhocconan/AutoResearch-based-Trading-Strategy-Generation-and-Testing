@@ -1,102 +1,121 @@
 #!/usr/bin/env python3
 """
-4h_12h_kama_trend_volume_v1
-Strategy: 4h KAMA trend following with 12h volume confirmation
-Timeframe: 4h
+1h_4h_1d_camarilla_breakout_volume
+Strategy: 1h breakout with 4h/1d Camarilla confluence
+Timeframe: 1h
 Leverage: 1.0
-Hypothesis: Use KAMA (adaptive moving average) on 4h to capture trend changes; require 12h volume surge (>2x average) to confirm institutional interest; only trade in direction of 4h KAMA slope. Designed to work in bull markets (trend continuation) and bear markets (sharp reversals on volume) by combining adaptive trend with volume confirmation. Low-frequency design targets 20-40 trades/year to minimize fee drag.
+Hypothesis: Buy when 1h closes above 4h R3 with volume confirmation and 1d uptrend; sell when 1h closes below 4h S3 with 1d downtrend. Uses 4h Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 15-37 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_kama_trend_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 20:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 4h KAMA (Adaptive Moving Average) ===
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    # Pad arrays to match length
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(1, np.nan), volatility])
-    volatility = np.concatenate([np.full(9, np.nan), volatility[10:]]) if len(volatility) > 10 else np.full_like(change, np.nan)
-    er = np.where(volatility != 0, change / volatility, 0)
+    # 1h ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smoothing constants
-    fastest_sc = 2 / (2 + 1)   # for fast EMA (2-period)
-    slowest_sc = 2 / (30 + 1)  # for slow EMA (30-period)
-    sc = (er * (fastest_sc - slowest_sc) + slowest_sc) ** 2
+    # 1h volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # === 1d Close (trend filter: use prior 1d's close) ===
+    close_1d = df_1d['close'].values
+    close_1d_shifted = np.roll(close_1d, 1)
+    close_1d_shifted[0] = np.nan
+    close_1d_trend = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
     
-    # KAMA slope (trend direction)
-    kama_slope = np.diff(kama, prepend=kama[0])
+    # === 4h Camarilla (entry levels from prior 4h) ===
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # === 12h Volume Filter ===
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_12h_ratio = vol_12h / vol_ma_12h
-    vol_12h_ratio_aligned = align_htf_to_ltf(prices, df_12h, vol_12h_ratio)
+    # Prior 4h's Camarilla levels (use shifted values to avoid look-ahead)
+    high_4h_shift = np.roll(high_4h, 1)
+    low_4h_shift = np.roll(low_4h, 1)
+    close_4h_shift = np.roll(close_4h, 1)
+    high_4h_shift[0] = np.nan
+    low_4h_shift[0] = np.nan
+    close_4h_shift[0] = np.nan
     
-    # Volume confirmation: 12h volume > 2x average
-    volume_surge = vol_12h_ratio_aligned > 2.0
+    pivot_4h = (high_4h_shift + low_4h_shift + close_4h_shift) / 3
+    range_4h = high_4h_shift - low_4h_shift
+    r3_4h = close_4h_shift + range_4h * 1.166
+    s3_4h = close_4h_shift - range_4h * 1.166
     
-    # Session filter: active trading hours (0-23 UTC covers all major sessions)
+    # Align 4h Camarilla to 1h timeframe
+    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
+    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    
+    # Session filter: 08-20 UTC (major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 0) & (hours <= 23)
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(kama[i]) or np.isnan(kama_slope[i]) or
-            np.isnan(volume_surge[i]) or not in_session[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(r3_4h_aligned[i]) or np.isnan(s3_4h_aligned[i]) or
+            np.isnan(close_1d_trend[i]) or np.isnan(atr_1h[i]) or np.isnan(vol_ma_20[i]) or
+            not in_session[i]):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Long conditions: price above KAMA, KAMA sloping up, volume surge on 12h
-        long_signal = (close[i] > kama[i]) and (kama_slope[i] > 0) and volume_surge[i]
+        price_close = close[i]
+        volume_current = volume[i]
+        vol_ma = vol_ma_20[i]
         
-        # Short conditions: price below KAMA, KAMA sloping down, volume surge on 12h
-        short_signal = (close[i] < kama[i]) and (kama_slope[i] < 0) and volume_surge[i]
+        # Volume confirmation: 1h volume must be elevated
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Exit when price crosses KAMA in opposite direction (trend change)
-        exit_long = position == 1 and close[i] < kama[i]
-        exit_short = position == -1 and close[i] > kama[i]
+        # Trend filter: price close vs prior 1d close (1d trend)
+        uptrend_1d = price_close > close_1d_trend[i]
+        downtrend_1d = price_close < close_1d_trend[i]
+        
+        # Long conditions: 1h closes above prior 4h's R3 with volume + 1d uptrend
+        long_signal = volume_confirmed and (price_close > r3_4h_aligned[i]) and uptrend_1d
+        
+        # Short conditions: 1h closes below prior 4h's S3 with volume + 1d downtrend
+        short_signal = volume_confirmed and (price_close < s3_4h_aligned[i]) and downtrend_1d
+        
+        # Exit when price returns to the 4h pivot (mean reversion within prior 4h's range)
+        pivot_4h = (high_4h_shift + low_4h_shift + close_4h_shift) / 3
+        pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
+        exit_long = position == 1 and price_close < pivot_4h_aligned[i]
+        exit_short = position == -1 and price_close > pivot_4h_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -104,6 +123,8 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
+
+# Hypothesis: Buy when 1h closes above 4h R3 with volume confirmation and 1d uptrend; sell when 1h closes below 4h S3 with 1d downtrend. Uses 4h Camarilla for entry levels and 1d close for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend (1d close > prior 1d close for longs, < for shorts). Low-frequency design targets 15-37 trades/year to minimize fee drag.
