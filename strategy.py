@@ -1,19 +1,23 @@
-# 6h_1d_Aroon_Oscillator_Volume_Filter
-# Hypothesis: Aroon oscillator identifies trend strength and direction on 1d timeframe. 
-# Combined with volume confirmation on 6h, it captures strong trends while avoiding chop.
-# Works in bull/bear by following 1d trend direction. Target: 15-30 trades/year per symbol.
+#!/usr/bin/env python3
+"""
+12h_1d_Camarilla_Pivot_Breakout_Trend
+Hypothesis: Uses 12h timeframe with 1d Camarilla pivot levels for breakout trading.
+Trades breakouts above/below pivot support/resistance levels with volume confirmation.
+Follows 1d trend direction to avoid counter-trend whipsaws. Designed for 15-30 trades/year.
+Works in bull/bear by following higher timeframe trend - avoids counter-trend losses.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Aroon_Oscillator_Volume_Filter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Pivot_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -22,61 +26,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Aroon oscillator
+    # Load 1d data ONCE before loop for pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 6-period volume moving average for confirmation
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    
-    # Calculate Aroon oscillator on 1d (25-period)
+    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
+    # We'll use H3/L3 as resistance/support and H4/L4 as breakout levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Aroon Up: ((25 - days since 25-day high) / 25) * 100
-    aroon_up = np.full(len(high_1d), np.nan)
-    for i in range(24, len(high_1d)):
-        lookback = high_1d[i-24:i+1]
-        high_idx = len(lookback) - 1 - np.argmax(lookback[::-1])  # index of highest value
-        aroon_up[i] = ((24 - high_idx) / 24) * 100
+    # Calculate typical price for pivot point
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Aroon Down: ((25 - days since 25-day low) / 25) * 100
-    aroon_down = np.full(len(low_1d), np.nan)
-    for i in range(24, len(low_1d)):
-        lookback = low_1d[i-24:i+1]
-        low_idx = len(lookback) - 1 - np.argmin(lookback[::-1])  # index of lowest value
-        aroon_down[i] = ((24 - low_idx) / 24) * 100
+    # Camarilla levels
+    # H4 = close + 1.5 * range
+    # L4 = close - 1.5 * range
+    # H3 = close + 1.25 * range
+    # L3 = close - 1.25 * range
+    H4 = close_1d + 1.5 * range_1d
+    L4 = close_1d - 1.5 * range_1d
+    H3 = close_1d + 1.25 * range_1d
+    L3 = close_1d - 1.25 * range_1d
     
-    # Aroon Oscillator = Aroon Up - Aroon Down
-    aroon_osc = aroon_up - aroon_down
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Aroon oscillator to 6h timeframe
-    aroon_osc_aligned = align_htf_to_ltf(prices, df_1d, aroon_osc)
+    # Volume filter: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 12h timeframe
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(25, n):
+    for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if np.isnan(aroon_osc_aligned[i]) or np.isnan(vol_ma_6[i]):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 6-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_6[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Aroon oscillator signals: >50 = strong uptrend, <-50 = strong downtrend
-        strong_uptrend = aroon_osc_aligned[i] > 50
-        strong_downtrend = aroon_osc_aligned[i] < -50
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions
-        long_entry = strong_uptrend and volume_filter
-        short_entry = strong_downtrend and volume_filter
+        # Breakout conditions using Camarilla levels
+        breakout_H4 = close[i] > H4_aligned[i-1]  # Break above H4 level
+        breakdown_L4 = close[i] < L4_aligned[i-1]  # Break below L4 level
         
-        # Exit conditions: trend weakening or reversal
-        long_exit = aroon_osc_aligned[i] < 0  # Oscillator falls below zero
-        short_exit = aroon_osc_aligned[i] > 0  # Oscillator rises above zero
+        # Entry conditions: only trade in direction of 1d trend
+        long_entry = breakout_H4 and volume_filter and uptrend
+        short_entry = breakdown_L4 and volume_filter and downtrend
+        
+        # Exit conditions: return to opposite H3/L3 level or trend reversal
+        long_exit = (close[i] < L3_aligned[i]) or (not uptrend)  # Break below L3 or trend change
+        short_exit = (close[i] > H3_aligned[i]) or (not downtrend)  # Break above H3 or trend change
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
