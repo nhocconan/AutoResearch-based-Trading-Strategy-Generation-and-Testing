@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_volume_v1
-# Strategy: 12h Camarilla pivot breakout with volume confirmation and 1d trend filter
-# Timeframe: 12h
+# 1d_1w_keltner_breakout_v1
+# Strategy: 1d Keltner Channel breakout with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Camarilla levels from prior 1d act as strong support/resistance. 
-# Long when price breaks above H3 with volume > 1.5x 20-period average and 1d close > open (bullish bias).
-# Short when price breaks below L3 with volume confirmation and 1d close < open (bearish bias).
-# Uses 1d trend filter to avoid counter-trend trades. Designed for low trade frequency (~15-30/year).
+# Hypothesis: Keltner breakouts capture volatility expansions. Weekly EMA200 filters trend direction.
+# Volume > 1.5x 20-day average confirms institutional participation. Designed for low trade frequency
+# (~10-25/year) to minimize fee drag. Works in bull markets via breakout continuation and bear markets
+# via mean reversion when price breaks below lower band in downtrend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_volume_v1"
-timeframe = "12h"
+name = "1d_1w_keltner_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,69 +27,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior 1d (H4, L3, H3, L4 etc.)
-    # Using prior day's high, low, close
-    phigh = df_1d['high'].values
-    plow = df_1d['low'].values
-    pclose = df_1d['close'].values
+    # 1d ATR(10) for Keltner Channel
+    tr1 = high - low
+    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
     
-    # Camarilla multipliers
-    # H4 = close + 1.5*(high-low)
-    # H3 = close + 1.1*(high-low)
-    # L3 = close - 1.1*(high-low)
-    # L4 = close - 1.5*(high-low)
-    rang = phigh - plow
-    h3 = pclose + 1.1 * rang
-    l3 = pclose - 1.1 * rang
-    h4 = pclose + 1.5 * rang
-    l4 = pclose - 1.5 * rang
+    # 1d EMA(20) for Keltner Channel middle
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Keltner Channel bands
+    upper_band = ema_20 + 2.0 * atr
+    lower_band = ema_20 - 2.0 * atr
     
-    # 1d trend filter: bullish if close > open, bearish if close < open
-    trend_bull = pclose > df_1d['open'].values
-    trend_bear = pclose < df_1d['open'].values
-    trend_bull_aligned = align_htf_to_ltf(prices, df_1d, trend_bull)
-    trend_bear_aligned = align_htf_to_ltf(prices, df_1d, trend_bear)
-    
-    # Volume confirmation: current 12h volume > 1.5x 20-period average
+    # 20-day average volume for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_avg_20
+    
+    # Weekly EMA200 for trend filter
+    weekly_close = df_1w['close'].values
+    ema_200_1w = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or \
-           np.isnan(trend_bull_aligned[i]) or np.isnan(trend_bear_aligned[i]):
+        if np.isnan(ema_20[i]) or np.isnan(atr[i]) or np.isnan(vol_avg_20[i]) or np.isnan(ema_200_1w_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        # Long: price breaks above H3 AND 1d bullish trend AND volume confirmation
-        if close[i] > h3_aligned[i] and trend_bull_aligned[i] and vol_confirm[i] and position != 1:
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        
+        # Weekly trend filter: price above/below weekly EMA200
+        weekly_uptrend = close[i] > ema_200_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_200_1w_aligned[i]
+        
+        # Entry conditions
+        # Long: price breaks above upper band AND weekly uptrend AND volume confirmation
+        if close[i] > upper_band[i] and weekly_uptrend and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: price breaks below L3 AND 1d bearish trend AND volume confirmation
-        elif close[i] < l3_aligned[i] and trend_bear_aligned[i] and vol_confirm[i] and position != -1:
+        # Short: price breaks below lower band AND weekly downtrend AND volume confirmation
+        elif close[i] < lower_band[i] and weekly_downtrend and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to opposite Camarilla level (mean reversion)
-        elif position == 1 and close[i] < l3_aligned[i]:
+        # Exit: price returns to middle EMA (mean reversion)
+        elif position == 1 and close[i] < ema_20[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > h3_aligned[i]:
+        elif position == -1 and close[i] > ema_20[i]:
             position = 0
             signals[i] = 0.0
         else:
