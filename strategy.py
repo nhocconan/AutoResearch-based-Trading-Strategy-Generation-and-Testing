@@ -3,59 +3,120 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h volume confirmation and ATR-based stoploss
-# - Long: price breaks above Donchian upper (20-period high) + volume > 1.5x 20-period avg
-# - Short: price breaks below Donchian lower (20-period low) + volume > 1.5x 20-period avg
-# - Exit: ATR trailing stop (2.0 ATR from extreme price) or opposite Donchian break
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
-# - Donchian breakouts capture strong momentum moves effectively in both bull and bear markets
-# - Volume confirmation filters out false breakouts
-# - ATR stoploss manages risk during adverse moves
+# Hypothesis: 1h Williams %R reversal with 4h volume spike and 1d ADX trend filter
+# - Long: Williams %R(14) crosses above -80 (oversold reversal), volume > 1.5x 20-period 4h avg, 1d ADX(14) > 25
+# - Short: Williams %R(14) crosses below -20 (overbought reversal), volume > 1.5x 20-period 4h avg, 1d ADX(14) > 25
+# - Exit: Williams %R returns to -50 level or ATR-based stop (1.5 ATR)
+# - Uses discrete position sizing: ±0.20 to limit drawdown and reduce fee churn
+# - Session filter: 08-20 UTC to avoid low-volume periods
+# - Target: 15-37 trades/year (60-150 total over 4 years) to stay within fee drag limits
+# - Williams %R captures momentum reversals effectively in ranging markets
+# - Volume spike confirms institutional participation
+# - 1d ADX > 25 ensures we only trade when there is sufficient trend strength to avoid whipsaw
+# - 1h timeframe for precise entry timing, 4h/1d for signal direction
 
-name = "4h_12h_donchian_volume_atr_v2"
-timeframe = "4h"
+name = "1h_4h_1d_williamsr_adx_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
-    highest_since_entry = 0.0  # for long ATR trailing stop
-    lowest_since_entry = 0.0   # for short ATR trailing stop
     
-    # Load 12h data ONCE before loop for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 1d data ONCE before loop for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 12h volume 20-period SMA
-    volume_12h = df_12h['volume'].values
-    volume_sma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    # Pre-compute 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute ATR for stoploss (4h timeframe)
+    # True Range
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 1h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Load 4h data ONCE before loop for Williams %R and volume
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return signals
+    
+    # Pre-compute 4h Williams %R(14)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_4h) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Align 4h Williams %R to 1h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_4h, williams_r)
+    
+    # Pre-compute 4h Williams %R previous value for crossover detection
+    williams_r_prev = np.roll(williams_r_aligned, 1)
+    williams_r_prev[0] = williams_r_aligned[0]  # first value
+    
+    # Pre-compute 4h volume confirmation (20-period average)
+    volume_4h = df_4h['volume'].values
+    volume_sma_20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_4h, volume_sma_20_4h)
+    
+    # Pre-compute ATR for stoploss (1h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Pre-compute Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    for i in range(50, n):  # Start after 50-bar warmup
+    for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(williams_r_prev[i]) or np.isnan(volume_sma_20_aligned[i]) or
+            np.isnan(atr_14[i]) or np.isnan(adx_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade during 08-20 UTC
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -63,23 +124,26 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Donchian levels
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        # Williams %R values
+        wr_current = williams_r_aligned[i]
+        wr_previous = williams_r_prev[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Volume confirmation: current volume > 1.5x 20-period 4h average
         vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        
+        # Trend filter: 1d ADX > 25 (indicates sufficient trend strength)
+        adx_trend = adx_aligned[i] > 25
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above upper Donchian channel with volume confirmation
-        if close_price > upper_channel and vol_confirm:
+        # Long reversal: Williams %R crosses above -80 (oversold bounce)
+        if wr_previous <= -80 and wr_current > -80 and vol_confirm and adx_trend:
             enter_long = True
         
-        # Short breakdown: price below lower Donchian channel with volume confirmation
-        if close_price < lower_channel and vol_confirm:
+        # Short reversal: Williams %R crosses below -20 (overbought rejection)
+        if wr_previous >= -20 and wr_current < -20 and vol_confirm and adx_trend:
             enter_short = True
         
         # Exit conditions
@@ -87,29 +151,23 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Update highest price since entry for trailing stop
-            highest_since_entry = max(highest_since_entry, close_price)
-            # Exit long if ATR trailing stop hit or opposite Donchian break
-            exit_long = (close_price <= highest_since_entry - 2.0 * atr_14[i]) or (close_price < lower_channel)
+            # Exit long if Williams %R returns to -50 or ATR-based stop
+            exit_long = (wr_current >= -50) or (close_price <= entry_price - 1.5 * atr_14[i])
         elif position == -1:
-            # Update lowest price since entry for trailing stop
-            lowest_since_entry = min(lowest_since_entry, close_price)
-            # Exit short if ATR trailing stop hit or opposite Donchian break
-            exit_short = (close_price >= lowest_since_entry + 2.0 * atr_14[i]) or (close_price > upper_channel)
+            # Exit short if Williams %R returns to -50 or ATR-based stop
+            exit_short = (wr_current <= -50) or (close_price >= entry_price + 1.5 * atr_14[i])
         
-        # Track entry price for stoploss initialization
+        # Track entry price for stoploss calculation
         if enter_long or enter_short:
             entry_price = close_price
-            highest_since_entry = entry_price
-            lowest_since_entry = entry_price
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -118,6 +176,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
