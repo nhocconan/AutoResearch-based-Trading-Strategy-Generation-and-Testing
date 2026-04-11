@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_volatility_breakout_v1
-# Strategy: 1h volatility breakout with 4h trend filter and 1d volatility regime filter
-# Timeframe: 1h
+# 12h_1d_camarilla_breakout_volume_v1
+# Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Volatility expansion after low volatility periods captures breakouts in both bull and bear markets.
-# Uses 4h for trend direction (avoid counter-trend trades) and 1d for volatility regime (only trade in high vol regimes).
-# Designed for low trade frequency (~15-30/year) to avoid fee drag in challenging 1h timeframe.
+# Hypothesis: Camarilla pivot levels on 1d act as strong support/resistance. Breakouts with 1d EMA trend alignment and volume confirmation capture significant moves while minimizing false breakouts. Designed for low trade frequency (~15-30/year) to avoid fee drift. Works in both bull and bear markets by using trend filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_volatility_breakout_v1"
-timeframe = "1h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -26,98 +24,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (avoid Asian session noise)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 4h EMA20 for trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Load 1d data ONCE before loop for volatility regime
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ATR(10) for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr_1d = np.maximum(
-        high_1d[1:] - low_1d[1:],
-        np.maximum(
-            np.abs(high_1d[1:] - close_1d[:-1]),
-            np.abs(low_1d[1:] - close_1d[:-1])
-        )
-    )
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_10_1d = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
+    # Calculate Camarilla levels from previous 1d bar
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 1h ATR(10) for breakout threshold
-    tr = np.maximum(
-        high[1:] - low[1:],
-        np.maximum(
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-    )
-    tr = np.concatenate([[np.nan], tr])
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Camarilla levels: H3, L3 (strong resistance/support)
+    rng = prev_high - prev_low
+    H3 = prev_close + 1.1 * rng / 4
+    L3 = prev_close - 1.1 * rng / 4
+    H4 = prev_close + 1.1 * rng / 2
+    L4 = prev_close - 1.1 * rng / 2
     
-    # 1h Donchian channel breakout (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 12h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if any required data is invalid or outside session
-        if (not in_session[i] or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(atr_10_1d_aligned[i]) or np.isnan(atr_10[i]) or
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        # Skip if any required data is invalid
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility regime filter: only trade when 1d ATR is above its 30-period average
-        if i >= 30:
-            atr_ma_30 = np.nanmean(atr_10_1d_aligned[i-30:i]) if not np.isnan(np.nanmean(atr_10_1d_aligned[i-30:i])) else 0
-            vol_regime = atr_10_1d_aligned[i] > 1.2 * atr_ma_30
-        else:
-            vol_regime = False
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Trend filter: 4h EMA20 direction
-        trend_bullish = close[i] > ema_20_4h_aligned[i]
-        trend_bearish = close[i] < ema_20_4h_aligned[i]
+        # Breakout signals using Camarilla levels
+        breakout_up = high[i] > H3_aligned[i-1]
+        breakdown_down = low[i] < L3_aligned[i-1]
         
-        # Breakout signals
-        breakout_up = high[i] > highest_20[i-1]
-        breakdown_down = low[i] < lowest_20[i-1]
+        # 1d EMA trend filter
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: Breakout up + bullish trend + high volatility regime
-        if breakout_up and trend_bullish and vol_regime and position != 1:
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
-            signals[i] = 0.20
-        # Short: Breakdown down + bearish trend + high volatility regime
-        elif breakdown_down and trend_bearish and vol_regime and position != -1:
+            signals[i] = 0.25
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit: Opposite breakout or volatility collapse
-        elif position == 1 and (low[i] < lowest_20[i-1] or not vol_regime):
+            signals[i] = -0.25
+        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
+        elif position == 1 and low[i] < L4_aligned[i-1]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (high[i] > highest_20[i-1] or not vol_regime):
+        elif position == -1 and high[i] > H4_aligned[i-1]:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
