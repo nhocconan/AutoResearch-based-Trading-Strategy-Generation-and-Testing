@@ -1,122 +1,140 @@
 #!/usr/bin/env python3
 """
-12h KAMA Trend with Volume Confirmation and Daily ATR Filter
-- KAMA (Kaufman Adaptive Moving Average) adapts to market noise, reducing whipsaws
-- Long when price > KAMA, short when price < KAMA
-- Volume filter: require volume > 1.5x 20-period average
-- Daily ATR filter: only trade when daily ATR > 0.5 * 20-period average of daily ATR (avoid low volatility)
-- Designed for 12h timeframe: target 50-150 trades over 4 years
-- Works in both bull (trend following) and bear (adaptive filtering reduces false signals)
+1d KAMA + RSI + Chop Filter Strategy
+- KAMA determines trend direction (fast/slow adaptation)
+- RSI(14) for momentum confirmation (30/70 levels)
+- Chop index filter to avoid whipsaws in ranging markets (CHOP > 61.8 = range)
+- Position sizing: 0.25 for long/short, 0.0 for flat
+- Designed for low trade frequency (target: 20-60 trades/year) to minimize fee drag
+- Works in both bull (trend following) and bear (mean reversion in range) markets
 """
-
 from typing import Tuple
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_kama_trend_volume_filter_v1"
-timeframe = "12h"
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_kama(close, er_period=10, fast_ma=2, slow_ma=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change) > 1 else np.abs(change[0])
-    # Avoid division by zero
-    volatility = np.where(volatility == 0, 1e-10, volatility)
-    er = change / volatility
-    sc = (er * (2/(fast_ma+1) - 2/(slow_ma+1)) + 2/(slow_ma+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
+def calculate_kama(close, slow_period=10, fast_period=2):
+    """Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, n=slow_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1))**2
+    kama = np.full_like(close, np.nan)
+    kama[slow_period] = close[slow_period]
+    for i in range(slow_period+1, len(close)):
         kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     return kama
 
+def calculate_chop(high, low, close, period=14):
+    """Choppiness Index"""
+    atr = np.zeros_like(close)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr[1:] = tr
+    atr_sum = np.zeros_like(close)
+    for i in range(period, len(close)):
+        atr_sum[i] = np.sum(atr[i-period+1:i+1])
+    highest_high = np.zeros_like(close)
+    lowest_low = np.zeros_like(close)
+    for i in range(period-1, len(close)):
+        highest_high[i] = np.max(high[i-period+1:i+1])
+        lowest_low[i] = np.min(low[i-period+1:i+1])
+    chop = np.full_like(close, 50.0)
+    mask = (highest_high - lowest_low) != 0
+    chop[mask] = 100 * np.log10(atr_sum[mask] / period / (highest_high[mask] - lowest_low[mask])) / np.log10(period)
+    return chop
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate daily ATR (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR(14)
-    atr_14 = np.zeros_like(tr)
-    atr_14[13] = np.mean(tr[1:14])  # Seed with first 14 values
-    for i in range(14, len(tr)):
-        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    
-    # 20-period average of daily ATR
-    atr_ma_20 = np.zeros_like(atr_14)
-    for i in range(len(atr_14)):
-        if i >= 19:
-            atr_ma_20[i] = np.mean(atr_14[i-19:i+1])
+    # Calculate indicators
+    kama = calculate_kama(close, slow_period=10, fast_period=2)
+    rsi = np.full_like(close, 50.0)
+    # Calculate RSI
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    for i in range(1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14 if i >= 1 else 0
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14 if i >= 1 else 0
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
         else:
-            atr_ma_20[i] = np.nan
+            rsi[i] = 100 if avg_gain[i] > 0 else 50
     
-    # Daily ATR filter: current ATR > 0.5 * 20-period average ATR
-    atr_filter_1d = atr_14 > 0.5 * atr_ma_20
-    
-    # Align daily ATR filter to 12h timeframe
-    atr_filter_aligned = align_htf_to_ltf(prices, df_1d, atr_filter_1d.astype(float))
-    
-    # Calculate KAMA on 12h close prices
-    kama = calculate_kama(close, er_period=10, fast_ma=2, slow_ma=30)
-    
-    # Volume filter: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    chop = calculate_chop(high, low, close, period=14)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(atr_filter_aligned[i])):
+    for i in range(20, n):
+        # Skip if KAMA not ready
+        if np.isnan(kama[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Market regime filter: avoid trading in strong ranging markets
+        # Chop > 61.8 indicates ranging market (avoid trend following)
+        # Chop < 38.2 indicates trending market (favor trend following)
+        chop_value = chop[i] if not np.isnan(chop[i]) else 50
+        is_ranging = chop_value > 61.8
+        is_trending = chop_value < 38.2
         
-        # ATR filter: only trade when volatility is sufficient
-        atr_filter = bool(atr_filter_aligned[i])
+        # KAMA trend direction
+        kama_up = kama[i] > kama[i-1] if i > 0 else False
+        kama_down = kama[i] < kama[i-1] if i > 0 else False
         
-        # KAMA trend signals
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # RSI momentum
+        rsi_value = rsi[i] if not np.isnan(rsi[i]) else 50
+        rsi_overbought = rsi_value > 70
+        rsi_oversold = rsi_value < 30
         
-        # Entry conditions: require both volume and ATR filters
-        long_entry = price_above_kama and volume_filter and atr_filter
-        short_entry = price_below_kama and volume_filter and atr_filter
+        # Entry logic: adapt to market regime
+        long_entry = False
+        short_entry = False
         
-        # Exit conditions: reverse signal
-        long_exit = price_below_kama
-        short_exit = price_above_kama
+        if is_trending:
+            # In trending markets: follow KAMA direction with RSI filter
+            long_entry = kama_up and rsi_value < 70  # Not overbought
+            short_entry = kama_down and rsi_value > 30  # Not oversold
+        elif is_ranging:
+            # In ranging markets: mean reversion at RSI extremes
+            long_entry = rsi_oversold and kama_up  # Oversold + turning up
+            short_entry = rsi_overbought and kama_down  # Overbought + turning down
+        else:
+            # Transition zone: neutral, no entries
+            pass
         
-        # Priority: entry > exit > hold
+        # Exit logic: opposite signal or RSI extreme in trending markets
+        long_exit = False
+        short_exit = False
+        
+        if is_trending:
+            # Exit on opposite KAMA direction
+            long_exit = kama_down
+            short_exit = kama_up
+        else:
+            # Exit on RSI normalization
+            long_exit = rsi_value >= 50
+            short_exit = rsi_value <= 50
+        
+        # Update position
         if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
