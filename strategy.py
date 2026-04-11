@@ -3,19 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d + volume confirmation + chop regime filter
-# - Uses 1d Camarilla pivot levels (H3/L3 for entries, H4/L4 for stops)
-# - Entry when price touches H3/L3 with volume > 1.5x 20-period average
-# - Only trade in ranging markets (choppiness index > 61.8 on 12h)
-# - Exit when price reaches opposite H3/L3 level or volume dries up
+# Hypothesis: 4h Donchian(20) breakout + 1d trend filter (EMA50 > EMA200) + volume confirmation
+# - Donchian breakout on 4h: price > 20-period high for long, price < 20-period low for short
+# - Trend filter: 1d EMA50 > EMA200 for long bias, EMA50 < EMA200 for short bias
+# - Volume confirmation: 4h volume > 1.5x 20-period average
 # - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots work well in ranging markets which are common in bear/consolidation periods
-# - Volume confirmation ensures institutional participation
-# - Chop filter avoids false signals during strong trends
+# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
+# - Works in bull markets (breakouts with volume in uptrend) and bear markets (breakdowns with volume in downtrend)
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,66 +28,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla pivots and chop filter
+    # Load 1d data ONCE before loop for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate pivot point and ranges
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Pre-compute 1d trend bias (1 for uptrend, -1 for downtrend, 0 for neutral)
+    trend_bias = np.zeros(len(ema_50_aligned))
+    trend_bias[ema_50_aligned > ema_200_aligned] = 1
+    trend_bias[ema_50_aligned < ema_200_aligned] = -1
     
-    # Camarilla levels
-    H3 = pivot + (range_1d * 1.1 / 4)
-    L3 = pivot - (range_1d * 1.1 / 4)
-    H4 = pivot + (range_1d * 1.1 / 2)
-    L4 = pivot - (range_1d * 1.1 / 2)
-    
-    # Align 1d levels to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Pre-compute 12h Choppiness Index (chop > 61.8 = ranging market)
-    # Chop = 100 * log10(sum(ATR) / log10(highest_high - lowest_low)) / log10(n)
+    # Pre-compute 4h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # True Range
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
-    
-    # Sum of ATR over 14 periods
-    sum_atr = atr.rolling(window=14, min_periods=14).sum()
-    
-    # Highest high and lowest low over 14 periods
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    range_14 = highest_high - lowest_low
-    
-    # Choppiness Index
-    chop = 100 * np.log10(sum_atr / range_14) / np.log10(14)
-    chop_values = chop.fillna(50).values  # Fill NaN with neutral value
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
-    
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     volume_series = pd.Series(volume)
     volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(chop_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(trend_bias[i])):
             signals[i] = 0.0
             continue
         
@@ -100,38 +68,39 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         
-        # Chop regime filter: only trade in ranging markets (chop > 61.8)
-        chop_filter = chop_aligned[i] > 61.8
+        # Donchian breakout conditions
+        breakout_long = price_close > donchian_high[i-1]  # Close above previous period's high
+        breakout_short = price_close < donchian_low[i-1]  # Close below previous period's low
+        
+        # Trend filter from 1d
+        trend_up = trend_bias[i] == 1
+        trend_down = trend_bias[i] == -1
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Entry conditions: price touches H3/L3 with volume and chop confirmation
-        # Use high/low of bar to capture touches that might not close at the level
-        touch_H3 = price_high >= H3_aligned[i] and price_low <= H3_aligned[i]
-        touch_L3 = price_high >= L3_aligned[i] and price_low <= L3_aligned[i]
-        
+        # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: price touches L3 (support) with volume confirmation in ranging market
-        if touch_L3 and vol_confirm and chop_filter:
+        # Long: Donchian breakout + uptrend + volume confirmation
+        if breakout_long and trend_up and vol_confirm:
             enter_long = True
         
-        # Short: price touches H3 (resistance) with volume confirmation in ranging market
-        if touch_H3 and vol_confirm and chop_filter:
+        # Short: Donchian breakdown + downtrend + volume confirmation
+        if breakout_short and trend_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: price reaches opposite H3/L3 level or volume/chop deteriorates
+        # Exit conditions: opposite Donchian breakout or trend reversal
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price reaches H3 (resistance) OR chop breaks down OR volume dries up
-            exit_long = (price_high >= H3_aligned[i]) or (chop_aligned[i] <= 50) or (volume_current < volume_sma_20[i])
+            # Exit long if Donchian breakdown OR trend turns down
+            exit_long = (price_close < donchian_low[i-1]) or (not trend_up)
         elif position == -1:
-            # Exit short if price reaches L3 (support) OR chop breaks down OR volume dries up
-            exit_short = (price_low <= L3_aligned[i]) or (chop_aligned[i] <= 50) or (volume_current < volume_sma_20[i])
+            # Exit short if Donchian breakout OR trend turns up
+            exit_short = (price_close > donchian_high[i-1]) or (not trend_down)
         
         # Trading logic
         if enter_long and position != 1:
