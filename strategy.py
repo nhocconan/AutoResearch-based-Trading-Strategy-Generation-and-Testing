@@ -1,114 +1,136 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_camarilla_pivot_volume_v1
-# Strategy: 1h Camarilla pivot breakout with volume confirmation and 4h/1d trend filter
-# Timeframe: 1h
+# 6h_1w_1d_supertrend_v1
+# Strategy: 6s Supertrend with weekly trend filter and daily volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels act as support/resistance; breakouts with volume
-# and aligned 4h/1d trend yield high-probability trades. Works in both bull/bear
-# by using trend filter to avoid counter-trend trades. Target 15-37 trades/year.
+# Hypothesis: Supertrend captures trends effectively. Weekly trend filter avoids counter-trend trades during major reversals.
+# Daily volume confirms institutional participation. Designed to work in both bull (follow weekly uptrend) and bear (follow weekly downtrend) markets.
+# Target: 15-35 trades/year to minimize fee drag while capturing major moves.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_pivot_volume_v1"
-timeframe = "1h"
+name = "6h_1w_1d_supertrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 1d EMA(100) for trend filter
-    close_1d = df_1d['close'].values
-    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    # Daily volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # Calculate Camarilla pivots using previous day's OHLC
-    # We'll use daily OHLC from 1d data and align to 1h
-    prev_day_high = df_1d['high'].shift(1).values  # Previous day high
-    prev_day_low = df_1d['low'].shift(1).values    # Previous day low
-    prev_day_close = df_1d['close'].shift(1).values # Previous day close
+    # Supertrend calculation on 6h data
+    atr_period = 10
+    atr_multiplier = 3.0
     
-    # Align previous day's OHLC to 1h timeframe
-    prev_day_high_aligned = align_htf_to_ltf(prices, df_1d, prev_day_high)
-    prev_day_low_aligned = align_htf_to_ltf(prices, df_1d, prev_day_low)
-    prev_day_close_aligned = align_htf_to_ltf(prices, df_1d, prev_day_close)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First element has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate Camarilla levels for each 1h bar
-    # H4 = Close + 1.5*(High-Low) - resistance level
-    # L4 = Close - 1.5*(High-Low) - support level
-    camarilla_high = prev_day_close_aligned + 1.5 * (prev_day_high_aligned - prev_day_low_aligned)
-    camarilla_low = prev_day_close_aligned - 1.5 * (prev_day_high_aligned - prev_day_low_aligned)
+    # ATR
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Volume confirmation: current volume > 1.5x 24-period average
-    vol_series = pd.Series(volume)
-    vol_avg_24 = vol_series.rolling(window=24, min_periods=24).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_24)
+    # Supertrend basic bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (atr_multiplier * atr)
+    lower_band = hl2 - (atr_multiplier * atr)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Initialize Supertrend
+    supertrend = np.full_like(close, np.nan, dtype=float)
+    direction = np.full_like(close, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = hl2[0]
+    direction[0] = 1
+    
+    for i in range(1, n):
+        if np.isnan(atr[i]) or atr[i] == 0:
+            supertrend[i] = supertrend[i-1]
+            direction[i] = direction[i-1]
+            continue
+            
+        if close[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Volume confirmation: current 6h volume > 1.5x daily average volume (scaled to 6h)
+    # Approximate: 6h volume vs daily volume - assuming 4x 6h bars per day
+    vol_threshold = 1.5 * (vol_avg_20_1d_aligned / 4.0)  # Scale daily avg to per 6h bar
+    vol_confirm = volume > vol_threshold
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(10, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_100_1d_aligned[i]) or 
-            np.isnan(camarilla_high[i]) or np.isnan(camarilla_low[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(vol_confirm[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filters
-        uptrend_4h = close[i] > ema_50_4h_aligned[i]
-        uptrend_1d = close[i] > ema_100_1d_aligned[i]
-        downtrend_4h = close[i] < ema_50_4h_aligned[i]
-        downtrend_1d = close[i] < ema_100_1d_aligned[i]
+        # Weekly trend filter: price above/below weekly EMA20
+        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
         
-        uptrend = uptrend_4h and uptrend_1d
-        downtrend = downtrend_4h and downtrend_1d
+        # Supertrend direction
+        st_uptrend = direction[i] == 1
+        st_downtrend = direction[i] == -1
         
-        # Entry logic: Camarilla breakout + volume + trend alignment + session
-        if (close[i] > camarilla_high[i] and vol_confirm[i] and uptrend and 
-            session_filter[i] and position != 1):
+        # Entry logic: Supertrend alignment + weekly trend + volume confirmation
+        if st_uptrend and weekly_uptrend and vol_confirm[i] and position != 1:
             position = 1
-            signals[i] = 0.20
-        elif (close[i] < camarilla_low[i] and vol_confirm[i] and downtrend and 
-              session_filter[i] and position != -1):
+            signals[i] = 0.25
+        elif st_downtrend and weekly_downtrend and vol_confirm[i] and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit: price returns to pivot level or trend change
-        elif position == 1 and (close[i] < prev_day_close_aligned[i] or not uptrend):
+            signals[i] = -0.25
+        # Exit: Supertrend reversal or weekly trend change
+        elif position == 1 and (not st_uptrend or not weekly_uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > prev_day_close_aligned[i] or not downtrend):
+        elif position == -1 and (not st_downtrend or not weekly_downtrend):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
