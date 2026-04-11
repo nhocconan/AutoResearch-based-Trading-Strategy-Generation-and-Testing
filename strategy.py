@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_camarilla_breakout_volume_v1"
+name = "6h_1w_1d_cci_extreme_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,7 +21,7 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 10 or len(df_1d) < 10:
+    if len(df_1w) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate weekly OHLC for weekly trend
@@ -29,7 +29,7 @@ def generate_signals(prices):
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate daily OHLC for Camarilla pivot levels
+    # Calculate daily OHLC for daily CCI
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -41,28 +41,25 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 1.8x 20-period average
+    # 6h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Weekly trend: price above/below 20-week EMA
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Weekly trend: price above/below 50-week SMA
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Daily Camarilla pivot levels (previous day's data)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + range_1d * 1.166
-    s3_1d = close_1d - range_1d * 1.166
-    
+    # Daily CCI(20) - uses typical price and mean deviation
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    sma_tp_20 = pd.Series(typical_price_1d).rolling(window=20, min_periods=20).mean().values
+    mean_deviation = pd.Series(typical_price_1d).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci_1d = (typical_price_1d - sma_tp_20) / (0.015 * mean_deviation)
     # Shift by 1 to use only completed daily bars
-    r3_1d = np.roll(r3_1d, 1)
-    s3_1d = np.roll(s3_1d, 1)
-    r3_1d[0] = np.nan
-    s3_1d[0] = np.nan
-    
-    # Align daily Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    cci_1d = np.roll(cci_1d, 1)
+    cci_1d[0] = np.nan
+    # Align daily CCI to 6h timeframe
+    cci_6h = align_htf_to_ltf(prices, df_1d, cci_1d)
     
     # Session filter: 0-23 UTC (6h bars cover full day)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -74,42 +71,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Decrease hold counter
         if hold_count[i] > 0:
             hold_count[i] -= 1
         
         # Skip if any required data is invalid or outside session or holding
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(cci_6h[i]) or np.isnan(sma_50_1w_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i] or hold_count[i] > 0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation: 6h volume must be elevated
-        volume_confirmed = volume_current > 1.8 * vol_ma
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
         # Weekly trend filter
-        weekly_uptrend = price_close > ema_20_1w_aligned[i]
-        weekly_downtrend = price_close < ema_20_1w_aligned[i]
+        weekly_uptrend = price_close > sma_50_1w_aligned[i]
+        weekly_downtrend = price_close < sma_50_1w_aligned[i]
         
-        # Long conditions: price breaks above R3 with volume and weekly uptrend
-        long_signal = volume_confirmed and (price_high > r3_6h[i]) and weekly_uptrend
+        # Extreme CCI levels for mean reversion
+        cci_overbought = cci_6h[i] > 150
+        cci_oversold = cci_6h[i] < -150
         
-        # Short conditions: price breaks below S3 with volume and weekly downtrend
-        short_signal = volume_confirmed and (price_low < s3_6h[i]) and weekly_downtrend
+        # Long conditions: CCI oversold with volume and weekly uptrend
+        long_signal = volume_confirmed and cci_oversold and weekly_uptrend
         
-        # Exit when price returns to the daily pivot (mean reversion)
-        pivot_1d_today = (high_1d + low_1d + close_1d) / 3
-        pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d_today)
-        exit_long = position == 1 and price_close < pivot_6h[i]
-        exit_short = position == -1 and price_close > pivot_6h[i]
+        # Short conditions: CCI overbought with volume and weekly downtrend
+        short_signal = volume_confirmed and cci_overbought and weekly_downtrend
+        
+        # Exit when CCI returns to neutral zone (-50 to 50)
+        exit_long = position == 1 and cci_6h[i] > -50
+        exit_short = position == -1 and cci_6h[i] < 50
         
         # Trading logic with minimum holding period
         if long_signal and position != 1:
@@ -131,14 +128,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Camarilla breakout using daily pivot levels with volume confirmation and weekly trend filter.
-# Uses daily Camarilla R3/S3 levels (previous day's high/low/close) for intraday structure.
-# Enters long when 6h price breaks above daily R3 with volume >1.8x 6h 20-period average and price above weekly EMA20.
-# Enters short when 6h price breaks below daily S3 with same volume conditions and price below weekly EMA20.
-# Exits when price returns to the daily pivot level (mean reversion within the daily range).
-# Weekly EMA20 filter ensures trades align with higher timeframe trend, reducing false signals in ranging markets.
-# Volume filter reduces false breakouts, targeting 12-30 trades per year per symbol.
-# Minimum holding period of 2 bars (12 hours) reduces churn and forces trades to develop.
-# Position size: 0.25 to manage risk in volatile markets.
-# Designed to work in both bull and bear markets by combining intraday breakouts with higher timeframe trend.
-# Target: 48-120 total trades over 4 years (12-30/year) to minimize fee drag.
+# Hypothesis: 6h CCI extreme reversal with weekly trend filter and volume confirmation.
+# Uses daily CCI(20) to identify extreme overbought/oversold conditions (>150, <-150).
+# Enters long when CCI is deeply oversold (<-150) with volume >1.5x 20-period average and price above weekly SMA50.
+# Enters short when CCI is deeply overbought (>150) with volume >1.5x 20-period average and price below weekly SMA50.
+# Exits when CCI returns to neutral zone (-50 to 50), capturing mean reversion within the daily range.
+# Weekly SMA50 filter ensures trades align with higher timeframe trend, reducing counter-trend trades.
+# Volume filter reduces false signals from low-volume extremes.
+# Designed to work in both bull and bear markets by fading extremes in the direction of weekly trend.
+# Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag.
