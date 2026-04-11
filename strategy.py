@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v4"
+name = "4h_1d_vortex_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,63 +20,68 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
+    # Calculate 1d Vortex Indicator (period=34)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot: P = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Range
-    range_1d = high_1d - low_1d
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Resistance levels: P + (Range * multiplier / 11)
-    r3 = pivot + (range_1d * 1.1 / 11.0)
-    r4 = pivot + (range_1d * 1.5 / 11.0)
-    s3 = pivot - (range_1d * 1.1 / 11.0)
-    s4 = pivot - (range_1d * 1.5 / 11.0)
+    # Vortex movements
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
+    
+    # Sum over period
+    period = 34
+    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
+    
+    # Vortex Indicator
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
     
     # Calculate 1d average volume (20-period)
     volume_1d = df_1d['volume'].values
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align all 1d indicators to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure sufficient data
-    for i in range(20, n):
+    # Start from index 35 to ensure sufficient data
+    for i in range(35, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or
             np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Current 1d volume (aligned)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_surge = vol_1d_current > 2.0 * vol_avg_20_1d_aligned[i]  # 100% above average
+        vol_surge = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]  # 50% above average
         
-        price = close[i]
+        # Long when VI+ > VI- with volume surge
+        long_signal = vi_plus_aligned[i] > vi_minus_aligned[i] and vol_surge
+        # Short when VI- > VI+ with volume surge
+        short_signal = vi_minus_aligned[i] > vi_plus_aligned[i] and vol_surge
         
-        # Long when price breaks above R4 with volume surge
-        long_signal = price > r4_aligned[i] and vol_surge
-        # Short when price breaks below S4 with volume surge
-        short_signal = price < s4_aligned[i] and vol_surge
-        
-        # Exit when price returns to pivot (mean reversion)
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-        exit_long = price < pivot_aligned[i]
-        exit_short = price > pivot_aligned[i]
+        # Exit when Vortex lines cross (mean reversion)
+        exit_long = vi_plus_aligned[i] < vi_minus_aligned[i]
+        exit_short = vi_minus_aligned[i] < vi_plus_aligned[i]
         
         if long_signal and position != 1:
             position = 1
