@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 12h_1d_Camarilla_Pivot_Breakout_Trend
-Hypothesis: Uses 12h timeframe with 1d Camarilla pivot levels for breakout trading.
-Trades breakouts above/below pivot support/resistance levels with volume confirmation.
-Follows 1d trend direction to avoid counter-trend whipsaws. Designed for 15-30 trades/year.
-Works in bull/bear by following higher timeframe trend - avoids counter-trend losses.
+Hypothesis: Combines 12-hour Camarilla pivot levels with 1-day trend filter (EMA50) and volume confirmation.
+Trades breakouts of key pivot levels (H3/L3) in the direction of higher timeframe trend to avoid counter-trend whipsaws.
+Designed for 12-37 trades/year per symbol with high win rate during trends.
+Works in bull/bear by following 1d trend direction - avoids counter-trend losses.
 """
 
 import numpy as np
@@ -17,7 +17,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -26,53 +26,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for pivot levels and trend filter
+    # Load 1d data ONCE before loop for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
-    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
-    # We'll use H3/L3 as resistance/support and H4/L4 as breakout levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
-    
-    # Calculate typical price for pivot point
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    # H4 = close + 1.5 * range
-    # L4 = close - 1.5 * range
-    # H3 = close + 1.25 * range
-    # L3 = close - 1.25 * range
-    H4 = close_1d + 1.5 * range_1d
-    L4 = close_1d - 1.5 * range_1d
-    H3 = close_1d + 1.25 * range_1d
-    L3 = close_1d - 1.25 * range_1d
-    
-    # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: 20-period average
+    # Volume filter: 20-period average (12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 12h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align 1d EMA50 to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Camarilla pivot levels from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Range = high - low
+    daily_range = df_1d['high'] - df_1d['low']
+    # Camarilla levels
+    # H4 = close + 1.5 * (high - low) * 1.1
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low) * 1.1
+    camarilla_h3 = close_1d + 1.1 * daily_range
+    camarilla_l3 = close_1d - 1.1 * daily_range
+    
+    # Align pivot levels to 12h timeframe (previous day's levels)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3.values)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3.values)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -84,16 +78,16 @@ def generate_signals(prices):
         downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Breakout conditions using Camarilla levels
-        breakout_H4 = close[i] > H4_aligned[i-1]  # Break above H4 level
-        breakdown_L4 = close[i] < L4_aligned[i-1]  # Break below L4 level
+        breakout_h3 = close[i] > camarilla_h3_aligned[i-1]  # Break above H3
+        breakdown_l3 = close[i] < camarilla_l3_aligned[i-1]  # Break below L3
         
         # Entry conditions: only trade in direction of 1d trend
-        long_entry = breakout_H4 and volume_filter and uptrend
-        short_entry = breakdown_L4 and volume_filter and downtrend
+        long_entry = breakout_h3 and volume_filter and uptrend
+        short_entry = breakdown_l3 and volume_filter and downtrend
         
-        # Exit conditions: return to opposite H3/L3 level or trend reversal
-        long_exit = (close[i] < L3_aligned[i]) or (not uptrend)  # Break below L3 or trend change
-        short_exit = (close[i] > H3_aligned[i]) or (not downtrend)  # Break above H3 or trend change
+        # Exit conditions: return to opposite Camarilla level or trend reversal
+        long_exit = (close[i] < camarilla_l3_aligned[i]) or (not uptrend)  # Break below L3 or trend change
+        short_exit = (close[i] > camarilla_h3_aligned[i]) or (not downtrend)  # Break above H3 or trend change
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
