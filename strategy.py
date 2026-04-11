@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Bollinger Band Squeeze + 12h Volume Spike + 1d KAMA Trend Filter
-# - Bollinger Band Squeeze: BB Width < 20th percentile indicates low volatility (coiled spring)
-# - Entry: Breakout above upper BB (long) or below lower BB (short) with 12h volume spike > 2x average
-# - Trend filter: Price must be above/below 1d KAMA to align with higher timeframe trend
-# - Exit: Opposite BB breakout or volatility expansion (BB Width > 80th percentile)
-# - Works in bull markets (trend continuation breakouts) and bear markets (sharp reversals after squeeze)
+# Hypothesis: 12h Donchian breakout with volume confirmation and ADX trend filter
+# - Donchian(20) breakout: buy when price breaks above 20-period high, sell when breaks below 20-period low
+# - Volume confirmation: current volume > 1.5x 20-period average volume
+# - ADX trend filter: only trade when ADX > 25 (trending market) to avoid chop
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits for 4h
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
+# - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
+# - 1d ADX provides trend filter, reducing false signals in choppy markets
 
-name = "4h_12h_1d_bb_squeeze_volume_kama_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,61 +29,76 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for volume spike detection
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return signals
-    
-    # Load 1d data ONCE before loop for KAMA trend filter
+    # Load 1d data ONCE before loop for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 14:
         return signals
     
-    # Pre-compute Bollinger Bands (20, 2) on 4h
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean().values
-    dev = close_series.rolling(window=20, min_periods=20).std().values
-    upper_band = basis + 2.0 * dev
-    lower_band = basis - 2.0 * dev
-    bb_width = (upper_band - lower_band) / basis  # Normalized width
-    
-    # Pre-compute BB width percentiles for squeeze detection (using expanding window)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.expanding(min_periods=50).quantile(0.2).values  # 20th percentile
-    bb_width_pct80 = bb_width_series.expanding(min_periods=50).quantile(0.8).values  # 80th percentile
-    
-    # Pre-compute 12h volume average (20-period)
-    volume_12h = df_12h['volume'].values
-    volume_12h_series = pd.Series(volume_12h)
-    volume_12h_avg = volume_12h_series.rolling(window=20, min_periods=20).mean().values
-    volume_12h_avg_aligned = align_htf_to_ltf(prices, df_12h, volume_12h_avg)
-    
-    # Pre-compute 1d KAMA (adaptive moving average)
+    # Pre-compute 1d ADX (14-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, n=10))  # |close(t) - close(t-10)|
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # sum |close(t) - close(t-1)| over 10 periods
-    # Handle array shapes
-    change_padded = np.concatenate([[np.nan]*10, change])
-    volatility_padded = np.concatenate([[np.nan]*10, volatility])
-    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2 EMA, slow=30 EMA
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    for i in range(50, n):  # Start after 50-bar warmup
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Plus Directional Movement (+DM)
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_plus[0] = 0
+    
+    # Minus Directional Movement (-DM)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_minus[0] = 0
+    
+    # Smoothed values (using Wilder's smoothing)
+    atr = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
+    
+    # Initial values (first 14 periods)
+    atr[13] = np.mean(tr[1:15])
+    dm_plus_smooth[13] = np.mean(dm_plus[1:15])
+    dm_minus_smooth[13] = np.mean(dm_minus[1:15])
+    
+    # Wilder's smoothing for remaining periods
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
+    
+    # Directional Indicators
+    plus_di = 100 * dm_plus_smooth / atr
+    minus_di = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = np.zeros_like(atr)
+    dx[13:] = 100 * np.abs(plus_di[13:] - minus_di[13:]) / (plus_di[13:] + minus_di[13:])
+    
+    adx = np.zeros_like(dx)
+    adx[26] = np.mean(dx[14:28])  # First ADX value
+    for i in range(27, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute Donchian channels on 12h data (20-period)
+    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Pre-compute 12h volume SMA (20-period)
+    volume_series = pd.Series(volume)
+    volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(20, n):  # Start after 20-bar warmup for Donchian
         # Skip if any required data is invalid
-        if (np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(bb_width[i]) or np.isnan(bb_width_pct[i]) or np.isnan(bb_width_pct80[i]) or
-            np.isnan(volume_12h_avg_aligned[i]) or np.isnan(kama_aligned[i])):
+        if (np.isnan(high_roll_max[i]) or np.isnan(low_roll_min[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -93,45 +108,38 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         
-        # Bollinger Squeeze condition: low volatility (coiled spring)
-        squeeze = bb_width[i] < bb_width_pct[i]
+        # Donchian breakout conditions
+        breakout_up = price_close > high_roll_max[i-1]  # Close above previous period's high
+        breakdown_down = price_close < low_roll_min[i-1]  # Close below previous period's low
         
-        # Breakout conditions
-        breakout_up = price_high > upper_band[i]  # Break above upper band
-        breakout_down = price_low < lower_band[i]  # Break below lower band
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Volume spike: 12h volume > 2x average (confirming institutional interest)
-        volume_spike = volume_current > 2.0 * volume_12h_avg_aligned[i]
-        
-        # KAMA trend filter
-        price_above_kama = price_close > kama_aligned[i]
-        price_below_kama = price_close < kama_aligned[i]
-        
-        # Volatility expansion exit condition
-        volatility_expansion = bb_width[i] > bb_width_pct80[i]
+        # ADX trend filter: only trade when ADX > 25 (trending market)
+        trend_filter = adx_aligned[i] > 25
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Squeeze + upward breakout + volume spike + price above KAMA
-        if squeeze and breakout_up and volume_spike and price_above_kama:
+        # Long: Donchian breakout up + volume confirmation + trend filter
+        if breakout_up and vol_confirm and trend_filter:
             enter_long = True
         
-        # Short: Squeeze + downward breakout + volume spike + price below KAMA
-        if squeeze and breakout_down and volume_spike and price_below_kama:
+        # Short: Donchian breakdown down + volume confirmation + trend filter
+        if breakdown_down and vol_confirm and trend_filter:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: opposite Donchian breakout or loss of trend
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long on downward breakout OR volatility expansion
-            exit_long = breakout_down or volatility_expansion
+            # Exit long if breakdown down OR ADX falls below 20 (loss of trend)
+            exit_long = breakdown_down or (adx_aligned[i] < 20)
         elif position == -1:
-            # Exit short on upward breakout OR volatility expansion
-            exit_short = breakout_up or volatility_expansion
+            # Exit short if breakout up OR ADX falls below 20 (loss of trend)
+            exit_short = breakout_up or (adx_aligned[i] < 20)
         
         # Trading logic
         if enter_long and position != 1:
