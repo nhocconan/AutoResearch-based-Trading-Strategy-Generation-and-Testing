@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_volume_v1"
+name = "4h_1d_keltner_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,55 +20,45 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for 1d
+    # Calculate 1d EMA(20) and ATR(10) for Keltner Channel
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Pivot point = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
+    # EMA(20) of close
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # True Range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0  # First value
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Camarilla levels
-    # Resistance levels
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    r2 = close_1d + (range_1d * 1.1 / 6)
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    r4 = close_1d + (range_1d * 1.1 / 2)
-    # Support levels
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    s2 = close_1d - (range_1d * 1.1 / 6)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    s4 = close_1d - (range_1d * 1.1 / 2)
+    # Keltner Channel: EMA(20) ± 2 * ATR(10)
+    upper_keltner = ema_20 + 2.0 * atr_10
+    lower_keltner = ema_20 - 2.0 * atr_10
     
     # Calculate 1d average volume (20-period)
     volume_1d = df_1d['volume'].values
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align all 1d indicators to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure sufficient data for calculations
+    # Start from index 20 to ensure sufficient data
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -78,14 +68,15 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # Long when price touches S3 with volume surge (strong support)
-        long_signal = price <= s3_aligned[i] and vol_surge
-        # Short when price touches R3 with volume surge (strong resistance)
-        short_signal = price >= r3_aligned[i] and vol_surge
+        # Long when price breaks above upper Keltner band with volume surge
+        long_signal = price > upper_keltner_aligned[i] and vol_surge
+        # Short when price breaks below lower Keltner band with volume surge
+        short_signal = price < lower_keltner_aligned[i] and vol_surge
         
-        # Exit when price returns to pivot (mean reversion to mean)
-        exit_long = price >= pivot_aligned[i]
-        exit_short = price <= pivot_aligned[i]
+        # Exit when price returns to EMA(20) (mean reversion to mean)
+        ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+        exit_long = price < ema_20_aligned[i]
+        exit_short = price > ema_20_aligned[i]
         
         if long_signal and position != 1:
             position = 1
