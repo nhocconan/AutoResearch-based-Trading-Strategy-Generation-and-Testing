@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_cci_extreme_volume_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,22 +26,52 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return signals
     
-    # Calculate CCI on daily timeframe (20-period)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std()
-    cci = (typical_price - tp_mean) / (0.015 * tp_std)
-    cci = cci.values
+    # Calculate daily Donchian channels (20-period high/low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align daily CCI to 6h timeframe
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    # 20-period Donchian high and low (using previous day's data to avoid look-ahead)
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Volume confirmation: volume > 2x 20-period average (more stringent)
+    # Align daily Donchian to 4h timeframe
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Trend filter: ADX > 25 for trending market
+    # Calculate ADX components
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Smooth +DM and -DM
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    trending_market = adx > 25
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if np.isnan(cci_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
@@ -49,26 +79,35 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        cci_val = cci_aligned[i]
+        upper_channel = donchian_high_20_aligned[i]
+        lower_channel = donchian_low_20_aligned[i]
+        adx_val = adx[i]
+        trending = trending_market[i]
         
-        # Volume confirmation (more stringent: 2x average)
-        volume_confirmed = volume_current > 2.0 * vol_ma_20[i]
+        # Volume confirmation
+        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Entry signals
+        # Entry signals - only in trending markets
         long_signal = False
         short_signal = False
         
-        # Long: CCI < -100 (oversold) + volume confirmation
-        if cci_val < -100 and volume_confirmed:
+        # Long: price breaks above upper Donchian channel with volume and trend
+        if price_high > upper_channel and volume_confirmed and trending:
             long_signal = True
         
-        # Short: CCI > 100 (overbought) + volume confirmation
-        if cci_val > 100 and volume_confirmed:
+        # Short: price breaks below lower Donchian channel with volume and trend
+        if price_low < lower_channel and volume_confirmed and trending:
             short_signal = True
         
-        # Exit conditions: CCI returns to neutral zone (-50 to 50)
-        exit_long = position == 1 and cci_val > -50
-        exit_short = position == -1 and cci_val < 50
+        # Exit conditions
+        # Stop loss conditions
+        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr[i])
+        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr[i])
+        
+        # Exit when price returns to middle of channel (mean reversion within trend)
+        middle_channel = (upper_channel + lower_channel) / 2.0
+        exit_long = position == 1 and price_close < middle_channel
+        exit_short = position == -1 and price_close > middle_channel
         
         # Trading logic
         if long_signal and position != 1:
@@ -79,10 +118,10 @@ def generate_signals(prices):
             position = -1
             entry_price = price_close
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        elif position == 1 and (exit_long or stop_long):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and (exit_short or stop_short):
             position = 0
             signals[i] = 0.0
         else:
@@ -91,10 +130,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: CCI extreme + volume strategy on 6h timeframe.
-# Uses daily CCI(20) to identify extreme overbought/oversold conditions (>100/< -100).
-# Requires volume confirmation (>2x 20-period average) to ensure institutional participation.
-# Enters long on extreme oversold with volume, short on extreme overbought with volume.
-# Exits when CCI returns to neutral zone (-50 to 50).
-# Works in both bull and bear markets by trading mean reversion from extremes.
-# Designed for 6h timeframe with selective entries to target 50-150 total trades over 4 years.
+# Hypothesis: Donchian breakout strategy with volume confirmation and ADX trend filter.
+# Enters long when price breaks above 20-day Donchian high with volume confirmation (>1.5x avg volume) in trending markets (ADX > 25).
+# Enters short when price breaks below 20-day Donchian low with volume confirmation and ADX > 25.
+# Uses daily timeframe for Donchian channels to capture multi-day breakouts.
+# Volume confirmation ensures institutional participation, ADX filter avoids whipsaws in sideways markets.
+# Exits when price returns to the middle of the channel or ATR stop loss (2.0x) is hit.
+# Designed for 4h timeframe with tight entry conditions to target 75-200 total trades over 4 years.
+# Works in both bull and bear markets by trading breakouts in either direction with trend filter.
