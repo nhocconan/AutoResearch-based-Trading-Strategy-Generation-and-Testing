@@ -1,21 +1,15 @@
-# USES: 4h primary, 1d HTF - Camarilla pivot + volume spike + ADX trend filter + ATR stop
-# Hypothesis: Price action at key institutional levels (Camarilla) with volume confirmation
-# and trend alignment (ADX) captures institutional breakouts while avoiding false moves.
-# Works in bull/bear by filtering for trending conditions (ADX > 25).
-# Target: 20-40 trades/year per symbol for low friction and high edge.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_adx_volume_v1"
+name = "4h_1d_camarilla_adx_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -40,17 +34,12 @@ def generate_signals(prices):
     camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
     camarilla_pivot = close_1d  # Previous day's close
     
-    # Calculate 1d average volume (20-period) for volume filter
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
     # Calculate ADX on 1d for trend strength filter
-    # ADX requires TR, +DM, -DM
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First period has no prior close
-    tr2[0] = tr1[0]  # Use only high-low for first period
+    tr1[0] = 0
+    tr2[0] = tr1[0]
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
@@ -61,14 +50,11 @@ def generate_signals(prices):
     plus_dm[0] = 0
     minus_dm[0] = 0
     
-    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
     def wilders_smoothing(data, period):
         result = np.full_like(data, np.nan)
         if len(data) < period:
             return result
-        # First value is simple average
         result[period-1] = np.mean(data[:period])
-        # Subsequent values: smoothed = (prev_smoothed * (period-1) + current) / period
         for i in range(period, len(data)):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
@@ -78,7 +64,6 @@ def generate_signals(prices):
     plus_dm_smoothed = wilders_smoothing(plus_dm, atr_period)
     minus_dm_smoothed = wilders_smoothing(minus_dm, atr_period)
     
-    # Avoid division by zero
     plus_di = np.where(tr_smoothed != 0, plus_dm_smoothed / tr_smoothed * 100, 0)
     minus_di = np.where(tr_smoothed != 0, minus_dm_smoothed / tr_smoothed * 100, 0)
     dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
@@ -91,23 +76,23 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 50 to ensure sufficient data for ADX
-    for i in range(50, n):
+    # Start from index 80 to ensure sufficient data for ADX
+    for i in range(80, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(strong_trend_aligned[i])):
+            np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Current 1d volume (aligned)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_spike = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]  # 50% above average
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume)[i]
+        vol_avg_20_1d = pd.Series(align_htf_to_ltf(prices, df_1d, volume)).rolling(window=20, min_periods=20).mean().values[i]
+        vol_spike = vol_1d_current > 1.5 * vol_avg_20_1d  # 50% above average
         
         price = close[i]
         
