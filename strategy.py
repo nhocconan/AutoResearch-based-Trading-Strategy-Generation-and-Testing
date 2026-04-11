@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 6h_12h_donchian_volume_trend_v1
-# Strategy: 6h Donchian breakout with 12h EMA trend filter and volume confirmation
-# Timeframe: 6h
+# 4h_1d_camarilla_breakout_v32
+# Strategy: 4h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture trend continuation. 12h EMA confirms higher timeframe trend direction.
-# Volume > 1.5x 20-period average confirms institutional participation. Designed for low trade frequency (~20-40/year)
-# to minimize fee drag. Works in bull markets via long breakouts and bear markets via short breakdowns.
+# Hypothesis: Camarilla levels act as intraday support/resistance. Breakouts above H3 or below L3 with 1d EMA trend and volume capture institutional moves.
+# Works in bull markets via long breakouts and bear markets via short breakdowns. Designed for low trade frequency (~20-50/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_donchian_volume_trend_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v32"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,21 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 6h Donchian channels (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Camarilla levels (based on previous day)
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    camarilla_range = prev_high - prev_low
+    h3 = prev_close + 1.1 * camarilla_range
+    l3 = prev_close - 1.1 * camarilla_range
     
-    # 6h volume average (20-period) for confirmation
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 4h volume average (20-period) for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -48,35 +57,35 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(h3[i]) or np.isnan(l3[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Donchian breakout signals
-        breakout_up = high[i] > high_max_20[i-1]
-        breakdown_down = low[i] < low_min_20[i-1]
+        # Breakout signals
+        breakout_up = high[i] > h3[i]
+        breakdown_down = low[i] < l3[i]
         
-        # 12h EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_50_12h_aligned[i]
-        trend_bearish = close[i] < ema_50_12h_aligned[i]
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: Donchian breakout up AND bullish trend AND volume confirmation
+        # Long: Breakout above H3 AND bullish trend AND volume confirmation
         if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Donchian breakdown down AND bearish trend AND volume confirmation
+        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
         elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite Donchian signal (breakdown for long, breakout for short)
-        elif position == 1 and breakdown_down:
+        # Exit: Opposite Camarilla level touch (L3 for long, H3 for short)
+        elif position == 1 and low[i] < l3[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and breakout_up:
+        elif position == -1 and high[i] > h3[i]:
             position = 0
             signals[i] = 0.0
         else:
