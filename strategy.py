@@ -1,18 +1,9 @@
-# 4h_1d_donchian_volume_breakout_v1
-# Hypothesis: 4h Donchian channel breakout with 1d trend filter and volume confirmation
-# - Long when price breaks above 4h Donchian upper (20) + price > 1d EMA200 + volume > 1.5x average
-# - Short when price breaks below 4h Donchian lower (20) + price < 1d EMA200 + volume > 1.5x average
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 25-40 trades/year (100-160 total over 4 years) to stay within fee limits
-# - Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume)
-# - 1d EMA200 filter ensures trades align with higher timeframe trend
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_breakout_v1"
+name = "4h_1d_keltner_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,66 +20,76 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for EMA trend filter
+    # Load 1d data ONCE before loop for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 20:
         return signals
     
-    # Pre-compute 1d EMA200
+    # Calculate 14-period ATR on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Pre-compute 4h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Pre-compute 4h volume SMA (20-period)
-    volume_series = pd.Series(volume)
-    volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate Keltner Channels on 4h data (20-period EMA, 2.0 ATR multiplier)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_20_4h = pd.Series(high - low).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = ema_20 + 2.0 * atr_20_4h
+    keltner_lower = ema_20 - 2.0 * atr_20_4h
     
-    for i in range(100, n):  # Start after 100-bar warmup
+    # Volume confirmation: 20-period average
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Current price data
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume_current > 1.3 * volume_sma_20[i]
         
-        # 1d EMA200 trend filter
-        price_above_ema200 = price_close > ema200_1d_aligned[i]
-        price_below_ema200 = price_close < ema200_1d_aligned[i]
+        # Higher timeframe volatility filter: only trade when 1d ATR is elevated
+        # (indicates active market, avoids choppy sideways periods)
+        if i >= 20:  # Need enough history for ATR average
+            atr_ma_20 = np.nanmean(atr_14_1d_aligned[max(0, i-19):i+1])
+            vol_filter = atr_14_1d_aligned[i] > 0.8 * atr_ma_20
+        else:
+            vol_filter = True
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Donchian breakout + price above 1d EMA200 + volume confirmation
-        if price_close > donchian_high[i] and price_above_ema200 and vol_confirm:
+        # Long: Price breaks above Keltner upper + volume confirmation + volatility filter
+        if price_close > keltner_upper[i] and vol_confirm and vol_filter:
             enter_long = True
         
-        # Short: Donchian breakdown + price below 1d EMA200 + volume confirmation
-        if price_close < donchian_low[i] and price_below_ema200 and vol_confirm:
+        # Short: Price breaks below Keltner lower + volume confirmation + volatility filter
+        if price_close < keltner_lower[i] and vol_confirm and vol_filter:
             enter_short = True
         
-        # Exit conditions: opposite Donchian breach or price crosses 1d EMA200
+        # Exit conditions: price crosses back through the EMA (middle line)
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below Donchian lower OR crosses below 1d EMA200
-            exit_long = price_close < donchian_low[i] or (not price_above_ema200)
+            # Exit long if price crosses below EMA20
+            exit_long = price_close < ema_20[i]
         elif position == -1:
-            # Exit short if price breaks above Donchian upper OR crosses above 1d EMA200
-            exit_short = price_close > donchian_high[i] or (not price_below_ema200)
+            # Exit short if price crosses above EMA20
+            exit_short = price_close > ema_20[i]
         
         # Trading logic
         if enter_long and position != 1:
