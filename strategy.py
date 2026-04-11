@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v3
-# Strategy: 4h Camarilla pivot breakout with 1d volume and ADX trend filter
+# 4h_1d_vortex_volume_v1
+# Strategy: 4h Vortex indicator breakout with 1d volume and ADX trend filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels from prior 1d act as strong support/resistance.
-# Breakouts above/below these levels with above-average 1d volume and ADX > 25
-# indicate institutional participation with trend strength. Works in bull (breakouts continue)
-# and bear (breakdowns continue) markets. Volume and trend filters reduce false breakouts.
-# Target: 20-50 trades/year.
+# Hypothesis: Vortex identifies trend initiation. When VI+ crosses above VI- with above-average
+# 1d volume and ADX > 25, it signals strong trend initiation. Works in bull (VI+ > VI-) and
+# bear (VI- > VI+) markets. Volume and trend filters reduce false signals. Target: 20-50 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v3"
+name = "4h_1d_vortex_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,48 +32,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels from previous day
-    # HLC of previous 1d bar
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
-    
-    # Camarilla levels: R4, R3, R2, R1, S1, S2, S3, S4
-    # R4 = Close + ((High - Low) * 1.1/2)
-    # R3 = Close + ((High - Low) * 1.1/4)
-    # R2 = Close + ((High - Low) * 1.1/6)
-    # R1 = Close + ((High - Low) * 1.1/12)
-    # S1 = Close - ((High - Low) * 1.1/12)
-    # S2 = Close - ((High - Low) * 1.1/6)
-    # S3 = Close - ((High - Low) * 1.1/4)
-    # S4 = Close - ((High - Low) * 1.1/2)
-    rng = ph - pl
-    r4 = pc + (rng * 1.1 / 2)
-    r3 = pc + (rng * 1.1 / 4)
-    r2 = pc + (rng * 1.1 / 6)
-    r1 = pc + (rng * 1.1 / 12)
-    s1 = pc - (rng * 1.1 / 12)
-    s2 = pc - (rng * 1.1 / 6)
-    s3 = pc - (rng * 1.1 / 4)
-    s4 = pc - (rng * 1.1 / 2)
-    
-    # Align Camarilla levels to 4h
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # 1d volume average (20-period) for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    
-    # Calculate ADX on 1d for trend strength
-    # ADX calculation requires high, low, close
+    # Calculate 1d Vortex indicator
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -86,6 +43,31 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
+    # Vortex Indicator components
+    vm_plus = np.abs(high_1d - np.concatenate([[low_1d[0]], low_1d[:-1]]))
+    vm_minus = np.abs(low_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]))
+    
+    # Smoothing periods (typically 14)
+    period = 14
+    
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr14 = wilders_smooth(tr, period)
+    vm_plus_14 = wilders_smooth(vm_plus, period)
+    vm_minus_14 = wilders_smooth(vm_minus, period)
+    
+    # VI+ and VI-
+    vi_plus = np.where(tr14 != 0, vm_plus_14 / tr14, 0)
+    vi_minus = np.where(tr14 != 0, vm_minus_14 / tr14, 0)
+    
+    # Calculate ADX on 1d for trend strength
     # Directional Movement
     dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
                        (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
@@ -94,17 +76,8 @@ def generate_signals(prices):
                         (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
                         np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    tr14 = wilders_smooth(tr, 14)
-    dm_plus_14 = wilders_smooth(dm_plus, 14)
-    dm_minus_14 = wilders_smooth(dm_minus, 14)
+    dm_plus_14 = wilders_smooth(dm_plus, period)
+    dm_minus_14 = wilders_smooth(dm_minus, period)
     
     # DI+ and DI-
     di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
@@ -113,21 +86,25 @@ def generate_signals(prices):
     # DX and ADX
     dx = np.where((di_plus + di_minus) != 0, 
                   100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smooth(dx, 14)
+    adx = wilders_smooth(dx, period)
     
-    # Align ADX to 4h
+    # Align indicators to 4h
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 1d volume average (20-period) for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -138,20 +115,34 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 indicates strong trend
         trend_filter = adx_aligned[i] > 25
         
-        # Breakout conditions with volume and trend confirmation
-        # Long: close > R1 with volume confirmation and trend filter
-        # Short: close < S1 with volume confirmation and trend filter
-        long_breakout = close[i] > r1_aligned[i] and vol_confirm and trend_filter
-        short_breakout = close[i] < s1_aligned[i] and vol_confirm and trend_filter
+        # Vortex crossover conditions with volume and trend confirmation
+        # Long: VI+ crosses above VI- (VI+ > VI- and previous VI+ <= previous VI-)
+        # Short: VI- crosses above VI+ (VI- > VI+ and previous VI- <= previous VI+)
+        if i > 0:
+            vi_plus_cross_above = vi_plus_aligned[i] > vi_minus_aligned[i] and vi_plus_aligned[i-1] <= vi_minus_aligned[i-1]
+            vi_minus_cross_above = vi_minus_aligned[i] > vi_plus_aligned[i] and vi_minus_aligned[i-1] <= vi_plus_aligned[i-1]
+        else:
+            vi_plus_cross_above = False
+            vi_minus_cross_above = False
         
-        # Exit conditions: reverse breakout OR trend weakening
-        long_exit = (close[i] < s1_aligned[i]) or (adx_aligned[i] < 20)
-        short_exit = (close[i] > r1_aligned[i]) or (adx_aligned[i] < 20)
+        long_signal = vi_plus_cross_above and vol_confirm and trend_filter
+        short_signal = vi_minus_cross_above and vol_confirm and trend_filter
         
-        if long_breakout and position != 1:
+        # Exit conditions: reverse Vortex crossover OR trend weakening
+        if i > 0:
+            vi_minus_cross_above_vi_plus = vi_minus_aligned[i] > vi_plus_aligned[i] and vi_minus_aligned[i-1] <= vi_plus_aligned[i-1]
+            vi_plus_cross_above_vi_minus = vi_plus_aligned[i] > vi_minus_aligned[i] and vi_plus_aligned[i-1] <= vi_minus_aligned[i-1]
+        else:
+            vi_minus_cross_above_vi_plus = False
+            vi_plus_cross_above_vi_minus = False
+        
+        long_exit = vi_minus_cross_above_vi_plus or (adx_aligned[i] < 20)
+        short_exit = vi_plus_cross_above_vi_minus or (adx_aligned[i] < 20)
+        
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
