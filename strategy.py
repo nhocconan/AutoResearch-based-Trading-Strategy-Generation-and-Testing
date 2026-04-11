@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + chop regime filter
-# - Long when price breaks above 4h Donchian upper band (20-period high) + 1d volume > 2.0x 20-period volume average + chop < 61.8 (trending)
-# - Short when price breaks below 4h Donchian lower band (20-period low) + 1d volume > 2.0x 20-period volume average + chop < 61.8 (trending)
-# - Exit when price reverts to 4h Donchian middle band (20-period midpoint) or ATR stoploss triggered (adverse move > 2.5*ATR)
+# Hypothesis: 4h Donchian(20) breakout + 1d HMA trend filter + volume spike + ATR stoploss
+# - Long when price breaks above 4h Donchian upper band + 1d HMA(21) rising + 1d volume > 2.0x 20-period average
+# - Short when price breaks below 4h Donchian lower band + 1d HMA(21) falling + 1d volume > 2.0x 20-period average
+# - Exit when price reverts to 4h Donchian middle band or ATR stoploss triggered (adverse move > 2.5*ATR)
 # - Uses discrete position sizing (0.25) to minimize fee churn
-# - Works in bull/bear: Donchian captures institutional breakouts; volume confirms participation; chop filter avoids whipsaws in ranging markets
+# - HMA filter ensures we only trade in the direction of the daily trend, reducing false breakouts
+# - Volume spike confirms institutional participation
 # - Target: 20-40 trades/year to stay within fee drag limits while capturing strong moves
 
-name = "4h_1d_donchian_volume_chop_v2"
+name = "4h_1d_donchian_hma_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,7 +34,7 @@ def generate_signals(prices):
     if len(df_4h) < 50:
         return signals
     
-    # Load 1d data ONCE before loop for volume and chop (MTF rule compliance)
+    # Load 1d data ONCE before loop for HMA and volume (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
@@ -63,43 +64,50 @@ def generate_signals(prices):
     atr_20 = tr.rolling(window=20, min_periods=20).mean().values
     atr_20_aligned = align_htf_to_ltf(prices, df_4h, atr_20)
     
+    # Pre-compute 1d HMA(21) for trend filter
+    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights / weights.sum(), mode='valid')
+    
+    close_1d = df_1d['close'].values
+    if len(close_1d) >= 21:
+        wma_half = wma(close_1d, half_len)
+        wma_full = wma(close_1d, 21)
+        # Handle array lengths
+        raw_hma = 2 * wma_half[-len(wma_full):] - wma_full
+        hma_21 = wma(raw_hma, sqrt_len)
+        # Pad to match original length
+        hma_21_padded = np.full(len(close_1d), np.nan)
+        hma_21_padded[half_len - 1 + len(hma_21):] = hma_21
+        hma_21_values = hma_21_padded
+    else:
+        hma_21_values = np.full(len(close_1d), np.nan)
+    
+    # HMA rising/falling
+    hma_rising = np.zeros_like(hma_21_values, dtype=bool)
+    hma_falling = np.zeros_like(hma_21_values, dtype=bool)
+    hma_rising[1:] = hma_21_values[1:] > hma_21_values[:-1]
+    hma_falling[1:] = hma_21_values[1:] < hma_21_values[:-1]
+    
+    # Align HMA trend to 4h timeframe
+    hma_rising_aligned = align_htf_to_ltf(prices, df_1d, hma_rising)
+    hma_falling_aligned = align_htf_to_ltf(prices, df_1d, hma_falling)
+    
     # Pre-compute 1d volume SMA for confirmation
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 1d chop regime filter (Choppiness Index)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1_1d = pd.Series(high_1d).rolling(2).max() - pd.Series(low_1d).rolling(2).min()
-    tr2_1d = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d))
-    tr3_1d = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d))
-    tr_1d = pd.concat([tr1_1d, tr2_1d, tr3_1d], axis=1).max(axis=1)
-    
-    # Sum of TR over 14 periods
-    sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum_tr_14 / (hh_14 - ll_14)) / log10(14)
-    # Avoid division by zero and log of zero/negative
-    denominator = hh_14 - ll_14
-    chop_raw = np.where((denominator > 0) & (sum_tr_14 > 0), 
-                        100 * np.log10(sum_tr_14 / denominator) / np.log10(14), 
-                        50.0)  # Default to neutral when invalid
-    chop = chop_raw
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
             np.isnan(donchian_middle_aligned[i]) or np.isnan(atr_20_aligned[i]) or
-            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(volume_sma_20_1d_aligned[i]) or np.isnan(hma_rising_aligned[i]) or
+            np.isnan(hma_falling_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -113,17 +121,17 @@ def generate_signals(prices):
         volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
         vol_confirm = volume_1d_aligned[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Chop regime filter: chop < 61.8 indicates trending market (good for breakouts)
-        chop_current = chop_aligned[i]
-        trending_regime = chop_current < 61.8
+        # HMA trend filter
+        hma_up = hma_rising_aligned[i]
+        hma_down = hma_falling_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close_price > donchian_upper_aligned[i]
         breakout_down = close_price < donchian_lower_aligned[i]
         
         # Entry conditions
-        enter_long = breakout_up and vol_confirm and trending_regime
-        enter_short = breakout_down and vol_confirm and trending_regime
+        enter_long = breakout_up and hma_up and vol_confirm
+        enter_short = breakout_down and hma_down and vol_confirm
         
         # Exit conditions
         exit_long = (position == 1 and 
