@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR-based stoploss
-# - Long: Price breaks above Donchian upper channel (20-period high) + volume > 1.5x 20-period average
-# - Short: Price breaks below Donchian lower channel (20-period low) + volume > 1.5x 20-period average
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR trailing stop
+# - Long: Price breaks above Donchian upper channel (20-period high) + volume > 1.5x 20-period 1d average volume
+# - Short: Price breaks below Donchian lower channel (20-period low) + volume > 1.5x 20-period 1d average volume
 # - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Donchian breakout
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
 # - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Volume confirmation filters out weak breakouts and increases signal quality
 # - ATR stoploss manages risk during volatile periods
 
-name = "4h_1d_donchian_breakout_volume_v1"
+name = "4h_1d_donchian_breakout_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
