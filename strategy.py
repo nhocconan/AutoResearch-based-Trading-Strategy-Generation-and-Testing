@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_keltner_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_trix_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,100 +22,122 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 100:
         return signals
     
-    # Calculate 20-period ATR for Keltner channels
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift())
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_20 = tr.rolling(window=20, min_periods=20).mean().values
+    # Calculate daily TRIX (15-period EMA applied 3 times)
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period EMA for middle line
-    ema_20 = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # TRIX calculation: EMA(EMA(EMA(close, 15), 15), 15)
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
     
-    # Upper and lower Keltner channels
-    keltner_upper = ema_20 + 2.0 * atr_20
-    keltner_lower = ema_20 - 2.0 * atr_20
+    # TRIX = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix = trix_raw.fillna(0).values
     
     # Shift by 1 to use only completed daily bars
-    keltner_upper = np.roll(keltner_upper, 1)
-    keltner_lower = np.roll(keltner_lower, 1)
-    ema_20 = np.roll(ema_20, 1)
-    keltner_upper[0] = np.nan
-    keltner_lower[0] = np.nan
-    ema_20[0] = np.nan
+    trix = np.roll(trix, 1)
+    trix[0] = 0
     
-    # Align 1d indicators to 12h timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Align TRIX to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Calculate 12-period ATR for stoploss
-    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    atr_12 = pd.Series(tr_12h).rolling(window=12, min_periods=12).mean().values
+    # Calculate 4h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume filter: volume > 1.3x 20-period average
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate 4h volume ratio (current vs 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(30, n):  # Start after warmup
+    # Calculate 4h ADX(14) for trend strength
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    for i in range(140, n):  # Start after warmup periods
         # Skip if any required data is invalid
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
-            np.isnan(ema_20_aligned[i]) or np.isnan(atr_12[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
-        atr = atr_12[i]
         
-        # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        # Volume confirmation: current volume > 1.8x average
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Long conditions: close above upper Keltner channel with volume
-        long_signal = volume_confirmed and (price_close > keltner_upper_aligned[i])
+        # Regime filter: ADX > 25 indicates trending market
+        trending = adx[i] > 25
         
-        # Short conditions: close below lower Keltner channel with volume
-        short_signal = volume_confirmed and (price_close < keltner_lower_aligned[i])
+        # Long conditions: TRIX > 0 (bullish momentum) AND RSI > 50 (bullish bias) with volume and trend
+        long_signal = volume_confirmed and trending and (trix_aligned[i] > 0) and (rsi[i] > 50)
         
-        # Dynamic stoploss: 2x ATR from entry
-        if position == 1 and price_close < keltner_upper_aligned[i] - 2.0 * atr:
+        # Short conditions: TRIX < 0 (bearish momentum) AND RSI < 50 (bearish bias) with volume and trend
+        short_signal = volume_confirmed and trending and (trix_aligned[i] < 0) and (rsi[i] < 50)
+        
+        # Exit when TRIX crosses zero (momentum reversal)
+        exit_long = position == 1 and trix_aligned[i] <= 0
+        exit_short = position == -1 and trix_aligned[i] >= 0
+        
+        # Trading logic
+        if long_signal and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_signal and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and price_close > keltner_lower_aligned[i] + 2.0 * atr:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
-            # Trading logic
-            if long_signal and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif short_signal and position != -1:
-                position = -1
-                signals[i] = -0.25
-            elif position == 1 and price_close < keltner_upper_aligned[i]:
-                # Exit long if price falls back below middle line
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and price_close > keltner_lower_aligned[i]:
-                # Exit short if price rises back above middle line
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Maintain current position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            # Maintain current position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Keltner channel breakout on 12h with volume confirmation and ATR-based stoploss.
-# Uses daily Keltner channels (EMA20 ± 2*ATR20) to identify volatility-based support/resistance.
-# Enters long when price breaks above upper channel with volume confirmation (>1.3x average volume).
-# Enters short when price breaks below lower channel with volume confirmation.
-# Exits when price returns to middle line (EMA20) or hits 2x ATR trailing stop.
-# Works in both bull and bear markets by capturing volatility expansions.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe.
+# Hypothesis: TRIX momentum + RSI bias + volume confirmation + ADX trend filter on 4h.
+# Uses daily TRIX (triple EMA momentum oscillator) to capture medium-term momentum shifts.
+# Enters long when daily TRIX > 0 (bullish momentum) AND 4h RSI > 50 (bullish bias)
+# with volume confirmation (>1.8x average) and ADX > 25 (trending market).
+# Enters short when daily TRIX < 0 (bearish momentum) AND 4h RSI < 50 (bearish bias)
+# with volume confirmation and ADX > 25.
+# Exits when daily TRIX crosses zero (momentum reversal).
+# This combination filters out ranging markets (low ADX) and false momentum signals.
+# Target: 80-150 total trades over 4 years (20-38/year) to minimize fee drag.
+# TRIX is particularly effective in crypto markets for catching sustained moves.
+# Works in both bull and bear markets by aligning with the dominant momentum regime.
