@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Pivot_Breakout_Trend
-Hypothesis: Combines daily Camarilla pivot breakouts (R4/S4) with 12h EMA50 trend filter and volume confirmation.
-Trades only in direction of higher timeframe trend to avoid counter-trend whipsaws.
-Designed for 15-30 trades/year per symbol with high win rate during trends.
-Works in bull/bear by following 12h trend direction - avoids counter-trend losses.
+1h_4h_1d_Camarilla_Range_Bound
+Hypothesis: In the 1h timeframe, price often ranges between daily Camarilla S3/R3 levels during low volatility periods.
+We buy near S3 and sell near R3 (or vice versa for shorts) only when 4h trend is aligned and volume confirms.
+This mean-reversion strategy works in both bull and bear markets by fading extremes within the daily range.
+Uses 4h for trend direction, 1h for entry timing, and avoids choppy markets via volume filter.
+Target: 20-40 trades/year per symbol with controlled risk.
 """
 
 from typing import Tuple
@@ -12,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_Pivot_Breakout_Trend"
-timeframe = "4h"
+name = "1h_4h_1d_Camarilla_Range_Bound"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_camarilla(high: float, low: float, close: float) -> Tuple[float, float, float, float]:
@@ -42,9 +43,9 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     # Calculate daily Camarilla levels from previous day's OHLC
@@ -64,19 +65,19 @@ def generate_signals(prices):
         s3_1d[i] = s3
         s4_1d[i] = s4
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align all to 4h timeframe
+    # Align all to 1h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Volume filter: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: 24-period average (1 day of 1h bars)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -85,36 +86,35 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
             np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vol_ma_24[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume filter: current volume > 1.2x 24-period average (avoid low-volume noise)
+        volume_filter = volume[i] > 1.2 * vol_ma_24[i]
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below 4h EMA20
+        uptrend = close[i] > ema_20_4h_aligned[i]
+        downtrend = close[i] < ema_20_4h_aligned[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = close[i] > r4_1d_aligned[i]  # Break above R4
-        breakdown_down = close[i] < s4_1d_aligned[i]  # Break below S4
+        # Mean reversion entries: fade extremes toward S3/R3
+        # Long near S3 (support) in uptrend
+        long_entry = (close[i] <= s3_1d_aligned[i] * 1.005) and volume_filter and uptrend
+        # Short near R3 (resistance) in downtrend
+        short_entry = (close[i] >= r3_1d_aligned[i] * 0.995) and volume_filter and downtrend
         
-        # Entry conditions: only trade in direction of 12h trend
-        long_entry = breakout_up and volume_filter and uptrend
-        short_entry = breakdown_down and volume_filter and downtrend
-        
-        # Exit conditions: return to opposite S/R level or trend reversal
-        long_exit = (close[i] < s3_1d_aligned[i]) or (not uptrend)  # Break below S3 or trend change
-        short_exit = (close[i] > r3_1d_aligned[i]) or (not downtrend)  # Break above R3 or trend change
+        # Exit conditions: return to midpoint or trend failure
+        mid_point = (r3_1d_aligned[i] + s3_1d_aligned[i]) / 2
+        long_exit = (close[i] >= mid_point) or (not uptrend)
+        short_exit = (close[i] <= mid_point) or (not downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -123,6 +123,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
