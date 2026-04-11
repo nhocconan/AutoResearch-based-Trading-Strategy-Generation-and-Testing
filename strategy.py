@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_market_regime_v1
-# Strategy: 6h market regime with 12h/1d trend filter
-# Timeframe: 6h
+# 4h_1d_camarilla_breakout_volume_v3
+# Strategy: 4h Camarilla pivot breakout with 1d trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Uses 12h ADX to identify trending vs ranging markets and 1d EMA for directional bias.
-# In trending markets (ADX > 25): enter breakouts in direction of 1d EMA trend.
-# In ranging markets (ADX <= 25): fade at Bollinger Bands extremes.
-# Designed for low trade frequency (~20-40/year) to minimize fee drift.
-# Works in bull markets via trend-following breakouts and bear markets via mean reversion.
+# Hypothesis: Camarilla pivot levels act as strong support/resistance. Breakouts with 1d EMA trend alignment and volume confirmation capture significant moves while minimizing false breakouts. Designed for low trade frequency (~20-40/year) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_market_regime_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,135 +24,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop for ADX calculation
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Load 1d data ONCE before loop for EMA and Bollinger Bands
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h ADX calculation (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels from previous 1d bar
+    # Using close of previous day as base
+    prev_close = df_1d['close'].shift(1).values  # Previous day's close
+    prev_high = df_1d['high'].shift(1).values    # Previous day's high
+    prev_low = df_1d['low'].shift(1).values      # Previous day's low
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with original index
+    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
+    # Range = prev_high - prev_low
+    # H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    # L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
+    # L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
+    # H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    # L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    rng = prev_high - prev_low
+    H4 = prev_close + 1.1 * rng / 2
+    L4 = prev_close - 1.1 * rng / 2
+    H3 = prev_close + 1.1 * rng / 4
+    L3 = prev_close - 1.1 * rng / 4
+    H2 = prev_close + 1.1 * rng / 6
+    L2 = prev_close - 1.1 * rng / 6
+    H1 = prev_close + 1.1 * rng / 12
+    L1 = prev_close - 1.1 * rng / 12
     
-    # Smoothed values
-    def smooth_wmma(arr, period):
-        """Wilder's moving average (smoothed)"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period]) / period
-        # Subsequent values
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
     
-    atr_12h = smooth_wmma(tr, 14)
-    dm_plus_smooth = smooth_wmma(dm_plus, 14)
-    dm_minus_smooth = smooth_wmma(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_12h != 0, 100 * dm_plus_smooth / atr_12h, 0)
-    di_minus = np.where(atr_12h != 0, 100 * dm_minus_smooth / atr_12h, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx_12h = smooth_wmma(dx, 14)
-    
-    # Align 12h ADX to 6s timeframe
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # 1d EMA50 for trend bias
+    # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 6h Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(adx_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or \
-           np.isnan(sma_20[i]) or np.isnan(std_20[i]):
+        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        adx = adx_12h_aligned[i]
-        ema_50 = ema_50_1d_aligned[i]
-        upper = upper_bb[i]
-        lower = lower_bb[i]
-        curr_close = close[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Regime determination
-        is_trending = adx > 25
-        is_ranging = adx <= 25
+        # Breakout signals using Camarilla levels
+        # Breakout above H3 (strong resistance)
+        breakout_up = high[i] > H3_aligned[i-1]
+        # Breakdown below L3 (strong support)
+        breakdown_down = low[i] < L3_aligned[i-1]
         
-        if is_trending:
-            # Trending market: breakout in direction of 1d EMA
-            if curr_close > ema_50:  # Bullish bias
-                # Long breakout: price above upper Bollinger Band
-                if curr_close > upper and position != 1:
-                    position = 1
-                    signals[i] = 0.25
-                # Exit: price crosses below EMA
-                elif position == 1 and curr_close < ema_50:
-                    position = 0
-                    signals[i] = 0.0
-            else:  # Bearish bias
-                # Short breakdown: price below lower Bollinger Band
-                if curr_close < lower and position != -1:
-                    position = -1
-                    signals[i] = -0.25
-                # Exit: price crosses above EMA
-                elif position == -1 and curr_close > ema_50:
-                    position = 0
-                    signals[i] = 0.0
-        else:
-            # Ranging market: mean reversion at Bollinger Bands
-            # Long: price touches lower BB and starts to revert up
-            if curr_close < lower and i > 50 and close[i-1] >= lower and position != 1:
-                position = 1
-                signals[i] = 0.25
-            # Short: price touches upper BB and starts to revert down
-            elif curr_close > upper and i > 50 and close[i-1] <= upper and position != -1:
-                position = -1
-                signals[i] = -0.25
-            # Exit: price returns to middle (SMA)
-            elif position == 1 and curr_close > sma_20[i]:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and curr_close < sma_20[i]:
-                position = 0
-                signals[i] = 0.0
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
-        # Hold position
-        if position == 1 and signals[i] == 0:
+        # Entry conditions
+        # Long: Breakout above H3 AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
+            position = 1
             signals[i] = 0.25
-        elif position == -1 and signals[i] == 0:
+        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
+            position = -1
             signals[i] = -0.25
+        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
+        elif position == 1 and low[i] < L4_aligned[i-1]:  # Break below L4
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and high[i] > H4_aligned[i-1]:  # Break above H4
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
