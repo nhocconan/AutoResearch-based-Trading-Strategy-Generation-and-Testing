@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_trend_v2"
+name = "4h_12h_camarilla_breakout_volume_trend_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -100,10 +100,10 @@ def generate_signals(prices):
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -111,7 +111,7 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
@@ -121,6 +121,6 @@ def generate_signals(prices):
 # Exits when price returns to the daily pivot level (mean reversion within the day's range).
 # Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
 # Tight filters target 20-50 trades per year to stay within optimal range while maintaining edge.
-# Position size: 0.30 to balance risk and return.
+# Position size: 0.25 to balance risk and return.
 # Camarilla pivots work well in both bull and bear markets as they adapt to daily volatility ranges.
 # Tested on ETHUSDT with strong results in top performers list.
