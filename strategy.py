@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_williams_alligator_v1"
-timeframe = "12h"
+name = "4h_12h_kama_volatility_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,101 +12,78 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return signals
     
-    # Williams Alligator components (13, 8, 5 period SMAs with future shifts)
-    close_1d = df_1d['close'].values
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values  # 13-period, 8 bars ahead
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values    # 8-period, 5 bars ahead
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values     # 5-period, 3 bars ahead
+    # Calculate KAMA on 12h close
+    close_12h = df_12h['close'].values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)
+    # ER = |change| / volatility, avoid division by zero
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close_12h)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
     
-    # Align to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ADX filter for trending markets
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
+    # Calculate ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    # Align 12h KAMA to 4h
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
     
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    trending_market = adx > 25
+    # Volatility filter: ATR > 1.5 * ATR(50)
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr > 1.5 * atr_50
+    
+    # Volume confirmation: volume > 2.0 * volume MA(20)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 2.0 * vol_ma_20
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(atr_50[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
-        volume_current = volume[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        adx_val = adx[i]
-        trending = trending_market[i]
+        kama_val = kama_aligned[i]
+        vol_filt = volatility_filter[i]
+        vol_conf = volume_confirmed[i]
         
-        # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
-        
-        # Williams Alligator signals: lips > teeth > jaw = uptrend, lips < teeth < jaw = downtrend
-        uptrend = lips_val > teeth_val and teeth_val > jaw_val
-        downtrend = lips_val < teeth_val and teeth_val < jaw_val
-        
-        # Entry signals - only in trending markets with volume
-        long_signal = False
-        short_signal = False
-        
-        # Long: price above lips in uptrend with volume confirmation
-        if price_close > lips_val and uptrend and volume_confirmed and trending:
-            long_signal = True
-        
-        # Short: price below lips in downtrend with volume confirmation
-        if price_close < lips_val and downtrend and volume_confirmed and trending:
-            short_signal = True
+        # Entry signals
+        long_signal = price_close > kama_val and vol_filt and vol_conf
+        short_signal = price_close < kama_val and vol_filt and vol_conf
         
         # Exit conditions
-        # Stop loss based on ATR
+        exit_long = position == 1 and price_close < kama_val
+        exit_short = position == -1 and price_close > kama_val
+        # Stop loss
         stop_long = position == 1 and price_low < (entry_price - 2.5 * atr[i])
         stop_short = position == -1 and price_high > (entry_price + 2.5 * atr[i])
-        
-        # Exit when Alligator closes (lips crosses teeth in opposite direction)
-        exit_long = position == 1 and lips_val < teeth_val
-        exit_short = position == -1 and lips_val > teeth_val
         
         # Trading logic
         if long_signal and position != 1:
@@ -129,11 +106,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Williams Alligator strategy on 12h timeframe with daily Alligator alignment.
-# Enters long when price is above lips and Alligator is aligned bullish (lips>teeth>jaw) with volume confirmation.
-# Enters short when price is below lips and Alligator is aligned bearish (lips<teeth<jaw) with volume confirmation.
-# Uses daily timeframe for Alligator calculation to avoid noise and capture multi-day trends.
-# Volume confirmation ensures institutional participation, ADX filter (>25) avoids whipsaws.
-# Exits when Alligator closes (lips crosses teeth) or ATR stop loss (2.5x) is hit.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years.
-# Works in both bull and bear markets by trading with the trend as defined by the Alligator.
+# Hypothesis: KAMA volatility breakout strategy with volume confirmation on 4h timeframe.
+# Uses 12h KAMA to filter noise and identify the true trend direction.
+# Enters long when price crosses above 12h KAMA with high volatility (ATR > 1.5*ATR50) and high volume (>2x avg volume).
+# Enters short when price crosses below 12h KAMA with same conditions.
+# Uses ATR-based stop loss (2.5x) and exits when price crosses back below/above KAMA.
+# Designed for low trade frequency (<50 trades/year) to minimize fee drag.
+# Works in both bull and bear markets by adapting to volatility regimes and using KAMA's adaptive smoothing.
