@@ -3,16 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
-# - Long: price breaks above Donchian(20) high, volume > 1.5x 20-period avg, price > weekly EMA(20)
-# - Short: price breaks below Donchian(20) low, volume > 1.5x 20-period avg, price < weekly EMA(20)
-# - Exit: price returns to Donchian midpoint
-# - Uses discrete position sizing (0.25) to minimize fee churn
-# - Target: 15-25 trades/year (60-100 total over 4 years) to stay within fee drag limits
-# - Works in both bull and bear markets by requiring volume confirmation and trend alignment
+# Hypothesis: 6h Elder Ray + 1d Regime Filter
+# - Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# - Long: Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA(50) AND volume > 1.2x 20-period avg
+# - Short: Bear Power > 0 AND Bull Power < 0 AND price < 1d EMA(50) AND volume > 1.2x 20-period avg
+# - Exit: Power values converge (|Bull Power| < 0.1 * ATR AND |Bear Power| < 0.1 * ATR)
+# - Uses 6h timeframe for lower frequency (target: 12-30 trades/year)
+# - Elder Ray measures bull/bear strength relative to EMA, effective in both trending and ranging markets
+# - 1d EMA filter ensures alignment with higher timeframe trend
+# - Volume confirmation reduces false signals
+# - Discrete position sizing (0.25) minimizes fee churn
 
-name = "1d_donchian_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,69 +31,73 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop for trend filter (MTF rule compliance)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Pre-compute 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 1d Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Pre-compute 6h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Pre-compute 1d volume confirmation (20-period average)
+    # Pre-compute ATR for exit condition
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Pre-compute 6h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(atr[i]) or 
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         volume_current = volume[i]
         
-        # Donchian levels
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
-        mid_channel = donchian_mid[i]
+        # Elder Ray components
+        bull_power = high_price - ema_13[i]
+        bear_power = ema_13[i] - low_price
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.2x 20-period average
+        vol_confirm = volume_current > 1.2 * volume_sma_20[i]
         
-        # Weekly trend filter: price above/below weekly EMA(20)
-        weekly_bias_long = close_price > ema_20_1w_aligned[i]
-        weekly_bias_short = close_price < ema_20_1w_aligned[i]
+        # 1d EMA trend bias
+        ema_bias_long = close_price > ema_50_1d_aligned[i]
+        ema_bias_short = close_price < ema_50_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above upper Donchian, volume confirmation, long bias
-        if close_price > upper_channel and vol_confirm and weekly_bias_long:
+        # Long: strong bull power, weak bear power, long bias, volume confirmation
+        if bull_power > 0 and bear_power < 0 and ema_bias_long and vol_confirm:
             enter_long = True
         
-        # Short breakout: price below lower Donchian, volume confirmation, short bias
-        if close_price < lower_channel and vol_confirm and weekly_bias_short:
+        # Short: strong bear power, weak bull power, short bias, volume confirmation
+        if bear_power > 0 and bull_power < 0 and ema_bias_short and vol_confirm:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: power values converge (market losing directional strength)
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to Donchian midpoint
-            exit_long = close_price <= mid_channel
+            # Exit long when bull power weakens and bear power strengthens
+            exit_long = (bull_power < 0.1 * atr[i]) and (bear_power > -0.1 * atr[i])
         elif position == -1:
-            # Exit short if price returns to Donchian midpoint
-            exit_short = close_price >= mid_channel
+            # Exit short when bear power weakens and bull power strengthens
+            exit_short = (bear_power < 0.1 * atr[i]) and (bull_power > -0.1 * atr[i])
         
         # Trading logic
         if enter_long and position != 1:
