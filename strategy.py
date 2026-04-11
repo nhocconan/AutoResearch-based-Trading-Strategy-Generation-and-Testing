@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
-# - Long: price breaks above Camarilla H3 level, volume > 1.3x 20-period avg, price > 1d EMA(50)
-# - Short: price breaks below Camarilla L3 level, volume > 1.3x 20-period avg, price < 1d EMA(50)
-# - Exit: price returns to Camarilla pivot point (PP) or opposite H3/L3 level
-# - Uses discrete position sizing (0.25) to minimize fee churn
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR-based trend filter
+# - Long: price breaks above Donchian(20) high, volume > 1.3x 20-period avg, ATR(14) > ATR(50) * 1.1 (trending)
+# - Short: price breaks below Donchian(20) low, volume > 1.3x 20-period avg, ATR(14) > ATR(50) * 1.1 (trending)
+# - Exit: price returns to Donchian midpoint
+# - Uses 1d EMA(50) for trend bias: price > EMA(50) for long bias, price < EMA(50) for short bias
+# - Position size: 0.25 (discrete to minimize fee churn)
 # - Target: 20-30 trades/year (80-120 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots work well in ranging markets; EMA filter adds trend bias for breakouts
+# - Works in both bull and bear by requiring volume and volatility confirmation for breakouts
 
-name = "4h_1d_camarilla_pivot_breakout_v1"
+name = "4h_1d_donchian_atr_volume_v9"
 timeframe = "4h"
 leverage = 1.0
 
@@ -38,48 +39,46 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute Camarilla pivot levels from 1d OHLC
-    # Camarilla: PP = (H+L+C)/3, Range = H-L
-    # H4 = PP + Range * 1.1/2, H3 = PP + Range * 1.1/4, H2 = PP + Range * 1.1/6, H1 = PP + Range * 1.1/12
-    # L4 = PP - Range * 1.1/2, L3 = PP - Range * 1.1/4, L2 = PP - Range * 1.1/6, L1 = PP - Range * 1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    h3 = pp + range_1d * 1.1 / 4.0
-    l3 = pp - range_1d * 1.1 / 4.0
-    pp_aligned = pp  # pivot point for exit
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Pre-compute 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
     # Pre-compute 4h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-compute ATR filters for regime detection
+    # ATR(14) for current volatility
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR(50) for longer-term volatility comparison
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(pp_aligned[i]) or np.isnan(volume_sma_20[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or
             np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.3x 20-period average
+        # Donchian levels
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        mid_channel = donchian_mid[i]
+        
+        # Volume confirmation: current volume > 1.3x 20-period average (less strict to increase trades)
         vol_confirm = volume_current > 1.3 * volume_sma_20[i]
         
-        # Camarilla levels
-        h3_level = h3_aligned[i]
-        l3_level = l3_aligned[i]
-        pp_level = pp_aligned[i]
+        # Trend filter: ATR(14) > ATR(50) * 1.1 (less strict to increase trades)
+        atr_trend = atr_14[i] > (atr_50[i] * 1.1)
         
         # 1d EMA trend bias
         ema_bias_long = close_price > ema_50_1d_aligned[i]
@@ -89,12 +88,12 @@ def generate_signals(prices):
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above H3, volume confirmation, long bias
-        if close_price > h3_level and vol_confirm and ema_bias_long:
+        # Long breakout: price above upper Donchian, volume confirmation, trending, long bias
+        if close_price > upper_channel and vol_confirm and atr_trend and ema_bias_long:
             enter_long = True
         
-        # Short breakout: price below L3, volume confirmation, short bias
-        if close_price < l3_level and vol_confirm and ema_bias_short:
+        # Short breakout: price below lower Donchian, volume confirmation, trending, short bias
+        if close_price < lower_channel and vol_confirm and atr_trend and ema_bias_short:
             enter_short = True
         
         # Exit conditions
@@ -102,11 +101,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to pivot point or below L3
-            exit_long = close_price <= pp_level
+            # Exit long if price returns to Donchian midpoint
+            exit_long = close_price <= mid_channel
         elif position == -1:
-            # Exit short if price returns to pivot point or above H3
-            exit_short = close_price >= pp_level
+            # Exit short if price returns to Donchian midpoint
+            exit_short = close_price >= mid_channel
         
         # Trading logic
         if enter_long and position != 1:
