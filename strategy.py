@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume"
+name = "4h_1d_trix_volume_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 24:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -22,40 +22,34 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate TRIX on 1d close (15-period EMA applied 3 times)
     close_1d = df_1d['close'].values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # EMA1
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA2 of EMA1
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA3 of EMA2 (this is TRIX)
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
     
-    # Resistance levels
-    h1_1d = close_1d + 1.1 * range_1d / 6
-    h2_1d = close_1d + 1.1 * range_1d / 4
-    h3_1d = close_1d + 1.1 * range_1d / 2
+    # TRIX calculation: percentage change of triple EMA
+    trix = np.zeros_like(ema3)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
     
-    # Support levels
-    l1_1d = close_1d - 1.1 * range_1d / 6
-    l2_1d = close_1d - 1.1 * range_1d / 4
-    l3_1d = close_1d - 1.1 * range_1d / 2
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Align 1d levels to 4h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    h1_aligned = align_htf_to_ltf(prices, df_1d, h1_1d)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, h2_1d)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l1_aligned = align_htf_to_ltf(prices, df_1d, l1_1d)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, l2_1d)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # Align TRIX and signal to 4h
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
     
-    # 1d volume confirmation: current volume > 10-period average
+    # 1d volume confirmation
     volume_1d = df_1d['volume'].values
-    vol_avg_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_avg_10_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     # 4h ATR for volatility filter
     tr1 = high - low
@@ -68,48 +62,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 10 to ensure sufficient data
-    for i in range(10, n):
+    # Start from index 30 to ensure sufficient data
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
-            np.isnan(vol_avg_10_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(trix_signal_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Current 1d volume (aligned)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirm = vol_1d_current > vol_avg_10_aligned[i]
+        vol_confirm = vol_1d_current > vol_avg_20_aligned[i]
         
-        # Volatility filter: only trade when ATR > 20-period average
-        atr_avg_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean()[i]
-        vol_filter = atr[i] > atr_avg_20
+        # TRIX crossover signals
+        trix_cross_up = trix_aligned[i] > trix_signal_aligned[i] and trix_aligned[i-1] <= trix_signal_aligned[i-1]
+        trix_cross_down = trix_aligned[i] < trix_signal_aligned[i] and trix_aligned[i-1] >= trix_signal_aligned[i-1]
         
-        # Price levels for current bar
-        h1 = h1_aligned[i]
-        h2 = h2_aligned[i]
-        h3 = h3_aligned[i]
-        l1 = l1_aligned[i]
-        l2 = l2_aligned[i]
-        l3 = l3_aligned[i]
-        pivot = pivot_aligned[i]
+        # Volatility filter: only trade when ATR > 15-period average
+        atr_avg_15 = pd.Series(atr).rolling(window=15, min_periods=15).mean()[i]
+        vol_filter = atr[i] > atr_avg_15
         
-        # Long conditions: bounce from support levels with volume and volatility
-        long_signal = vol_confirm and vol_filter and (
-            (close[i] > l1 and low[i] <= l1) or  # bounce from L1
-            (close[i] > l2 and low[i] <= l2) or  # bounce from L2
-            (close[i] > l3 and low[i] <= l3)     # bounce from L3
-        )
+        # Long conditions: TRIX bullish crossover with volume and volatility
+        long_signal = vol_confirm and vol_filter and trix_cross_up
         
-        # Short conditions: rejection from resistance levels with volume and volatility
-        short_signal = vol_confirm and vol_filter and (
-            (close[i] < h1 and high[i] >= h1) or  # rejection from H1
-            (close[i] < h2 and high[i] >= h2) or  # rejection from H2
-            (close[i] < h3 and high[i] >= h3)     # rejection from H3
-        )
+        # Short conditions: TRIX bearish crossover with volume and volatility
+        short_signal = vol_confirm and vol_filter and trix_cross_down
         
-        # Exit conditions: price moves to opposite side of pivot
-        long_exit = close[i] < pivot
-        short_exit = close[i] > pivot
+        # Exit conditions: opposite TRIX crossover
+        long_exit = trix_cross_down
+        short_exit = trix_cross_up
         
         if long_signal and position != 1:
             position = 1
