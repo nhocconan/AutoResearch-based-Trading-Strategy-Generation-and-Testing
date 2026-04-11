@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v2"
-timeframe = "1h"
+name = "6h_1d_market_regime_breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,77 +21,132 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Calculate daily pivot points (Camarilla)
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return signals
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # Calculate daily 20-period EMA for trend direction
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Camarilla levels
-    r4 = pivot + (range_val * 1.5)
-    r3 = pivot + (range_val * 1.25)
-    s3 = pivot - (range_val * 1.25)
-    s4 = pivot - (range_val * 1.5)
+    # Align daily EMA to 6h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate daily ATR for volatility and regime detection
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / (atr_ma + 1e-10)
-    low_vol = atr_ratio < 0.5  # Low volatility filter
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > (vol_ma * 1.5)
+    # Align daily ATR to 6h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Calculate 6-period ATR for 6h timeframe (used for stops)
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.roll(close, 1))
+    tr3_6h = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    tr_6h[0] = tr1_6h[0]
+    atr_6h = pd.Series(tr_6h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate weekly data for longer-term trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return signals
+    
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate weekly ATR for volatility regime
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    tr1_w = high_1w - low_1w
+    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
+    tr_w[0] = tr1_w[0]
+    atr_1w = pd.Series(tr_w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    
+    # Volatility regime filter: avoid extremely low volatility environments
+    # Use ratio of current 6h ATR to weekly ATR
+    atr_ratio_6h_to_1w = atr_6h / (atr_1w_aligned + 1e-10)
+    low_vol_filter = atr_ratio_6h_to_1w > 0.3  # Avoid when 6h volatility is too low relative to weekly
+    
+    # Trend alignment filter: price should be aligned with both daily and weekly trends
+    daily_trend_aligned = close > ema_20_1d_aligned
+    weekly_trend_aligned = close > ema_50_1w_aligned
+    
+    # Volume confirmation: current volume above 20-period average
+    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_confirmation = volume > 1.3 * vol_ma_20
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(s4[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(hours[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_1w_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr_6h[i]) or
+            np.isnan(low_vol_filter[i]) or np.isnan(daily_trend_aligned[i]) or
+            np.isnan(weekly_trend_aligned[i]) or np.isnan(volume_confirmation[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
-        vol_surge_now = vol_surge[i]
-        low_vol_now = low_vol[i]
-        session_now = session_filter[i]
+        volume_current = volume[i]
+        ema_20 = ema_20_1d_aligned[i]
+        ema_50 = ema_50_1w_aligned[i]
+        atr_1d_val = atr_1d_aligned[i]
+        atr_6h_val = atr_6h[i]
+        low_vol = low_vol_filter[i]
+        daily_trend = daily_trend_aligned[i]
+        weekly_trend = weekly_trend_aligned[i]
+        vol_confirm = volume_confirmation[i]
         
-        # Entry conditions - require low volatility + volume surge + session
-        long_signal = (price_close > r4[i]) and vol_surge_now and low_vol_now and session_now
-        short_signal = (price_close < s3[i]) and vol_surge_now and low_vol_now and session_now
+        # Determine market regime based on volatility and trend alignment
+        # In low volatility regimes, we avoid trading
+        # In high volatility regimes with trend alignment, we trade breakouts
         
-        # Exit conditions - reverse at opposite Camarilla level
-        exit_long = position == 1 and price_close < r3[i]
-        exit_short = position == -1 and price_close > s4[i]
+        # Entry conditions - only in favorable regimes
+        long_signal = False
+        short_signal = False
         
-        # Stop loss - 2x ATR
-        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr[i])
-        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr[i])
+        # Long: price above both EMAs with volume confirmation and adequate volatility
+        if (price_close > ema_20 and price_close > ema_50 and 
+            vol_confirm and low_vol and daily_trend and weekly_trend):
+            long_signal = True
+        
+        # Short: price below both EMAs with volume confirmation and adequate volatility
+        if (price_close < ema_20 and price_close < ema_50 and 
+            vol_confirm and low_vol and not daily_trend and not weekly_trend):
+            short_signal = True
+        
+        # Exit conditions - reverse when trend alignment breaks
+        exit_long = position == 1 and (price_close < ema_20 or price_close < ema_50)
+        exit_short = position == -1 and (price_close > ema_20 or price_close > ema_50)
+        
+        # Stop loss conditions using 6h ATR
+        stop_long = position == 1 and price_low < (entry_price - 2.5 * atr_6h_val)
+        stop_short = position == -1 and price_high > (entry_price + 2.5 * atr_6h_val)
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
             entry_price = price_close
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
             entry_price = price_close
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and (exit_long or stop_long):
             position = 0
             signals[i] = 0.0
@@ -100,13 +155,17 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 1h Camarilla breakout strategy with volume surge and low volatility filter.
-# Enters long when price breaks above Camarilla R4 level with volume surge (>1.5x avg volume) in low volatility conditions (ATR ratio < 0.5) during active session (08-20 UTC).
-# Enters short when price breaks below Camarilla S3 level with same conditions.
-# Uses Camarilla R3/S4 for exits and 2x ATR for stop loss.
-# Designed for 1h timeframe to target 60-150 total trades over 4 years (15-37/year).
-# Works in both bull and bear markets by capturing breakouts in either direction with volatility filter to avoid whipsaws.
+# Hypothesis: 6s market regime breakout strategy
+# Enters long when price is above both daily (20) and weekly (50) EMA with volume confirmation
+# and adequate volatility (6h ATR > 30% of weekly ATR), indicating a strong bullish regime.
+# Enters short when price is below both EMAs with volume confirmation and adequate volatility,
+# indicating a strong bearish regime.
+# Uses volatility regime filter to avoid choppy, low-volatility environments where breakouts fail.
+# Exits when price crosses below either EMA (for longs) or above either EMA (for shorts).
+# Designed for 6h timeframe to capture medium-term trends while avoiding whipsaws.
+# Works in both bull and bear markets by adapting to the prevailing regime.
+# Target: 50-150 total trades over 4 years (12-37/year) with selective entry conditions.
