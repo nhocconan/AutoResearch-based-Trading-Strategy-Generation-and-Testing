@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_floodgate_strategy_v1
-Strategy: Daily 20-period Donchian breakout with weekly trend filter and volume confirmation
-Timeframe: 1d
+1h_4h_1d_cci_momentum_v1
+Strategy: 1h CCI momentum with volume confirmation and 4h/1d trend filter
+Timeframe: 1h
 Leverage: 1.0
-Hypothesis: Uses daily Donchian channel (20-day high/low) for breakout entries, filtered by weekly EMA50 trend direction and confirmed by volume > 1.5x 20-day average. Designed to capture major trend continuations in both bull and bear markets while avoiding false breakouts in choppy conditions. Weekly trend filter ensures alignment with higher timeframe momentum. Target: 30-80 trades over 4 years (7-20/year).
+Hypothesis: Uses CCI (Commodity Channel Index) to identify momentum extremes, filtered by 4h and 1d EMA trend alignment and volume spikes. CCI > 100 indicates strong uptrend momentum, CCI < -100 indicates strong downtrend momentum. Uses higher timeframes for direction (4h/1d) and 1h only for timing. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_floodgate_strategy_v1"
-timeframe = "1d"
+name = "1h_4h_1d_cci_momentum_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,22 +27,31 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 20-period Donchian channel (daily)
-    # Upper band = 20-day high, Lower band = 20-day low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # CCI(20) calculation
+    typical_price = (high + low + close) / 3
+    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
+    tp_mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (typical_price - tp_ma) / (0.015 * tp_mad)
+    cci_values = cci.values
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 20-period EMA for 1h trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,41 +62,44 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(cci_values[i]) or np.isnan(ema_20[i]) or np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
+        cci_val = cci_values[i]
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend_1w = price_close > ema_50_1w_aligned[i]
-        downtrend_1w = price_close < ema_50_1w_aligned[i]
+        # Trend filters: price above/both EMAs for long, below/both for short
+        uptrend_4h = price_close > ema_20_4h_aligned[i]
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_4h = price_close < ema_20_4h_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions using Donchian channels
-        breakout_up = price_close > donchian_high[i]
-        breakout_down = price_close < donchian_low[i]
+        # CCI momentum conditions
+        strong_uptrend = cci_val > 100
+        strong_downtrend = cci_val < -100
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: upward breakout with volume in uptrend (weekly)
-        long_signal = breakout_up and vol_confirmed and uptrend_1w
+        # Long: strong uptrend momentum with volume in uptrend (both 4h and 1d)
+        long_signal = strong_uptrend and vol_confirmed and uptrend_4h and uptrend_1d
         
-        # Short: downward breakout with volume in downtrend (weekly)
-        short_signal = breakout_down and vol_confirmed and downtrend_1w
+        # Short: strong downtrend momentum with volume in downtrend (both 4h and 1d)
+        short_signal = strong_downtrend and vol_confirmed and downtrend_4h and downtrend_1d
         
-        # Exit when price returns to the 20-day EMA or opposite Donchian level
-        exit_long = position == 1 and (price_close < donchian_low[i])
-        exit_short = position == -1 and (price_close > donchian_high[i])
+        # Exit when CCI returns to neutral zone or trend changes
+        exit_long = position == 1 and (cci_val < 0 or not (uptrend_4h and uptrend_1d))
+        exit_short = position == -1 and (cci_val > 0 or not (downtrend_4h and downtrend_1d))
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -95,6 +107,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
