@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 6h_1d_camarilla_breakout_volume_v1
-# Strategy: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# Timeframe: 6h
+# 4h_12h_keltner_breakout_volume_v1
+# Strategy: 4h Keltner breakout with 12h trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance. Breakouts with 1d EMA trend alignment and volume confirmation capture significant moves while minimizing false breakouts. Designed for low trade frequency (~20-40/year) to avoid fee drift. Works in bull (breakouts) and bear (breakdowns) via trend filter.
+# Hypothesis: Keltner Channel breakouts capture volatility expansions. Using 12h EMA trend filter ensures trades align with higher timeframe momentum, reducing whipsaws. Volume confirmation filters low-momentum breakouts. Designed for 25-40 trades/year to minimize fee drag while capturing strong trends in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_12h_keltner_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,90 +24,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Using close of previous day as base
-    prev_close = df_1d['close'].shift(1).values  # Previous day's close
-    prev_high = df_1d['high'].shift(1).values    # Previous day's high
-    prev_low = df_1d['low'].shift(1).values      # Previous day's low
+    # Calculate Keltner Channel (20, 2.0) on 4h data
+    # Middle = EMA(20) of close
+    # Upper = Middle + 2.0 * ATR(20)
+    # Lower = Middle - 2.0 * ATR(20)
+    close_series = pd.Series(close)
+    ema_middle = close_series.ewm(span=20, adjust=False, min_periods=20).values
     
-    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
-    # Range = prev_high - prev_low
-    # H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    # L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
-    # H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    # L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    # H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    # L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Calculate ATR(20)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).values
     
-    rng = prev_high - prev_low
-    H4 = prev_close + 1.1 * rng / 2
-    L4 = prev_close - 1.1 * rng / 2
-    H3 = prev_close + 1.1 * rng / 4
-    L3 = prev_close - 1.1 * rng / 4
-    H2 = prev_close + 1.1 * rng / 6
-    L2 = prev_close - 1.1 * rng / 6
-    H1 = prev_close + 1.1 * rng / 12
-    L1 = prev_close - 1.1 * rng / 12
+    keltner_upper = ema_middle + 2.0 * atr
+    keltner_lower = ema_middle - 2.0 * atr
     
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # 20-period volume average for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Breakout signals using Camarilla levels
-        # Breakout above H3 (strong resistance)
-        breakout_up = high[i] > H3_aligned[i-1]
-        # Breakdown below L3 (strong support)
-        breakdown_down = low[i] < L3_aligned[i-1]
+        # Breakout signals using Keltner Channel
+        # Breakout above upper band
+        breakout_up = high[i] > keltner_upper[i-1]
+        # Breakdown below lower band
+        breakdown_down = low[i] < keltner_lower[i-1]
         
-        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_50_1d_aligned[i]
-        trend_bearish = close[i] < ema_50_1d_aligned[i]
+        # 12h EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_12h_aligned[i]
+        trend_bearish = close[i] < ema_50_12h_aligned[i]
         
         # Entry conditions
-        # Long: Breakout above H3 AND bullish trend AND volume confirmation
+        # Long: Breakout above upper band AND bullish trend AND volume confirmation
         if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
+        # Short: Breakdown below lower band AND bearish trend AND volume confirmation
         elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
-        elif position == 1 and low[i] < L4_aligned[i-1]:  # Break below L4
+        # Exit: Opposite breakout using the middle line (mean reversion)
+        elif position == 1 and close[i] < ema_middle[i-1]:  # Close below EMA middle
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] > H4_aligned[i-1]:  # Break above H4
+        elif position == -1 and close[i] > ema_middle[i-1]:  # Close above EMA middle
             position = 0
             signals[i] = 0.0
         else:
