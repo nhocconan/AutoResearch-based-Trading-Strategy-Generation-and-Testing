@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-4h_1d_liquidity_sweep_volume_reversal_v1
-Strategy: 4h liquidity sweep detection with volume reversal confirmation
+4h_1d_kama_rsi_chop_v1
+Strategy: 4h KAMA direction with RSI momentum and Choppiness index regime filter
 Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Detects liquidity sweeps (false breakouts of recent highs/lows) followed by volume-confirmed reversals. Uses 1d ATR for dynamic stop placement and 1d ADX for trend strength filtering. Works in both bull and bear markets by capturing mean-reversion after stop hunts. Target: 20-40 trades per year.
+Hypothesis: Uses KAMA for trend direction, RSI for momentum strength, and Choppiness index to filter ranging markets. Only takes trades when trend is aligned (KAMA slope), momentum confirms (RSI > 50 for long, < 50 for short), and market is trending (CHOP < 61.8). Designed to avoid whipsaws in chop while capturing trends. Target: 20-50 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_liquidity_sweep_volume_reversal_v1"
+name = "4h_1d_kama_rsi_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -32,79 +31,84 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ATR(14) for volatility normalization
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # KAMA (Kaufman Adaptive Moving Average) on 1d close
     close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # KAMA calculation
+    kama_1d = np.zeros_like(close_1d)
+    kama_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # 1d ADX(14) for trend strength
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
+    # RSI on 1d close (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)  # Strong volume confirmation
-    
-    # Detect liquidity sweeps: false breakouts of 20-period highs/lows
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Bullish liquidity sweep: price makes new 20-period high but closes below it with volume
-    bullish_sweep = (high == high_20) & (close < high_20) & vol_spike
-    
-    # Bearish liquidity sweep: price makes new 20-period low but closes above it with volume
-    bearish_sweep = (low == low_20) & (close > low_20) & vol_spike
-    
-    # Align sweep signals to avoid look-ahead
-    bullish_sweep_aligned = align_htf_to_ltf(prices, df_1d, bullish_sweep.astype(float))
-    bearish_sweep_aligned = align_htf_to_ltf(prices, df_1d, bearish_sweep.astype(float))
+    # Choppiness Index on 1d (14-period)
+    atr_1d = np.zeros_like(close_1d)
+    tr1 = np.abs(np.diff(high_1d := df_1d['high'].values, prepend=high_1d[0]))
+    tr2 = np.abs(np.diff(low_1d := df_1d['low'].values, prepend=low_1d[0]))
+    tr3 = np.abs(high_1d - low_1d)
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop_1d = 100 * np.log10(atr_1d * 14 / (max_high - min_low)) / np.log10(14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: only trade against strong trends (mean reversion in trends)
-        strong_trend = adx_1d_aligned[i] > 25
+        price_close = close[i]
         
-        # Mean reversion entries after liquidity sweeps
-        long_entry = bullish_sweep_aligned[i] and strong_trend
-        short_entry = bearish_sweep_aligned[i] and strong_trend
+        # KAMA slope for trend direction (using 3-period difference)
+        kama_slope = kama_1d_aligned[i] - kama_1d_aligned[i-3] if i >= 3 else 0
+        uptrend = kama_slope > 0
+        downtrend = kama_slope < 0
         
-        # Exit when price reverts to the 20-period midpoint or opposite sweep level
-        mid_20 = (high_20 + low_20) / 2
-        exit_long = position == 1 and close[i] < mid_20[i]
-        exit_short = position == -1 and close[i] > mid_20[i]
+        # RSI momentum
+        rsi = rsi_1d_aligned[i]
+        rsi_bullish = rsi > 50
+        rsi_bearish = rsi < 50
+        
+        # Choppiness filter: only trade when market is trending (CHOP < 61.8)
+        chop = chop_1d_aligned[i]
+        trending_market = chop < 61.8
+        
+        # Long: uptrend + bullish RSI + trending market
+        long_signal = uptrend and rsi_bullish and trending_market
+        
+        # Short: downtrend + bearish RSI + trending market
+        short_signal = downtrend and rsi_bearish and trending_market
+        
+        # Exit when trend changes or RSI reverses
+        exit_long = position == 1 and (not uptrend or not rsi_bullish)
+        exit_short = position == -1 and (not downtrend or not rsi_bearish)
         
         # Trading logic
-        if long_entry and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
