@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_Volume_Spike_Keltner_Breakout_v1
-Hypothesis: Uses 1-day Keltner channels with volume spikes to identify volatility expansions in trending markets.
-Designed to work in both bull and bear markets by capturing volatility bursts that often precede strong moves.
-Trades only when volatility expands (ATR-based) and volume confirms, reducing whipsaws and focusing on high-probability breakouts.
-Targets 20-40 trades per year per symbol to minimize fee drag.
+4h_1d_TRIX_Volume_Spike_Regime_v1
+Hypothesis: Uses TRIX (1-period ROC of EMA) on 4h with volume spike and 1-day Choppiness regime filter.
+TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Volume spike confirms breakout strength.
+Choppiness regime (from daily) filters: CHOP > 61.8 = range (mean revert at extremes), CHOP < 38.2 = trend (follow TRIX).
+Designed for low trade frequency (<30/year) to avoid fee drag, works in bull/bear via regime adaptation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Volume_Spike_Keltner_Breakout_v1"
+name = "4h_1d_TRIX_Volume_Spike_Regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,73 +26,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Keltner channels
+    # Load 1d data ONCE before loop for Choppiness index
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 40-period EMA for 4h trend filter
-    ema_40_4h = pd.Series(close).ewm(span=40, adjust=False, min_periods=40).mean().values
+    # Calculate TRIX on 4h: EMA of EMA of EMA of close, then 1-period ROC
+    close_s = pd.Series(close)
+    ema1 = close_s.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.pct_change(1) * 100  # 1-period ROC as percentage
+    trix = trix.values
     
-    # Volume spike filter: 20-period average
+    # Volume filter: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1-day Keltner channels
-    close_1d = df_1d['close'].values
+    # Calculate Choppiness Index on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period EMA of close for Keltner center
-    keltner_center_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # True range for 1-day ATR
+    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First period
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])  # First period
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])   # First period
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr[0] = tr1[0]  # first period
     
-    # Keltner channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    keltner_upper_1d = keltner_center_1d + 2.0 * atr_1d
-    keltner_lower_1d = keltner_center_1d - 2.0 * atr_1d
+    # ATR(14) sum of TR
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Align Keltner channels to 4h timeframe (wait for daily close)
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper_1d)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower_1d)
-    keltner_center_aligned = align_htf_to_ltf(prices, df_1d, keltner_center_1d)
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(atr_sum / (hh - ll)) / log10(14)
+    chop = 100 * np.log10(atr_14 / (hh_14 - ll_14 + 1e-10)) / np.log10(14)
+    chop = chop.values
+    
+    # Align Choppiness to 4h timeframe (wait for daily close)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_40_4h[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
-            np.isnan(keltner_center_aligned[i])):
+        if (np.isnan(trix[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume spike: current volume > 2.0x 20-period average
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (strong spike)
+        volume_filter = volume[i] > 2.0 * vol_ma_20[i]
         
-        # Trend filter: price above/below 40-period EMA
-        uptrend = close[i] > ema_40_4h[i]
-        downtrend = close[i] < ema_40_4h[i]
+        # TRIX signals
+        trix_bullish = trix[i] > 0
+        trix_bearish = trix[i] < 0
         
-        # Breakout conditions using daily Keltner channels
-        breakout_up = close[i] > keltner_upper_aligned[i]   # Break above upper Keltner
-        breakdown_down = close[i] < keltner_lower_aligned[i] # Break below lower Keltner
+        # Choppiness regime: >61.8 = range, <38.2 = trend
+        chop_value = chop_aligned[i]
+        is_range = chop_value > 61.8
+        is_trend = chop_value < 38.2
         
-        # Entry conditions: volatility expansion + volume spike + trend alignment
-        long_entry = breakout_up and volume_spike and uptrend
-        short_entry = breakdown_down and volume_spike and downtrend
+        # Entry logic: adapt to regime
+        if is_range:
+            # In range: mean reversion at extremes (TRIX near zero)
+            long_entry = volume_filter and trix[i] < -0.1 and trix[i] > -0.5  # Oversold bounce
+            short_entry = volume_filter and trix[i] > 0.1 and trix[i] < 0.5   # Overbought pullback
+        else:  # trending or neutral chop
+            # In trend: follow TRIX direction
+            long_entry = volume_filter and trix_bullish and trix[i] > 0.1
+            short_entry = volume_filter and trix_bearish and trix[i] < -0.1
         
-        # Exit conditions: return to Keltner center or trend reversal
-        long_exit = (close[i] < keltner_center_aligned[i]) or (not uptrend)
-        short_exit = (close[i] > keltner_center_aligned[i]) or (not downtrend)
+        # Exit conditions: opposite TRIX signal or volume dry-up
+        long_exit = (trix[i] < -0.1) or (volume[i] < 0.5 * vol_ma_20[i])
+        short_exit = (trix[i] > 0.1) or (volume[i] < 0.5 * vol_ma_20[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
