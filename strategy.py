@@ -3,49 +3,51 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate weekly OHLC for Camarilla levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily OHLC for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Camarilla levels: H3, L3 (tighter than H4/L4 for more entries)
-    hl_range = high_1w - low_1w
-    camarilla_h3 = close_1w + 1.1 * hl_range / 4
-    camarilla_l3 = close_1w - 1.1 * hl_range / 4
+    hl_range = high_1d - low_1d
+    camarilla_h3 = close_1d + 1.1 * hl_range / 4
+    camarilla_l3 = close_1d - 1.1 * hl_range / 4
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: 10-period average on weekly volume
-    volume_sma_10 = pd.Series(df_1w['volume'].values).rolling(window=10, min_periods=10).mean().values
-    volume_sma_10_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_10)
+    # Volume confirmation: 10-period average on daily volume
+    volume_sma_10 = pd.Series(df_1d['volume'].values).rolling(window=10, min_periods=10).mean().values
+    volume_sma_10_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_10)
     
-    # Trend filter: 20-period EMA on weekly close
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # Trend filter: 20-period EMA on daily close
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
             np.isnan(volume_sma_10_aligned[i]) or np.isnan(ema_20_aligned[i])):
@@ -55,7 +57,7 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 10-period weekly average
+        # Volume confirmation: current volume > 1.5x 10-period daily average
         vol_confirm = volume_current > 1.5 * volume_sma_10_aligned[i]
         
         # Trend filter: only trade in direction of 20 EMA
@@ -74,19 +76,19 @@ def generate_signals(prices):
         if price_close < camarilla_l3_aligned[i] and vol_confirm and below_ema:
             enter_short = True
         
-        # Exit conditions: price returns to the week's close (pivot point)
-        prev_close_1w = np.concatenate([[np.nan], close_1w[:-1]])
-        prev_close_aligned = align_htf_to_ltf(prices, df_1w, prev_close_1w)
+        # Exit conditions: price returns to the day's close (pivot point)
+        prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
         exit_long = price_close < prev_close_aligned[i]
         exit_short = price_close > prev_close_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -95,12 +97,12 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Camarilla H3/L3 breakout on weekly timeframe with volume confirmation and EMA20 trend filter.
+# Hypothesis: Camarilla H3/L3 breakout on daily timeframe with volume confirmation and EMA20 trend filter.
 # Uses tighter Camarilla H3/L3 levels (Close ± 1.1*(High-Low)/4) for more frequent but still filtered entries.
 # Works in both bull (breakouts above H3) and bear (breakdowns below L3) by capturing institutional activity.
-# Volume confirmation (>1.5x 10-week average) ensures participation. EMA20 filter avoids counter-trend trades.
-# Position size 0.30 balances risk and return. Target: 10-25 trades/year to minimize fee drag.
+# Volume confirmation (>1.5x 10-day average) ensures participation. EMA20 filter avoids counter-trend trades.
+# Position size 0.25 balances risk and return. Target: 20-50 trades/year to minimize fee drag.
