@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
+name = "4h_1d_camarilla_breakout_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,21 +22,36 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d Donchian channels (20-period)
+    # 1d OHLC for Camarilla pivot calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use only completed 1d bars
-    donch_high_1d = np.roll(donch_high_1d, 1)
-    donch_low_1d = np.roll(donch_low_1d, 1)
-    donch_high_1d[0] = np.nan
-    donch_low_1d[0] = np.nan
+    # Calculate Camarilla pivot levels (using previous day's data)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align 1d Donchian levels to 4h timeframe
-    donch_high_4h = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_4h = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    # Camarilla levels: H4 = close + range * 1.1/2, L4 = close - range * 1.1/2
+    camarilla_h4 = close_1d + range_1d * 1.1 / 2
+    camarilla_l4 = close_1d - range_1d * 1.1 / 2
+    camarilla_h3 = close_1d + range_1d * 1.1 / 4
+    camarilla_l3 = close_1d - range_1d * 1.1 / 4
+    
+    # Shift by 1 to use only completed 1d bars (previous day's levels)
+    camarilla_h4 = np.roll(camarilla_h4, 1)
+    camarilla_l4 = np.roll(camarilla_l4, 1)
+    camarilla_h3 = np.roll(camarilla_h3, 1)
+    camarilla_l3 = np.roll(camarilla_l3, 1)
+    camarilla_h4[0] = np.nan
+    camarilla_l4[0] = np.nan
+    camarilla_h3[0] = np.nan
+    camarilla_l3[0] = np.nan
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # 4h ADX for trend strength filter
     tr1 = high[1:] - low[1:]
@@ -57,7 +72,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 1.8x 20-period average (balance between signal quality and trade count)
+    # 4h volume filter: volume > 2.0x 20-period average (stricter for fewer trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,7 +80,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or 
+        if (np.isnan(h4_4h[i]) or np.isnan(l4_4h[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
             np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -78,22 +93,21 @@ def generate_signals(prices):
         adx_val = adx[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.8 * vol_ma
+        volume_confirmed = volume_current > 2.0 * vol_ma
         
-        # Trend filter: ADX > 30 for trending market
-        trend_filter = adx_val > 30
+        # Trend filter: ADX > 35 for trending market
+        trend_filter = adx_val > 35
         
-        # Long conditions: price breaks above 1d Donchian high with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > donch_high_4h[i])
+        # Long conditions: price breaks above H3 level with volume and trend
+        long_signal = volume_confirmed and trend_filter and (price_high > h3_4h[i])
         
-        # Short conditions: price breaks below 1d Donchian low with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < donch_low_4h[i])
+        # Short conditions: price breaks below L3 level with volume and trend
+        short_signal = volume_confirmed and trend_filter and (price_low < l3_4h[i])
         
-        # Exit when price returns to the middle of 1d Donchian channel
-        donch_mid_1d = (donch_high_1d + donch_low_1d) / 2
-        donch_mid_4h = align_htf_to_ltf(prices, df_1d, donch_mid_1d)
-        exit_long = position == 1 and price_close < donch_mid_4h[i]
-        exit_short = position == -1 and price_close > donch_mid_4h[i]
+        # Exit when price returns to the opposite side of the pivot level
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+        exit_long = position == 1 and price_close < pivot_4h[i]
+        exit_short = position == -1 and price_close > pivot_4h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -113,9 +127,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Donchian breakout with volume confirmation and ADX trend filter.
-# Enters long when 4h price breaks above 20-day 1d Donchian high with volume >1.8x average and ADX>30.
-# Enters short when price breaks below 20-day 1d Donchian low with same conditions.
-# Exits when price returns to the midpoint of the 1d Donchian channel.
-# Works in both bull and breakout markets by capturing strong directional moves.
-# Moderate thresholds target ~20-30 trades/year to minimize fee drag.
+# Hypothesis: Camarilla breakout strategy using H3/L3 levels from previous day's price action.
+# Enters long when 4h price breaks above H3 (close + range*1.1/4) with volume >2x average and ADX>35.
+# Enters short when price breaks below L3 (close - range*1.1/4) with same conditions.
+# Exits when price returns to the pivot level (mean reversion within the day's range).
+# Works in both bull and bear markets by capturing intraday momentum with proper filters.
+# Tight volume (2.0x) and trend (ADX>35) filters target ~20-30 trades/year to minimize fee drag.
