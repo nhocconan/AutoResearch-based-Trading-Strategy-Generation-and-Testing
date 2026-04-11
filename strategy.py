@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1-week pivot bounce + volume confirmation.
-# Uses weekly pivot points (S1/S2/R1/R2) from previous week to capture mean-reversion bounces.
-# Long when price bounces above S1 with volume > 1.3x weekly average, short when rejects at R1.
-# Designed for low trade frequency (~15-30/year) to minimize fee decay while capturing weekly swings.
-# Weekly pivots provide stronger support/resistance than daily, reducing whipsaw in choppy markets.
-# Works in bull/bear markets by fading extremes at key weekly support/resistance levels.
+# Hypothesis: 1d timeframe with 1-week volatility regime filter (ATR-based) and 1-week Donchian breakout.
+# Uses weekly ATR to detect volatility regimes and weekly Donchian channels for trend direction.
+# Long when price breaks above weekly Donchian high in high volatility regime, short when breaks below weekly Donchian low.
+# Designed for low trade frequency (~10-30/year) to minimize fee decay while capturing major trend moves.
+# Works in bull markets by capturing trends and in bear markets by avoiding false breakouts via volatility filter.
 
-name = "4h_1w_pivot_bounce_volume_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_atr_volatility_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,57 +26,78 @@ def generate_signals(prices):
     
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using previous week's data)
+    # Calculate weekly ATR(14) for volatility regime
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly pivot calculation (standard floor trader pivots)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    r1 = 2 * pivot_1w - low_1w
-    s1 = 2 * pivot_1w - high_1w
-    r2 = pivot_1w + range_1w
-    s2 = pivot_1w - range_1w
+    # True Range calculation
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Align weekly pivot levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # ATR(14) using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    atr_14 = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
+        if i == 0:
+            atr_14[i] = np.nan
+        elif i < 14:
+            if i == 1:
+                atr_14[i] = np.nanmean(tr[1:i+1])
+            else:
+                atr_14[i] = (atr_14[i-1] * (i-1) + tr[i]) / i
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Calculate weekly average volume (for confirmation)
-    volume_1w = df_1w['volume'].values
-    vol_avg_4_1w = pd.Series(volume_1w).rolling(window=4, min_periods=4).mean().values
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_4_1w)
+    # Calculate weekly Donchian channels (20-period)
+    high_max_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly indicators to daily timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
+    high_max_20_aligned = align_htf_to_ltf(prices, df_1w, high_max_20)
+    low_min_20_aligned = align_htf_to_ltf(prices, df_1w, low_min_20)
+    
+    # Calculate volatility regime: current ATR > 1.5 * ATR(50) average
+    atr_50 = np.full_like(tr, np.nan)
+    for i in range(len(tr)):
+        if i < 50:
+            atr_50[i] = np.nan
+        elif i == 50:
+            atr_50[i] = np.nanmean(tr[1:51])
+        else:
+            atr_50[i] = (atr_50[i-1] * 49 + tr[i]) / 50
+    
+    atr_50_aligned = align_htf_to_ltf(prices, df_1w, atr_50)
+    vol_regime = atr_14_aligned > (1.5 * atr_50_aligned)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 4 to ensure volume average is valid
-    for i in range(4, n):
+    # Start from index 20 to ensure Donchian channels are valid
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(high_max_20_aligned[i]) or np.isnan(low_min_20_aligned[i]) or
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.3 * weekly average volume
-        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
+        # Entry conditions: Donchian breakout in high volatility regime
+        long_breakout = close[i] > high_max_20_aligned[i]
+        short_breakout = close[i] < low_min_20_aligned[i]
         
-        # Entry conditions: price bounces off S1/S2 or rejects at R1/R2 with volume
-        long_entry = ((low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]) or 
-                     (low[i] <= s2_aligned[i] and close[i] > s2_aligned[i])) and vol_filter
-        short_entry = ((high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]) or 
-                      (high[i] >= r2_aligned[i] and close[i] < r2_aligned[i])) and vol_filter
+        long_entry = long_breakout and vol_regime[i]
+        short_entry = short_breakout and vol_regime[i]
         
-        # Exit conditions: price reaches opposite pivot level
-        exit_long = high[i] >= r1_aligned[i] if not np.isnan(r1_aligned[i]) else False
-        exit_short = low[i] <= s1_aligned[i] if not np.isnan(s1_aligned[i]) else False
+        # Exit conditions: price returns to middle of Donchian channel
+        donchian_mid = (high_max_20_aligned[i] + low_min_20_aligned[i]) / 2
+        exit_long = close[i] < donchian_mid
+        exit_short = close[i] > donchian_mid
         
         if long_entry and position != 1:
             position = 1
