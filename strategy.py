@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v9"
-timeframe = "4h"
+name = "1d_1w_keltner_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,43 +20,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return signals
     
-    # Calculate Camarilla pivot levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Keltner Channel (20-period EMA, 2.0 ATR)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
-    daily_range = high_1d - low_1d
+    # ATR(20) for weekly
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Key levels for breakout: R4 (resistance) and S4 (support)
-    r4 = close_1d + (daily_range * 1.1 / 2)
-    s4 = close_1d - (daily_range * 1.1 / 2)
+    # EMA(20) for weekly
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Exit levels: R3 and S3
-    r3 = close_1d + (daily_range * 1.1 / 4)
-    s3 = close_1d - (daily_range * 1.1 / 4)
+    # Keltner Channels
+    upper_keltner = ema_20 + 2.0 * atr_20
+    lower_keltner = ema_20 - 2.0 * atr_20
     
-    # Volume confirmation: 4h volume > 2.5x 100-period average (strict to reduce trades)
-    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    # Align weekly Keltner channels to daily
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
     
-    # Align daily levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Daily volume confirmation: volume > 1.5x 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_100[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -64,27 +62,27 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.5 * vol_ma_100[i]
+        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above R4
-        breakout_down = price_close < s4_aligned[i]  # Break below S4
+        # Breakout conditions using weekly Keltner Channels
+        breakout_up = price_close > upper_keltner_aligned[i]  # Break above upper Keltner
+        breakout_down = price_close < lower_keltner_aligned[i]  # Break below lower Keltner
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Break above R4 with volume confirmation
+        # Long: Break above upper Keltner with volume confirmation
         if breakout_up and vol_confirm:
             enter_long = True
         
-        # Short: Break below S4 with volume confirmation
+        # Short: Break below lower Keltner with volume confirmation
         if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: return to opposite S3/R3 levels
-        exit_long = price_close < s3_aligned[i]  # Return to S3 level
-        exit_short = price_close > r3_aligned[i]  # Return to R3 level
+        # Exit conditions: return to opposite Keltner level (mean reversion)
+        exit_long = price_close < ema_20_aligned[i]  # Return to weekly EMA
+        exit_short = price_close > ema_20_aligned[i]  # Return to weekly EMA
         
         # Trading logic
         if enter_long and position != 1:
@@ -105,12 +103,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with strict volume confirmation.
-# Enters long when price breaks above R4 with volume > 2.5x 100-period average.
-# Enters short when price breaks below S4 with volume > 2.5x 100-period average.
-# Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (2.5x) and longer MA (100) to significantly reduce trade frequency.
-# Position size set to 0.25 to manage risk in volatile markets.
-# Target: 10-15 trades per year (40-60 total over 4 years) to minimize fee drag.
+# Hypothesis: 1d Keltner breakout strategy using weekly Keltner Channels (EMA20 ± 2*ATR20).
+# Enters long when price breaks above weekly upper Keltner with volume > 1.5x 20-day average.
+# Enters short when price breaks below weekly lower Keltner with volume > 1.5x 20-day average.
+# Exits when price returns to weekly EMA(20) level.
+# Weekly timeframe provides higher timeframe trend context, reducing false breakouts.
+# Volume confirmation ensures breakouts are supported by participation.
+# Target: 10-25 trades per year (40-100 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 4h timeframe provides good balance between signal quality and trade frequency.
