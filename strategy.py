@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 1d_1w_kama_rsi_chop_v2
-# Strategy: Daily KAMA with RSI filter and weekly Choppiness Index regime filter
-# Timeframe: 1d
+# 6h_12h_1d_rsi_divergence_volume_v1
+# Strategy: 6s RSI divergence with 12h trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: KAMA adapts to market efficiency, RSI identifies overbought/oversold conditions,
-# and Choppiness Index filters trending vs ranging markets. Works in both bull and bear markets
-# by adapting to volatility regimes and avoiding false signals in chop.
+# Hypothesis: RSI divergence identifies exhaustion in trends. Combined with 12h EMA trend filter and volume spike,
+# it provides high-probability reversal entries. Works in both bull (buy dips) and bear (sell rallies) markets.
+# Target: 20-40 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_chop_v2"
-timeframe = "1d"
+name = "6h_12h_1d_rsi_divergence_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,110 +26,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 30:
+    if len(df_12h) < 30 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly Choppiness Index (14-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # 1d RSI(14) for divergence detection
+    close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 6h RSI(14) for entry confirmation
+    delta_6h = pd.Series(close).diff()
+    gain_6h = delta_6h.where(delta_6h > 0, 0)
+    loss_6h = -delta_6h.where(delta_6h < 0, 0)
+    avg_gain_6h = gain_6h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_6h = loss_6h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_6h = avg_gain_6h / avg_loss_6h
+    rsi_6h = 100 - (100 / (1 + rs_6h))
+    rsi_6h_values = rsi_6h.values
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(atr14) / (hh - ll)) / log10(14)
-    sum_atr14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr14 / (hh - ll)) / np.log10(14)
-    chop = np.where((hh - ll) == 0, 50, chop)  # Avoid division by zero
-    chop = np.where(np.isnan(chop), 50, chop)  # Fill NaN with neutral value
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # Daily KAMA (10-period ER, 2/30 fast/slow SC)
-    er_period = 10
-    fast_sc = 2
-    slow_sc = 30
-    
-    change = np.abs(close - np.roll(close, er_period))
-    change = np.concatenate([[np.nan] * er_period, change[er_period:]])  # First er_period values NaN
-    
-    diff = np.abs(np.diff(close, prepend=close[0]))
-    sum_diff = pd.Series(diff).rolling(window=er_period, min_periods=er_period).sum().values
-    
-    er = np.where(sum_diff != 0, change / sum_diff, 0)
-    sc = (er * (fast_sc / er_period - slow_sc / er_period) + slow_sc / er_period) ** 2
-    
-    kama = np.full_like(close, np.nan)
-    kama[er_period] = close[er_period]  # Seed
-    
-    for i in range(er_period + 1, len(close)):
-        if not np.isnan(kama[i-1]) and not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Daily RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)  # When no loss, RSI=100
-    rsi = np.where(avg_gain == 0, 0, rsi)    # When no gain, RSI=0
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(100, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(rsi_6h_values[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # KAMA direction: price above/below KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # RSI values
+        rsi_1d_now = rsi_1d_aligned[i]
+        rsi_1d_prev = rsi_1d_aligned[i-1] if i > 0 else 50
+        rsi_6h_now = rsi_6h_values[i]
+        rsi_6h_prev = rsi_6h_values[i-1] if i > 0 else 50
         
-        # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending
-        chop_val = chop_aligned[i]
-        is_ranging = chop_val > 61.8
-        is_trending = chop_val < 38.2
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i >= 2:
+            # Check for lower low in price and higher low in RSI over last 2 periods
+            if close[i] < close[i-2] and low[i] < low[i-2]:
+                if rsi_1d_now > rsi_1d_prev and rsi_6h_now > rsi_6h_prev:
+                    bullish_div = True
         
-        # Entry logic: In ranging markets, mean revert at RSI extremes
-        if is_ranging and rsi_oversold and price_above_kama and position != 1:
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i >= 2:
+            # Check for higher high in price and lower high in RSI over last 2 periods
+            if close[i] > close[i-2] and high[i] > high[i-2]:
+                if rsi_1d_now < rsi_1d_prev and rsi_6h_now < rsi_6h_prev:
+                    bearish_div = True
+        
+        # Entry logic: RSI divergence + volume spike + trend alignment (counter-trend)
+        if bullish_div and volume_spike[i] and downtrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif is_ranging and rsi_overbought and price_below_kama and position != -1:
+        elif bearish_div and volume_spike[i] and uptrend and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: RSI returns to neutral or chop indicates trending
-        elif position == 1 and (rsi[i] > 50 or not is_ranging):
+        # Exit: trend resumes or RSI reaches extreme
+        elif position == 1 and (rsi_1d_now > 70 or uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi[i] < 50 or not is_ranging):
+        elif position == -1 and (rsi_1d_now < 30 or downtrend):
             position = 0
             signals[i] = 0.0
         else:
