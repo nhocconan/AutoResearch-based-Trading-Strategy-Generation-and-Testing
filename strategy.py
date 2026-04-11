@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h RSI divergence with daily volume confirmation and weekly trend filter.
-# Uses RSI(14) divergences for mean reversion entries, volume spike to confirm institutional interest,
-# and weekly EMA(50) trend filter to avoid counter-trend trades in strong trends.
-# Designed for 20-50 trades/year with focus on BTC/ETH robustness.
+# Hypothesis: 4h timeframe with daily pivot levels and daily volume confirmation.
+# Uses daily Camarilla levels for both trend direction and entry.
+# Fades at daily S3/R3 in direction of daily trend and breaks out at daily S4/R4.
+# Volume filter confirms institutional participation. Designed for 19-50 trades/year.
+# Daily trend filter reduces whipsaw in sideways markets and improves win rate.
 
-name = "4h_1d1w_rsi_divergence_v1"
+name = "4h_1d_camarilla_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price arrays
@@ -23,106 +24,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 20 or len(df_1w) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    daily_range_1d = prev_high_1d - prev_low_1d
+    r4_1d = prev_close_1d + daily_range_1d * 1.1 / 2
+    r3_1d = prev_close_1d + daily_range_1d * 1.1 / 4
+    s3_1d = prev_close_1d - daily_range_1d * 1.1 / 4
+    s4_1d = prev_close_1d - daily_range_1d * 1.1 / 2
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily trend: price above midpoint of R3/S3 = bullish, below = bearish
+    daily_trend_bull = prev_close_1d > (r3_1d + s3_1d) / 2  # Above midpoint
+    daily_trend_bear = prev_close_1d < (r3_1d + s3_1d) / 2  # Below midpoint
     
-    # Calculate daily average volume (20-period)
+    # Align daily levels and trend to 4h
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    daily_trend_bull_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_bull)
+    daily_trend_bear_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_bear)
+    
+    # Daily average volume (20-period)
     volume_1d = df_1d['volume'].values
     vol_avg_20 = np.full_like(volume_1d, np.nan, dtype=float)
     for i in range(19, len(volume_1d)):
         vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Calculate weekly EMA(50)
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full_like(close_1w, np.nan, dtype=float)
-    if len(close_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 49) / 51
-    
-    # Align indicators to 4h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)  # RSI from daily but aligned to 4h
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Initialize signals
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Lookback period for divergence detection
-    lookback = 10
-    
-    for i in range(lookback, n):
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi_aligned[i]) or np.isnan(vol_avg_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_avg_aligned[i]) or
+            np.isnan(daily_trend_bull_aligned[i]) or np.isnan(daily_trend_bear_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 2.0 * daily average volume
-        vol_filter = volume[i] > 2.0 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.5 * daily average volume
+        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Determine weekly trend: above EMA50 = bullish, below = bearish
-        is_bullish_trend = close[i] > ema_50_aligned[i]
-        is_bearish_trend = close[i] < ema_50_aligned[i]
+        # Determine daily trend direction
+        is_bullish_day = daily_trend_bull_aligned[i]
+        is_bearish_day = daily_trend_bear_aligned[i]
         
-        # Bullish RSI divergence: price makes lower low, RSI makes higher low
-        bull_div = False
-        if i >= lookback:
-            for j in range(1, lookback+1):
-                if low[i-j] < low[i] and rsi_aligned[i-j] > rsi_aligned[i]:
-                    bull_div = True
-                    break
+        # Fade at S3/R3 in direction of daily trend
+        fade_long = (low[i] <= s3_1d_aligned[i] and vol_filter and is_bullish_day)
+        fade_short = (high[i] >= r3_1d_aligned[i] and vol_filter and is_bearish_day)
         
-        # Bearish RSI divergence: price makes higher high, RSI makes lower high
-        bear_div = False
-        if i >= lookback:
-            for j in range(1, lookback+1):
-                if high[i-j] > high[i] and rsi_aligned[i-j] < rsi_aligned[i]:
-                    bear_div = True
-                    break
+        # Breakout at S4/R4 (always active, but stronger with trend)
+        breakout_long = (high[i] >= r4_1d_aligned[i] and vol_filter)
+        breakout_short = (low[i] <= s4_1d_aligned[i] and vol_filter)
         
-        # Entry conditions
-        bull_entry = bull_div and vol_filter and is_bullish_trend
-        bear_entry = bear_div and vol_filter and is_bearish_trend
+        # Exit when price returns to daily midpoint or opposite S3/R3
+        daily_midpoint = (r3_1d + s3_1d) / 2
+        daily_midpoint_aligned = align_htf_to_ltf(prices, df_1d, daily_midpoint)
         
-        # Exit conditions: opposite divergence or RSI extreme
-        bull_exit = (position == 1 and 
-                    (rsi_aligned[i] > 70 or bear_div))
-        bear_exit = (position == -1 and 
-                    (rsi_aligned[i] < 30 or bull_div))
+        exit_long = (position == 1 and 
+                    (low[i] <= daily_midpoint_aligned[i] or 
+                     high[i] >= s3_1d_aligned[i]))  # Exit long if hits daily midpoint or daily S3
+        exit_short = (position == -1 and 
+                     (high[i] >= daily_midpoint_aligned[i] or 
+                      low[i] <= r3_1d_aligned[i]))  # Exit short if hits daily midpoint or daily R3
         
-        # Update position and signals
-        if bull_entry and position != 1:
+        # Priority: breakout > fade > hold
+        if breakout_long and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bear_entry and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and bull_exit:
+        elif fade_long and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif fade_short and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bear_exit:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
