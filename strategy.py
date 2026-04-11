@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-# 6h_1d_donchian_weekly_pivot_volume
-# Strategy: 6-hour Donchian(20) breakout with weekly pivot direction filter and volume confirmation
-# Timeframe: 6h
+# 12h_1d_alligator_2025
+# Strategy: 12-hour Williams Alligator with 1-day trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Price breaks out of 6-hour Donchian channels in alignment with weekly pivot bias
-# (above weekly pivot = long bias, below = short bias), confirmed by volume spikes.
-# Works in bull markets via breakout continuation and in bear via mean reversion at pivot levels.
-# Weekly pivot provides structural support/resistance that price respects across regimes.
+# Hypothesis: Williams Alligator (three SMAs) identifies trends; when jaws (13-period) and teeth (8-period) are aligned and lips (5-period) crosses, it signals trend continuation. Combined with 1-day trend filter and volume confirmation to avoid false signals. Works in bull/bear by capturing trend continuations.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_weekly_pivot_volume"
-timeframe = "6h"
+name = "12h_1d_alligator_2025"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -33,82 +30,57 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data
-    # Weekly high/low/close from Friday's data (simplified: use rolling window)
-    # For true weekly pivot, we need weekly OHLC - approximate using daily data
-    # Weekly pivot = (Weekly High + Weekly Low + Weekly Close) / 3
-    # We'll use 5-day rolling window for weekly approximation
+    # Williams Alligator components (5, 8, 13 period SMAs on median price)
+    median_price = (high + low) / 2.0
     
-    # Calculate rolling weekly high, low, close
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    # Calculate SMAs for Alligator
+    # Jaws (13-period, 8 bars offset)
+    jaws = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (8-period, 5 bars offset)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (5-period, 3 bars offset)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Weekly pivot point
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    # 1-day EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly support/resistance levels
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
-    
-    # Align weekly pivot data to 6h timeframe (wait for daily close)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
-    
-    # Calculate 6h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
+    # Align 1-day EMA to 12h timeframe (wait for daily close)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (1.3 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r3_aligned[i]) or 
-            np.isnan(weekly_s3_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         
-        # Determine bias from weekly pivot
-        bullish_bias = price_close > weekly_pivot_aligned[i]
-        bearish_bias = price_close < weekly_pivot_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions with weekly pivot filter
-        # Long: price breaks above Donchian high AND above weekly pivot (bullish bias)
-        long_breakout = (price_high > donchian_high[i]) and bullish_bias
-        # Short: price breaks below Donchian low AND below weekly pivot (bearish bias)
-        short_breakout = (price_low < donchian_low[i]) and bearish_bias
+        # Alligator signals: lips crossing teeth in direction of jaw alignment
+        # Bullish: lips above teeth AND teeth above jaws (all aligned up)
+        bullish_aligned = (lips[i] > teeth[i]) and (teeth[i] > jaws[i])
+        # Bearish: lips below teeth AND teeth below jaws (all aligned down)
+        bearish_aligned = (lips[i] < teeth[i]) and (teeth[i] < jaws[i])
         
-        # Fade at extreme weekly levels (mean reversion)
-        # Long: price touches/slightly breaks weekly S3 and shows rejection
-        long_fade = (price_low <= weekly_s3_aligned[i] * 1.002) and bullish_bias
-        # Short: price touches/slightly breaks weekly R3 and shows rejection
-        short_fade = (price_high >= weekly_r3_aligned[i] * 0.998) and bearish_bias
+        # Entry conditions: alignment + volume spike + trend filter
+        long_signal = bullish_aligned and vol_spike[i] and uptrend_1d
+        short_signal = bearish_aligned and vol_spike[i] and downtrend_1d
         
-        # Combine signals with volume confirmation
-        long_signal = (long_breakout or long_fade) and vol_spike[i]
-        short_signal = (short_breakout or short_fade) and vol_spike[i]
-        
-        # Exit conditions
-        # Exit long when price returns to Donchian midpoint or breaks below weekly pivot
-        exit_long = position == 1 and (price_close < donchian_mid[i] or price_close < weekly_pivot_aligned[i])
-        # Exit short when price returns to Donchian midpoint or breaks above weekly pivot
-        exit_short = position == -1 and (price_close > donchian_mid[i] or price_close > weekly_pivot_aligned[i])
+        # Exit when Alligator alignment breaks (lips crosses teeth opposite direction)
+        exit_long = position == 1 and (lips[i] < teeth[i])  # Lips crossed below teeth
+        exit_short = position == -1 and (lips[i] > teeth[i])  # Lips crossed above teeth
         
         # Trading logic
         if long_signal and position != 1:
