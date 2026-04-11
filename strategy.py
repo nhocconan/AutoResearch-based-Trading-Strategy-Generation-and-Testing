@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_volume_v1
-# Strategy: 12h Camarilla pivot with 1d volume confirmation
-# Timeframe: 12h
+# 4h_1d_keltner_channel_volume_v1
+# Strategy: 4h Keltner Channel breakout with 1d volume confirmation and trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels act as strong support/resistance. Price touching L3/L4 with volume spike and bullish 1d trend triggers longs; touching H3/H4 with volume spike and bearish 1d trend triggers shorts. Low trade frequency avoids fee drag.
+# Hypothesis: Keltner Channel breakouts capture momentum with volatility-based bands. Volume confirmation ensures breakout strength. 
+# Trend filter (1d EMA50) ensures alignment with higher timeframe trend. Designed for low trade frequency to minimize fee drift.
+# Works in bull by riding uptrend breakouts, in bear by shorting downtrend breakdowns.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_1d_keltner_channel_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,23 +32,12 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Camarilla pivot levels on 12h (using previous 12h bar)
-    # Calculate from previous bar's high, low, close
-    phigh = np.roll(high, 1)
-    plow = np.roll(low, 1)
-    pclose = np.roll(close, 1)
-    phigh[0] = high[0]
-    plow[0] = low[0]
-    pclose[0] = close[0]
-    
-    pivot = (phigh + plow + pclose) / 3
-    range_val = phigh - plow
-    
-    # Camarilla levels
-    H4 = pivot + (range_val * 1.5 / 2)
-    H3 = pivot + (range_val * 1.25 / 2)
-    L3 = pivot - (range_val * 1.25 / 2)
-    L4 = pivot - (range_val * 1.5 / 2)
+    # Keltner Channel on 4h (20-period, ATR multiplier 2.0)
+    period = 20
+    ma = pd.Series(close).rolling(window=period, min_periods=period).mean()
+    atr = pd.Series(high - low).rolling(window=period, min_periods=period).mean()
+    upper_band = (ma + 2.0 * atr).values
+    lower_band = (ma - 2.0 * atr).values
     
     # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
@@ -58,7 +49,7 @@ def generate_signals(prices):
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # Current 1d volume (aligned)
+    # Align raw 1d volume for current bar comparison
     vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
@@ -66,33 +57,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(H4[i]) or np.isnan(L4[i]) or \
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or \
            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or \
            np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
+        # Volume confirmation: current 1d volume > 20-period average
+        vol_confirm = vol_1d_aligned[i] > vol_avg_20_1d_aligned[i]
         
         # Trend filter: close vs 1d EMA50
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: Price touches L3/L4 AND uptrend AND volume confirmation
-        if (close[i] <= L3[i] or close[i] <= L4[i]) and uptrend and vol_confirm and position != 1:
+        # Long: Price breaks above upper band AND uptrend AND volume confirmation
+        if not np.isnan(upper_band[i]) and close[i] > upper_band[i] and uptrend and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price touches H3/H4 AND downtrend AND volume confirmation
-        elif (close[i] >= H3[i] or close[i] >= H4[i]) and downtrend and vol_confirm and position != -1:
+        # Short: Price breaks below lower band AND downtrend AND volume confirmation
+        elif not np.isnan(lower_band[i]) and close[i] < lower_band[i] and downtrend and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Price crosses opposite H3/L3
-        elif position == 1 and close[i] >= H3[i]:
+        # Exit: Price crosses opposite band
+        elif position == 1 and close[i] < lower_band[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= L3[i]:
+        elif position == -1 and close[i] > upper_band[i]:
             position = 0
             signals[i] = 0.0
         else:
