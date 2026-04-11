@@ -1,22 +1,75 @@
-# 4h_12h_donchian_volume_trend_v1
-# Strategy: 4h Donchian breakout with 12h volume and trend confirmation
-# Timeframe: 4h
-# Leverage: 1.0
-# Hypothesis: Uses 4h Donchian breakout (20-period) confirmed by 12h volume expansion and 12h EMA trend.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Low trade frequency target: 20-40 trades/year to minimize fee drag while capturing strong momentum moves.
+#!/usr/bin/env python3
+"""
+6h_1w_elliott_wave_fib
+Strategy: 6h Elliott Wave-inspired trend continuation with 1-week Fibonacci retracement levels
+Timeframe: 6h
+Leverage: 1.0
+Hypothesis: Uses 1-week Fibonacci retracement levels (38.2%, 61.8%) from the prior weekly swing to identify institutional support/resistance. Enters on 6h pullbacks to these levels in the direction of the higher timeframe trend (1-week Supertrend). Designed for low frequency (15-30 trades/year) to minimize fee decay while capturing high-probability trend continuations in both bull and bear markets.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_donchian_volume_trend_v1"
-timeframe = "4h"
+name = "6h_1w_elliott_wave_fib"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_supertrend(high, low, close, atr_period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR
+    atr = pd.Series(tr).ewm(alpha=1/atr_period, adjust=False).mean().values
+    
+    # Upper and Lower Bands
+    hl2 = (high + low) / 2
+    upperband = hl2 + (multiplier * atr)
+    lowerband = hl2 - (multiplier * atr)
+    
+    # Initialize Supertrend
+    supertrend = np.full_like(close, np.nan)
+    direction = np.full_like(close, 1)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close)):
+        if np.isnan(atr[i-1]) or np.isnan(upperband[i-1]) or np.isnan(lowerband[i-1]):
+            continue
+            
+        # Upper band logic
+        if close[i-1] > upperband[i-1]:
+            upperband[i] = upperband[i-1]
+        else:
+            upperband[i] = hl2[i] + (multiplier * atr[i])
+            
+        # Lower band logic
+        if close[i-1] < lowerband[i-1]:
+            lowerband[i] = lowerband[i-1]
+        else:
+            lowerband[i] = hl2[i] - (multiplier * atr[i])
+            
+        # Trend direction
+        if close[i] > upperband[i-1]:
+            direction[i] = 1
+        elif close[i] < lowerband[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            
+        # Supertrend value
+        if direction[i] == 1:
+            supertrend[i] = lowerband[i]
+        else:
+            supertrend[i] = upperband[i]
+            
+    return supertrend, direction
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,67 +79,139 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 20:
+    if len(df_1w) < 20 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h ATR for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === 1-week Swing Points for Fibonacci ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Find weekly swing high and low (using 5-period window)
+    def find_swing_points(arr, window=5):
+        """Find swing highs and lows"""
+        highs = np.full_like(arr, np.nan)
+        lows = np.full_like(arr, np.nan)
+        
+        for i in range(window, len(arr) - window):
+            # Swing high: highest high in window
+            if arr[i] == np.max(arr[i-window:i+window+1]):
+                highs[i] = arr[i]
+            # Swing low: lowest low in window
+            if arr[i] == np.min(arr[i-window:i+window+1]):
+                lows[i] = arr[i]
+        return highs, lows
     
-    # 12h volume filter: volume > 1.5x 20-period average
-    vol_12h = df_12h['volume'].values
-    vol_ma_20_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_12h = vol_12h / vol_ma_20_12h
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    swing_high_1w, swing_low_1w = find_swing_points(high_1w, 5)
     
-    # 12h EMA trend: 50-period EMA
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Find most recent swing high and low
+    def get_most_recent_swing(values):
+        """Get the most recent non-NaN swing value"""
+        for i in range(len(values)-1, -1, -1):
+            if not np.isnan(values[i]):
+                return values[i]
+        return np.nan
+    
+    # Calculate Fibonacci levels from weekly swing
+    def calculate_fib_levels(high_val, low_val):
+        """Calculate 38.2% and 61.8% Fibonacci retracement levels"""
+        if np.isnan(high_val) or np.isnan(low_val) or high_val <= low_val:
+            return np.nan, np.nan
+        diff = high_val - low_val
+        fib_382 = high_val - (diff * 0.382)
+        fib_618 = high_val - (diff * 0.618)
+        return fib_382, fib_618
+    
+    # Get most recent swing points
+    recent_swing_high = get_most_recent_swing(swing_high_1w)
+    recent_swing_low = get_most_recent_swing(swing_low_1w)
+    
+    # Calculate Fibonacci levels
+    fib_382, fib_618 = calculate_fib_levels(recent_swing_high, recent_swing_low)
+    
+    # Align Fibonacci levels to 6h timeframe (hold until new swing forms)
+    fib_382_arr = np.full(len(prices), fib_382)
+    fib_618_arr = np.full(len(prices), fib_618)
+    
+    # === 1-week Supertrend (trend filter) ===
+    supertrend_1w, trend_1w = calculate_supertrend(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values,
+        atr_period=10,
+        multiplier=3.0
+    )
+    
+    # Align Supertrend and trend direction to 6h
+    supertrend_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_1w)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w.astype(float))
+    
+    # === 6h RSI (entry timing) ===
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === 6h Volume Filter ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr_4h[i]) or np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(fib_382_arr[i]) or np.isnan(fib_618_arr[i]) or
+            np.isnan(supertrend_1w_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        atr = atr_4h[i]
-        vol_ratio = vol_ratio_12h_aligned[i]
-        ema_trend = ema_12h_aligned[i]
+        price_high = high[i]
+        price_low = low[i]
         
-        # Volume confirmation: expanded volume
-        volume_expanded = vol_ratio > 1.5
+        # Trend direction from 1-week Supertrend
+        uptrend = trend_1w_aligned[i] > 0
+        downtrend = trend_1w_aligned[i] < 0
         
-        # Breakout conditions
-        breakout_up = price_close > donchian_high[i]
-        breakdown_down = price_close < donchian_low[i]
+        # Price near Fibonacci levels (within 0.5% tolerance)
+        near_fib_382 = abs(price_close - fib_382_arr[i]) / fib_382_arr[i] < 0.005
+        near_fib_618 = abs(price_close - fib_618_arr[i]) / fib_618_arr[i] < 0.005
         
-        # Trend filter: price above/below 12h EMA
-        uptrend = price_close > ema_trend
-        downtrend = price_close < ema_trend
+        # Volume confirmation: above average volume
+        volume_ok = volume[i] > vol_ma_20[i]
         
-        # Long: breakout up + volume expansion + uptrend
-        long_signal = breakout_up and volume_expanded and uptrend
+        # RSI conditions for pullback entry
+        rsi_not_overbought = rsi[i] < 60
+        rsi_not_oversold = rsi[i] > 40
         
-        # Short: breakdown down + volume expansion + downtrend
-        short_signal = breakdown_down and volume_expanded and downtrend
+        # Long conditions: uptrend + pullback to 61.8% Fib + volume + RSI not overbought
+        long_signal = (
+            uptrend and 
+            near_fib_618 and 
+            volume_ok and 
+            rsi_not_overbought
+        )
         
-        # Stoploss: 2.5 * ATR from entry
-        stop_long = position == 1 and price_close < (ema_trend - 2.5 * atr)
-        stop_short = position == -1 and price_close > (ema_trend + 2.5 * atr)
+        # Short conditions: downtrend + pullback to 38.2% Fib + volume + RSI not oversold
+        short_signal = (
+            downtrend and 
+            near_fib_382 and 
+            volume_ok and 
+            rsi_not_oversold
+        )
+        
+        # Exit conditions: trend reversal or price moves against position
+        exit_long = position == 1 and (not uptrend or price_close < supertrend_1w_aligned[i])
+        exit_short = position == -1 and (not downtrend or price_close > supertrend_1w_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
@@ -95,10 +220,10 @@ def generate_signals(prices):
         elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and stop_long:
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and stop_short:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
