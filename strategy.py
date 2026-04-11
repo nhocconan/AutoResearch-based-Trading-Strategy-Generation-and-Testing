@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 6h_1d_ichimoku_cloud_v1
-# Strategy: 6h Ichimoku with 1d cloud filter and volume confirmation
-# Timeframe: 6h
+# 4h_12h_trix_volume_regime_v1
+# Strategy: 4h TRIX momentum with 12h trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Ichimoku system provides dynamic support/resistance and momentum signals.
-# Using 1d cloud as trend filter improves robustness in both bull/bear markets.
-# Volume confirmation reduces false signals. Designed for 30-60 trades/year to avoid fee drag.
+# Hypothesis: TRIX (TRIple Exponential Average) filters noise and identifies smooth momentum.
+# Long when TRIX > 0 and rising, short when TRIX < 0 and falling, with 12h EMA trend filter.
+# Volume spike (1.5x 20-period average) confirms momentum strength. Designed for moderate
+# frequency (25-40 trades/year) to balance signal quality and fee drag in bull/bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_cloud_v1"
-timeframe = "6h"
+name = "4h_12h_trix_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
@@ -26,79 +27,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 52:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # 1d Ichimoku components
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # TRIX calculation: Triple EMA of price, then ROC
+    # TRIX = EMA(EMA(EMA(close, period), period), period) ROC
+    period = 15
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
+    trix = ema3.pct_change(periods=1) * 100  # Rate of change
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align 1d Ichimoku components to 6h timeframe
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # 6h volume filter: current volume > 20-period average volume
-    volume_series = pd.Series(volume)
-    vol_avg_20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_avg_20
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after warmup period
+    for i in range(60, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(senkou_span_a_6h[i]) or np.isnan(senkou_span_b_6h[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(trix.iloc[i]) or 
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Cloud top and bottom
-        cloud_top = np.maximum(senkou_span_a_6h[i], senkou_span_b_6h[i])
-        cloud_bottom = np.minimum(senkou_span_a_6h[i], senkou_span_b_6h[i])
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Bullish: price above cloud AND Tenkan > Kijun
-        bullish_setup = (close[i] > cloud_top) and (tenkan_sen_6h[i] > kijun_sen_6h[i])
+        # TRIX signals: positive and rising = bullish momentum
+        trix_now = trix.iloc[i]
+        trix_prev = trix.iloc[i-1]
+        trix_bullish = trix_now > 0 and trix_now > trix_prev
+        trix_bearish = trix_now < 0 and trix_now < trix_prev
         
-        # Bearish: price below cloud AND Tenkan < Kijun
-        bearish_setup = (close[i] < cloud_bottom) and (tenkan_sen_6h[i] < kijun_sen_6h[i])
-        
-        # Entry logic: Ichimoku signal + volume filter
-        if bullish_setup and volume_filter[i] and position != 1:
+        # Entry logic: TRIX momentum + volume spike + trend alignment
+        if (trix_bullish and volume_spike[i] and uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        elif bearish_setup and volume_filter[i] and position != -1:
+        elif (trix_bearish and volume_spike[i] and downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price enters cloud or Tenkan/Kijun cross reverses
-        elif position == 1 and (close[i] <= cloud_top or tenkan_sen_6h[i] <= kijun_sen_6h[i]):
+        # Exit: TRIX momentum reversal or trend change
+        elif position == 1 and (not trix_bullish or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] >= cloud_bottom or tenkan_sen_6h[i] >= kijun_sen_6h[i]):
+        elif position == -1 and (not trix_bearish or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
