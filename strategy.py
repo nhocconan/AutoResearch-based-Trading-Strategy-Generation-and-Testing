@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot reversal with 1d volume confirmation and ADX trend filter
-# - Camarilla levels from 1d: L3/H3 act as strong intraday support/resistance
-# - Long when price closes back above L3 after touching it (mean reversion in trend)
-# - Short when price closes back below H3 after touching it
-# - Volume confirmation: current volume > 1.5x 24-period average (institutional participation)
-# - ADX filter: only trade when ADX > 25 to avoid ranging markets and false reversals
-# - Discrete position sizing: ±0.25 to control drawdown and minimize fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee limits for 12h
-# - Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
+# Hypothesis: 4h Camarilla pivot levels from 12h + volume spike + volatility regime filter
+# - Long when price breaks above Camarilla H4 resistance with volume > 2.0x 20-period average (strong conviction)
+# - Short when price breaks below Camarilla L4 support with volume > 2.0x 20-period average
+# - Uses 12h data to calculate Camarilla levels (more stable than shorter timeframes)
+# - Volatility filter: only trade when ATR(14) > ATR(50) to avoid low volatility chop
+# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits for 4h
+# - Camarilla levels provide natural support/resistance based on previous day's price action
+# - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
 
-name = "12h_1d_camarilla_volume_adx_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_volume_volatility_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,75 +30,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla, volume and ADX
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return signals
     
-    # Extract 1d arrays
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate Camarilla levels for each 12h bar
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate previous day's Camarilla levels (using prior day's OHLC)
-    # Shift by 1 to use completed day's data only
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = np.nan  # First day has no previous
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Camarilla formulas: H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
+    camarilla_h4 = close_12h + (high_12h - low_12h) * 1.1 / 2
+    camarilla_l4 = close_12h - (high_12h - low_12h) * 1.1 / 2
     
-    # Camarilla calculations
-    range_1d = prev_high - prev_low
-    camarilla_h3 = prev_close + range_1d * 1.1 / 6
-    camarilla_l3 = prev_close - range_1d * 1.1 / 6
-    camarilla_h4 = prev_close + range_1d * 1.1 / 2
-    camarilla_l4 = prev_close - range_1d * 1.1 / 2
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
     
-    # 1d volume SMA (24-period)
-    volume_series = pd.Series(volume_1d)
-    volume_sma_24_1d = volume_series.rolling(window=24, min_periods=24).mean().values
+    # 12h volume SMA (20-period)
+    volume_12h = df_12h['volume'].values
+    volume_series = pd.Series(volume_12h)
+    volume_sma_20_12h = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
     
-    # 1d ADX calculation (14-period)
-    # True Range
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Volatility filter: ATR(14) > ATR(50) to avoid low volatility chop
+    tr1 = pd.Series(high_12h).shift(1) - pd.Series(low_12h).shift(1)
+    tr2 = abs(pd.Series(high_12h).shift(1) - pd.Series(close_12h).shift(1))
+    tr3 = abs(pd.Series(low_12h).shift(1) - pd.Series(close_12h).shift(1))
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50_12h = pd.Series(tr_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    atr_50_aligned = align_htf_to_ltf(prices, df_12h, atr_50_12h)
     
-    # Directional Movement
-    dm_plus = pd.Series(high_1d).diff()
-    dm_minus = -pd.Series(low_1d).diff()
-    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
-    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
-    
-    # Smoothed values
-    atr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / np.where(atr_14 == 0, 1, atr_14)
-    di_minus = 100 * dm_minus_smooth / np.where(atr_14 == 0, 1, atr_14)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    volume_sma_24_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_24_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Pre-compute 4h price series for efficiency
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
-            np.isnan(volume_sma_24_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,42 +81,38 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         
-        # Camarilla touch conditions (using wicks for touch detection)
-        touched_l3 = price_low <= camarilla_l3_aligned[i]
-        touched_h3 = price_high >= camarilla_h3_aligned[i]
+        # Camarilla breakout conditions
+        breakout_long = price_close > camarilla_h4_aligned[i-1]  # Close above previous period's H4
+        breakout_short = price_close < camarilla_l4_aligned[i-1]  # Close below previous period's L4
         
-        # Reversal conditions: price closes back inside the level after touching
-        reversed_long = touched_l3 and price_close > camarilla_l3_aligned[i]
-        reversed_short = touched_h3 and price_close < camarilla_h3_aligned[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (using 12h aligned volume)
+        vol_confirm = volume_current > 2.0 * volume_sma_20_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 24-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_24_aligned[i]
-        
-        # ADX trend filter: only trade in trending markets (ADX > 25)
-        trend_filter = adx_aligned[i] > 25
+        # Volatility filter: trade only when short-term ATR > long-term ATR (avoid low volatility chop)
+        vol_filter = atr_14_aligned[i] > atr_50_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: L3 touch and reversal + volume + trend
-        if reversed_long and vol_confirm and trend_filter:
+        # Long: Camarilla H4 breakout + volume confirmation + volatility filter
+        if breakout_long and vol_confirm and vol_filter:
             enter_long = True
         
-        # Short: H3 touch and reversal + volume + trend
-        if reversed_short and vol_confirm and trend_filter:
+        # Short: Camarilla L4 breakdown + volume confirmation + volatility filter
+        if breakout_short and vol_confirm and vol_filter:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla level break or volatility collapse
+        # Exit conditions: opposite Camarilla breakout or volatility collapse
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below L4 (stronger support break)
-            exit_long = price_close < camarilla_l4_aligned[i]
+            # Exit long if price breaks below L4 OR volatility filter fails
+            exit_long = (price_close < camarilla_l4_aligned[i-1]) or (not vol_filter)
         elif position == -1:
-            # Exit short if price breaks above H4 (stronger resistance break)
-            exit_short = price_close > camarilla_h4_aligned[i]
+            # Exit short if price breaks above H4 OR volatility filter fails
+            exit_short = (price_close > camarilla_h4_aligned[i-1]) or (not vol_filter)
         
         # Trading logic
         if enter_long and position != 1:
