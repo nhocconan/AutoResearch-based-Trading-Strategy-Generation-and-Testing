@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1-day Bollinger Band squeeze and breakout
-# Uses Bollinger Band width to identify low volatility periods (squeeze)
-# Breaks out when price closes outside Bollinger Bands with volume confirmation
-# Designed for 20-40 trades/year with focus on BTC/ETH performance
+# Hypothesis: 12h timeframe with weekly pivot levels and daily volume confirmation.
+# Uses weekly Camarilla levels for trend direction and daily levels for entry.
+# Fades at daily S3/R3 in direction of weekly trend and breaks out at daily S4/R4.
+# Volume filter confirms institutional participation. Designed for 12-37 trades/year.
+# Weekly trend filter reduces whipsaw in sideways markets and improves win rate.
 
-name = "4h_1d_bb_squeeze_breakout_v1"
-timeframe = "4h"
+name = "12h_1w1d_camarilla_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price arrays
@@ -23,47 +24,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load daily and weekly data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily Bollinger Bands (20, 2)
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla levels for trend direction
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w[0] = np.nan
+    prev_low_1w[0] = np.nan
+    prev_close_1w[0] = np.nan
+    
+    daily_range_1w = prev_high_1w - prev_low_1w
+    r4_1w = prev_close_1w + daily_range_1w * 1.1 / 2
+    r3_1w = prev_close_1w + daily_range_1w * 1.1 / 4
+    s3_1w = prev_close_1w - daily_range_1w * 1.1 / 4
+    s4_1w = prev_close_1w - daily_range_1w * 1.1 / 2
+    
+    # Weekly trend: price above R3 = bullish, below S3 = bearish
+    weekly_trend_bull = prev_close_1w > (r3_1w + s3_1w) / 2  # Above midpoint
+    weekly_trend_bear = prev_close_1w < (r3_1w + s3_1w) / 2  # Below midpoint
+    
+    # Align weekly trend to 12h
+    weekly_trend_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bull)
+    weekly_trend_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bear)
+    
+    # Calculate daily Camarilla levels for entry
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-period SMA and standard deviation
-    sma_20 = np.full_like(close_1d, np.nan)
-    std_20 = np.full_like(close_1d, np.nan)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    for i in range(19, len(close_1d)):
-        sma_20[i] = np.mean(close_1d[i-19:i+1])
-        std_20[i] = np.std(close_1d[i-19:i+1])
+    daily_range_1d = prev_high_1d - prev_low_1d
+    r4_1d = prev_close_1d + daily_range_1d * 1.1 / 2
+    r3_1d = prev_close_1d + daily_range_1d * 1.1 / 4
+    s3_1d = prev_close_1d - daily_range_1d * 1.1 / 4
+    s4_1d = prev_close_1d - daily_range_1d * 1.1 / 2
     
-    # Calculate upper and lower bands
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
-    bb_width = upper_band - lower_band
+    # Daily average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20 = np.full_like(volume_1d, np.nan, dtype=float)
+    for i in range(19, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Calculate Bollinger Band width percentile (252-period for 1 year)
-    bb_width_pct = np.full_like(bb_width, np.nan)
-    for i in range(251, len(bb_width)):
-        bb_width_pct[i] = scipy.stats.percentileofscore(bb_width[i-251:i+1], bb_width[i]) / 100.0
-    
-    # Identify squeeze: BB width below 20th percentile (low volatility)
-    squeeze = bb_width_pct < 0.20
-    
-    # Align squeeze and bands to 4h
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    
-    # Calculate 20-period average volume for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg_20 = np.full_like(vol_1d, np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_avg_20[i] = np.mean(vol_1d[i-19:i+1])
+    # Align daily levels and volume to 12h
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
@@ -71,30 +92,50 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(squeeze_aligned[i]) or 
-            np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i]) or
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_avg_aligned[i]) or
+            np.isnan(weekly_trend_bull_aligned[i]) or np.isnan(weekly_trend_bear_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.3 * daily average volume
-        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.5 * daily average volume
+        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Breakout conditions
-        breakout_long = (close[i] > upper_band_aligned[i] and vol_filter and squeeze_aligned[i])
-        breakout_short = (close[i] < lower_band_aligned[i] and vol_filter and squeeze_aligned[i])
+        # Determine weekly trend direction
+        is_bullish_week = weekly_trend_bull_aligned[i]
+        is_bearish_week = weekly_trend_bear_aligned[i]
         
-        # Exit when price returns to middle band (mean reversion)
-        middle_band = (upper_band_aligned[i] + lower_band_aligned[i]) / 2
-        exit_long = (position == 1 and close[i] <= middle_band)
-        exit_short = (position == -1 and close[i] >= middle_band)
+        # Fade at S3/R3 in direction of weekly trend
+        fade_long = (low[i] <= s3_1d_aligned[i] and vol_filter and is_bullish_week)
+        fade_short = (high[i] >= r3_1d_aligned[i] and vol_filter and is_bearish_week)
         
-        # Priority: breakout > exit > hold
+        # Breakout at S4/R4 (always active, but stronger with trend)
+        breakout_long = (high[i] >= r4_1d_aligned[i] and vol_filter)
+        breakout_short = (low[i] <= s4_1d_aligned[i] and vol_filter)
+        
+        # Exit when price returns to weekly midpoint or opposite S3/R3
+        weekly_midpoint = (r3_1w + s3_1w) / 2
+        weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint)
+        
+        exit_long = (position == 1 and 
+                    (low[i] <= weekly_midpoint_aligned[i] or 
+                     high[i] >= s3_1d_aligned[i]))  # Exit long if hits weekly midpoint or daily S3
+        exit_short = (position == -1 and 
+                     (high[i] >= weekly_midpoint_aligned[i] or 
+                      low[i] <= r3_1d_aligned[i]))  # Exit short if hits weekly midpoint or daily R3
+        
+        # Priority: breakout > fade > hold
         if breakout_long and position != 1:
             position = 1
             signals[i] = 0.25
         elif breakout_short and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif fade_long and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif fade_short and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
@@ -108,117 +149,3 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
-
-# Import scipy for percentile calculation
-try:
-    import scipy.stats
-except ImportError:
-    # Fallback method if scipy is not available
-    def percentileofscore(scores, score):
-        if len(scores) == 0:
-            return 0.0
-        return np.sum(scores <= score) / len(scores) * 100.0
-    
-    # Override the bb_width_pct calculation
-    def generate_signals(prices):
-        n = len(prices)
-        if n < 50:
-            return np.zeros(n)
-        
-        # Price arrays
-        high = prices['high'].values
-        low = prices['low'].values
-        close = prices['close'].values
-        volume = prices['volume'].values
-        
-        # Load daily data ONCE before loop
-        df_1d = get_htf_data(prices, '1d')
-        if len(df_1d) < 30:
-            return np.zeros(n)
-        
-        # Calculate daily Bollinger Bands (20, 2)
-        close_1d = df_1d['close'].values
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        
-        # Calculate 20-period SMA and standard deviation
-        sma_20 = np.full_like(close_1d, np.nan)
-        std_20 = np.full_like(close_1d, np.nan)
-        
-        for i in range(19, len(close_1d)):
-            sma_20[i] = np.mean(close_1d[i-19:i+1])
-            std_20[i] = np.std(close_1d[i-19:i+1])
-        
-        # Calculate upper and lower bands
-        upper_band = sma_20 + (2 * std_20)
-        lower_band = sma_20 - (2 * std_20)
-        bb_width = upper_band - lower_band
-        
-        # Calculate Bollinger Band width percentile (252-period for 1 year) - fallback method
-        bb_width_pct = np.full_like(bb_width, np.nan)
-        for i in range(251, len(bb_width)):
-            # Calculate percentile manually: percentage of values <= current value
-            past_values = bb_width[i-251:i+1]
-            bb_width_pct[i] = np.sum(past_values <= bb_width[i]) / len(past_values)
-        
-        # Identify squeeze: BB width below 20th percentile (low volatility)
-        squeeze = bb_width_pct < 0.20
-        
-        # Align squeeze and bands to 4h
-        squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-        upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-        lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-        
-        # Calculate 20-period average volume for confirmation
-        vol_1d = df_1d['volume'].values
-        vol_avg_20 = np.full_like(vol_1d, np.nan)
-        for i in range(19, len(vol_1d)):
-            vol_avg_20[i] = np.mean(vol_1d[i-19:i+1])
-        vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-        
-        signals = np.zeros(n)
-        position = 0  # 1=long, -1=short, 0=flat
-        
-        for i in range(1, n):
-            # Skip if any required data is invalid
-            if (np.isnan(squeeze_aligned[i]) or 
-                np.isnan(upper_band_aligned[i]) or 
-                np.isnan(lower_band_aligned[i]) or
-                np.isnan(vol_avg_aligned[i])):
-                signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-                continue
-            
-            # Volume filter: current volume > 1.3 * daily average volume
-            vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
-            
-            # Breakout conditions
-            breakout_long = (close[i] > upper_band_aligned[i] and vol_filter and squeeze_aligned[i])
-            breakout_short = (close[i] < lower_band_aligned[i] and vol_filter and squeeze_aligned[i])
-            
-            # Exit when price returns to middle band (mean reversion)
-            middle_band = (upper_band_aligned[i] + lower_band_aligned[i]) / 2
-            exit_long = (position == 1 and close[i] <= middle_band)
-            exit_short = (position == -1 and close[i] >= middle_band)
-            
-            # Priority: breakout > exit > hold
-            if breakout_long and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif breakout_short and position != -1:
-                position = -1
-                signals[i] = -0.25
-            elif position == 1 and exit_long:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and exit_short:
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold current position
-                signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
-        
-        return signals
-except Exception as e:
-    # If any import or calculation fails, return zero signals
-    def generate_signals(prices):
-        return np.zeros(len(prices))
