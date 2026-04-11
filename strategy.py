@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h TRIX + Volume Spike + Chop Regime Filter
-# - TRIX (15-period) measures momentum with reduced noise
-# - Long when TRIX crosses above zero with volume > 2x 20-period average and chop > 61.8 (range)
-# - Short when TRIX crosses below zero with volume > 2x 20-period average and chop > 61.8 (range)
-# - Uses chop regime to avoid whipsaws in strong trends (chop < 38.2) and focus on mean reversion in ranges
-# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits for 4h
-# - Works in both bull (mean reversion in rallies) and bear (mean reversion in declines) markets
+# Hypothesis: 12h Donchian channel breakout + 1d trend filter + volume confirmation
+# - Donchian(20) on 12h: long when close breaks above upper band, short when breaks below lower band
+# - 1d EMA200 as trend filter: only take long when price > EMA200, short when price < EMA200
+# - Volume confirmation: current volume > 1.8x 20-period average to avoid false breakouts
+# - Exit when price crosses back through the middle of the Donchian channel
+# - Position sizing: 0.25 to manage drawdown and reduce fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) for 12h timeframe
+# - Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
 
-name = "4h_trix_volume_chop_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,86 +29,73 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for chop filter
+    # Load 1d data ONCE before loop for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 200:
         return signals
     
-    # Pre-compute 1d Chop Index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA200
     close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    atr_1d = []
-    for i in range(len(close_1d)):
-        if i == 0:
-            tr = high_1d[i] - low_1d[i]
-        else:
-            tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-        atr_1d.append(tr)
+    # Pre-compute Donchian channel on 12h data (20-period)
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    atr_1d = np.array(atr_1d)
-    atr_sum_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    high_max_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    low_min_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop_1d = 100 * np.log10(atr_sum_14 / np.log10(14) / (high_max_14 - low_min_14))
-    chop_1d = np.where((high_max_14 - low_min_14) == 0, 50, chop_1d)  # avoid division by zero
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # Pre-compute TRIX (15-period) on 4h data
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # first value has no previous
-    
-    # Pre-compute 4h volume SMA (20-period)
+    # Pre-compute 12h volume SMA (20-period)
     volume_series = pd.Series(volume)
     volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    for i in range(15, n):  # Start after warmup for TRIX and chop
+    for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(trix[i]) or np.isnan(chop_1d_aligned[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(trix[i-1]) if i > 0 else False):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         
-        # TRIX crossover signals
-        trix_cross_above = trix[i] > 0 and trix[i-1] <= 0
-        trix_cross_below = trix[i] < 0 and trix[i-1] >= 0
+        # Donchian breakout conditions
+        breakout_up = price_close > donchian_high[i-1]  # Close above previous upper band
+        breakdown_down = price_close < donchian_low[i-1]  # Close below previous lower band
         
-        # Volume confirmation: current volume > 2x 20-period average
-        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.8x 20-period average
+        vol_confirm = volume_current > 1.8 * volume_sma_20[i]
         
-        # Chop regime filter: chop > 61.8 indicates ranging market (good for mean reversion)
-        chop_range = chop_1d_aligned[i] > 61.8
+        # 1d EMA200 trend filter
+        price_above_ema200 = price_close > ema200_1d_aligned[i]
+        price_below_ema200 = price_close < ema200_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: TRIX crosses above zero + volume confirmation + chop range
-        if trix_cross_above and vol_confirm and chop_range:
+        # Long: Donchian breakout up + price above 1d EMA200 + volume confirmation
+        if breakout_up and price_above_ema200 and vol_confirm:
             enter_long = True
         
-        # Short: TRIX crosses below zero + volume confirmation + chop range
-        if trix_cross_below and vol_confirm and chop_range:
+        # Short: Donchian breakdown down + price below 1d EMA200 + volume confirmation
+        if breakdown_down and price_below_ema200 and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite TRIX crossover or chop leaves range (trend developing)
+        # Exit conditions: price crosses back through the middle of Donchian channel
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if TRIX crosses below zero OR chop drops below 50 (trend developing)
-            exit_long = trix_cross_below or (chop_1d_aligned[i] < 50)
+            # Exit long if price crosses below the middle of Donchian channel
+            exit_long = price_close < donchian_mid[i]
         elif position == -1:
-            # Exit short if TRIX crosses above zero OR chop drops below 50 (trend developing)
-            exit_short = trix_cross_above or (chop_1d_aligned[i] < 50)
+            # Exit short if price crosses above the middle of Donchian channel
+            exit_short = price_close > donchian_mid[i]
         
         # Trading logic
         if enter_long and position != 1:
