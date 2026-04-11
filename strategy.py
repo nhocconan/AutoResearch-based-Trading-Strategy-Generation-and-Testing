@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d/1w Donchian breakout with volume confirmation and 1w trend filter
-# Long when price breaks above weekly Donchian(20) high + volume > 1.5x average + weekly trend up
-# Short when price breaks below weekly Donchian(20) low + volume > 1.5x average + weekly trend down
-# Exit when price returns to weekly Donchian midpoint or trend reverses
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
-# Weekly trend filter reduces whipsaw in ranging markets while capturing strong trends
-# Weekly timeframe aligns with longer-term cycles in BTC/ETH
+# Hypothesis: 6h Camarilla pivot with 1d volume confirmation and trend filter
+# Long when price breaks above R4 (resistance 4) with volume > 1.5x 20-period average and 1d trend up
+# Short when price breaks below S4 (support 4) with volume > 1.5x 20-period average and 1d trend down
+# Exit when price returns to previous period's close or trend reverses
+# Camarilla levels from 1d: R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
+# Designed for 12-37 trades/year on 6h timeframe with strong trend following and low turnover
 
-name = "1d_1w_donchian_volume_trend_v2"
-timeframe = "1d"
+name = "6h_1d_camarilla_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,25 +25,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 1d high, low, close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Donchian channels (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donchian_mid_1w = (donchian_high_1w + donchian_low_1w) / 2
-    donchian_high_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_1w)
-    donchian_low_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_1w)
-    donchian_mid_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_mid_1w)
+    # Calculate Camarilla levels: R4 and S4
+    # R4 = close + 1.1*(high-low), S4 = close - 1.1*(high-low)
+    camarilla_r4 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.1 * (high_1d - low_1d)
+    
+    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 20-period average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,28 +56,28 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_1w_aligned[i]) or np.isnan(donchian_low_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Trend filter: price relative to weekly EMA20
-        is_uptrend = close[i] > ema_20_1w_aligned[i]
-        is_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA50
+        is_uptrend = close[i] > ema_50_1d_aligned[i]
+        is_downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: break of weekly Donchian channel
-        donchian_breakout_up = close[i] > donchian_high_1w_aligned[i-1]  # Break above previous week's high
-        donchian_breakdown_down = close[i] < donchian_low_1w_aligned[i-1]  # Break below previous week's low
+        # Entry conditions: breakout of Camarilla R4/S4
+        camarilla_breakout_up = close[i] > camarilla_r4_aligned[i-1]  # Break above previous period's R4
+        camarilla_breakdown_down = close[i] < camarilla_s4_aligned[i-1]  # Break below previous period's S4
         
-        long_entry = donchian_breakout_up and volume_filter and is_uptrend
-        short_entry = donchian_breakdown_down and volume_filter and is_downtrend
+        long_entry = camarilla_breakout_up and volume_filter and is_uptrend
+        short_entry = camarilla_breakdown_down and volume_filter and is_downtrend
         
-        # Exit conditions: return to midpoint or trend change
-        long_exit = (close[i] < donchian_mid_1w_aligned[i]) or (not is_uptrend)
-        short_exit = (close[i] > donchian_mid_1w_aligned[i]) or (not is_downtrend)
+        # Exit conditions: return to previous period's close or trend reversal
+        long_exit = (close[i] < close_1d[i-1]) or (not is_uptrend)  # Return to prev 1d close or trend change
+        short_exit = (close[i] > close_1d[i-1]) or (not is_downtrend)  # Return to prev 1d close or trend change
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
