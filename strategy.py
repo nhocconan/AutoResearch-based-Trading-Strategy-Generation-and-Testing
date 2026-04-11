@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_cloud_v1"
-timeframe = "6h"
+name = "12h_1d_vwap_trend_squeeze_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,95 +22,71 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 50:
         return signals
     
-    # Ichimoku components on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily VWAP for trend direction (more robust than EMA)
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d = vwap_1d.values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # 12h VWAP for dynamic support/resistance
+    typical_price = (high + low + close) / 3
+    vwap = (typical_price * volume).cumsum() / volume.cumsum()
+    vwap = vwap.values
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Bollinger Bands for squeeze detection (20, 2) on 12h
+    vwap_series = pd.Series(vwap)
+    vwap_ma_20 = vwap_series.rolling(window=20, min_periods=20).mean().values
+    vwap_std_20 = vwap_series.rolling(window=20, min_periods=20).std().values
+    upper_band = vwap_ma_20 + 2 * vwap_std_20
+    lower_band = vwap_ma_20 - 2 * vwap_std_20
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-    senkou_a = ((tenkan + kijun) / 2)
+    # Volume spike detection (volume > 1.8x 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Chikou Span (Lagging Span): close shifted -22 periods (not used for signals)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # 6m ATR for volatility filter
-    tr1 = pd.Series(high).rolling(window=1).max() - pd.Series(low).rolling(window=1).min()
-    tr2 = abs(pd.Series(high).rolling(window=1).max() - pd.Series(close).shift(1))
-    tr3 = abs(pd.Series(low).rolling(window=1).min() - pd.Series(close).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
+    # Align daily VWAP to 12h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_ma_20[i]) or 
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
+        volume_current = volume[i]
+        vwap_val = vwap[i]
+        vwap_1d_val = vwap_1d_aligned[i]
         
-        tenkan_val = tenkan_6h[i]
-        kijun_val = kijun_6h[i]
-        senkou_a_val = senkou_a_6h[i]
-        senkou_b_val = senkou_b_6h[i]
+        # Bollinger Band squeeze: bandwidth < 4% of VWAP (low volatility)
+        bb_width = (upper_band[i] - lower_band[i]) / vwap_ma_20[i] if vwap_ma_20[i] != 0 else 1
+        squeeze = bb_width < 0.04
         
-        # Cloud boundaries (Senkou Span A and B)
-        upper_cloud = max(senkou_a_val, senkou_b_val)
-        lower_cloud = min(senkou_a_val, senkou_b_val)
+        # Volume confirmation: volume spike
+        volume_spike = volume_current > 1.8 * vol_ma_20[i]
         
-        # Ichimoku signals
-        tk_cross_bull = tenkan_val > kijun_val
-        tk_cross_bear = tenkan_val < kijun_val
+        # Trend filter: price relative to daily VWAP
+        above_trend = price_close > vwap_1d_val
+        below_trend = price_close < vwap_1d_val
         
-        # Price relative to cloud
-        price_above_cloud = price_close > upper_cloud
-        price_below_cloud = price_close < lower_cloud
-        price_in_cloud = (price_close >= lower_cloud) and (price_close <= upper_cloud)
-        
-        # Volatility filter: avoid extremely low volatility
-        vol_filter = atr[i] > 0.01 * price_close  # ATR > 1% of price
-        
-        # Trading logic
+        # Mean reversion signals from Bollinger Bands with volume confirmation
         long_signal = False
         short_signal = False
         
-        # Long: TK bullish cross + price above cloud + volatility filter
-        if tk_cross_bull and price_above_cloud and vol_filter:
+        # Long: price at lower BB during squeeze + volume spike + above daily VWAP trend
+        if squeeze and volume_spike and price_close <= lower_band[i] and above_trend:
             long_signal = True
         
-        # Short: TK bearish cross + price below cloud + volatility filter
-        if tk_cross_bear and price_below_cloud and vol_filter:
+        # Short: price at upper BB during squeeze + volume spike + below daily VWAP trend
+        if squeeze and volume_spike and price_close >= upper_band[i] and below_trend:
             short_signal = True
         
-        # Exit: TK cross in opposite direction or price enters cloud
-        exit_long = (tk_cross_bear) or (price_in_cloud)
-        exit_short = (tk_cross_bull) or (price_in_cloud)
+        # Exit: return to VWAP (mean reversion complete)
+        exit_long = price_close >= vwap_val
+        exit_short = price_close <= vwap_val
         
         # Trading logic
         if long_signal and position != 1:
@@ -131,11 +107,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Ichimoku cloud strategy with TK cross signals and cloud filter from 1d.
-# Enters long when Tenkan crosses above Kijun AND price is above the cloud (bullish trend).
-# Enters short when Tenkan crosses below Kijun AND price is below the cloud (bearish trend).
-# Uses daily Ichimoku for higher timeframe trend context, reducing whipsaws.
-# Volatility filter (ATR > 1% of price) avoids choppy markets.
-# Works in bull markets via trend-following signals and in bear markets via short signals.
-# Cloud acts as dynamic support/resistance, improving entry/exit timing.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 12h VWAP Bollinger Band squeeze strategy with daily VWAP trend filter and volume confirmation.
+# Enters long when price touches lower Bollinger Band during low volatility squeeze with volume spike and price above daily VWAP.
+# Enters short when price touches upper Bollinger Band during squeeze with volume spike and price below daily VWAP.
+# Exits when price returns to 12h VWAP (mean reversion complete).
+# Uses Bollinger Band squeeze (<4% width) to identify low volatility periods primed for expansion.
+# Volume confirmation (>1.8x 20-period average) ensures institutional participation.
+# Daily VWAP filter ensures trades align with higher timeframe trend.
+# Target: 15-25 trades per year to minimize fee drag while capturing explosive moves after consolidation.
+# Works in both bull and bear markets by trading mean reversion explosions from squeezed conditions.
+# VWAP is more robust than EMA for trending markets and adapts to volume profile.
