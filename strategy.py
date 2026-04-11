@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_ema_crossover_volatility_breakout
-# Strategy: Daily EMA crossover with weekly trend filter and volatility breakout
-# Timeframe: 1d
+# 6h_1d_ichimoku_cloud_breakout_v1
+# Strategy: Ichimoku cloud breakout with daily trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: EMA(9/21) crossovers signal trend changes. Weekly EMA(50) filters trend direction.
-# Volatility breakout (ATR-based) confirms momentum. Works in bull by riding uptrends,
-# and in bear by catching short-term reversals against the weekly trend.
+# Hypothesis: Price breaking above/below Ichimoku cloud with daily trend alignment captures
+# strong momentum moves. Cloud acts as dynamic support/resistance, reducing whipsaws.
+# Works in bull by catching breakouts above cloud in uptrend, in bear by catching
+# breakdowns below cloud in downtrend. Volume confirms institutional participation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_ema_crossover_volatility_breakout"
-timeframe = "1d"
+name = "6h_1d_ichimoku_cloud_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,64 +27,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 50:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_trend = ema_50_1w > np.roll(ema_50_1w, 1)  # Rising EMA = uptrend
-    ema_50_1w_trend[0] = False  # First value invalid
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w_trend)
+    # Ichimoku components on daily timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily EMA(9) and EMA(21) for crossover
-    ema_9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    max_high_9 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_9 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_9 + min_low_9) / 2
     
-    # ATR(14) for volatility breakout
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_26 + min_low_26) / 2
     
-    # Signals
-    bullish_cross = ema_9 > ema_21
-    bearish_cross = ema_9 < ema_21
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Volatility breakout: price moves beyond 1.5 * ATR from prior close
-    bullish_break = close > np.roll(close, 1) + 1.5 * atr
-    bearish_break = close < np.roll(close, 1) - 1.5 * atr
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_52 + min_low_52) / 2)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods back (not used for signals)
+    
+    # Align Ichimoku components to 6h timeframe (with proper delay for leading spans)
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a, additional_delay_bars=26)  # Leading span needs delay
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b, additional_delay_bars=26)  # Leading span needs delay
+    
+    # Daily trend filter: price above/below cloud
+    # Green cloud (bullish): Senkou A > Senkou B
+    # Red cloud (bearish): Senkou A < Senkou B
+    green_cloud = senkou_a_6h > senkou_b_6h
+    red_cloud = senkou_a_6h < senkou_b_6h
+    
+    # Price relative to cloud
+    above_cloud = (close > senkou_a_6h) & (close > senkou_b_6h)
+    below_cloud = (close < senkou_a_6h) & (close < senkou_b_6h)
+    
+    # Volume confirmation: 20-period volume average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(52, n):  # Start after Senkou B calculation period
         # Skip if any required data is invalid
-        if (np.isnan(ema_9[i]) or np.isnan(ema_21[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: EMA crossover + volatility breakout + weekly trend alignment
-        bullish_entry = (bullish_cross[i] and bullish_break[i] and ema_50_1w_aligned[i])
-        bearish_entry = (bearish_cross[i] and bearish_break[i] and not ema_50_1w_aligned[i])
+        # Bullish breakout: price breaks above cloud in bullish trend
+        bull_breakout = (above_cloud[i] and 
+                        not above_cloud[i-1] and  # Just broke above
+                        green_cloud[i] and        # Bullish cloud
+                        vol_spike[i])             # Volume confirmation
         
-        # Exit conditions: opposing EMA crossover
-        exit_long = position == 1 and bearish_cross[i]
-        exit_short = position == -1 and bullish_cross[i]
+        # Bearish breakdown: price breaks below cloud in bearish trend
+        bear_breakdown = (below_cloud[i] and 
+                         not below_cloud[i-1] and  # Just broke below
+                         red_cloud[i] and          # Bearish cloud
+                         vol_spike[i])             # Volume confirmation
+        
+        # Exit conditions: price returns to cloud or opposite signal
+        exit_long = position == 1 and (not above_cloud[i] or bear_breakdown)
+        exit_short = position == -1 and (not below_cloud[i] or bull_breakout)
         
         # Trading logic
-        if bullish_entry and position != 1:
+        if bull_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_entry and position != -1:
+        elif bear_breakdown and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
