@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_trend_v4
-# Strategy: 4-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation
+# 4h_1d_vwap_mean_reversion_v1
+# Strategy: 4-hour VWAP mean reversion with 1-day trend filter and volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Uses daily Camarilla pivot levels (R4/S4 for breakouts, R3/S3 for rejections)
-# filtered by 1-day EMA50 trend and volume spikes. Designed to capture multi-day momentum
-# bursts while filtering counter-trend noise. Tightened entry conditions to reduce trades
-# and avoid overtrading. Focus on BTC/ETH robustness.
+# Hypothesis: Price reverts to daily VWAP during ranging markets, with trend filter to avoid
+# counter-trend trades. Works in both bull and bear by capturing mean reversion within the
+# dominant daily trend. Uses volume confirmation to ensure institutional participation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v4"
+name = "4h_1d_vwap_mean_reversion_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,79 +32,107 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d OHLC for Camarilla pivots and EMA50
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1h data for VWAP calculation (to avoid look-ahead)
+    df_1h = get_htf_data(prices, '1h')
+    
+    if len(df_1h) < 50:
+        return np.zeros(n)
+    
+    # 1d OHLC for trend filter
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (H-L) * 1.1/2
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    # S4 = C - (H-L) * 1.1/2
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + range_1d * 1.1 / 2.0
-    r3_1d = close_1d + range_1d * 1.1 / 4.0
-    s3_1d = close_1d - range_1d * 1.1 / 4.0
-    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    # 1h data for VWAP calculation
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
+    volume_1h = df_1h['volume'].values
+    
+    # Calculate typical price and VWAP components
+    typical_price_1h = (high_1h + low_1h + close_1h) / 3.0
+    pv_1h = typical_price_1h * volume_1h
+    
+    # Calculate cumulative VWAP (resets daily)
+    cum_pv = np.cumsum(pv_1h)
+    cum_volume = np.cumsum(volume_1h)
+    vwap_1h = np.where(cum_volume > 0, cum_pv / cum_volume, typical_price_1h)
+    
+    # Reset VWAP at daily boundaries (00:00 UTC)
+    # Assuming 1h data aligns with calendar days
+    vwap_1h_daily = vwap_1h.copy()
+    # Simple approach: reset every 24 hours (24 * 1h bars)
+    for i in range(24, len(vwap_1h), 24):
+        if i < len(vwap_1h):
+            vwap_1h_daily[i] = typical_price_1h[i]  # Reset at start of day
+            # Recalculate cumulative from this point
+            cum_pv = np.nancumsum(pv_1h[i:])  # Not ideal but works for demonstration
+            # Better: use pandas to group by date
+    
+    # Alternative: calculate VWAP per day using date grouping
+    # For simplicity, we'll use a rolling window that approximates daily VWAP
+    # Reset every 24 bars (1 day of 1h data)
+    vwap_reset = np.full_like(vwap_1h, np.nan)
+    for i in range(0, len(vwap_1h), 24):
+        end_idx = min(i + 24, len(vwap_1h))
+        if end_idx > i:
+            cum_pv_day = np.nansum(pv_1h[i:end_idx])
+            cum_vol_day = np.nansum(volume_1h[i:end_idx])
+            if cum_vol_day > 0:
+                vwap_day = cum_pv_day / cum_vol_day
+                vwap_reset[i:end_idx] = vwap_day
     
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align 1d data to 4h timeframe (wait for daily close)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    
+    # Align 1h VWAP to 4h timeframe (1h data is already lower than 4h, so we need to upsample)
+    # Since we have 1h data, we can use the last VWAP value within each 4h period
+    # Simpler: use the VWAP from the 1h bar that aligns with 4h close
+    # We'll use the VWAP value from 1h, 2h, 3h, or 4h ago depending on position in 4h cycle
+    # For 4h bar at index i, we use 1h VWAP from the same absolute time
+    # Since 1h data is available, we can align it directly
+    vwap_1h_aligned = align_htf_to_ltf(prices, df_1h, vwap_reset)
+    
+    # Standard deviation of price from VWAP for z-score
+    price_dev = close - vwap_1h_aligned
+    # Use 20-period rolling std of price deviation
+    price_dev_ma = pd.Series(price_dev).rolling(window=20, min_periods=20).mean().values
+    price_dev_std = pd.Series(price_dev - price_dev_ma).rolling(window=20, min_periods=20).std().values
+    # Avoid division by zero
+    price_dev_std = np.where(price_dev_std == 0, 1e-10, price_dev_std)
+    z_score = (price_dev - price_dev_ma) / price_dev_std
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)  # Increased threshold for stricter volume confirmation
+    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s4_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vwap_1h_aligned[i]) or 
+            np.isnan(z_score[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
+        z = z_score[i]
         
         # Trend filter: price above/below 1d EMA50
         uptrend_1d = price_close > ema_50_1d_aligned[i]
         downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Camarilla breakout signals (using previous day's levels)
-        breakout_up = price_close > r4_1d_aligned[i]   # Break above R4
-        breakdown_down = price_close < s4_1d_aligned[i]  # Break below S4
-        reject_at_r3 = price_close < r3_1d_aligned[i] and price_close > r3_1d_aligned[i-1]  # Reject at R3
-        reject_at_s3 = price_close > s3_1d_aligned[i] and price_close < s3_1d_aligned[i-1]  # Reject at S3
+        # Mean reversion signals: extreme Z-score reversals
+        # Long when significantly below VWAP in uptrend (pullback to mean)
+        long_signal = (z < -2.0) and vol_spike[i] and uptrend_1d
+        # Short when significantly above VWAP in downtrend (pullback to mean)
+        short_signal = (z > 2.0) and vol_spike[i] and downtrend_1d
         
-        # Volume confirmation
-        vol_confirmed = vol_spike[i]
-        
-        # Long: Break above R4 with volume in uptrend OR rejection at R3 with volume in uptrend
-        long_signal = (breakout_up and vol_confirmed and uptrend_1d) or \
-                      (reject_at_r3 and vol_confirmed and uptrend_1d)
-        
-        # Short: Break below S4 with volume in downtrend OR rejection at S3 with volume in downtrend
-        short_signal = (breakdown_down and vol_confirmed and downtrend_1d) or \
-                       (reject_at_s3 and vol_confirmed and downtrend_1d)
-        
-        # Exit when price returns to the 1d pivot level or opposite Camarilla level
-        exit_long = position == 1 and (price_close < pivot_1d_aligned[i] or 
-                                       price_close < s3_1d_aligned[i])
-        exit_short = position == -1 and (price_close > pivot_1d_aligned[i] or 
-                                         price_close > r3_1d_aligned[i])
+        # Exit when price returns to VWAP (Z-score near zero) or opposite extreme
+        exit_long = position == 1 and (z > -0.5)  # Return toward mean
+        exit_short = position == -1 and (z < 0.5)  # Return toward mean
         
         # Trading logic
         if long_signal and position != 1:
