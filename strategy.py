@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with 1-day Camarilla pivot breakout + volume surge + volatility filter.
-# Uses tight entry conditions (volatility > 1.5x median, volume > 2.0x average) to limit trades to ~20-40/year.
-# Works in bull/bear markets by capturing breakouts with institutional volume confirmation.
-# Designed for low trade frequency to minimize fee drag while maintaining edge in ranging/trending regimes.
+# Hypothesis: 1d timeframe with 1-week Bollinger Band squeeze breakout + volume confirmation + ADX trend filter.
+# Uses Bollinger Band width < 20th percentile for squeeze detection, breakout on close > upper band or < lower band,
+# volume > 1.5x 20-day average, and ADX > 25 for trend confirmation. Designed for low trade frequency (~10-20/year)
+# to minimize fee decay while capturing explosive moves in both bull and bear markets.
 
-name = "12h_1d_camarilla_volatility_breakout_v2"
-timeframe = "12h"
+name = "1d_1w_bb_squeeze_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -23,66 +23,101 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (H4, L4) from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Bollinger Bands on 1w data
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    h4 = close_1d + range_1d * 1.1 / 2
-    l4 = close_1d - range_1d * 1.1 / 2
+    # 20-period SMA and standard deviation
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean()
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std()
     
-    # Align H4 and L4 to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    bb_width = upper_band - lower_band
     
-    # Calculate 1d volatility (ATR-like: average true range over 10 days)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first period
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    # Bollinger Band width percentile (20-period lookback for squeeze)
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).rank(pct=True)
+    
+    # Squeeze condition: BB width < 20th percentile
+    squeeze = bb_width_percentile < 0.2
+    
+    # Breakout conditions: close outside Bollinger Bands
+    breakout_up = close_1w > upper_band
+    breakout_down = close_1w < lower_band
+    
+    # ADX calculation on 1w data (14-period)
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = np.abs(high_1w[0] - close_1w[0])
+    tr3[0] = np.abs(low_1w[0] - close_1w[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
     
-    # Calculate 1d volume average (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Directional Movement
+    up_move = high_1w - np.roll(high_1w, 1)
+    down_move = np.roll(low_1w, 1) - low_1w
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
+    
+    # Directional Indicators
+    plus_di = 100 * (plus_dm_14 / tr_14)
+    minus_di = 100 * (minus_dm_14 / tr_14)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    
+    # Align all 1w indicators to daily timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_1w, squeeze.values)
+    breakout_up_aligned = align_htf_to_ltf(prices, df_1w, breakout_up.values)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_1w, breakout_down.values)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx.values.fillna(0))
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_filter = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure volatility and volume averages are valid
-    for i in range(20, n):
+    # Start from index 50 to ensure all indicators are valid
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(squeeze_aligned[i]) or np.isnan(breakout_up_aligned[i]) or 
+            np.isnan(breakout_down_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: current 1d volatility > 1.5 * median of last 30 periods
-        vol_filter = atr_aligned[i] > 1.5 * np.nanmedian(atr_aligned[max(0, i-30):i])
+        # Entry conditions: BB squeeze breakout with volume and trend confirmation
+        long_entry = (squeeze_aligned[i] and breakout_up_aligned[i] and 
+                      volume_filter[i] and (adx_aligned[i] > 25))
+        short_entry = (squeeze_aligned[i] and breakout_down_aligned[i] and 
+                       volume_filter[i] and (adx_aligned[i] > 25))
         
-        # Volume filter: current volume > 2.0 * 1d average volume (higher threshold for fewer trades)
-        vol_surge = volume[i] > 2.0 * vol_avg_aligned[i]
-        
-        # Entry conditions: price breaks through Camarilla H4/L4 with volatility and volume surge
-        long_entry = (high[i] > h4_aligned[i] and vol_filter and vol_surge)
-        short_entry = (low[i] < l4_aligned[i] and vol_filter and vol_surge)
-        
-        # Exit conditions: price returns to pivot level
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-        exit_low = low[i] < pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else False
-        exit_high = high[i] > pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else False
+        # Exit conditions: return to middle Bollinger Band (20-period SMA)
+        sma_20_aligned = align_htf_to_ltf(prices, df_1w, sma_20.values.fillna(0))
+        if not np.isnan(sma_20_aligned[i]):
+            exit_long = close[i] < sma_20_aligned[i]
+            exit_short = close[i] > sma_20_aligned[i]
+        else:
+            exit_long = exit_short = False
         
         if long_entry and position != 1:
             position = 1
@@ -90,10 +125,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_low:
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_high:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
