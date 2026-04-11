@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_camarilla_pivot_volume_v1
-Strategy: 12h Camarilla pivot level reversal with volume confirmation and 1d trend filter
-Timeframe: 12h
+1d_1w_camarilla_pivot_volume_v1
+Strategy: 1d Camarilla pivot level touch with volume confirmation and weekly trend filter
+Timeframe: 1d
 Leverage: 1.0
-Hypothesis: Uses daily Camarilla pivot levels (calculated from previous day's high-low-close) as support/resistance zones. Enters long when price bounces off S3/S4 with volume confirmation in a 1d uptrend, and short when price bounces off R3/R4 with volume confirmation in a 1d downtrend. Exits when price reaches the opposite pivot level or mean (P). Designed to capture mean-reversion bounces at strong intraday levels while avoiding false signals in strong trends. Works in both bull and bear markets by using 1d trend filter to align with higher timeframe momentum. Target: 50-150 total trades over 4 years (12-37/year).
+Hypothesis: Uses daily Camarilla pivot levels (support/resistance) from prior day's range, entered on touch with volume spike (>1.5x avg volume) and filtered by weekly EMA50 trend direction. Designed to capture mean reversion at key levels in ranging markets and breakouts in trending markets. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend). Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,59 +27,36 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each day
-    # Based on previous day's H, L, C
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily pivot points from previous day
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
-    
-    # Calculate pivot and Camarilla levels
     pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
+    range_val = prev_high - prev_low
     
-    # Camarilla levels: S1, S2, S3, S4 and R1, R2, R3, R4
-    # S4 = Close - ((High - Low) * 1.500)
-    # S3 = Close - ((High - Low) * 1.250)
-    # S2 = Close - ((High - Low) * 1.166)
-    # S1 = Close - ((High - Low) * 1.083)
-    # R1 = Close + ((High - Low) * 1.083)
-    # R2 = Close + ((High - Low) * 1.166)
-    # R3 = Close + ((High - Low) * 1.250)
-    # R4 = Close + ((High - Low) * 1.500)
+    # Camarilla levels
+    r4 = pivot + (range_val * 1.1 / 2)
+    r3 = pivot + (range_val * 1.1 / 4)
+    r2 = pivot + (range_val * 1.1 / 6)
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    s2 = pivot - (range_val * 1.1 / 6)
+    s3 = pivot - (range_val * 1.1 / 4)
+    s4 = pivot - (range_val * 1.1 / 2)
     
-    s4 = prev_close - (range_hl * 1.500)
-    s3 = prev_close - (range_hl * 1.250)
-    s2 = prev_close - (range_hl * 1.166)
-    s1 = prev_close - (range_hl * 1.083)
-    r1 = prev_close + (range_hl * 1.083)
-    r2 = prev_close + (range_hl * 1.166)
-    r3 = prev_close + (range_hl * 1.250)
-    r4 = prev_close + (range_hl * 1.500)
-    
-    # Align all levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -88,44 +65,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(pivot[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend_1d = price_close > ema_50_1d_aligned[i]
-        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend_1w = price_close > ema_50_1w_aligned[i]
+        downtrend_1w = price_close < ema_50_1w_aligned[i]
+        
+        # Touch conditions (within 0.1% of level)
+        touch_r1 = abs(price_close - r1[i]) / r1[i] < 0.001
+        touch_s1 = abs(price_close - s1[i]) / s1[i] < 0.001
+        touch_r2 = abs(price_close - r2[i]) / r2[i] < 0.001
+        touch_s2 = abs(price_close - s2[i]) / s2[i] < 0.001
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: price near S3/S4 with volume in uptrend
-        long_signal = vol_confirmed and uptrend_1d and (
-            (price_close <= s3_aligned[i] * 1.005 and price_close >= s4_aligned[i] * 0.995) or
-            (price_close <= s4_aligned[i] * 1.005 and price_close >= s4_aligned[i] * 0.995)
-        )
+        # Long: touch support in uptrend or break resistance with volume
+        long_signal = ((touch_s1 or touch_s2) and vol_confirmed and uptrend_1w) or \
+                      (price_close > r1[i] and vol_confirmed and uptrend_1w)
         
-        # Short: price near R3/R4 with volume in downtrend
-        short_signal = vol_confirmed and downtrend_1d and (
-            (price_close >= r3_aligned[i] * 0.995 and price_close <= r4_aligned[i] * 1.005) or
-            (price_close >= r4_aligned[i] * 0.995 and price_close <= r4_aligned[i] * 1.005)
-        )
+        # Short: touch resistance in downtrend or break support with volume
+        short_signal = ((touch_r1 or touch_r2) and vol_confirmed and downtrend_1w) or \
+                       (price_close < s1[i] and vol_confirmed and downtrend_1w)
         
-        # Exit when price reaches opposite level or pivot
-        exit_long = position == 1 and (
-            price_close >= pivot_aligned[i] * 0.995 or  # Reached pivot
-            price_close >= r1_aligned[i] * 0.995        # Reached R1
-        )
-        exit_short = position == -1 and (
-            price_close <= pivot_aligned[i] * 1.005 or  # Reached pivot
-            price_close <= s1_aligned[i] * 1.005        # Reached S1
-        )
+        # Exit when price reaches opposite level or midpoint
+        exit_long = position == 1 and (price_close > r1[i] or abs(price_close - pivot[i]) / pivot[i] < 0.0005)
+        exit_short = position == -1 and (price_close < s1[i] or abs(price_close - pivot[i]) / pivot[i] < 0.0005)
         
         # Trading logic
         if long_signal and position != 1:
