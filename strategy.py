@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 12h Williams Alligator regime filter
-# - Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures bull/bear strength
-# - Williams Alligator (Jaw=TEETH=13, Teeth=8, Lips=5 SMAs) identifies trend vs range
-# - Long when Bull Power > 0 AND Bear Power < 0 AND Alligator aligned bullish (Lips > Teeth > Jaw)
-# - Short when Bear Power > 0 AND Bull Power < 0 AND Alligator aligned bearish (Lips < Teeth < Jaw)
-# - Uses 12h HTF for Alligator regime to avoid 6h whipsaw, 6h for Elder Ray timing
-# - Discrete position sizing ±0.25 limits drawdown and reduces fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 6h
-# - Works in bull markets (strong Elder Ray + bullish Alligator) and bear markets (strong Elder Ray + bearish Alligator)
+# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + choppiness regime filter
+# - Long when price touches or breaks above Camarilla H3 level with volume > 1.8x 20-period average
+# - Short when price touches or breaks below Camarilla L3 level with volume > 1.8x 20-period average
+# - Choppiness regime filter: only trade when CHOP(14) < 61.8 (trending market) to avoid false signals in ranging markets
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
+# - Volume spike requirement ensures we only trade high-conviction breakouts from pivot levels
+# - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
+# - 1d HTF provides reliable Camarilla levels and volume confirmation, reducing false signals
 
-name = "6h_12h_elder_ray_alligator_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_chop_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,69 +25,113 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for Williams Alligator regime
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for Camarilla levels, volume, and chop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 12h Williams Alligator SMAs
-    close_12h = df_12h['close'].values
-    jaw_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values  # Jaw (13-period)
-    teeth_12h = pd.Series(close_12h).ewm(span=8, adjust=False, min_periods=8).mean().values    # Teeth (8-period)
-    lips_12h = pd.Series(close_12h).ewm(span=5, adjust=False, min_periods=5).mean().values     # Lips (5-period)
+    # Pre-compute 1d Camarilla levels (based on previous day's high, low, close)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 12h Alligator to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    # Calculate Camarilla levels for each day
+    camarilla_h3 = np.full_like(close_1d, np.nan)
+    camarilla_l3 = np.full_like(close_1d, np.nan)
     
-    # Pre-compute 6h Elder Ray components
-    # EMA13 for Elder Ray calculation
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13_6h  # Bull Power = High - EMA13
-    bear_power = ema13_6h - low   # Bear Power = EMA13 - Low
+    for i in range(len(df_1d)):
+        if i == 0:
+            continue  # Skip first day (no previous day)
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        
+        camarilla_h3[i] = prev_close + range_val * 1.1 / 4
+        camarilla_l3[i] = prev_close - range_val * 1.1 / 4
+    
+    # Pre-compute 1d volume SMA (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_series = pd.Series(volume_1d)
+    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute 1d Choppiness Index (CHOP)
+    # CHOP = 100 * log10(sum(TR over n) / (n * (max(high) - min(low)))) / log10(n)
+    tr_list = []
+    for i in range(len(df_1d)):
+        if i == 0:
+            tr_list.append(high_1d[i] - low_1d[i])  # First TR
+        else:
+            tr = max(
+                high_1d[i] - low_1d[i],
+                abs(high_1d[i] - close_1d[i-1]),
+                abs(low_1d[i] - close_1d[i-1])
+            )
+            tr_list.append(tr)
+    
+    tr_series = pd.Series(tr_list)
+    atr_sum = tr_series.rolling(window=14, min_periods=14).sum()
+    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop_raw = 100 * np.log10(atr_sum / (14 * (max_high - min_low))) / np.log10(14)
+    chop_values = chop_raw.values
+    
+    # Align 1d indicators to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator alignment conditions
-        alligator_bullish = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
-        alligator_bearish = (lips_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < jaw_aligned[i])
+        # Current price data
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
+        volume_current = volume[i]
         
-        # Elder Ray conditions
-        strong_bull = bull_power[i] > 0 and bear_power[i] < 0  # Bull Power positive, Bear Power negative
-        strong_bear = bear_power[i] > 0 and bull_power[i] < 0  # Bear Power positive, Bull Power negative
+        # Camarilla level touch/breakout conditions
+        touch_long = price_high >= camarilla_h3_aligned[i]  # High touches or breaks above H3
+        touch_short = price_low <= camarilla_l3_aligned[i]  # Low touches or breaks below L3
+        
+        # Volume confirmation: current volume > 1.8x 20-period average (using 1d aligned volume)
+        vol_confirm = volume_current > 1.8 * volume_sma_20_aligned[i]
+        
+        # Choppiness regime filter: only trade when CHOP < 61.8 (trending market)
+        chop_filter = chop_aligned[i] < 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Strong bullish Elder Ray + bullish Alligator alignment
-        if strong_bull and alligator_bullish:
+        # Long: Camarilla H3 touch/breakout + volume confirmation + chop filter
+        if touch_long and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short: Strong bearish Elder Ray + bearish Alligator alignment
-        if strong_bear and alligator_bearish:
+        # Short: Camarilla L3 touch/breakout + volume confirmation + chop filter
+        if touch_short and vol_confirm and chop_filter:
             enter_short = True
         
-        # Exit conditions: opposite Elder Ray signal or Alligator alignment breakdown
+        # Exit conditions: opposite Camarilla level touch or chop regime shift to ranging
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if bearish Elder Ray appears OR Alligator loses bullish alignment
-            exit_long = strong_bear or (not alligator_bullish)
+            # Exit long if price touches L3 OR chop shifts to ranging (CHOP >= 61.8)
+            exit_long = (price_low <= camarilla_l3_aligned[i]) or (not chop_filter)
         elif position == -1:
-            # Exit short if bullish Elder Ray appears OR Alligator loses bearish alignment
-            exit_short = strong_bull or (not alligator_bearish)
+            # Exit short if price touches H3 OR chop shifts to ranging (CHOP >= 61.8)
+            exit_short = (price_high >= camarilla_h3_aligned[i]) or (not chop_filter)
         
         # Trading logic
         if enter_long and position != 1:
