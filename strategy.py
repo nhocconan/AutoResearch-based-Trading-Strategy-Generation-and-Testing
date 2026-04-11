@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ATR-based trailing stop
-# - Long: Price breaks above Donchian upper channel (20-period high) + volume > 1.5x 20-period 1d average
-# - Short: Price breaks below Donchian lower channel (20-period low) + volume > 1.5x 20-period 1d average
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume confirmation and ATR stoploss
+# - Long: Price breaks above Donchian upper channel (20-period high) + 1d ATR(14) > 1.5x 20-period average ATR
+# - Short: Price breaks below Donchian lower channel (20-period low) + 1d ATR(14) > 1.5x 20-period average ATR
 # - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Donchian breakout
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
 # - Donchian channels provide clear structure for breakouts in both bull and bear markets
-# - Volume confirmation filters out weak breakouts and increases signal quality
+# - 1d ATR volatility confirmation filters out weak breakouts during low volatility periods
 # - ATR stoploss manages risk during volatile periods
-# - 12h timeframe reduces trade frequency to avoid fee drag while capturing medium-term trends
 
-name = "12h_1d_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,52 +33,60 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Load 1d data ONCE before loop for volume confirmation
+    # Load 1d data ONCE before loop for ATR-based volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d volume confirmation (20-period average)
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Pre-compute 1d ATR(14) and its 20-period average for volatility confirmation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute Donchian channels on 12h timeframe
+    # Calculate True Range for 1d
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_14_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 20-period average of 1d ATR for volatility threshold
+    atr_sma_20_1d = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).mean().values
+    atr_sma_20_aligned = align_htf_to_ltf(prices, df_1d, atr_sma_20_1d)
+    
+    # Pre-compute Donchian channels on 4h timeframe
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute ATR for stoploss (12h timeframe)
+    # Pre-compute ATR for stoploss (4h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_sma_20_aligned[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(atr_sma_20_aligned[i]) or
             np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
-        volume_current = volume[i]
         
         # Donchian levels
         upper_channel = highest_high[i]
         lower_channel = lowest_low[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period 1d average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Volatility confirmation: current 1d ATR > 1.5x 20-period average ATR
+        vol_confirm = atr_14_1d[i] > 1.5 * atr_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price closes above upper Donchian channel with volume confirmation
+        # Long breakout: price closes above upper Donchian channel with volatility confirmation
         if close_price > upper_channel and vol_confirm:
             enter_long = True
         
-        # Short breakout: price closes below lower Donchian channel with volume confirmation
+        # Short breakout: price closes below lower Donchian channel with volatility confirmation
         if close_price < lower_channel and vol_confirm:
             enter_short = True
         
