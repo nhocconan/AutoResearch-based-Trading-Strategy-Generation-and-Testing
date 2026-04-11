@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with volume confirmation and 1w trend filter
-# - Long when price breaks above Camarilla H3 level with volume > 1.8x 20-day average and weekly close > weekly open (bullish week)
-# - Short when price breaks below Camarilla L3 level with volume > 1.8x 20-day average and weekly close < weekly open (bearish week)
+# Hypothesis: 6h Elder Ray + Williams %R with 1d regime filter
+# - Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA13
+# - Williams %R identifies overbought/oversold conditions
+# - Long when Bull Power > 0, Williams %R < -80 (oversold), and 1d close > EMA50 (bullish regime)
+# - Short when Bear Power < 0, Williams %R > -20 (overbought), and 1d close < EMA50 (bearish regime)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits for 1d
-# - Volume confirmation ensures high-conviction breakouts
-# - Weekly trend filter aligns with higher timeframe momentum to avoid counter-trend trades
-# - Works in both bull (breakouts with volume in bullish weeks) and bear (breakdowns with volume in bearish weeks)
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 6h
+# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
+# - 1d EMA50 regime filter ensures we only trade with the higher timeframe trend
 
-name = "1d_1w_camarilla_pivot_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_williamsr_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,104 +25,68 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla pivots and volume
+    # Load 1d data ONCE before loop for regime filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d indicators
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA50 for regime filter
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla pivot levels (based on previous day)
-    # Pivot = (H + L + C) / 3
-    # H3 = Pivot + (H - L) * 1.1 / 4
-    # L3 = Pivot - (H - L) * 1.1 / 4
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_h3 = pivot_1d + (high_1d - low_1d) * 1.1 / 4.0
-    camarilla_l3 = pivot_1d - (high_1d - low_1d) * 1.1 / 4.0
+    # Pre-compute 6h EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Shift by 1 to use previous day's levels (no look-ahead)
-    camarilla_h3_shifted = np.roll(camarilla_h3, 1)
-    camarilla_l3_shifted = np.roll(camarilla_l3, 1)
-    camarilla_h3_shifted[0] = np.nan  # First value invalid
-    camarilla_l3_shifted[0] = np.nan
-    
-    # 1d volume SMA (20-period)
-    volume_series = pd.Series(volume_1d)
-    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1d indicators to 1d timeframe (identity alignment but using helper for consistency)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_shifted)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_shifted)
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        # Fallback to neutral trend if insufficient weekly data
-        weekly_bullish = np.ones(n, dtype=bool)
-        weekly_bearish = np.ones(n, dtype=bool)
-    else:
-        # Weekly trend: bullish if weekly close > weekly open, bearish if close < open
-        weekly_open = df_1w['open'].values
-        weekly_close = df_1w['close'].values
-        weekly_bullish_raw = weekly_close > weekly_open
-        weekly_bearish_raw = weekly_close < weekly_open
-        
-        # Align weekly trend to daily timeframe
-        weekly_bullish = align_htf_to_ltf(prices, df_1w, weekly_bullish_raw.astype(float)) > 0.5
-        weekly_bearish = align_htf_to_ltf(prices, df_1w, weekly_bearish_raw.astype(float)) > 0.5
+    # Pre-compute 6h Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(ema13[i]) or np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current price data
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
-        volume_current = volume[i]
+        # Elder Ray components
+        bull_power = high[i] - ema13[i]  # Measures buying strength
+        bear_power = low[i] - ema13[i]   # Measures selling strength (typically negative)
         
-        # Volume confirmation: current volume > 1.8x 20-day average
-        vol_confirm = volume_current > 1.8 * volume_sma_20_aligned[i]
+        # Williams %R conditions
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        
+        # 1d regime filter
+        bullish_regime = close[i] > ema50_1d_aligned[i]
+        bearish_regime = close[i] < ema50_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H3 + volume confirmation + bullish week
-        if (price_close > camarilla_h3_aligned[i] and 
-            vol_confirm and 
-            weekly_bullish[i]):
+        # Long: Bull Power positive + oversold + bullish 1d regime
+        if bull_power > 0 and oversold and bullish_regime:
             enter_long = True
         
-        # Short: Price breaks below Camarilla L3 + volume confirmation + bearish week
-        if (price_close < camarilla_l3_aligned[i] and 
-            vol_confirm and 
-            weekly_bearish[i]):
+        # Short: Bear Power negative + overbought + bearish 1d regime
+        if bear_power < 0 and overbought and bearish_regime:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla level break or volume collapse
+        # Exit conditions: opposite Elder Ray signal or regime change
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below L3 OR volume drops below average
-            exit_long = (price_close < camarilla_l3_aligned[i]) or (volume_current < volume_sma_20_aligned[i])
+            # Exit long if Bear Power becomes negative OR regime turns bearish
+            exit_long = (bear_power < 0) or (not bullish_regime)
         elif position == -1:
-            # Exit short if price breaks above H3 OR volume drops below average
-            exit_short = (price_close > camarilla_h3_aligned[i]) or (volume_current < volume_sma_20_aligned[i])
+            # Exit short if Bull Power becomes positive OR regime turns bullish
+            exit_short = (bull_power > 0) or (not bearish_regime)
         
         # Trading logic
         if enter_long and position != 1:
