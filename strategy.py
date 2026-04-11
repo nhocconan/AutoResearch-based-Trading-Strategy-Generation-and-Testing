@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_momentum_v1"
-timeframe = "6h"
+name = "12h_1d_1w_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,64 +17,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
+    # Load daily and weekly data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate EMA13 on daily close for Elder Ray
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    # Calculate daily OHLC for Camarilla pivot levels (previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    close_1d = df_1d['close'].values
     
-    # Align to 6h timeframe
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Calculate weekly OHLC for additional filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 6h RSI(14) for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla pivot calculation (previous day)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # 6h volume filter: volume > 1.5x 20-period average
+    # Resistance and support levels (previous day's data)
+    r3_1d = close_1d + range_1d * 1.166
+    s3_1d = close_1d - range_1d * 1.166
+    
+    # Shift by 1 to use only completed daily bars (previous day's levels)
+    r3_1d = np.roll(r3_1d, 1)
+    s3_1d = np.roll(s3_1d, 1)
+    r3_1d[0] = np.nan
+    s3_1d[0] = np.nan
+    
+    # Align daily Camarilla levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Weekly trend filter: 20-period EMA on weekly close
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # 12h ATR for volatility filter (14 period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Additional: Daily volume ratio filter (volume > 2x daily average)
+    # Use daily volume from df_1d and align to 12h
+    vol_1d = df_1d['volume'].values
+    vol_ma_10_1d = pd.Series(vol_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ma_10_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_10_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(vol_ma_10_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
+        vol_daily_ma = vol_ma_10_1d_aligned[i]
         
-        # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        # Volume confirmation: both 12h and daily volume must be elevated
+        volume_confirmed = (volume_current > 1.5 * vol_ma) and (volume_current > 2.0 * vol_daily_ma)
         
-        # Long conditions: Bull Power > 0 (bullish momentum) + RSI > 50 (momentum) + volume
-        long_signal = volume_confirmed and (bull_power_6h[i] > 0) and (rsi[i] > 50)
+        # Long conditions: price breaks above R3 with volume and price above weekly EMA20
+        long_signal = volume_confirmed and (price_high > r3_12h[i]) and (price_close > ema_20_1w_aligned[i])
         
-        # Short conditions: Bear Power < 0 (bearish momentum) + RSI < 50 (momentum) + volume
-        short_signal = volume_confirmed and (bear_power_6h[i] < 0) and (rsi[i] < 50)
+        # Short conditions: price breaks below S3 with volume and price below weekly EMA20
+        short_signal = volume_confirmed and (price_low < s3_12h[i]) and (price_close < ema_20_1w_aligned[i])
         
-        # Exit when momentum diverges: Bull Power turns negative for long, Bear Power turns positive for short
-        exit_long = position == 1 and bull_power_6h[i] <= 0
-        exit_short = position == -1 and bear_power_6h[i] >= 0
+        # Exit when price returns to the daily pivot (mean reversion)
+        pivot_1d = (high_1d + low_1d + close_1d) / 3
+        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = position == 1 and price_close < pivot_12h[i]
+        exit_short = position == -1 and price_close > pivot_12h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -94,11 +123,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Elder Ray momentum strategy with RSI confirmation and volume filter.
-# Uses daily Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) to measure
-# market momentum relative to the 13-period EMA. Enters long when Bull Power > 0
-# indicating bullish momentum, RSI > 50 confirming upward momentum, and volume > 1.5x average.
-# Enters short when Bear Power < 0 indicating bearish momentum, RSI < 50, and volume confirmation.
-# Exits when momentum diverges (Bull Power <= 0 for longs, Bear Power >= 0 for shorts).
-# This approach works in both bull and bear markets by capturing momentum shifts.
-# Position size: 0.25 to manage risk. Target: 50-150 trades over 4 years (12-37/year).
+# Hypothesis: 12h Camarilla breakout using daily pivot levels with dual volume confirmation (12h and daily) and weekly trend filter.
+# Uses daily Camarilla R3/S3 levels (previous day's high/low/close) for intraday structure.
+# Enters long when 12h price breaks above daily R3 with volume >1.5x 12h 20-period average AND >2x daily 10-period average
+# and price above weekly EMA20. Enters short when 12h price breaks below daily S3 with same volume conditions
+# and price below weekly EMA20. Exits when price returns to the daily pivot level (mean reversion within the day's range).
+# Weekly EMA20 filter ensures trades align with higher timeframe trend, reducing false signals in ranging markets.
+# Dual volume filter significantly reduces false breakouts, targeting only 20-40 trades per year per symbol.
+# Position size: 0.25 to balance risk and return, limiting drawdown in volatile markets.
+# Designed to work in both bull and bear markets by combining intraday breakouts with higher timeframe trend.
+# Target: 50-100 trades over 4 years (12-25/year) to minimize fee drag.
