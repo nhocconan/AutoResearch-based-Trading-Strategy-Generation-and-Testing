@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 1d/1w trend filter
-# Long when price breaks above Donchian(20) high + volume > 1.5x average + 1d trend up
-# Short when price breaks below Donchian(20) low + volume > 1.5x average + 1d trend down
-# Exit when price returns to Donchian midpoint or trend reverses
-# Designed for 20-50 trades/year on 4h timeframe with strong trend capture and low turnover
+# Hypothesis: 4h Bollinger Band squeeze breakout with volume confirmation and 1d trend filter
+# Long when price breaks above upper BB(20,2) + BB width < 20th percentile (squeeze) + volume > 1.5x avg + 1d trend up
+# Short when price breaks below lower BB(20,2) + BB width < 20th percentile + volume > 1.5x avg + 1d trend down
+# Exit when price returns to BB middle or squeeze ends
+# Designed for 20-40 trades/year on 4h timeframe with low turnover and high edge during breakouts from low volatility
 
-name = "4h_1d_donchian_volume_trend_v1"
+name = "4h_1d_bb_squeeze_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,18 +37,29 @@ def generate_signals(prices):
     # Calculate 20-period average volume for volume filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Calculate Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    bb_middle = sma_20
+    bb_width = bb_upper - bb_lower
+    
+    # Calculate 50-period percentile rank of BB width for squeeze detection (20th percentile threshold)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_rank = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    squeeze_condition = bb_width_rank < 0.2  # BB width in bottom 20% = squeeze
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(squeeze_condition[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -59,16 +70,13 @@ def generate_signals(prices):
         is_uptrend = close[i] > ema_50_1d_aligned[i]
         is_downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions
-        donchian_breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
-        donchian_breakdown_down = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Entry conditions: BB breakout during squeeze
+        long_entry = (close[i] > bb_upper[i-1]) and squeeze_condition[i-1] and volume_filter and is_uptrend
+        short_entry = (close[i] < bb_lower[i-1]) and squeeze_condition[i-1] and volume_filter and is_downtrend
         
-        long_entry = donchian_breakout_up and volume_filter and is_uptrend
-        short_entry = donchian_breakdown_down and volume_filter and is_downtrend
-        
-        # Exit conditions
-        long_exit = (close[i] < donchian_mid[i]) or (not is_uptrend)  # Return to midpoint or trend change
-        short_exit = (close[i] > donchian_mid[i]) or (not is_downtrend)  # Return to midpoint or trend change
+        # Exit conditions: return to middle or squeeze ends or trend change
+        long_exit = (close[i] < bb_middle[i]) or (not squeeze_condition[i]) or (not is_uptrend)
+        short_exit = (close[i] > bb_middle[i]) or (not squeeze_condition[i]) or (not is_downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
