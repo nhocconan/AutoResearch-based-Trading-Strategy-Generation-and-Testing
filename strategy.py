@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume_v2"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -19,45 +18,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 2:
+    if len(df_4h) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla pivot levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    pivot_12h = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    
-    # Resistance levels (tighter levels for fewer trades)
-    h1_12h = close_12h + 1.1 * range_12h / 6
-    h2_12h = close_12h + 1.1 * range_12h / 4
-    h3_12h = close_12h + 1.1 * range_12h / 2
-    
-    # Support levels
-    l1_12h = close_12h - 1.1 * range_12h / 6
-    l2_12h = close_12h - 1.1 * range_12h / 4
-    l3_12h = close_12h - 1.1 * range_12h / 2
-    
-    # Align 12h levels to 4h
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    h1_aligned = align_htf_to_ltf(prices, df_12h, h1_12h)
-    h2_aligned = align_htf_to_ltf(prices, df_12h, h2_12h)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
-    l1_aligned = align_htf_to_ltf(prices, df_12h, l1_12h)
-    l2_aligned = align_htf_to_ltf(prices, df_12h, l2_12h)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
-    
-    # 12h volume confirmation: current volume > 24-period average
-    volume_12h = df_12h['volume'].values
-    vol_avg_24 = pd.Series(volume_12h).rolling(window=24, min_periods=24).mean().values
-    vol_avg_24_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_24)
-    
-    # 4h ATR for volatility filter
+    # Calculate 4h ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -65,24 +33,64 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Calculate 4h Camarilla pivot levels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    pivot_4h = (high_4h + low_4h + close_4h) / 3
+    range_4h = high_4h - low_4h
+    
+    # Resistance levels (tighter levels for fewer trades)
+    h1_4h = close_4h + 1.1 * range_4h / 6
+    h2_4h = close_4h + 1.1 * range_4h / 4
+    h3_4h = close_4h + 1.1 * range_4h / 2
+    
+    # Support levels
+    l1_4h = close_4h - 1.1 * range_4h / 6
+    l2_4h = close_4h - 1.1 * range_4h / 4
+    l3_4h = close_4h - 1.1 * range_4h / 2
+    
+    # Calculate 1d trend filter (EMA cross)
+    ema_fast_1d = pd.Series(close_4h).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow_1d = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    trend_1d = ema_fast_1d > ema_slow_1d  # True for uptrend
+    
+    # Align 4h levels and 1d trend to 1h
+    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
+    h1_aligned = align_htf_to_ltf(prices, df_4h, h1_4h)
+    h2_aligned = align_htf_to_ltf(prices, df_4h, h2_4h)
+    h3_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
+    l1_aligned = align_htf_to_ltf(prices, df_4h, l1_4h)
+    l2_aligned = align_htf_to_ltf(prices, df_4h, l2_4h)
+    l3_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
+    trend_aligned = align_htf_to_ltf(prices, df_4h, trend_1d.astype(float))
+    
+    # Volume confirmation: current volume > 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 24 to ensure sufficient data
-    for i in range(24, n):
-        # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
-            np.isnan(vol_avg_24_aligned[i]) or np.isnan(atr[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+    # Session filter: 8-20 UTC
+    hours = prices.index.hour
+    
+    # Start from index 30 to ensure sufficient data
+    for i in range(30, n):
+        # Session filter: only trade 8-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Current 12h volume (aligned)
-        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
-        vol_confirm = vol_12h_current > vol_avg_24_aligned[i]
+        # Skip if any required data is invalid
+        if (np.isnan(pivot_aligned[i]) or np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_avg_20[i]) or np.isnan(trend_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            continue
         
-        # Volatility filter: only trade when ATR > 50-period average
-        atr_avg_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean()[i]
-        vol_filter = atr[i] > atr_avg_50
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_avg_20[i]
         
         # Price levels for current bar
         h1 = h1_aligned[i]
@@ -92,31 +100,32 @@ def generate_signals(prices):
         l2 = l2_aligned[i]
         l3 = l3_aligned[i]
         pivot = pivot_aligned[i]
+        trend_up = trend_aligned[i] > 0.5
         
-        # Long conditions: bounce from support levels with volume and volatility
-        long_signal = vol_confirm and vol_filter and (
-            (close[i] > l1 and low[i] <= l1) or  # bounce from L1
-            (close[i] > l2 and low[i] <= l2) or  # bounce from L2
-            (close[i] > l3 and low[i] <= l3)     # bounce from L3
+        # Long conditions: break above resistance with volume and uptrend
+        long_signal = vol_confirm and trend_up and (
+            close[i] > h1 or  # break H1
+            close[i] > h2 or  # break H2
+            close[i] > h3     # break H3
         )
         
-        # Short conditions: rejection from resistance levels with volume and volatility
-        short_signal = vol_confirm and vol_filter and (
-            (close[i] < h1 and high[i] >= h1) or  # rejection from H1
-            (close[i] < h2 and high[i] >= h2) or  # rejection from H2
-            (close[i] < h3 and high[i] >= h3)     # rejection from H3
+        # Short conditions: break below support with volume and downtrend
+        short_signal = vol_confirm and (not trend_up) and (
+            close[i] < l1 or  # break L1
+            close[i] < l2 or  # break L2
+            close[i] < l3     # break L3
         )
         
-        # Exit conditions: price moves to opposite side of pivot
+        # Exit conditions: price returns to pivot
         long_exit = close[i] < pivot
         short_exit = close[i] > pivot
         
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -125,6 +134,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
