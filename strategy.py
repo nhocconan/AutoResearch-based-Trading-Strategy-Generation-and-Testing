@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "6h_1w_1d_elder_ray_trend_follow"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,89 +17,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-calculate session hours (08-20 UTC)
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
+    # Load weekly and daily data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return signals
     
-    # Calculate Camarilla pivot levels from daily data
+    # Calculate Elder Ray components on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formula: range = high - low
-    daily_range = high_1d - low_1d
+    # Calculate EMA13 for power calculations
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Key levels for breakout: R4 (resistance) and S4 (support)
-    r4 = close_1d + (daily_range * 1.1 / 2)
-    s4 = close_1d - (daily_range * 1.1 / 2)
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Exit levels: R3 and S3
-    r3 = close_1d + (daily_range * 1.1 / 4)
-    s3 = close_1d - (daily_range * 1.1 / 4)
+    # Smooth the power values with EMA13
+    bull_power_smooth = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Volume confirmation: 1h volume > 2.0x 48-period average (48h = 2 days)
-    vol_ma_48 = pd.Series(volume).rolling(window=48, min_periods=48).mean().values
+    # Weekly trend filter: price above/below weekly EMA26
+    close_1w = df_1w['close'].values
+    ema26_1w = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # Align daily levels to 1h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align all indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_smooth)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_smooth)
+    ema26_1w_aligned = align_htf_to_ltf(prices, df_1w, ema26_1w)
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_48[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema26_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        volume_current = volume[i]
         
-        # Volume confirmation
-        vol_confirm = volume_current > 2.0 * vol_ma_48[i]
+        # Elder Ray conditions
+        strong_bull = bull_power_aligned[i] > 0  # Buyers in control
+        strong_bear = bear_power_aligned[i] < 0  # Sellers in control
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above R4
-        breakout_down = price_close < s4_aligned[i]  # Break below S4
+        # Weekly trend filter
+        above_weekly_ema = price_close > ema26_1w_aligned[i]
+        below_weekly_ema = price_close < ema26_1w_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Break above R4 with volume confirmation
-        if breakout_up and vol_confirm:
+        # Long: Strong bull power + above weekly EMA
+        if strong_bull and above_weekly_ema:
             enter_long = True
         
-        # Short: Break below S4 with volume confirmation
-        if breakout_down and vol_confirm:
+        # Short: Strong bear power + below weekly EMA
+        if strong_bear and below_weekly_ema:
             enter_short = True
         
-        # Exit conditions: return to opposite S3/R3 levels
-        exit_long = price_close < s3_aligned[i]  # Return to S3 level
-        exit_short = price_close > r3_aligned[i]  # Return to R3 level
+        # Exit conditions: opposite power signal
+        exit_long = bear_power_aligned[i] > 0  # Bear power positive
+        exit_short = bull_power_aligned[i] < 0  # Bull power negative
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -108,16 +99,16 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 1h Camarilla breakout strategy using daily pivot levels with volume confirmation and session filter.
-# Enters long when price breaks above R4 with volume > 2.0x 48-period average during 08-20 UTC.
-# Enters short when price breaks below S4 with volume > 2.0x 48-period average during 08-20 UTC.
-# Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (2.0x) and session filter to reduce trade frequency.
-# Position size set to 0.20 to manage risk.
-# Target: 15-37 trades per year (60-150 total over 4 years) to minimize fee drag.
-# Uses 1h for entry timing with 1d for signal direction to balance responsiveness and noise reduction.
-# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# Hypothesis: 6h Elder Ray trend following with weekly trend filter.
+# Uses Elder Ray (Bull Power/Bear Power) from daily data to measure buying/selling pressure.
+# Weekly EMA26 filter ensures trades align with higher timeframe trend.
+# Enters long when Bull Power > 0 and price above weekly EMA26.
+# Enters short when Bear Power < 0 and price below weekly EMA26.
+# Exits when power signals reverse.
+# Works in both bull and bear markets by following the weekly trend.
+# Position size 0.25 manages risk. Target: 20-40 trades per year (80-160 total over 4 years).
+# Elder Ray is effective in trending markets and avoids whipsaws in ranging conditions.
