@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_breakout_volume_v2
-Strategy: 12h price action with 1d Camarilla confluence and trend filter
-Timeframe: 12h
+4h_1d_camarilla_breakout_volume_trend_v6
+Strategy: 4h price action with 1d Camarilla confluence and trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Buy when 12h closes above daily R3 with volume confirmation and daily close > prior daily close (uptrend); sell when 12h closes below daily S3 with volume confirmation and daily close < prior daily close (downtrend). Exit when price returns to daily pivot. Uses strict volume confirmation (2.0x average) to reduce trades and avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend.
+Hypothesis: Buy when 4h closes above daily R3 with volume confirmation and daily uptrend; sell when 4h closes below daily S3 with volume confirmation and daily downtrend. Exit when price returns to daily pivot. Uses 1d close > prior daily close for uptrend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend. Low-frequency design targets 20-50 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v6"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,11 +32,20 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h volume filter: volume > 2.0x 20-period average (stricter to reduce trades)
+    # 4h ATR for volatility filter (optional, not used in entry but good for context)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === 1d Close (trend filter: use prior day's close) ===
     close_1d = df_1d['close'].values
+    # Trend: today's close > yesterday's close for uptrend, < for downtrend
+    # We'll use the 1d close shifted by 1 to represent "prior day close" for trend
     close_1d_shifted = np.roll(close_1d, 1)
     close_1d_shifted[0] = np.nan
     close_1d_trend = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
@@ -59,7 +68,7 @@ def generate_signals(prices):
     r3_1d = close_1d_shift + range_1d * 1.166
     s3_1d = close_1d_shift - range_1d * 1.166
     
-    # Align daily Camarilla to 12h timeframe
+    # Align daily Camarilla to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
@@ -74,7 +83,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid or outside session
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(close_1d_trend[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(close_1d_trend[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -83,17 +92,17 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: 12h volume must be elevated (2.0x average)
-        volume_confirmed = volume_current > 2.0 * vol_ma
+        # Volume confirmation: 4h volume must be elevated
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
         # Trend filter: price close vs prior day close (1d trend)
         uptrend_1d = price_close > close_1d_trend[i]
         downtrend_1d = price_close < close_1d_trend[i]
         
-        # Long conditions: 12h closes above prior day's R3 with volume + 1d uptrend
+        # Long conditions: 4h closes above prior day's R3 with volume + 1d uptrend
         long_signal = volume_confirmed and (price_close > r3_1d_aligned[i]) and uptrend_1d
         
-        # Short conditions: 12h closes below prior day's S3 with volume + 1d downtrend
+        # Short conditions: 4h closes below prior day's S3 with volume + 1d downtrend
         short_signal = volume_confirmed and (price_close < s3_1d_aligned[i]) and downtrend_1d
         
         # Exit when price returns to the 1d pivot (mean reversion within prior day's range)
@@ -118,4 +127,4 @@ def generate_signals(prices):
     
     return signals
 
-"""Hypothesis: Buy when 12h closes above daily R3 with volume confirmation and daily close > prior daily close (uptrend); sell when 12h closes below daily S3 with volume confirmation and daily close < prior daily close (downtrend). Exit when price returns to daily pivot. Uses strict volume confirmation (2.0x average) to reduce trades and avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend."""
+# Hypothesis: Buy when 4h closes above daily R3 with volume confirmation and daily uptrend; sell when 4h closes below daily S3 with volume confirmation and daily downtrend. Exit when price returns to daily pivot. Uses 1d close > prior daily close for uptrend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend. Low-frequency design targets 20-50 trades/year to minimize fee drag.
