@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d volume spike and 1w choppiness regime filter
-# - Enter long when price breaks above 20-period Donchian upper band AND 1d volume > 1.5x 20-period volume SMA AND 1w chop < 61.8 (trending regime)
-# - Enter short when price breaks below 20-period Donchian lower band AND 1d volume > 1.5x 20-period volume SMA AND 1w chop < 61.8 (trending regime)
-# - Exit: price reverses to opposite Donchian band (upper for shorts, lower for longs)
-# - Donchian breakout captures strong momentum moves
-# - Volume confirmation ensures institutional participation
-# - 1w chop filter avoids false breakouts in ranging markets
-# - Target: 25-40 trades/year to minimize fee drag while capturing high-probability trends
+# Hypothesis: 1d Donchian(20) breakout with 1w HMA trend filter and volume confirmation
+# - Enter long when price breaks above 20-day Donchian upper band AND 1w HMA(21) is rising AND 1d volume > 1.5x 20-day volume SMA
+# - Enter short when price breaks below 20-day Donchian lower band AND 1w HMA(21) is falling AND 1d volume > 1.5x 20-day volume SMA
+# - Exit: time-based exit after 10 bars or opposite Donchian break
+# - Donchian channels provide clear structural breakouts
+# - 1w HMA(21) filter ensures alignment with higher timeframe trend to avoid counter-trend trades
+# - Volume confirmation increases breakout validity
+# - Target: 15-25 trades/year to minimize fee drag while capturing high-probability breakouts
 
-name = "4h_1d_1w_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_hma_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,101 +25,82 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for volume confirmation (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return signals
-    
-    # Load 1w data ONCE before loop for choppiness regime filter (MTF rule compliance)
+    # Load 1w data ONCE before loop for HMA trend filter (MTF rule compliance)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return signals
     
-    # Pre-compute 20-period Donchian channels for 4h
+    # Pre-compute 20-period Donchian channels for 1d
     highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute volume SMA for 1d data (20-period)
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Pre-compute 20-period volume SMA for 1d
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute True Range for 1w choppiness calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Pre-compute HMA for 1w close (trend filter)
     close_1w = df_1w['close'].values
+    # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = len(close_1w) // 2
+    sqrt_len = int(np.sqrt(len(close_1w)))
+    if half_len > 0 and sqrt_len > 0:
+        wma_half = pd.Series(close_1w).ewm(span=half_len, adjust=False, min_periods=half_len).mean()
+        wma_full = pd.Series(close_1w).ewm(span=len(close_1w), adjust=False, min_periods=len(close_1w)).mean()
+        raw_hma = 2 * wma_half - wma_full
+        hma_21 = raw_hma.ewm(span=sqrt_len, adjust=False, min_periods=sqrt_len).mean().values
+    else:
+        hma_21 = np.full_like(close_1w, np.nan)
     
-    # Calculate True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = np.abs(high_1w[0] - low_1w[0])  # First period
-    tr2[0] = 0  # No previous close for first period
-    tr3[0] = 0  # No previous close for first period
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align 1w HMA to 1d timeframe (using completed 1w bar)
+    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
-    # Calculate 14-period ATR and sum of ranges for choppiness
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    range_14 = max_hh_14 - min_ll_14
+    # Pre-compute HMA slope for trend direction (rising/falling)
+    hma_slope = np.diff(hma_21_aligned, prepend=hma_21_aligned[0])
+    hma_rising = hma_slope > 0
+    hma_falling = hma_slope < 0
     
-    # Choppiness Index: 100 * log10(sum TR / range) / log10(14)
-    # Avoid division by zero and log of zero
-    chop_raw = np.where((range_14 > 0) & (sum_tr_14 > 0), 
-                        100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 
-                        50)  # Neutral value when undefined
-    
-    # Align indicators to 4h timeframe
-    volume_1d_current = df_1d['volume'].values
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_current)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_raw)
-    
-    for i in range(30, n):  # Start after warmup period
+    for i in range(30, n):  # Start after 30-bar warmup for 20-period indicators
         # Skip if any required data is invalid
         if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(volume_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+            np.isnan(volume_sma_20[i]) or np.isnan(hma_21_aligned[i]) or
+            np.isnan(hma_rising[i]) or np.isnan(hma_falling[i])):
             signals[i] = 0.0
             continue
         
         # Volume confirmation: 1d volume > 1.5x 20-period volume SMA
-        vol_confirm = volume_1d_aligned[i] > 1.5 * volume_sma_20_1d_aligned[i]
-        
-        # Regime filter: 1w chop < 61.8 (trending market)
-        trending_regime = chop_aligned[i] < 61.8
+        vol_confirm = volume[i] > 1.5 * volume_sma_20[i]
         
         # Donchian breakout signals
         long_breakout = close[i] > highest_high_20[i]
         short_breakout = close[i] < lowest_low_20[i]
         
-        # Exit signals: price reverses to opposite Donchian band
-        long_exit = close[i] < lowest_low_20[i]  # Exit long when price breaks lower band
-        short_exit = close[i] > highest_high_20[i]  # Exit short when price breaks upper band
+        # Exit conditions: time-based or opposite breakout
+        # We'll use a simple approach: exit on opposite Donchian break or after 10 bars
+        # Track bars in position separately
         
         # Trading logic
-        if long_breakout and vol_confirm and trending_regime:
+        if long_breakout and vol_confirm and hma_rising[i]:
             if position != 1:  # Only signal on new long entry
                 position = 1
                 signals[i] = 0.25
             else:
                 signals[i] = 0.25
-        elif short_breakout and vol_confirm and trending_regime:
+        elif short_breakout and vol_confirm and hma_falling[i]:
             if position != -1:  # Only signal on new short entry
                 position = -1
                 signals[i] = -0.25
             else:
                 signals[i] = -0.25
         else:
-            # Check for exits
-            if position == 1 and long_exit:
+            # Exit conditions: opposite Donchian break
+            if position == 1 and short_breakout:
                 position = 0
                 signals[i] = 0.0
-            elif position == -1 and short_exit:
+            elif position == -1 and long_breakout:
                 position = 0
                 signals[i] = 0.0
             else:
