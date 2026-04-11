@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,16 +19,6 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return signals
-    
-    # Calculate weekly EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -65,18 +55,17 @@ def generate_signals(prices):
     camarilla_H4 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
     camarilla_L4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
     camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
-    # Volume confirmation: 20-period average on 12h
+    # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(200, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i]) or
-            np.isnan(ema_21_1w_aligned[i])):
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i])):
             signals[i] = 0.0
             continue
         
@@ -89,22 +78,18 @@ def generate_signals(prices):
         # Volatility regime filter: trade only when volatility is elevated (ATR ratio > 0.7)
         vol_regime = atr_ratio_1d[i] > 0.7
         
-        # Trend filter: price above/below weekly EMA21
-        price_above_weekly_ema = price_close > ema_21_1w_aligned[i]
-        price_below_weekly_ema = price_close < ema_21_1w_aligned[i]
-        
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime + weekly uptrend
+        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime
         price_above_H4 = price_close > camarilla_H4_aligned[i]
-        if price_above_H4 and vol_confirm and vol_regime and price_above_weekly_ema:
+        if price_above_H4 and vol_confirm and vol_regime:
             enter_long = True
         
-        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime + weekly downtrend
+        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime
         price_below_L4 = price_close < camarilla_L4_aligned[i]
-        if price_below_L4 and vol_confirm and vol_regime and price_below_weekly_ema:
+        if price_below_L4 and vol_confirm and vol_regime:
             enter_short = True
         
         # Exit conditions: price crosses back through the Camarilla mid-point (C level)
@@ -140,3 +125,10 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
+
+# Hypothesis: Camarilla breakout with volume and volatility regime filters.
+# Uses daily Camarilla levels (H4/L4) for entry and C level for exit.
+# Volume confirmation (>1.8x 20-period average) ensures institutional participation.
+# Volatility regime filter (ATR ratio > 0.7) avoids low-volatility chop.
+# Works in both bull and bear markets by capturing breakouts from key daily levels.
+# Target: 20-40 trades/year to minimize fee drag.
