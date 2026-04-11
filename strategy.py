@@ -1,150 +1,129 @@
 #!/usr/bin/env python3
 """
-1d_1w_kama_rsi_chop_v1
-Strategy: 1d KAMA trend with RSI momentum and Choppiness index regime filter
-Timeframe: 1d
+4h_1d_camarilla_breakout_volatility_v3
+Strategy: 4h breakout with 1d volatility filter and volume confirmation (tightened version)
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: In low-chop regimes (trending markets), go long when KAMA turns up and RSI > 50; short when KAMA turns down and RSI < 50. In high-chop regimes (ranging markets), stay flat. Uses weekly trend filter to avoid counter-trend trades. Designed for both bull and bear markets by adapting to market regime - trend following in trending markets, avoiding chop. Low-frequency design targets 15-25 trades/year to minimize fee drag.
+Hypothesis: Tightened version of v2 with stricter entry conditions to reduce trade count and avoid overtrading. 
+Requires volume > 2.0x 20-period average (vs 1.5x), ATR ratio < 0.6 (vs 0.8), and adds close > open filter to ensure strong directional candles.
+Target: 15-30 trades/year to minimize fee drag while maintaining edge in both bull and bear markets via volatility breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_volatility_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1d Indicators ===
-    # KAMA ( Kaufman Adaptive Moving Average )
-    def kama(close, period=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        # Handle first element
-        volatility = np.concatenate([[np.sum(np.abs(np.diff(close[:period])))], volatility])
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smoothing constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # Initialize KAMA
-        kama_vals = np.full_like(close, np.nan, dtype=float)
-        kama_vals[period] = close[period]
-        for i in range(period+1, len(close)):
-            if not np.isnan(sc[i]):
-                kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-            else:
-                kama_vals[i] = kama_vals[i-1]
-        return kama_vals
+    # 4h ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # RSI
-    def rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.concatenate([[np.mean(gain[:period])], np.zeros(len(close)-period)])
-        avg_loss = np.concatenate([[np.mean(loss[:period])], np.zeros(len(close)-period)])
-        for i in range(period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_vals = 100 - (100 / (1 + rs))
-        return rsi_vals
+    # 4h volume filter: volume > 2.0x 20-period average (tightened from 1.5x)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index
-    def choppiness_index(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.max(tr1[0], tr2[0], tr3[0])], np.maximum(tr1, np.maximum(tr2, tr3))])
-        atr = np.convolve(tr, np.ones(period)/period, mode='same')
-        atr[:period-1] = np.nan
-        atr[-1] = np.nan
-        # Sum of ATR over period
-        atr_sum = np.convolve(tr, np.ones(period)/period, mode='same') * period
-        atr_sum[:period-1] = np.nan
-        atr_sum[-1] = np.nan
-        # Price range over period
-        max_high = np.concatenate([[np.max(high[:period])], np.zeros(len(high)-period)])
-        min_low = np.concatenate([[np.min(low[:period])], np.zeros(len(low)-period)])
-        for i in range(period, len(high)):
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-        price_range = max_high - min_low
-        # Choppiness
-        cpi = 100 * np.log10(atr_sum / price_range) / np.log10(period)
-        return cpi
+    # === 1d ATR (volatility filter: low volatility regime) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate indicators
-    kama_vals = kama(close, period=10, fast=2, slow=30)
-    rsi_vals = rsi(close, period=14)
-    cpi_vals = choppiness_index(high, low, close, period=14)
+    # Calculate 1d ATR
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # === 1w Trend Filter ===
-    close_1w = df_1w['close'].values
-    # Weekly EMA for trend direction
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False).values
-    # Shift to avoid look-ahead (use previous week's close)
-    ema_1w_shifted = np.roll(ema_1w, 1)
-    ema_1w_shifted[0] = np.nan
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_shifted)
+    # 1d ATR ratio: current ATR / 20-period average ATR (low when < 0.6, tightened from 0.8)
+    atr_ma_20 = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma_20
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Align 1d indicators (though they're already on 1d timeframe, we ensure proper alignment)
-    kama_aligned = kama_vals
-    rsi_aligned = rsi_vals
-    cpi_aligned = cpi_vals
+    # === 1d Close (prior close for context) ===
+    close_1d_shifted = np.roll(close_1d, 1)
+    close_1d_shifted[0] = np.nan
+    close_1d_prior = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
+    
+    # === 1d Camarilla (entry levels from prior 1d) ===
+    high_1d_shift = np.roll(high_1d, 1)
+    low_1d_shift = np.roll(low_1d, 1)
+    close_1d_shift = np.roll(close_1d, 1)
+    high_1d_shift[0] = np.nan
+    low_1d_shift[0] = np.nan
+    close_1d_shift[0] = np.nan
+    
+    pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
+    range_1d = high_1d_shift - low_1d_shift
+    r3_1d = close_1d_shift + range_1d * 1.166
+    s3_1d = close_1d_shift - range_1d * 1.166
+    
+    # Align 1d Camarilla to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    
+    # Session filter: 08-20 UTC (major sessions)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(cpi_aligned[i]) or np.isnan(ema_1w_aligned[i])):
+        # Skip if any required data is invalid or outside session
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(close_1d_prior[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
+            not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: Choppiness > 61.8 = ranging (avoid), < 38.2 = trending (trade)
-        ranging_market = cpi_aligned[i] > 61.8
-        trending_market = cpi_aligned[i] < 38.2
+        price_close = close[i]
+        price_open = open_price[i]
+        volume_current = volume[i]
+        vol_ma = vol_ma_20[i]
         
-        # Weekly trend filter: only trade in direction of weekly trend
-        price_above_weekly_ema = close[i] > ema_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_1w_aligned[i]
+        # Volume confirmation: 4h volume must be expanded (tightened to 2.0x)
+        volume_expanded = volume_current > 2.0 * vol_ma
         
-        # KAMA direction: slope of KAMA
-        kama_rising = kama_aligned[i] > kama_aligned[i-1] if i > 0 else False
-        kama_falling = kama_aligned[i] < kama_aligned[i-1] if i > 0 else False
+        # Volatility filter: low volatility regime (ATR ratio < 0.6, tightened from 0.8)
+        low_volatility = atr_ratio_aligned[i] < 0.6
         
-        # RSI momentum
-        rsi_above_50 = rsi_aligned[i] > 50
-        rsi_below_50 = rsi_aligned[i] < 50
+        # Strong candle: close > open for longs, close < open for shorts
+        strong_bullish = price_close > price_open
+        strong_bearish = price_close < price_open
         
-        # Long conditions: trending market + KAMA rising + RSI > 50 + price above weekly EMA
-        long_signal = trending_market and kama_rising and rsi_above_50 and price_above_weekly_ema
+        # Long conditions: 4h closes above prior 1d's R3 with volume expansion + low volatility + strong bullish candle
+        long_signal = volume_expanded and low_volatility and strong_bullish and (price_close > r3_1d_aligned[i])
         
-        # Short conditions: trending market + KAMA falling + RSI < 50 + price below weekly EMA
-        short_signal = trending_market and kama_falling and rsi_below_50 and price_below_weekly_ema
+        # Short conditions: 4h closes below prior 1d's S3 with volume expansion + low volatility + strong bearish candle
+        short_signal = volume_expanded and low_volatility and strong_bearish and (price_close < s3_1d_aligned[i])
         
-        # Exit conditions: reverse signal or chop increases
-        exit_long = position == 1 and (not kama_rising or rsi_aligned[i] < 50 or ranging_market)
-        exit_short = position == -1 and (not kama_falling or rsi_aligned[i] > 50 or ranging_market)
+        # Exit when price returns to the 1d pivot (mean reversion within prior 1d's range)
+        exit_long = position == 1 and price_close < pivot_1d_aligned[i]
+        exit_short = position == -1 and price_close > pivot_1d_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -164,4 +143,6 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: In low-chop regimes (trending markets), go long when KAMA turns up and RSI > 50; short when KAMA turns down and RSI < 50. In high-chop regimes (ranging markets), stay flat. Uses weekly trend filter to avoid counter-trend trades. Designed for both bull and bear markets by adapting to market regime - trend following in trending markets, avoiding chop. Low-frequency design targets 15-25 trades/year to minimize fee drag.
+# Hypothesis: Tightened version of v2 with stricter entry conditions to reduce trade count and avoid overtrading. 
+# Requires volume > 2.0x 20-period average (vs 1.5x), ATR ratio < 0.6 (vs 0.8), and adds close > open filter to ensure strong directional candles.
+# Target: 15-30 trades/year to minimize fee drag while maintaining edge in both bull and bear markets via volatility breakouts.
