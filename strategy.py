@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_trend_v3"
+name = "12h_1d_donchian_breakout_volume_trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,30 +22,25 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily OHLC for Camarilla pivot calculation
+    # Daily high/low for Donchian channel (20-day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla pivot levels (using previous day's data)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: H3 = close + range * 1.1/4, L3 = close - range * 1.1/4
-    camarilla_h3 = close_1d + range_1d * 1.1 / 4
-    camarilla_l3 = close_1d - range_1d * 1.1 / 4
+    # Calculate daily Donchian channel (20-period)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Shift by 1 to use only completed daily bars (previous day's levels)
-    camarilla_h3 = np.roll(camarilla_h3, 1)
-    camarilla_l3 = np.roll(camarilla_l3, 1)
-    camarilla_h3[0] = np.nan
-    camarilla_l3[0] = np.nan
+    donchian_high = np.roll(donchian_high, 1)
+    donchian_low = np.roll(donchian_low, 1)
+    donchian_high[0] = np.nan
+    donchian_low[0] = np.nan
     
-    # Align daily Camarilla levels to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align daily Donchian levels to 12h timeframe
+    dh_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    dl_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # 12h ATR for volatility filter
+    # 12h ATR for volatility filter (14-period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -69,7 +64,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
+        if (np.isnan(dh_12h[i]) or np.isnan(dl_12h[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
@@ -86,16 +81,16 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 (strong trend filter to reduce trades)
         trend_filter = adx[i] > 25
         
-        # Long conditions: price breaks above H3 level with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > h3_12h[i])
+        # Long conditions: price breaks above Donchian high with volume and trend
+        long_signal = volume_confirmed and trend_filter and (price_high > dh_12h[i])
         
-        # Short conditions: price breaks below L3 level with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < l3_12h[i])
+        # Short conditions: price breaks below Donchian low with volume and trend
+        short_signal = volume_confirmed and trend_filter and (price_low < dl_12h[i])
         
-        # Exit when price returns to the opposite side of the pivot level
-        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-        exit_long = position == 1 and price_close < pivot_12h[i]
-        exit_short = position == -1 and price_close > pivot_12h[i]
+        # Exit when price returns to the opposite side of the Donchian channel midpoint
+        donchian_mid = (dh_12h[i] + dl_12h[i]) / 2
+        exit_long = position == 1 and price_close < donchian_mid
+        exit_short = position == -1 and price_close > donchian_mid
         
         # Trading logic
         if long_signal and position != 1:
@@ -115,9 +110,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla breakout strategy for 12h timeframe with stricter ADX filter (>25).
-# Enters long when 12h price breaks above daily H3 level with volume >1.5x average and ADX>25.
-# Enters short when price breaks below daily L3 level with same conditions.
-# Exits when price returns to the daily pivot level (mean reversion within the day's range).
+# Hypothesis: Daily Donchian breakout strategy for 12h timeframe with volume and ADX filters.
+# Enters long when 12h price breaks above daily 20-period Donchian high with volume >1.5x average and ADX>25.
+# Enters short when price breaks below daily 20-period Donchian low with same conditions.
+# Exits when price returns to the Donchian channel midpoint (mean reversion within the channel).
 # Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
 # Target: 15-25 trades per year to minimize fee drift while capturing strong daily trends.
