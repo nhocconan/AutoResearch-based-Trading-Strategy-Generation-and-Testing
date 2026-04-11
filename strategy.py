@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-# 12h_1d_alligator_2025
-# Strategy: 12-hour Williams Alligator with 1-day trend filter
-# Timeframe: 12h
+# 4h_12h_keltner_breakout_v1
+# Strategy: 4-hour Keltner breakout with 12-hour trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Williams Alligator (three SMAs) identifies trends; when jaws (13-period) and teeth (8-period) are aligned and lips (5-period) crosses, it signals trend continuation. Combined with 1-day trend filter and volume confirmation to avoid false signals. Works in bull/bear by capturing trend continuations.
+# Hypothesis: Price breaks out of Keltner channels during high momentum periods, with 12h trend filter to avoid counter-trend trades.
+# Works in bull by capturing breakouts with trend, and in bear by fading false breakouts via trend filter. Volume confirms institutional participation.
+# Uses Keltner channels (ATR-based) for dynamic support/resistance, which adapts to volatility regimes.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_alligator_2025"
-timeframe = "12h"
+name = "4h_12h_keltner_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -25,68 +27,61 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Williams Alligator components (5, 8, 13 period SMAs on median price)
-    median_price = (high + low) / 2.0
+    # 12h EMA20 for trend filter
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # Calculate SMAs for Alligator
-    # Jaws (13-period, 8 bars offset)
-    jaws = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period, 5 bars offset)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period, 3 bars offset)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate ATR for Keltner channels (using 4h data)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # 1-day EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1-day EMA to 12h timeframe (wait for daily close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Keltner channels: EMA20 ± 2*ATR
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20 + 2.0 * atr
+    lower_keltner = ema_20 - 2.0 * atr
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.3 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend_1d = price_close > ema_50_1d_aligned[i]
-        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA20
+        uptrend_12h = price_close > ema_20_12h_aligned[i]
+        downtrend_12h = price_close < ema_20_12h_aligned[i]
         
-        # Alligator signals: lips crossing teeth in direction of jaw alignment
-        # Bullish: lips above teeth AND teeth above jaws (all aligned up)
-        bullish_aligned = (lips[i] > teeth[i]) and (teeth[i] > jaws[i])
-        # Bearish: lips below teeth AND teeth below jaws (all aligned down)
-        bearish_aligned = (lips[i] < teeth[i]) and (teeth[i] < jaws[i])
+        # Breakout signals: price breaks Keltner bands with volume
+        long_breakout = (price_close > upper_keltner[i]) and vol_spike[i]
+        short_breakout = (price_close < lower_keltner[i]) and vol_spike[i]
         
-        # Entry conditions: alignment + volume spike + trend filter
-        long_signal = bullish_aligned and vol_spike[i] and uptrend_1d
-        short_signal = bearish_aligned and vol_spike[i] and downtrend_1d
+        # Exit when price returns to EMA20 (mean reversion) or opposite breakout
+        exit_long = position == 1 and (price_close < ema_20[i])
+        exit_short = position == -1 and (price_close > ema_20[i])
         
-        # Exit when Alligator alignment breaks (lips crosses teeth opposite direction)
-        exit_long = position == 1 and (lips[i] < teeth[i])  # Lips crossed below teeth
-        exit_short = position == -1 and (lips[i] > teeth[i])  # Lips crossed above teeth
-        
-        # Trading logic
-        if long_signal and position != 1:
+        # Trading logic: only trade in direction of 12h trend
+        if long_breakout and uptrend_12h and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_breakout and downtrend_12h and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
