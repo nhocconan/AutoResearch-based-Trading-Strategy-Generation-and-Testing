@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal + daily trend filter + volume confirmation
-# Uses daily Williams fractals for reversal signals and daily ADX for trend strength.
-# Enters long on bullish fractal in strong uptrend (ADX>25) with volume confirmation.
-# Enters short on bearish fractal in strong downtrend (ADX>25) with volume confirmation.
-# Designed for 12-37 trades/year on 6h timeframe with strong edge in both bull/bear markets.
+# Hypothesis: 12h Williams Alligator with 1d/1w trend filter.
+# Uses 1w SMA(13,8,5) for trend direction (Jaws/Teeth/Lips alignment).
+# Enters long when 12h price crosses above Lips in bullish weekly trend.
+# Enters short when 12h price crosses below Lips in bearish weekly trend.
+# Volume filter (1.5x 20-period average) confirms momentum.
+# Designed for 12-37 trades/year on 12h timeframe.
 
-name = "6h_1d_fractal_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1w_alligator_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,115 +25,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Williams Fractal: 5-bar pattern
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-1] > high[n-3] and high[n-1] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-1] < low[n-3] and low[n-1] < low[n+1]
-    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
-    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
+    # Calculate Williams Alligator on weekly timeframe
+    close_1w = df_1w['close'].values
     
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i] < high_1d[i-1] and
-            high_1d[i-3] < high_1d[i-1] and
-            high_1d[i+1] < high_1d[i-1]):
-            bearish_fractal[i-1] = True
-            
-        if (low_1d[i-2] > low_1d[i-1] and 
-            low_1d[i] > low_1d[i-1] and
-            low_1d[i-3] > low_1d[i-1] and
-            low_1d[i+1] > low_1d[i-1]):
-            bullish_fractal[i-1] = True
+    # Jaw (13-period, 8-bar shift)
+    jaw = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (8-period, 5-bar shift)
+    teeth = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (5-period, 3-bar shift)
+    lips = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate ADX on daily data
-    # ADX calculation requires +DI, -DI, and DX
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Weekly trend: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+    weekly_trend_bull = (lips > teeth) & (teeth > jaw)
+    weekly_trend_bear = (lips < teeth) & (teeth < jaw)
     
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
+    # Align weekly Alligator lines and trend to 12h
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    weekly_trend_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bull)
+    weekly_trend_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bear)
     
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed values (14-period Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[1:period+1]) / period
-        # Subsequent values: smoothed = prev * (period-1)/period + current/period
-        for i in range(period, len(data)):
-            if not np.isnan(result[i-1]) and not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    tr14 = wilders_smoothing(tr, 14)
-    plus_dm14 = wilders_smoothing(plus_dm, 14)
-    minus_dm14 = wilders_smoothing(minus_dm, 14)
-    
-    # Avoid division by zero
-    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
-    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
-    
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align daily indicators to 6h timeframe
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Daily average volume (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20 = np.full_like(volume_1d, np.nan, dtype=float)
-    for i in range(19, len(volume_1d)):
-        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
-    
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Volume filter: 20-period average on 12h
+    vol_avg_20 = np.full_like(volume, np.nan, dtype=float)
+    for i in range(19, len(volume)):
+        vol_avg_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or
+            np.isnan(weekly_trend_bull_aligned[i]) or np.isnan(weekly_trend_bear_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.3 * daily average volume
-        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_filter = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_aligned[i] > 25
+        # Determine weekly trend direction
+        is_bullish_week = weekly_trend_bull_aligned[i]
+        is_bearish_week = weekly_trend_bear_aligned[i]
         
-        # Enter long on bullish fractal in strong uptrend with volume
-        long_entry = (bullish_fractal_aligned[i] and strong_trend and vol_filter)
+        # Enter long when price crosses above Lips in bullish weekly trend
+        long_entry = (close[i] > lips_aligned[i] and close[i-1] <= lips_aligned[i-1] and 
+                     vol_filter and is_bullish_week)
         
-        # Enter short on bearish fractal in strong downtrend with volume
-        short_entry = (bearish_fractal_aligned[i] and strong_trend and vol_filter)
+        # Enter short when price crosses below Lips in bearish weekly trend
+        short_entry = (close[i] < lips_aligned[i] and close[i-1] >= lips_aligned[i-1] and 
+                      vol_filter and is_bearish_week)
         
-        # Exit when opposite fractal appears or trend weakens
-        exit_long = (position == 1 and 
-                    (bearish_fractal_aligned[i] or adx_aligned[i] < 20))
-        exit_short = (position == -1 and 
-                     (bullish_fractal_aligned[i] or adx_aligned[i] < 20))
+        # Exit when price crosses Teeth (opposite signal)
+        exit_long = (position == 1 and close[i] < teeth_aligned[i])
+        exit_short = (position == -1 and close[i] > teeth_aligned[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
