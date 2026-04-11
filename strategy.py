@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_v1
+4h_1d_camarilla_breakout_v2
 Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter
 Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Uses daily Camarilla pivot levels (H4/L4) for breakout entries on 4h chart with volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend alignment. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses higher timeframe (1d) for direction and 4h only for timing. Target: 15-30 trades per year (60-120 total over 4 years).
+Hypothesis: Uses 4h Camarilla pivot levels (resistance/support) for breakout entries with volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend alignment. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses 1d for direction and 4h only for timing. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,10 +29,10 @@ def generate_signals(prices):
     # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA20 for trend filter (optional, can be removed if too many trades)
+    # 4h EMA20 for trend filter (optional, can be removed if too slow)
     ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # 1d EMA50 for trend filter
@@ -63,16 +63,16 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is invalid
         if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(camarilla_H4_aligned[i]) or 
-            np.isnan(camarilla_L4_aligned[i])):
+            np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
         # Trend filter: price above/below 1d EMA50
-        uptrend_1d = price_close > ema_50_1d_aligned[i]
-        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        uptrend = price_close > ema_50_1d_aligned[i]
+        downtrend = price_close < ema_50_1d_aligned[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > camarilla_H4_aligned[i]
@@ -82,10 +82,10 @@ def generate_signals(prices):
         vol_confirmed = vol_spike[i]
         
         # Long: upward breakout with volume in uptrend
-        long_signal = breakout_up and vol_confirmed and uptrend_1d
+        long_signal = breakout_up and vol_confirmed and uptrend
         
         # Short: downward breakout with volume in downtrend
-        short_signal = breakout_down and vol_confirmed and downtrend_1d
+        short_signal = breakout_down and vol_confirmed and downtrend
         
         # Exit when price returns to the EMA20 (4h) or opposite Camarilla level
         exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
