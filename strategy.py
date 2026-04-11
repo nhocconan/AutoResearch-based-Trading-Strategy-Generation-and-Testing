@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 4h_12h_cci_volume_v1
-# Strategy: 4h CCI (Commodity Channel Index) with volume confirmation and 12h trend filter
-# Timeframe: 4h
+# 1d_1w_kama_rsi_volume_v1
+# Strategy: 1d KAMA trend direction + RSI + volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: CCI identifies cyclical overbought/oversold conditions. In trending markets,
-# CCI > +100 indicates strong uptrend, CCI < -100 indicates strong downtrend.
-# Combined with 12h EMA50 trend filter and volume confirmation to avoid false signals.
-# Designed for low frequency (20-40 trades/year) to minimize fee drag in both bull and bear markets.
+# Hypothesis: KAMA adapts to market noise, providing reliable trend direction.
+# In trending markets, KAMA follows price with less lag than traditional MAs.
+# Combine with RSI for momentum confirmation and volume to filter weak moves.
+# Designed for very low frequency (<10 trades/year) to minimize fee decay in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_cci_volume_v1"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,23 +27,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1w EMA(20) for trend filter (slower trend)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # CCI calculation: (Typical Price - SMA) / (0.015 * Mean Deviation)
-    typical_price = (high + low + close) / 3.0
-    tp_series = pd.Series(typical_price)
-    sma_20 = tp_series.rolling(window=20, min_periods=20).mean()
-    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (tp_series - sma_20) / (0.015 * mad)
+    # KAMA calculation (adaptive moving average)
+    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    change = np.abs(close - np.roll(close, 10))
+    # Avoid division by zero - add small epsilon
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) > 1 else 1
+    # Proper ER calculation using rolling window
+    change_series = pd.Series(change)
+    volatility_series = pd.Series(np.abs(np.diff(close, prepend=close[0])))
+    er = change_series.rolling(window=10, min_periods=1).sum() / \
+         volatility_series.rolling(window=10, min_periods=1).sum().replace(0, 1e-10)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[9] = close[:10].mean()  # Start after first 10 periods
+    for i in range(10, n):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # RSI calculation
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -55,32 +78,35 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(cci.iloc[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(kama[i]) or np.isnan(rsi.iloc[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filters: price above/below KAMA and 1w EMA20
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        price_above_1w_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_1w_ema = close[i] < ema_20_1w_aligned[i]
         
-        # Entry logic: CCI extreme + volume + trend alignment
-        if (cci.iloc[i] > 100 and  # Strong uptrend
-            vol_confirm[i] and uptrend and position != 1):
+        # Entry logic: strong momentum + volume + trend alignment
+        if (rsi.iloc[i] > 60 and  # Strong bullish momentum
+            price_above_kama and price_above_1w_ema and vol_confirm[i] and position != 1):
             position = 1
-            signals[i] = 0.25
-        elif (cci.iloc[i] < -100 and  # Strong downtrend
-              vol_confirm[i] and downtrend and position != -1):
+            signals[i] = 0.20
+        elif (rsi.iloc[i] < 40 and  # Strong bearish momentum
+              price_below_kama and price_below_1w_ema and vol_confirm[i] and position != -1):
             position = -1
-            signals[i] = -0.25
-        # Exit: CCI returns to neutral zone or trend change
-        elif position == 1 and (cci.iloc[i] <= 0 or not uptrend):
+            signals[i] = -0.20
+        # Exit: momentum weakening or trend change
+        elif position == 1 and (rsi.iloc[i] < 50 or not price_above_kama):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (cci.iloc[i] >= 0 or not downtrend):
+        elif position == -1 and (rsi.iloc[i] > 50 or not price_below_kama):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
