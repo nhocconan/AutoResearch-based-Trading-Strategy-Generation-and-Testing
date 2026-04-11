@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout + weekly volume confirmation + ATR stoploss
-# - Donchian(20) breakout captures momentum in both bull and bear markets
-# - Weekly volume confirmation ensures breakouts have institutional participation
-# - ATR-based stoploss limits drawdown during volatile periods
-# - Discrete position sizing (±0.25) minimizes fee churn
-# - Target: 15-25 trades/year (60-100 total over 4 years) to stay within fee limits
-# - Works in bull markets (breakouts to upside) and bear markets (breakouts to downside)
-# - Weekly timeframe avoids noise while capturing major participation
+# Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+# - Donchian breakout: price > upper(20) or price < lower(20) on 6h timeframe
+# - Weekly pivot direction: price > weekly pivot (from 1d data) for long, < for short
+# - Volume confirmation: 6h volume > 1.5x 20-period average (from 1d data aligned)
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Donchian provides clear breakout levels, weekly pivot gives HTF bias, volume filters weak signals
+# - Works in bull markets (breakouts with HTF up bias) and bear markets (breakdowns with HTF down bias)
 
-name = "1d_donchian_breakout_weekly_volume_v1"
-timeframe = "1d"
+name = "6h_1d_donchian_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,98 +28,90 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
-    atr_stop = 0.0
     
-    # Load weekly data ONCE before loop for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop for weekly pivot and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute weekly volume confirmation (20-period average)
-    volume_1w = df_1w['volume'].values
-    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
+    # Pre-compute 1d weekly pivot (using prior week's high, low, close)
+    # For each 1d bar, calculate pivot based on prior 7 days (approximate week)
+    df_1d = df_1d.copy()
+    df_1d['weekly_high'] = pd.Series(df_1d['high']).rolling(window=7, min_periods=7).max().shift(1)
+    df_1d['weekly_low'] = pd.Series(df_1d['low']).rolling(window=7, min_periods=7).min().shift(1)
+    df_1d['weekly_close'] = pd.Series(df_1d['close']).rolling(window=7, min_periods=7).last().shift(1)
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_pivot = (df_1d['weekly_high'] + df_1d['weekly_low'] + df_1d['weekly_close']) / 3
+    weekly_pivot_values = weekly_pivot.values
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot_values)
     
-    # Pre-compute Donchian channels (20-period) on 1d
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pre-compute 1d volume confirmation (20-period average)
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute ATR (14-period) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Pre-compute Donchian channels on 6h timeframe
+    donchian_window = 20
+    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    for i in range(60, n):  # Start after 60-bar warmup
+    for i in range(donchian_window, n):  # Start after Donchian warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current price and volume data
+        # Current price data
         close_current = close[i]
         volume_current = volume[i]
         
         # Donchian breakout conditions
-        breakout_up = close_current > donchian_high[i-1]  # Break above previous period high
-        breakout_down = close_current < donchian_low[i-1]  # Break below previous period low
+        breakout_up = close_current > upper_channel[i]
+        breakdown_down = close_current < lower_channel[i]
         
-        # Weekly volume confirmation: current volume > 1.5x 20-period weekly average
+        # Weekly pivot direction from 1d data
+        above_weekly_pivot = close_current > weekly_pivot_aligned[i]
+        below_weekly_pivot = close_current < weekly_pivot_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
-        
-        # ATR-based stoploss (2.0 * ATR)
-        stop_distance = 2.0 * atr[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: upward Donchian breakout + volume confirmation
-        if breakout_up and vol_confirm:
+        # Long: Donchian breakout up + above weekly pivot + volume confirmation
+        if breakout_up and above_weekly_pivot and vol_confirm:
             enter_long = True
         
-        # Short: downward Donchian breakout + volume confirmation
-        if breakout_down and vol_confirm:
+        # Short: Donchian breakdown down + below weekly pivot + volume confirmation
+        if breakdown_down and below_weekly_pivot and vol_confirm:
             enter_short = True
         
-        # Exit conditions: stoploss hit or opposite breakout
+        # Exit conditions: opposite Donchian touch or loss of HTF bias
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if stoploss hit OR downward breakout occurs
-            if close_current <= entry_price - stop_distance:
-                exit_long = True
-            elif breakout_down:  # Opposite breakout
-                exit_long = True
+            # Exit long if price touches lower channel OR goes below weekly pivot
+            exit_long = (close_current <= lower_channel[i]) or (not above_weekly_pivot)
         elif position == -1:
-            # Exit short if stoploss hit OR upward breakout occurs
-            if close_current >= entry_price + stop_distance:
-                exit_short = True
-            elif breakout_up:  # Opposite breakout
-                exit_short = True
+            # Exit short if price touches upper channel OR goes above weekly pivot
+            exit_short = (close_current >= upper_channel[i]) or (not below_weekly_pivot)
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            entry_price = close_current
             signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            entry_price = close_current
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
-            entry_price = 0.0
             signals[i] = 0.0
         elif position == -1 and exit_short:
             position = 0
-            entry_price = 0.0
             signals[i] = 0.0
         else:
             # Maintain current position
