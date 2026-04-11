@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and ADX regime filter
-# - Long: Price breaks above Donchian(20) high AND 1d volume > 1.5x 20-period average AND ADX(12h) > 25
-# - Short: Price breaks below Donchian(20) low AND 1d volume > 1.5x 20-period average AND ADX(12h) > 25
-# - Exit: Price returns to Donchian(20) midpoint OR ADX falls below 20 (regime change)
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Donchian channels provide clear breakout levels with built-in trend following
-# - Volume confirmation ensures breakouts have conviction
-# - ADX filter avoids ranging markets where breakouts fail
-# - Works in bull markets (strong breakouts up) and bear markets (strong breakouts down)
+# Hypothesis: 1h Camarilla pivot breakout with 4h trend filter and volume confirmation
+# - Uses 4h EMA50 for trend direction (long above, short below)
+# - 1h Camarilla pivot levels (H3/L3) for breakout entries
+# - Volume > 1.5x 20-period average for confirmation
+# - Session filter: 08-20 UTC to avoid low-volume Asian session
+# - Discrete position sizing: ±0.20 to limit drawdown and fee churn
+# - Target: 15-37 trades/year (60-150 total over 4 years) to stay within fee drag limits
+# - Works in bull markets (breakouts with trend) and bear markets (breakouts against trend with confirmation)
 
-name = "12h_donchian_volume_adx_v1"
-timeframe = "12h"
+name = "1h_camarilla_pivot_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,120 +29,99 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 60:
+        return signals
+    
+    # Pre-compute 4h EMA50 for trend
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
     # Load 1d data ONCE before loop for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d volume confirmation (20-period average)
+    # Pre-compute 1d volume SMA20 for confirmation
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute Donchian channels on 12h timeframe
-    # Donchian(20) high: 20-period rolling max of high
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Donchian(20) low: 20-period rolling min of low
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Donchian(20) midpoint: average of high and low
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Pre-compute hours for session filter (08-20 UTC)
+    hours = prices.index.hour
     
-    # Pre-compute ADX on 12h timeframe
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+ , DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def WilderSmooth(data, period):
-        result = np.full_like(data, np.nan)
-        alpha = 1.0 / period
-        # First value is simple average
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(data)):
-                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-        return result
-    
-    atr = WilderSmooth(tr, 14)
-    dm_plus_smooth = WilderSmooth(dm_plus, 14)
-    dm_minus_smooth = WilderSmooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = WilderSmooth(dx, 14)
-    
-    for i in range(100, n):  # Start after 100-bar warmup for indicators
+    for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_sma_20_aligned[i]) or np.isnan(adx[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(volume_sma_20_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        if not in_session:
             signals[i] = 0.0
             continue
         
         # Current price data
-        close_current = close[i]
         volume_current = volume[i]
+        high_current = high[i]
+        low_current = low[i]
+        close_current = close[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Calculate 1h Camarilla pivot levels using previous bar's OHLC
+        if i == 0:
+            continue
+        prev_close = close[i-1]
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_range = prev_high - prev_low
+        
+        # Camarilla levels
+        h3 = prev_close + prev_range * 1.1 / 4
+        l3 = prev_close - prev_range * 1.1 / 4
+        h4 = prev_close + prev_range * 1.1 / 2
+        l4 = prev_close - prev_range * 1.1 / 2
+        
+        # Trend filter: 4h EMA50
+        uptrend = close_current > ema50_4h_aligned[i]
+        downtrend = close_current < ema50_4h_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 1d SMA20
         vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
-        
-        # ADX regime filter: trending market
-        adx_strong = adx[i] > 25
-        adx_weak = adx[i] < 20  # Exit condition
-        
-        # Breakout conditions
-        breakout_up = close_current > donchian_high[i]
-        breakout_down = close_current < donchian_low[i]
-        
-        # Mean reversion exit: price returns to midpoint
-        return_to_mid = abs(close_current - donchian_mid[i]) < (donchian_high[i] - donchian_low[i]) * 0.1
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: bullish breakout + volume confirmation + strong trend
-        if breakout_up and vol_confirm and adx_strong:
+        # Long: price breaks above H3 with uptrend and volume confirmation
+        if high_current > h3 and uptrend and vol_confirm:
             enter_long = True
         
-        # Short: bearish breakout + volume confirmation + strong trend
-        if breakout_down and vol_confirm and adx_strong:
+        # Short: price breaks below L3 with downtrend and volume confirmation
+        if low_current < l3 and downtrend and vol_confirm:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: reverse breakout or loss of trend
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to midpoint OR trend weakens
-            exit_long = return_to_mid or adx_weak
+            # Exit long if price breaks below L3 or trend turns down
+            exit_long = (low_current < l3) or (not uptrend)
         elif position == -1:
-            # Exit short if price returns to midpoint OR trend weakens
-            exit_short = return_to_mid or adx_weak
+            # Exit short if price breaks above H3 or trend turns up
+            exit_short = (high_current > h3) or (not downtrend)
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -153,6 +130,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
