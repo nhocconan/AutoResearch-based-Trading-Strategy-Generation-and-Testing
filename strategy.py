@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
+name = "4h_1d_camarilla_breakout_volume_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -72,7 +72,7 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 2.0x 20-period average (stricter for fewer trades)
+    # 4h volume filter: volume > 2.5x 20-period average (stricter for fewer trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -93,10 +93,10 @@ def generate_signals(prices):
         adx_val = adx[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 2.0 * vol_ma
+        volume_confirmed = volume_current > 2.5 * vol_ma
         
-        # Trend filter: ADX > 35 for trending market
-        trend_filter = adx_val > 35
+        # Trend filter: ADX > 40 for trending market
+        trend_filter = adx_val > 40
         
         # Long conditions: price breaks above H3 level with volume and trend
         long_signal = volume_confirmed and trend_filter and (price_high > h3_4h[i])
@@ -112,10 +112,10 @@ def generate_signals(prices):
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -123,13 +123,13 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
 # Hypothesis: Camarilla breakout strategy using H3/L3 levels from previous day's price action.
-# Enters long when 4h price breaks above H3 (close + range*1.1/4) with volume >2x average and ADX>35.
+# Enters long when 4h price breaks above H3 (close + range*1.1/4) with volume >2.5x average and ADX>40.
 # Enters short when price breaks below L3 (close - range*1.1/4) with same conditions.
 # Exits when price returns to the pivot level (mean reversion within the day's range).
 # Works in both bull and bear markets by capturing intraday momentum with proper filters.
-# Tight volume (2.0x) and trend (ADX>35) filters target ~20-30 trades/year to minimize fee drag.
+# Tight volume (2.5x) and trend (ADX>40) filters target ~15-25 trades/year to minimize fee drag.
