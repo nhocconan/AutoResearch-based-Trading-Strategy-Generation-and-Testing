@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_volume_v1"
+name = "12h_1d_camarilla_volume_reversal_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -30,25 +30,25 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels: R4, R3, S3, S4
-    r4 = pivot + (range_1d * 1.1 / 2)
+    # Camarilla levels: R3, R4, S3, S4
     r3 = pivot + (range_1d * 1.1 / 4)
+    r4 = pivot + (range_1d * 1.1 / 2)
     s3 = pivot - (range_1d * 1.1 / 4)
     s4 = pivot - (range_1d * 1.1 / 2)
     
     # Shift by 1 to use only completed daily bars
-    r4 = np.roll(r4, 1)
     r3 = np.roll(r3, 1)
+    r4 = np.roll(r4, 1)
     s3 = np.roll(s3, 1)
     s4 = np.roll(s4, 1)
-    r4[0] = np.nan
     r3[0] = np.nan
+    r4[0] = np.nan
     s3[0] = np.nan
     s4[0] = np.nan
     
     # Align daily levels to 12h timeframe
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
     r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
     s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
@@ -62,13 +62,16 @@ def generate_signals(prices):
     # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Calculate pivot for exit
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(r4_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(pivot_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -85,14 +88,13 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely low volatility
         vol_filter = atr_val > 0.005 * price_close  # ATR > 0.5% of price
         
-        # Long conditions: price breaks above S3 or S4 with volume and vol filter
+        # Long conditions: price breaks below S3 or S4 (oversold bounce)
         long_signal = volume_confirmed and vol_filter and (price_low < s3_12h[i] or price_low < s4_12h[i])
         
-        # Short conditions: price breaks below R3 or R4 with volume and vol filter
+        # Short conditions: price breaks above R3 or R4 (overbought rejection)
         short_signal = volume_confirmed and vol_filter and (price_high > r3_12h[i] or price_high > r4_12h[i])
         
         # Exit when price returns to pivot level
-        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
         exit_long = position == 1 and price_close > pivot_12h[i]
         exit_short = position == -1 and price_close < pivot_12h[i]
         
