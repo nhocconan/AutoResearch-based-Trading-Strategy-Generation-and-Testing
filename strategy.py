@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Strategy: 12h Camarilla breakout with 1d EMA trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_1d_kama_volume_cross_v1
+# Strategy: 4h KAMA crossover with volume confirmation and 1d trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (H3/L3) from daily chart act as strong support/resistance. Breakouts in the direction of the 1d EMA trend with volume confirmation capture institutional moves. Works in both bull/bear by trading breakouts in trend direction, avoiding false signals in chop. Lower frequency (12h) reduces trade frequency and fee drag.
+# Hypothesis: KAMA adapts to market noise, providing reliable trend signals in both bull and bear markets. 
+# Price crossing above/below KAMA indicates trend changes. Volume confirms institutional participation.
+# 1d EMA filter ensures we only trade in the direction of the higher timeframe trend, reducing false signals.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_kama_volume_cross_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +30,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # 1d EMA(50) for trend filter
@@ -35,18 +38,44 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Camarilla levels: H3/L3 = C +- (H-L)*1.1/2
-    camarilla_h3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_l3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Proper ER calculation
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    for i in range(1, len(close)):
+        if i == 1:
+            change[i] = np.abs(close[i] - close[i-1])
+            volatility[i] = np.abs(close[i] - close[i-1])
+        else:
+            change[i] = np.abs(close[i] - close[i-10]) if i >= 10 else np.abs(close[i] - close[0])
+            volatility[i] = np.sum(np.abs(np.diff(close[max(0, i-9):i+1])))
+    
+    # Vectorized ER calculation
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.zeros_like(close)
+    for i in range(len(close)):
+        if i == 0:
+            volatility[i] = 0
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close[max(0, i-9):i+1])))
+    
+    # Avoid division by zero
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -55,10 +84,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ratio.iloc[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(kama[i]) or np.isnan(vol_ratio.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -66,19 +94,19 @@ def generate_signals(prices):
         vol_confirmed = vol_ratio.iloc[i] > 1.5
         
         # Entry conditions
-        # Long: Price breaks above H3 + above 1d EMA50 (uptrend) + volume confirmation
-        if vol_confirmed and close[i] > camarilla_h3_aligned[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Long: Price crosses above KAMA + above 1d EMA50 (uptrend) + volume confirmation
+        if vol_confirmed and close[i] > kama[i] and close[i-1] <= kama[i-1] and close[i] > ema_50_1d_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price breaks below L3 + below 1d EMA50 (downtrend) + volume confirmation
-        elif vol_confirmed and close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
+        # Short: Price crosses below KAMA + below 1d EMA50 (downtrend) + volume confirmation
+        elif vol_confirmed and close[i] < kama[i] and close[i-1] >= kama[i-1] and close[i] < ema_50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to midpoint or trend reversal
-        elif position == 1 and (close[i] < (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2 or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: price returns to KAMA or trend reversal
+        elif position == 1 and (close[i] < kama[i] or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2 or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > kama[i] or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
