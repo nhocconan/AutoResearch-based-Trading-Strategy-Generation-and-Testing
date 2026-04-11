@@ -1,36 +1,19 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_v1
-# Strategy: 4h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation
-# Timeframe: 4h
+# 12h_1d_kama_ema_trend_v1
+# Strategy: 12h trend following with KAMA trend detection and EMA confirmation from 1d timeframe
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels from daily chart act as strong support/resistance.
-# Breakouts above/below these levels with volume confirmation and 1d EMA trend alignment
-# yield high-probability trades. Works in both bull (breakouts continue) and bear
-# (breakouts fail, mean revert to opposite level) regimes via symmetric logic.
+# Hypothesis: KAMA adapts to market noise, reducing false signals in choppy markets.
+#             Combined with 1d EMA trend filter, it captures strong trends while avoiding whipsaws.
+#             Designed for low frequency (12-25 trades/year) to minimize fee drag in trending markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_v1"
-timeframe = "4h"
+name = "12h_1d_kama_ema_trend_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    range_val = high - low
-    if range_val <= 0:
-        return close, close, close, close
-    close_val = close
-    L4 = close_val + range_val * 1.1 / 2
-    L3 = close_val + range_val * 1.1 / 4
-    L2 = close_val + range_val * 1.1 / 6
-    L1 = close_val + range_val * 1.1 / 12
-    S1 = close_val - range_val * 1.1 / 12
-    S2 = close_val - range_val * 1.1 / 6
-    S3 = close_val - range_val * 1.1 / 4
-    S4 = close_val - range_val * 1.1 / 2
-    return L4, L3, L2, L1, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -41,7 +24,6 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -54,69 +36,64 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from previous day
-    L4_arr = np.full(n, np.nan)
-    L3_arr = np.full(n, np.nan)
-    L2_arr = np.full(n, np.nan)
-    L1_arr = np.full(n, np.nan)
-    S1_arr = np.full(n, np.nan)
-    S2_arr = np.full(n, np.nan)
-    S3_arr = np.full(n, np.nan)
-    S4_arr = np.full(n, np.nan)
+    # KAMA calculation (adaptive moving average)
+    er_len = 10
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    for i in range(len(df_1d)):
-        day_high = df_1d['high'].iloc[i]
-        day_low = df_1d['low'].iloc[i]
-        day_close = df_1d['close'].iloc[i]
-        L4, L3, L2, L1, S1, S2, S3, S4 = calculate_camarilla(day_high, day_low, day_close)
-        # These levels are valid for the next day
-        start_idx = (i + 1) * 6  # 6 four-hour bars per day
-        end_idx = min(start_idx + 6, n)
-        if start_idx < n:
-            L4_arr[start_idx:end_idx] = L4
-            L3_arr[start_idx:end_idx] = L3
-            L2_arr[start_idx:end_idx] = L2
-            L1_arr[start_idx:end_idx] = L1
-            S1_arr[start_idx:end_idx] = S1
-            S2_arr[start_idx:end_idx] = S2
-            S3_arr[start_idx:end_idx] = S3
-            S4_arr[start_idx:end_idx] = S4
+    change = np.abs(np.diff(close, k=10))  # 10-period net change
+    change = np.insert(change, 0, 0)       # align with original index
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
+    
+    # Calculate efficiency ratio properly
+    price_change = np.abs(np.diff(close, k=10))
+    price_change = np.insert(price_change, 0, 0)
+    
+    volatility_sum = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility_sum[i] = volatility_sum[i-1] + np.abs(close[i] - close[i-1])
+    
+    er = np.where(volatility_sum != 0, price_change / volatility_sum, 0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Price channels for entry (20-period high/low)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(L4_arr[i]) or np.isnan(L3_arr[i]) or 
-            np.isnan(L2_arr[i]) or np.isnan(L1_arr[i]) or np.isnan(S1_arr[i]) or 
-            np.isnan(S2_arr[i]) or np.isnan(S3_arr[i]) or np.isnan(S4_arr[i]) or
-            np.isnan(vol_ma.iloc[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(high_20.iloc[i]) or np.isnan(low_20.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation
-        vol_ok = volume[i] > vol_ma.iloc[i] * 1.5
+        # Trend filters
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        price_above_ema1d = close[i] > ema_50_1d_aligned[i]
+        price_below_ema1d = close[i] < ema_50_1d_aligned[i]
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
-        
-        # Long conditions: break above L3 with volume and uptrend
-        if vol_ok and uptrend and close[i] > L3_arr[i] and position != 1:
+        # Entry conditions
+        if price_above_kama and price_above_ema1d and close[i] > high_20.iloc[i-1] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short conditions: break below S3 with volume and downtrend
-        elif vol_ok and downtrend and close[i] < S3_arr[i] and position != -1:
+        elif price_below_kama and price_below_ema1d and close[i] < low_20.iloc[i-1] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: reverse signal or volatility stop
-        elif position == 1 and (close[i] < L1_arr[i] or not uptrend):
+        # Exit conditions: trend deterioration
+        elif position == 1 and (close[i] < kama[i] or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > S1_arr[i] or not downtrend):
+        elif position == -1 and (close[i] > kama[i] or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
