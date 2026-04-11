@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Strategy: 4h breakout at Camarilla pivot levels with 1d volume confirmation and ADX filter
-# Timeframe: 4h
+# 6h_1w_camarilla_volume_v1
+# Strategy: 6s Camarilla pivot levels from 1d, with 1w trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels from 1d act as strong support/resistance. Breakouts with volume
-# and trend strength (ADX > 25) capture momentum. Works in both bull (breakouts up) and bear
-# (breakouts down) by trading direction based on 1d EMA trend. Low frequency to avoid fee drag.
+# Hypothesis: Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) work better when aligned with weekly trend and volume spikes.
+# In bull/bear markets, weekly trend filters out counter-trend trades. Volume confirms institutional interest.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "6h_1w_camarilla_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,83 +26,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d data ONCE before loop for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous 1d bar (H, L, C)
+    # Using yesterday's H, L, C for today's levels (no look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1d volume average (20-period) for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Camarilla: multiplier = 1.1/12
+    # R4 = C + (H-L) * 1.1/2
+    # R3 = C + (H-L) * 1.1/4
+    # S3 = C - (H-L) * 1.1/4
+    # S4 = C - (H-L) * 1.1/2
+    camarilla_multiplier = 1.1 / 12
+    r4 = close_1d + (high_1d - low_1d) * camarilla_multiplier * 6  # *6 because 1.1/2 = 6*(1.1/12)
+    r3 = close_1d + (high_1d - low_1d) * camarilla_multiplier * 3  # *3 because 1.1/4 = 3*(1.1/12)
+    s3 = close_1d - (high_1d - low_1d) * camarilla_multiplier * 3
+    s4 = close_1d - (high_1d - low_1d) * camarilla_multiplier * 6
     
-    # ADX calculation (14-period)
-    period = 14
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
-    tr = np.insert(tr, 0, 0)
+    # Align Camarilla levels to 6h timeframe (using previous day's levels)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean()
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=period, min_periods=period).sum() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=period, min_periods=period).sum() / atr)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean()
+    # 1w EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Typical price = (H + L + C) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    typical_price_vals = typical_price.values
-    
-    # Camarilla levels: H/L = typical_price +/- 1.1 * (H - L) / 2
-    high_low_diff = df_1d['high'].values - df_1d['low'].values
-    camarilla_high = typical_price_vals + 1.1 * high_low_diff / 2
-    camarilla_low = typical_price_vals - 1.1 * high_low_diff / 2
-    
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    
-    # Volume ratio (current vs 20-period average)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_ratio = volume / vol_ma_20
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or 
-            np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or
-            np.isnan(adx.iloc[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # ADX trend strength filter
-        strong_trend = adx.iloc[i] > 25
+        # Weekly trend filter
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Volume confirmation (current volume > 1.5x average)
-        volume_confirm = vol_ratio[i] > 1.5
+        # Mean reversion at S3/R3 with volume spike
+        long_mr = (close[i] <= s3_6h[i]) and vol_spike.iloc[i] and uptrend and position != 1
+        short_mr = (close[i] >= r3_6h[i]) and vol_spike.iloc[i] and downtrend and position != -1
         
-        # Entry conditions
-        if strong_trend and volume_confirm and close[i] > camarilla_high_aligned[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Breakout continuation at S4/R4 with volume spike
+        long_break = (close[i] >= s4_6h[i]) and vol_spike.iloc[i] and uptrend and position != 1
+        short_break = (close[i] <= r4_6h[i]) and vol_spike.iloc[i] and downtrend and position != -1
+        
+        # Entry logic
+        if long_mr or long_break:
             position = 1
             signals[i] = 0.25
-        elif strong_trend and volume_confirm and close[i] < camarilla_low_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
+        elif short_mr or short_break:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: trend weakening, opposite signal, or volume drop
-        elif position == 1 and (adx.iloc[i] < 20 or close[i] < camarilla_low_aligned[i] or vol_ratio[i] < 0.8):
+        # Exit when price reverts to mean (opposite S3/R3) or volume dries up
+        elif position == 1 and (close[i] >= r3_6h[i] or not vol_spike.iloc[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (adx.iloc[i] < 20 or close[i] > camarilla_high_aligned[i] or vol_ratio[i] < 0.8):
+        elif position == -1 and (close[i] <= s3_6h[i] or not vol_spike.iloc[i]):
             position = 0
             signals[i] = 0.0
         else:
