@@ -1,18 +1,25 @@
-#!/usr/bin/env python3
+# 6h Camarilla Pivot Breakout with Volume Filter
+# Targets breakouts at R4/S4 levels from daily pivots with volume confirmation.
+# Designed for 50-150 trades over 4 years (12-37/year) with strong breakout moves.
+
+from typing import Tuple
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with volume confirmation and 1w trend filter
-# Long when price breaks above Donchian(10) high + volume > 1.5x average + 1w trend up
-# Short when price breaks below Donchian(10) low + volume > 1.5x average + 1w trend down
-# Exit when price returns to Donchian midpoint or trend reverses
-# Target: 15-25 trades/year on 1d timeframe with strong trend capture and low turnover
-# Designed to work in both bull and bear markets via trend filter and volatility-adjusted position sizing
-
-name = "1d_1w_donchian_volume_trend_v1"
-timeframe = "1d"
+name = "6h_camarilla_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_camarilla(high: float, low: float, close: float) -> Tuple[float, float, float, float]:
+    """Calculate Camarilla pivot levels (R3, R4, S3, S4) from previous period's OHLC."""
+    pivot = (high + low + close) / 3
+    range_ = high - low
+    r3 = pivot + (range_ * 1.1 / 2)
+    r4 = pivot + (range_ * 1.1)
+    s3 = pivot - (range_ * 1.1 / 2)
+    s4 = pivot - (range_ * 1.1)
+    return r3, r4, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,51 +32,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate daily Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 10-period average volume for volume filter
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Shift by 1 to use previous day's data (no look-ahead)
+    r3_1d = np.full_like(close_1d, np.nan)
+    r4_1d = np.full_like(close_1d, np.nan)
+    s3_1d = np.full_like(close_1d, np.nan)
+    s4_1d = np.full_like(close_1d, np.nan)
     
-    # Calculate Donchian channels (10-period)
-    donchian_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    for i in range(1, len(close_1d)):
+        r3, r4, s3, s4 = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+        r3_1d[i] = r3
+        r4_1d[i] = r4
+        s3_1d[i] = s3
+        s4_1d[i] = s4
+    
+    # Align to 6h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Volume filter: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(10, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_10[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 10-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_10[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Trend filter: price relative to 1w EMA20
-        is_uptrend = close[i] > ema_20_1w_aligned[i]
-        is_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = close[i] > r4_1d_aligned[i]  # Break above R4
+        breakdown_down = close[i] < s4_1d_aligned[i]  # Break below S4
         
         # Entry conditions
-        donchian_breakout_up = close[i] > donchian_high[i-1]  # Break above previous period's high
-        donchian_breakdown_down = close[i] < donchian_low[i-1]  # Break below previous period's low
+        long_entry = breakout_up and volume_filter
+        short_entry = breakdown_down and volume_filter
         
-        long_entry = donchian_breakout_up and volume_filter and is_uptrend
-        short_entry = donchian_breakdown_down and volume_filter and is_downtrend
-        
-        # Exit conditions
-        long_exit = (close[i] < donchian_mid[i]) or (not is_uptrend)  # Return to midpoint or trend change
-        short_exit = (close[i] > donchian_mid[i]) or (not is_downtrend)  # Return to midpoint or trend change
+        # Exit conditions: return to pivot area or opposite S/R level
+        long_exit = close[i] < r3_1d_aligned[i]  # Return below R3
+        short_exit = close[i] > s3_1d_aligned[i]  # Return above S3
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
