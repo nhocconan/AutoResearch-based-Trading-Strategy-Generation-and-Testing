@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-# 12h_1w_camarilla_breakout_v1
-# Strategy: Camarilla pivot breakout on 12h with weekly trend filter and volume confirmation
-# Timeframe: 12h
+# 1d_1w_funding_zscore_mean_reversion
+# Strategy: Funding rate mean reversion with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance. Price breaking above/below these levels with volume and weekly trend alignment captures institutional moves. Weekly filter avoids counter-trend trades. Works in bull by catching breakouts in uptrend, and in bear by catching breakdowns in downtrend.
+# Hypothesis: Extreme funding rates (Z-score) signal mean reversion. Weekly trend filter ensures
+# trades align with higher timeframe momentum. Volume confirmation filters weak signals.
+# Works in bull by fading euphoria and in bear by fading panic.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_v1"
-timeframe = "12h"
+name = "1d_1w_funding_zscore_mean_reversion"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,77 +29,72 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
+    # Weekly EMA(50) for trend filter
     close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_uptrend = ema_21_1w > np.roll(ema_21_1w, 1)  # Rising EMA
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = ema_50_1w > np.roll(ema_50_1w, 1)  # Rising EMA
     weekly_uptrend[0] = False  # First value invalid
     weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
     
-    # Daily data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Daily ATR(14) for volatility normalization
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Funding rate proxy using price deviation from weekly VWAP
+    # Since we don't have direct funding data, use deviation from weekly VWAP as proxy
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    # Weekly VWAP calculation
+    pv_sum = pd.Series(pv).rolling(window=5*7*12, min_periods=5*7*12).sum()  # Approx 5 days of 12h periods per week
+    vol_sum = pd.Series(volume).rolling(window=5*7*12, min_periods=5*7*12).sum()
+    weekly_vwap = pv_sum / vol_sum
+    weekly_vwap = np.nan_to_num(weekly_vwap, nan=close[0])
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Deviation from weekly VWAP as funding proxy
+    deviation = (close - weekly_vwap) / atr
     
-    # Camarilla formulas
-    range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + range_1d * 1.1 / 2
-    camarilla_l4 = close_1d - range_1d * 1.1 / 2
-    camarilla_h3 = close_1d + range_1d * 1.1 / 4
-    camarilla_l3 = close_1d - range_1d * 1.1 / 4
+    # Z-score of deviation over 60-day lookback
+    def rolling_zscore(arr, window):
+        mean = pd.Series(arr).rolling(window=window, min_periods=window).mean()
+        std = pd.Series(arr).rolling(window=window, min_periods=window).std()
+        return (arr - mean) / (std + 1e-10)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    zscore = rolling_zscore(deviation, 60)
     
-    # Volume average (24-period ~ 12 days) for confirmation
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume average (20-period) for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(24, n):
+    for i in range(60, n):  # Start after zscore warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_12h[i]) or np.isnan(camarilla_l4_12h[i]) or 
-            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(zscore[i]) or np.isnan(weekly_uptrend_aligned[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(atr[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current values
-        price_now = close[i]
-        volume_now = volume[i]
+        # Mean reversion signals with weekly trend filter
+        long_signal = (zscore[i] < -2.0) and weekly_uptrend_aligned[i] and vol_spike[i]
+        short_signal = (zscore[i] > 2.0) and (not weekly_uptrend_aligned[i]) and vol_spike[i]
         
-        # Camarilla levels at current bar
-        h4 = camarilla_h4_12h[i]
-        l4 = camarilla_l4_12h[i]
-        h3 = camarilla_h3_12h[i]
-        l3 = camarilla_l3_12h[i]
-        
-        # Breakout conditions with volume and trend
-        bull_break = (price_now > h4) and volume_now and weekly_uptrend_aligned[i]
-        bear_break = (price_now < l4) and volume_now and not weekly_uptrend_aligned[i]
-        
-        # Exit conditions: reverse signal or re-entry into Camarilla body
-        exit_long = position == 1 and (price_now < h3 or bear_break)
-        exit_short = position == -1 and (price_now > l3 or bull_break)
+        # Exit conditions: Z-score reverts to mean or opposite extreme
+        exit_long = position == 1 and (zscore[i] > -0.5 or zscore[i] > 2.0)
+        exit_short = position == -1 and (zscore[i] < 0.5 or zscore[i] < -2.0)
         
         # Trading logic
-        if bull_break and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bear_break and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
