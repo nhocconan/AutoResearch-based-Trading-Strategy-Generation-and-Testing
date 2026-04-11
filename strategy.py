@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,45 +17,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly OHLC for Camarilla pivot calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily OHLC for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla pivot levels (using previous week's data)
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Calculate daily Camarilla pivot levels (using previous day's data)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
     # Camarilla levels: H3 = close + range * 1.1/4, L3 = close - range * 1.1/4
-    camarilla_h3 = close_1w + range_1w * 1.1 / 4
-    camarilla_l3 = close_1w - range_1w * 1.1 / 4
+    camarilla_h3 = close_1d + range_1d * 1.1 / 4
+    camarilla_l3 = close_1d - range_1d * 1.1 / 4
     
-    # Shift by 1 to use only completed weekly bars (previous week's levels)
+    # Shift by 1 to use only completed daily bars (previous day's levels)
     camarilla_h3 = np.roll(camarilla_h3, 1)
     camarilla_l3 = np.roll(camarilla_l3, 1)
     camarilla_h3[0] = np.nan
     camarilla_l3[0] = np.nan
     
-    # Align weekly Camarilla levels to daily timeframe
-    h3_1d = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_1d = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Align daily Camarilla levels to 12h timeframe
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Daily ATR for volatility filter
+    # 12h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily volume filter: volume > 1.5x 20-period average
+    # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Daily ADX for trend strength (14 period)
+    # 12h ADX for trend strength (14 period)
     plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
     minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
     tr_dm = tr[1:]
@@ -69,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_1d[i]) or np.isnan(l3_1d[i]) or 
+        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
@@ -87,15 +87,15 @@ def generate_signals(prices):
         trend_filter = adx[i] > 20
         
         # Long conditions: price breaks above H3 level with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > h3_1d[i])
+        long_signal = volume_confirmed and trend_filter and (price_high > h3_12h[i])
         
         # Short conditions: price breaks below L3 level with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < l3_1d[i])
+        short_signal = volume_confirmed and trend_filter and (price_low < l3_12h[i])
         
         # Exit when price returns to the opposite side of the pivot level
-        pivot_1d = align_htf_to_ltf(prices, df_1w, pivot)
-        exit_long = position == 1 and price_close < pivot_1d[i]
-        exit_short = position == -1 and price_close > pivot_1d[i]
+        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+        exit_long = position == 1 and price_close < pivot_12h[i]
+        exit_short = position == -1 and price_close > pivot_12h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -115,9 +115,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla breakout using weekly levels for BTC/ETH in both bull and bear markets.
-# Enters long when daily price breaks above weekly H3 level with volume >1.5x average and ADX>20.
-# Enters short when price breaks below weekly L3 level with same conditions.
-# Exits when price returns to the weekly pivot level (mean reversion within the week's range).
-# Weekly timeframe reduces noise, ADX filter ensures trades in trending markets.
-# Target: 15-30 trades per year to minimize fee drag while capturing strong weekly trends.
+# Hypothesis: Daily Camarilla breakout strategy for 12h timeframe.
+# Enters long when 12h price breaks above daily H3 level with volume >1.5x average and ADX>20.
+# Enters short when price breaks below daily L3 level with same conditions.
+# Exits when price returns to the daily pivot level (mean reversion within the day's range).
+# Daily timeframe provides balanced signal frequency, ADX filter ensures trades in trending markets.
+# Target: 20-30 trades per year to minimize fee drag while capturing strong daily trends.
