@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with weekly trend filter, volume confirmation, and ATR stop.
-# Long when price breaks above 20-day high with weekly EMA trend up and volume > 1.5x average.
-# Short when price breaks below 20-day low with weekly EMA trend down and volume > 1.5x average.
-# Designed for low trade frequency (~10-25/year) to minimize fee decay while capturing major moves.
-# Works in bull/bear markets by following the weekly trend direction on breakouts.
+# Hypothesis: 12h timeframe with 1-day volatility breakout + volume confirmation.
+# Uses daily ATR breakout from previous day's close to capture momentum after volatility expansion.
+# Long when price breaks above previous close + 0.5*ATR with volume > 1.2x average,
+# short when breaks below previous close - 0.5*ATR with volume > 1.2x average.
+# Designed for low trade frequency (~15-30/year) to minimize fee decay while capturing volatility breakouts.
+# Works in bull/bear markets by trading volatility expansions in either direction.
 
-name = "1d_1w_donchian_trend_volume_v1"
-timeframe = "1d"
+name = "12h_1d_volatility_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price arrays
@@ -24,64 +25,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate weekly EMA for trend filter (20-period)
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate daily Donchian channels (20-period high/low)
+    # Calculate daily ATR (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    close_1d = df_1d['close'].values
     
-    # Calculate daily average volume (20-period for confirmation)
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # ATR calculation
+    atr_14 = np.zeros_like(tr)
+    atr_14[13] = np.mean(tr[:14])  # First ATR value
+    for i in range(14, len(tr)):
+        atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    
+    # Breakout levels: previous close ± 0.5 * ATR
+    upper_break = np.roll(close_1d, 1) + 0.5 * atr_14
+    lower_break = np.roll(close_1d, 1) - 0.5 * atr_14
+    upper_break[0] = np.nan  # First day has no previous close
+    lower_break[0] = np.nan
+    
+    # Calculate daily average volume (20-period)
     volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    vol_avg_20 = np.zeros_like(volume_1d, dtype=float)
+    for i in range(19, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
+    vol_avg_20[:19] = np.nan
+    
+    # Align daily levels to 12h timeframe
+    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
+    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure all indicators are valid
-    for i in range(20, n):
+    # Start from index 1 to ensure we have previous close
+    for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * daily average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.2 * daily average volume
+        vol_filter = volume[i] > 1.2 * vol_avg_aligned[i]
         
-        # Trend filter: price relative to weekly EMA
-        trend_up = close[i] > ema_20_1w_aligned[i]
-        trend_down = close[i] < ema_20_1w_aligned[i]
+        # Entry conditions: price breaks above/below volatility bands with volume
+        long_break = high[i] > upper_break_aligned[i] and vol_filter
+        short_break = low[i] < lower_break_aligned[i] and vol_filter
         
-        # Entry conditions: Donchian breakout with volume and trend alignment
-        long_entry = (high[i] > donchian_high_aligned[i]) and vol_filter and trend_up
-        short_entry = (low[i] < donchian_low_aligned[i]) and vol_filter and trend_down
+        # Exit conditions: price returns to previous day's close (mean reversion)
+        prev_close = np.roll(close_1d, 1)
+        prev_close[0] = np.nan
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
         
-        # Exit conditions: opposite Donchian breakout or trend reversal
-        exit_long = (low[i] < donchian_low_aligned[i]) or (close[i] < ema_20_1w_aligned[i])
-        exit_short = (high[i] > donchian_high_aligned[i]) or (close[i] > ema_20_1w_aligned[i])
+        exit_long = low[i] <= prev_close_aligned[i] if not np.isnan(prev_close_aligned[i]) else False
+        exit_short = high[i] >= prev_close_aligned[i] if not np.isnan(prev_close_aligned[i]) else False
         
-        if long_entry and position != 1:
+        if long_break and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_break and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
