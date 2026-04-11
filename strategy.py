@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume_trend_v1
-# Strategy: 4h Donchian breakout with 1d trend filter and volume confirmation
-# Timeframe: 4h
+# 12h_1w_ema_breakout_v1
+# Strategy: 12h EMA breakout with weekly trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Price breaking Donchian(20) channels on 4h captures breakouts, 
-# filtered by 1d EMA trend and volume spikes. Works in bull by catching breakouts in uptrend,
-# and in bear by catching breakdowns in downtrend.
+# Hypothesis: Price breaking above 12h EMA(50) signals bullish momentum, below signals bearish.
+# Weekly EMA(50) trend filter ensures trades align with higher timeframe momentum.
+# Volume spike filter confirms breakout strength. Works in bull by riding uptrends,
+# and in bear by capturing short-term reversals against the weekly trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1w_ema_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,23 +27,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_trend = ema_1d > np.roll(ema_1d, 1)  # Rising EMA = uptrend
-    ema_1d_trend[0] = False  # First value has no previous
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_trend)
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_trend = close_1w > ema_1w  # Uptrend when price > EMA
+    ema_1w_trend_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_trend)
     
-    # Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 12h EMA(50) for entry signal
+    ema_12h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,26 +49,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(ema_12h[i]) or np.isnan(ema_1w_trend_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
-            
-        # Breakout conditions
-        long_breakout = high[i] > highest_high[i-1]  # Break above prior 20-period high
-        short_breakout = low[i] < lowest_low[i-1]    # Break below prior 20-period low
         
-        # Exit conditions: opposite breakout or loss of trend
-        exit_long = position == 1 and (short_breakout or not ema_1d_aligned[i])
-        exit_short = position == -1 and (long_breakout or ema_1d_aligned[i])
+        # Entry conditions
+        long_signal = (close[i] > ema_12h[i]) and ema_1w_trend_aligned[i] and vol_spike[i]
+        short_signal = (close[i] < ema_12h[i]) and (not ema_1w_trend_aligned[i]) and vol_spike[i]
         
-        # Trading logic: only trade in direction of daily trend
-        if long_breakout and ema_1d_aligned[i] and vol_spike[i] and position != 1:
+        # Exit conditions: opposite EMA cross
+        exit_long = position == 1 and close[i] < ema_12h[i]
+        exit_short = position == -1 and close[i] > ema_12h[i]
+        
+        # Trading logic
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and not ema_1d_aligned[i] and vol_spike[i] and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
