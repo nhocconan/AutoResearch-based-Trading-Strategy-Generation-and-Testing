@@ -1,19 +1,19 @@
-# 6h_1d_camarilla_pivot_breakout_v1
-# Hypothesis: 6h Camarilla pivot levels from 1d with volume confirmation
-# - Long when price breaks above R3 (resistance level 3) with volume > 1.5x 20-period average
-# - Short when price breaks below S3 (support level 3) with volume > 1.5x 20-period average
-# - Exit when price reverses to opposite pivot level (R2 for long, S2 for short) or volatility drops
-# - Uses daily Camarilla levels for structure, 6h for execution timing
-# - Volume filter ensures breakouts have conviction
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within 6h limits
+# 4h_1d_donchian_volume_breakout_v1
+# Hypothesis: 4h Donchian channel breakout with 1d trend filter and volume confirmation
+# - Long when price breaks above 4h Donchian upper (20) + price > 1d EMA200 + volume > 1.5x average
+# - Short when price breaks below 4h Donchian lower (20) + price < 1d EMA200 + volume > 1.5x average
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 25-40 trades/year (100-160 total over 4 years) to stay within fee limits
+# - Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume)
+# - 1d EMA200 filter ensures trades align with higher timeframe trend
 
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_camarilla_pivot_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,81 +29,66 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla levels
+    # Load 1d data ONCE before loop for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return signals
     
-    # Pre-calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA200
     close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Camarilla formulas
-    # Range = High - Low
-    # R4 = Close + Range * 1.1/2
-    # R3 = Close + Range * 1.1/4
-    # R2 = Close + Range * 1.1/6
-    # R1 = Close + Range * 1.1/12
-    # S1 = Close - Range * 1.1/12
-    # S2 = Close - Range * 1.1/6
-    # S3 = Close - Range * 1.1/4
-    # S4 = Close - Range * 1.1/2
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    r2_1d = close_1d + range_1d * 1.1 / 6
-    s2_1d = close_1d - range_1d * 1.1 / 6
+    # Pre-compute 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    
-    # Pre-compute 6h volume SMA (20-period)
+    # Pre-compute 4h volume SMA (20-period)
     volume_series = pd.Series(volume)
     volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(volume_sma_20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         volume_current = volume[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
+        # 1d EMA200 trend filter
+        price_above_ema200 = price_close > ema200_1d_aligned[i]
+        price_below_ema200 = price_close < ema200_1d_aligned[i]
+        
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above R3 with volume confirmation
-        if price_high > r3_aligned[i] and vol_confirm:
+        # Long: Donchian breakout + price above 1d EMA200 + volume confirmation
+        if price_close > donchian_high[i] and price_above_ema200 and vol_confirm:
             enter_long = True
         
-        # Short: Price breaks below S3 with volume confirmation
-        if price_low < s3_aligned[i] and vol_confirm:
+        # Short: Donchian breakdown + price below 1d EMA200 + volume confirmation
+        if price_close < donchian_low[i] and price_below_ema200 and vol_confirm:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: opposite Donchian breach or price crosses 1d EMA200
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price drops back to R2 (profit target) or breaks S3 (stop)
-            exit_long = price_close < r2_aligned[i] or price_low < s3_aligned[i]
+            # Exit long if price breaks below Donchian lower OR crosses below 1d EMA200
+            exit_long = price_close < donchian_low[i] or (not price_above_ema200)
         elif position == -1:
-            # Exit short if price rises to S2 (profit target) or breaks R3 (stop)
-            exit_short = price_close > s2_aligned[i] or price_high > r3_aligned[i]
+            # Exit short if price breaks above Donchian upper OR crosses above 1d EMA200
+            exit_short = price_close > donchian_high[i] or (not price_below_ema200)
         
         # Trading logic
         if enter_long and position != 1:
