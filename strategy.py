@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_donchian_breakout_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_trend_pullback_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,100 +21,80 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Daily EMA trend filter
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 20-period Donchian high and low (using previous week's data to avoid look-ahead)
-    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # Align weekly Donchian to 12h timeframe
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Trend filter: ADX > 25 for trending market
-    # Calculate ADX components
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    
+    # 4h ATR for volatility and stop loss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smooth +DM and -DM
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    trending_market = adx > 25
+    # 4h RSI for pullback entries
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+        if (np.isnan(ema_20_aligned[i]) or np.isnan(ema_50_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
         price_low = low[i]
-        volume_current = volume[i]
-        upper_channel = donchian_high_20_aligned[i]
-        lower_channel = donchian_low_20_aligned[i]
-        adx_val = adx[i]
-        trending = trending_market[i]
+        price_high = high[i]
+        ema_20 = ema_20_aligned[i]
+        ema_50 = ema_50_aligned[i]
         
-        # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
+        # Trend condition: EMA20 > EMA50 for uptrend, EMA20 < EMA50 for downtrend
+        uptrend = ema_20 > ema_50
+        downtrend = ema_20 < ema_50
         
-        # Entry signals - only in trending markets
-        long_signal = False
-        short_signal = False
+        # Pullback entry conditions
+        long_entry = False
+        short_entry = False
         
-        # Long: price breaks above upper Donchian channel with volume and trend
-        if price_high > upper_channel and volume_confirmed and trending:
-            long_signal = True
+        # Long: Uptrend + price pulls back to EMA20 with RSI < 40
+        if uptrend and price_low <= ema_20 and rsi[i] < 40:
+            long_entry = True
         
-        # Short: price breaks below lower Donchian channel with volume and trend
-        if price_low < lower_channel and volume_confirmed and trending:
-            short_signal = True
+        # Short: Downtrend + price pulls back to EMA20 with RSI > 60
+        if downtrend and price_high >= ema_20 and rsi[i] > 60:
+            short_entry = True
         
         # Exit conditions
-        # Stop loss conditions
-        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr[i])
-        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr[i])
+        # Exit long when price closes above EMA50 (trend weakening) or RSI > 70
+        exit_long = position == 1 and (price_close > ema_50 or rsi[i] > 70)
+        # Exit short when price closes below EMA50 or RSI < 30
+        exit_short = position == -1 and (price_close < ema_50 or rsi[i] < 30)
         
-        # Exit when price returns to middle of channel (mean reversion within trend)
-        middle_channel = (upper_channel + lower_channel) / 2.0
-        exit_long = position == 1 and price_close < middle_channel
-        exit_short = position == -1 and price_close > middle_channel
+        # Stop loss: 2.5 * ATR from entry
+        stop_long = position == 1 and price_low < (entry_price - 2.5 * atr[i])
+        stop_short = position == -1 and price_high > (entry_price + 2.5 * atr[i])
         
         # Trading logic
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             entry_price = price_close
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             entry_price = price_close
             signals[i] = -0.25
@@ -130,11 +110,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Donchian breakout strategy with volume confirmation and ADX trend filter on 12h timeframe.
-# Enters long when price breaks above 20-week Donchian high with volume confirmation (>1.5x avg volume) in trending markets (ADX > 25).
-# Enters short when price breaks below 20-week Donchian low with volume confirmation and ADX > 25.
-# Uses weekly timeframe for Donchian channels to capture multi-week breakouts suitable for 12h timeframe.
-# Volume confirmation ensures institutional participation, ADX filter avoids whipsaws in sideways markets.
-# Exits when price returns to the middle of the channel or ATR stop loss (2.0x) is hit.
-# Designed for 12h timeframe with tight entry conditions to target 50-150 total trades over 4 years.
-# Works in both bull and bear markets by trading breakouts in either direction with trend filter.
+# Hypothesis: Trend pullback strategy for 4h timeframe using daily EMA trend filter and 4h RSI for entry timing.
+# In uptrends (daily EMA20 > EMA50), enter long when price pulls back to EMA20 with RSI < 40 (oversold).
+# In downtrends (daily EMA20 < EMA50), enter short when price pulls back to EMA20 with RSI > 60 (overbought).
+# Exits when trend weakens (price crosses EMA50) or RSI reaches extreme levels.
+# Stop loss at 2.5 * ATR to manage risk.
+# Designed for low trade frequency (~20-40 trades/year) to minimize fee drag.
+# Works in both bull and bear markets by following the trend on higher timeframe.
+# Uses daily EMA for trend (avoids 4h whipsaws) and 4h RSI for precise entry timing.
+# Discrete position sizing (0.25) to reduce churn from small signal changes.
+# Should generate 80-160 total trades over 4 years (20-40/year) based on similar strategies.
+# Works on BTC/ETH/SOL by focusing on trend continuation after pullbacks.
