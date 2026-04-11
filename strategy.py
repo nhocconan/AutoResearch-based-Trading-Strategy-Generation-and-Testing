@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_breakout"
-timeframe = "1d"
+name = "6h_12h_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,86 +20,100 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return signals
     
-    # KAMA calculation on weekly close
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility = np.sum(np.abs(np.diff(close_1w)), axis=0)  # placeholder for actual volatility sum
-    # Correct ER calculation: need sum of absolute changes over period
-    er = np.zeros_like(close_1w)
-    for i in range(len(close_1w)):
-        if i < 10:
-            er[i] = np.nan
-        else:
-            direction = np.abs(close_1w[i] - close_1w[i-9])
-            volatility_sum = np.sum(np.abs(np.diff(close_1w[i-9:i+1])))
-            er[i] = direction / volatility_sum if volatility_sum != 0 else 0
-    # Smoothing constants
-    sc = (er * 0.29 + 0.06) ** 2  # where 0.29 = 2/(2+1), 0.06 = 2/(30+1)
-    # KAMA
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+    # Calculate 12h EMA(34) for trend filter
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # RSI on weekly close
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return signals
     
-    # Daily Donchian breakout levels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d RSI(14) for momentum filter
+    close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14_1d = (100 - (100 / (1 + rs))).values
     
-    # Align weekly indicators to daily
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
+    # Calculate 1d ATR(14) for volatility filter
+    high_1d = df_12h['high'].values
+    low_1d = df_12h['low'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 6h ATR(14) for position sizing and stops
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.roll(close, 1))
+    tr3_6h = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    tr_6h[0] = tr1_6h[0]  # First value
+    atr_14_6h = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Calculate 6h volume moving average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 12h EMA to 6h timeframe
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Align 1d RSI to 6h timeframe
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    
+    # Align 1d ATR to 6h timeframe
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or
+            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(atr_14_6h[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        volume_current = volume[i]
         
-        # Weekly trend filter: price vs KAMA
-        price_above_kama = price_close > kama_aligned[i]
-        price_below_kama = price_close < kama_aligned[i]
+        # Volume confirmation: volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Weekly momentum filter: RSI extremes
-        rsi_overbought = rsi_aligned[i] > 60
-        rsi_oversold = rsi_aligned[i] < 40
+        # Trend filter: price above/below 12h EMA(34)
+        trend_up = price_close > ema_34_12h_aligned[i]
+        trend_down = price_close < ema_34_12h_aligned[i]
         
-        # Daily breakout conditions
-        breakout_up = price_close > donchian_high[i]
-        breakout_down = price_close < donchian_low[i]
+        # Momentum filter: RSI not in extreme territory
+        rsi_not_overbought = rsi_14_1d_aligned[i] < 70
+        rsi_not_oversold = rsi_14_1d_aligned[i] > 30
+        
+        # Volatility filter: current volatility not too high
+        vol_filter = atr_14_6h[i] < 2.0 * atr_14_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price above weekly KAMA (uptrend) + RSI not overbought + daily breakout up
-        if price_above_kama and not rsi_overbought and breakout_up:
+        # Long: Uptrend + not overbought + volume confirmation + volatility filter
+        if trend_up and rsi_not_overbought and vol_confirm and vol_filter:
             enter_long = True
         
-        # Short: Price below weekly KAMA (downtrend) + RSI not oversold + daily breakout down
-        if price_below_kama and not rsi_oversold and breakout_down:
+        # Short: Downtrend + not oversold + volume confirmation + volatility filter
+        if trend_down and rsi_not_oversold and vol_confirm and vol_filter:
             enter_short = True
         
-        # Exit conditions: opposite breakout or trend reversal
-        exit_long = price_close < donchian_low[i] or price_close < kama_aligned[i]
-        exit_short = price_close > donchian_high[i] or price_close > kama_aligned[i]
+        # Exit conditions: trend reversal or volatility spike
+        exit_long = not trend_up or (atr_14_6h[i] > 2.5 * atr_14_1d_aligned[i])
+        exit_short = not trend_down or (atr_14_6h[i] > 2.5 * atr_14_1d_aligned[i])
         
         # Trading logic
         if enter_long and position != 1:
@@ -120,10 +134,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily trend following using weekly KAMA for trend filter, weekly RSI for momentum filter, and daily Donchian breakouts for entry.
-# Enters long when: price > weekly KAMA (uptrend), RSI < 60 (not overbought), and price breaks above 20-day Donchian high.
-# Enters short when: price < weekly KAMA (downtrend), RSI > 40 (not oversold), and price breaks below 20-day Donchian low.
-# Exits when price breaks below Donchian low (for longs) or above Donchian high (for shorts), or when trend reverses (price crosses KAMA).
-# Weekly timeframe provides robust trend/momentum filtering to avoid whipsaws, while daily breakouts capture timely entries.
-# Designed to work in both bull and bear markets by following the weekly trend and using momentum filters to avoid extremes.
-# Position size 0.25 limits risk, and strict entry conditions aim for 10-25 trades per year to minimize fee drag.
+# Hypothesis: 6h Camarilla breakout strategy using 12h EMA trend filter and 1d RSI momentum filter.
+# Enters long when price is above 12h EMA(34), RSI < 70, with volume > 1.5x 20-period average.
+# Enters short when price is below 12h EMA(34), RSI > 30, with volume > 1.5x 20-period average.
+# Uses volatility filter to avoid choppy markets and prevent whipsaws.
+# Position size set to 0.25 to manage risk in volatile markets.
+# Target: 20-40 trades per year (80-160 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by following the higher timeframe trend with momentum confirmation.
