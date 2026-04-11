@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_trix_volume_reversal_v1
-# Strategy: 12h TRIX momentum with 1d volume spike and 1d/1w trend filter
-# Timeframe: 12h
+# 4h_12h_donchian_volume_trend_v1
+# Strategy: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: TRIX (TRIple Exponential Average) detects momentum shifts. 
-# Volume spike confirms institutional participation. 1d/1w trend filter avoids counter-trend trades.
-# Designed for low trade frequency (<30/year) to minimize fee drag. Works in bull/bear via
-# momentum reversals aligned with higher timeframe trend.
+# Hypothesis: Donchian breakouts capture trend continuation. 12h EMA confirms higher timeframe trend direction.
+# Volume > 1.5x 20-period average confirms institutional participation. Designed for low trade frequency (~20-40/year)
+# to minimize fee drag. Works in bull markets via long breakouts and bear markets via short breakdowns.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_trix_volume_reversal_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,74 +21,62 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50 or len(df_1w) < 20:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 12h TRIX (15,9,9) - smoother momentum oscillator
-    # TRIX = EMA(EMA(EMA(close, 15), 9), 9)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    trix = trix.fillna(0).values
+    # 4h Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 1w EMA50 for higher timeframe trend
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # 1d volume spike detection (current volume > 2x 20-period average)
-    vol_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-    vol_spike = vol_1d_aligned > 2.0 * vol_avg_20_1d_aligned
+    # 4h volume average (20-period) for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(trix[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or \
-           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
+        if np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # TRIX momentum signals: zero-line cross
-        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
-        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Trend filter: price above/below EMA50 on both 1d and 1w
-        price = close[i]
-        uptrend_1d = price > ema50_1d_aligned[i]
-        uptrend_1w = price > ema50_1w_aligned[i]
-        downtrend_1d = price < ema50_1d_aligned[i]
-        downtrend_1w = price < ema50_1w_aligned[i]
+        # Donchian breakout signals
+        breakout_up = high[i] > high_max_20[i-1]
+        breakdown_down = low[i] < low_min_20[i-1]
         
-        # Entry conditions with volume confirmation
-        # Long: TRIX crosses up AND uptrend on both timeframes AND volume spike
-        if trix_cross_up and uptrend_1d and uptrend_1w and vol_spike[i] and position != 1:
+        # 12h EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_12h_aligned[i]
+        trend_bearish = close[i] < ema_50_12h_aligned[i]
+        
+        # Entry conditions
+        # Long: Donchian breakout up AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: TRIX crosses down AND downtrend on both timeframes AND volume spike
-        elif trix_cross_down and downtrend_1d and downtrend_1w and vol_spike[i] and position != -1:
+        # Short: Donchian breakdown down AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite TRIX cross (momentum shift)
-        elif position == 1 and trix_cross_down:
+        # Exit: Opposite Donchian signal (breakdown for long, breakout for short)
+        elif position == 1 and breakdown_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and trix_cross_up:
+        elif position == -1 and breakout_up:
             position = 0
             signals[i] = 0.0
         else:
