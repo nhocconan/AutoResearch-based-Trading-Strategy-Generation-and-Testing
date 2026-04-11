@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-# 1d_1w_kama_rsi_chop_v1
-# Strategy: 1d KAMA trend with RSI momentum and weekly chop regime filter
-# Timeframe: 1d
+# 6h_1w_52week_high_low_v1
+# Strategy: 6h 52-week high/low breakout with volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets. RSI filters for momentum strength, avoiding weak trends. Weekly chop regime ensures we only trade in trending markets (low chop) or mean-revert in ranging markets (high chop), adapting to changing market conditions. This approach reduces whipsaws and improves trend capture.
+# Hypothesis: Weekly 52-week high/low levels act as strong support/resistance.
+# Price breaking above 52-week high signals strength; breaking below 52-week low signals weakness.
+# Volume confirmation ensures institutional participation. Works in both bull and bear markets:
+# - In bull: buying breakouts above 52-week high
+# - In bear: shorting breakdowns below 52-week low
+# Using weekly timeframe for 52-week levels avoids noise from lower timeframes.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "6h_1w_52week_high_low_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,120 +32,56 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 30:
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    # 1d KAMA(14, 2, 30) for trend
-    # ER = |Close - Close[10]| / Sum(|Close - Close[1]|, 10)
-    change = np.abs(np.subtract(close[10:], close[:-10]))
-    volatility = np.sum(np.abs(np.subtract(close[1:11], close[:-11]), axis=0) if len(close) > 11 else np.abs(np.diff(close)))
-    # Simplified ER calculation using pandas
-    close_series = pd.Series(close)
-    change_abs = close_series.diff(10).abs()
-    volatility_sum = close_series.diff().abs().rolling(window=10, min_periods=1).sum()
-    er = change_abs / volatility_sum.replace(0, np.nan)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate 52-week high and low
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    kama = kama  # already aligned to 1d
+    # Rolling 52-week high/low (52 weeks of data)
+    week_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    week_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
     
-    # 1d RSI(14) for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Align 52-week levels to 6h timeframe
+    week_high_aligned = align_htf_to_ltf(prices, df_1w, week_high)
+    week_low_aligned = align_htf_to_ltf(prices, df_1w, week_low)
     
-    # Weekly chop regime: choppy if >61.8, trending if <38.2
-    # Chop = 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    atr_1w = []
-    tr_1w = []
-    for i in range(len(df_1w)):
-        if i == 0:
-            tr = df_1w['high'].iloc[i] - df_1w['low'].iloc[i]
-        else:
-            tr = max(
-                df_1w['high'].iloc[i] - df_1w['low'].iloc[i],
-                abs(df_1w['high'].iloc[i] - df_1w['close'].iloc[i-1]),
-                abs(df_1w['low'].iloc[i] - df_1w['close'].iloc[i-1])
-            )
-        tr_1w.append(tr)
-        atr_1w.append(np.mean(tr_1w[-14:]) if len(tr_1w) >= 14 else np.nan)
-    
-    chop_raw = []
-    for i in range(len(df_1w)):
-        if i < 13:
-            chop_raw.append(np.nan)
-        else:
-            sum_atr = sum(tr_1w[i-13:i+1])
-            highest_high = max(df_1w['high'].iloc[i-13:i+1])
-            lowest_low = min(df_1w['low'].iloc[i-13:i+1])
-            if highest_high == lowest_low:
-                chop_raw.append(100)
-            else:
-                chop_raw.append(100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14))
-    
-    chop = np.array(chop_raw)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = pd.Series(volume) / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(52, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(week_high_aligned[i]) or np.isnan(week_low_aligned[i]) or 
+            np.isnan(vol_ratio.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime-based logic
-        if chop_aligned[i] < 38.2:  # Trending market
-            # Trend following: KAMA direction + RSI momentum
-            if close[i] > kama[i] and rsi[i] > 50 and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif close[i] < kama[i] and rsi[i] < 50 and position != -1:
-                position = -1
-                signals[i] = -0.25
-        else:  # Choppy/ranging market
-            # Mean reversion: fade extreme RSI
-            if rsi[i] < 30 and position != 1:  # Oversold -> long
-                position = 1
-                signals[i] = 0.25
-            elif rsi[i] > 70 and position != -1:  # Overbought -> short
-                position = -1
-                signals[i] = -0.25
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirmed = vol_ratio.iloc[i] > 1.5
         
-        # Exit conditions
-        if position == 1:
-            if chop_aligned[i] < 38.2 and (close[i] < kama[i] or rsi[i] < 50):  # Trend end
-                position = 0
-                signals[i] = 0.0
-            elif chop_aligned[i] >= 38.2 and rsi[i] > 50:  # RSI no longer oversold
-                position = 0
-                signals[i] = 0.0
-        elif position == -1:
-            if chop_aligned[i] < 38.2 and (close[i] > kama[i] or rsi[i] > 50):  # Trend end
-                position = 0
-                signals[i] = 0.0
-            elif chop_aligned[i] >= 38.2 and rsi[i] < 50:  # RSI no longer overbought
-                position = 0
-                signals[i] = 0.0
+        # Entry conditions
+        # Long: Price breaks above 52-week high + volume confirmation
+        if vol_confirmed and close[i] > week_high_aligned[i] and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short: Price breaks below 52-week low + volume confirmation
+        elif vol_confirmed and close[i] < week_low_aligned[i] and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit conditions: price returns to midpoint of 52-week range or opposite breakout
+        elif position == 1 and (close[i] < (week_high_aligned[i] + week_low_aligned[i]) / 2):
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and (close[i] > (week_high_aligned[i] + week_low_aligned[i]) / 2):
+            position = 0
+            signals[i] = 0.0
         else:
             # Hold current position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
