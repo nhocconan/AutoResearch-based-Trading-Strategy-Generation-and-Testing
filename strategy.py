@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_keltner_breakout_v1"
-timeframe = "12h"
+name = "6h_1w_donchian_weekly_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -18,39 +18,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(20) for Keltner middle
-    close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate weekly pivot points (standard)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d ATR(10) for Keltner width
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # First period
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10_1d = pd.Series(tr).ewm(span=10, min_periods=10, adjust=False).mean().values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
     
-    # Calculate Keltner channels
-    keltner_upper = ema_20_1d + 2.0 * atr_10_1d
-    keltner_lower = ema_20_1d - 2.0 * atr_10_1d
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # Calculate 1d average volume (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h Donchian channels (20-period)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align all 1d indicators to 12h timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Calculate 6h average volume (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -58,28 +54,29 @@ def generate_signals(prices):
     # Start from index 20 to ensure sufficient data for calculations
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_avg_20[i]) or np.isnan(pivot_1w_aligned[i]) or
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current 1d volume (aligned)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_surge = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]  # 50% above average
+        # Current 6h volume
+        vol_current = volume[i]
+        vol_surge = vol_current > 1.5 * vol_avg_20[i]  # 50% above average
         
         price = close[i]
         
-        # Long when price breaks above Keltner upper with volume surge
-        long_breakout = price > keltner_upper_aligned[i]
+        # Long when price breaks above weekly R3 with volume surge
+        long_breakout = price > r3_1w_aligned[i]
         long_signal = long_breakout and vol_surge
         
-        # Short when price breaks below Keltner lower with volume surge
-        short_breakout = price < keltner_lower_aligned[i]
+        # Short when price breaks below weekly S3 with volume surge
+        short_breakout = price < s3_1w_aligned[i]
         short_signal = short_breakout and vol_surge
         
-        # Exit when price returns to the 20-day EMA (mean reversion to mean)
-        exit_long = price < ema_20_1d_aligned[i]
-        exit_short = price > ema_20_1d_aligned[i]
+        # Exit when price returns to weekly pivot (mean reversion to weekly mean)
+        exit_long = price < pivot_1w_aligned[i]
+        exit_short = price > pivot_1w_aligned[i]
         
         if long_signal and position != 1:
             position = 1
