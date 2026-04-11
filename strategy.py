@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d Williams %R regime filter
-# - Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures trend strength
-# - Long when Bull Power > 0 and rising + Bear Power < 0 (bullish momentum)
-# - Short when Bear Power > 0 and rising + Bull Power < 0 (bearish momentum)
-# - Williams %R from 1d acts as regime filter: only trade when not in extreme overbought/oversold
-# - Avoids false signals during strong trends where Elder Ray can whipsaw
-# - Works in bull markets (catch strong uptrends) and bear markets (catch strong downtrends)
+# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + choppiness regime filter
+# - Camarilla levels (H3, L3, H4, L4) from 1d act as intraday support/resistance
+# - Long when price touches L3 with volume > 1.8x 20-period average and chop > 61.8 (range)
+# - Short when price touches H3 with volume > 1.8x 20-period average and chop > 61.8 (range)
+# - Choppiness regime filter: only trade when CHOP(14) > 61.8 to avoid trending markets and false breakouts
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 6h
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
+# - Volume spike requirement (>1.8x average) ensures we only trade high-conviction mean reversions
+# - Works in both bull (mean reversion in range) and bear (mean reversion in range) markets
+# - 1d HTF provides reliable Camarilla levels and volume confirmation, reducing false signals
 
-name = "6h_1d_elder_ray_williamsr_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,77 +26,100 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Williams %R regime filter
+    # Load 1d data ONCE before loop for Camarilla levels, volume, and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d Williams %R (14-period)
-    highest_high_1d = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low_1d = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    # Pre-compute 1d indicators
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    williams_r_1d = -100 * (highest_high_1d - close_1d) / (highest_high_1d - lowest_low_1d)
-    # Avoid division by zero
-    williams_r_1d = np.where((highest_high_1d - lowest_low_1d) == 0, -50, williams_r_1d)
+    volume_1d = df_1d['volume'].values
     
-    # Align 1d Williams %R to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
+    # True range for ATR (used in chop calculation)
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Pre-compute 6h EMA13 for Elder Ray
-    close_series = pd.Series(close)
-    ema_13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1d volume SMA (20-period)
+    volume_series = pd.Series(volume_1d)
+    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute 6h Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = ema_13 - low   # Bear Power = EMA13 - Low
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (HHV - LLV)) / log10(14)
+    hh_14_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_14_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    sum_atr_14_1d = pd.Series(atr_14_1d).rolling(window=14, min_periods=14).sum().values
+    denominator = hh_14_1d - ll_14_1d
+    chop_1d = np.where(denominator > 0, 100 * np.log10(sum_atr_14_1d / denominator) / np.log10(14), 50)
     
-    # Slope of Elder Ray components (1-period change)
-    bull_power_slope = np.diff(bull_power, prepend=bull_power[0])
-    bear_power_slope = np.diff(bear_power, prepend=bear_power[0])
+    # Camarilla levels (based on previous day's range)
+    # H4 = close + 1.1 * (high - low) / 2
+    # L4 = close - 1.1 * (high - low) / 2
+    # H3 = close + 1.1 * (high - low) / 4
+    # L3 = close - 1.1 * (high - low) / 4
+    rangep = high_1d - low_1d
+    camarilla_h4 = close_1d + 1.1 * rangep / 2
+    camarilla_l4 = close_1d - 1.1 * rangep / 2
+    camarilla_h3 = close_1d + 1.1 * rangep / 4
+    camarilla_l3 = close_1d - 1.1 * rangep / 4
+    
+    # Align 1d indicators to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(williams_r_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Williams %R regime filter: avoid extreme overbought (> -20) and oversold (< -80)
-        # Only trade when Williams %R is between -80 and -20 (not in extreme zones)
-        williams_filter = (williams_r_aligned[i] > -80) and (williams_r_aligned[i] < -20)
+        # Current price data
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
+        volume_current = volume[i]
         
-        # Elder Ray conditions
-        bull_power_current = bull_power[i]
-        bear_power_current = bear_power[i]
-        bull_power_rising = bull_power_slope[i] > 0
-        bear_power_rising = bear_power_slope[i] > 0
+        # Volume confirmation: current volume > 1.8x 20-period average
+        vol_confirm = volume_current > 1.8 * volume_sma_20_aligned[i]
         
-        # Entry conditions
+        # Choppiness regime filter: only trade when CHOP > 61.8 (range-bound market)
+        chop_filter = chop_aligned[i] > 61.8
+        
+        # Entry conditions: price touches Camarilla levels with volume and chop confirmation
         enter_long = False
         enter_short = False
         
-        # Long: Bull Power > 0 and rising + Bear Power < 0 (bullish momentum)
-        if bull_power_current > 0 and bull_power_rising and bear_power_current < 0 and williams_filter:
+        # Long: price touches or crosses above L3 with volume and chop confirmation
+        if price_low <= camarilla_l3_aligned[i] and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short: Bear Power > 0 and rising + Bull Power < 0 (bearish momentum)
-        if bear_power_current > 0 and bear_power_rising and bull_power_current < 0 and williams_filter:
+        # Short: price touches or crosses below H3 with volume and chop confirmation
+        if price_high >= camarilla_h3_aligned[i] and vol_confirm and chop_filter:
             enter_short = True
         
-        # Exit conditions: opposite Elder Ray signal or regime change
+        # Exit conditions: price reaches opposite Camarilla level or regime changes
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if Bear Power becomes positive OR regime turns extreme
-            exit_long = (bear_power_current > 0) or (not williams_filter)
+            # Exit long if price reaches H3 or H4 or chop regime ends
+            exit_long = (price_high >= camarilla_h3_aligned[i]) or (not chop_filter)
         elif position == -1:
-            # Exit short if Bull Power becomes positive OR regime turns extreme
-            exit_short = (bull_power_current > 0) or (not williams_filter)
+            # Exit short if price reaches L3 or L4 or chop regime ends
+            exit_short = (price_low <= camarilla_l3_aligned[i]) or (not chop_filter)
         
         # Trading logic
         if enter_long and position != 1:
