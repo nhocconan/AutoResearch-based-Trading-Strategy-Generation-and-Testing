@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 4h_12h_cci_volume_regime_v2
-# Strategy: 4h CCI with 12h trend filter and volume confirmation
-# Timeframe: 4h
+# 6h_1d_1w_engulfing_momentum_v1
+# Strategy: 6h momentum with 1d/1w candle structure and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: CCI (Commodity Channel Index) identifies cyclical trends and reversals.
-# Long when CCI > 100 and rising, short when CCI < -100 and falling, with 12h EMA trend filter.
-# Volume spike (1.5x 20-period average) confirms momentum strength. Designed for moderate
-# frequency (25-40 trades/year) to balance signal quality and fee drag in bull/bear markets.
+# Hypothesis: Combines engulfing candle patterns with multi-timeframe trend alignment
+# and volume spikes to capture momentum moves in both bull and bear markets.
+# Uses 1d engulfing signals filtered by 1w trend and 6m momentum confirmation.
+# Designed for low frequency (15-30 trades/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_cci_volume_regime_v2"
-timeframe = "4h"
+name = "6h_1d_1w_engulfing_momentum_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,62 +27,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 30:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # CCI calculation: (Typical Price - SMA) / (0.015 * Mean Deviation)
-    period = 20
-    tp = (high + low + close) / 3.0
-    sma_tp = pd.Series(tp).rolling(window=period, min_periods=period).mean()
-    mad = pd.Series(tp).rolling(window=period, min_periods=period).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci = (tp - sma_tp) / (0.015 * mad)
+    # 1d Engulfing pattern
+    open_1d = df_1d['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_spike = volume > (vol_ma_20 * 1.5)
+    # Bullish engulfing: current green candle engulfs previous red candle
+    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d) & \
+                     (close_1d > open_1d) & (open_1d < close_1d) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1)) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1))
+    # Actually: current candle body completely engulfs previous candle body
+    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1)) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1))
+    # Correct bullish engulfing: current green candle completely engulfs previous red candle
+    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1)) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1))
+    # Proper implementation:
+    bullish_engulf = (close_1d > open_1d) & (close_1d.shift(1) < open_1d.shift(1)) & \
+                     (close_1d > open_1d.shift(1)) & (open_1d < close_1d.shift(1))
+    
+    # Bearish engulfing: current red candle completely engulfs previous green candle
+    bearish_engulf = (close_1d < open_1d) & (close_1d.shift(1) > open_1d.shift(1)) & \
+                     (close_1d < open_1d.shift(1)) & (open_1d > close_1d.shift(1))
+    
+    # 1w trend filter: price above/below 20-period EMA
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend_1w = close_1w > ema_20_1w
+    downtrend_1w = close_1w < ema_20_1w
+    
+    # Align 1d engulfing signals to 6h
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulf.astype(float))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulf.astype(float))
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w.astype(float))
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w.astype(float))
+    
+    # 6m RSI for momentum confirmation
+    rsi_period = 14
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume spike: current volume > 2x 20-period average
+    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup period
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(cci.iloc[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or
+            np.isnan(uptrend_1w_aligned[i]) or np.isnan(downtrend_1w_aligned[i]) or
+            np.isnan(rsi.iloc[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Entry conditions
+        bullish_setup = (bullish_engulf_aligned[i] > 0.5 and 
+                        uptrend_1w_aligned[i] > 0.5 and 
+                        rsi.iloc[i] > 50 and 
+                        volume_spike[i])
         
-        # CCI signals: above/below threshold with momentum
-        cci_now = cci.iloc[i]
-        cci_prev = cci.iloc[i-1]
-        cci_overbought = cci_now > 100 and cci_now > cci_prev
-        cci_oversold = cci_now < -100 and cci_now < cci_prev
+        bearish_setup = (bearish_engulf_aligned[i] > 0.5 and 
+                        downtrend_1w_aligned[i] > 0.5 and 
+                        rsi.iloc[i] < 50 and 
+                        volume_spike[i])
         
-        # Entry logic: CCI extreme + volume spike + trend alignment
-        if (cci_overbought and volume_spike[i] and uptrend and position != 1):
+        # Exit conditions: opposite engulfing or RSI extreme
+        if bullish_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif (cci_oversold and volume_spike[i] and downtrend and position != -1):
+        elif bearish_setup and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: CCI reversal or trend change
-        elif position == 1 and (cci_now < 0 or not uptrend):
+        elif position == 1 and (bearish_engulf_aligned[i] > 0.5 or rsi.iloc[i] < 30):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (cci_now > 0 or not downtrend):
+        elif position == -1 and (bullish_engulf_aligned[i] > 0.5 or rsi.iloc[i] > 70):
             position = 0
             signals[i] = 0.0
         else:
