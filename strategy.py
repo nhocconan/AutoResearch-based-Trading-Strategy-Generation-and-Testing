@@ -1,110 +1,89 @@
 #!/usr/bin/env python3
-# 1d_1w_keltner_channel_v2
-# Strategy: 1-day Keltner Channel breakout with 1-week ADX trend filter and volume confirmation
-# Timeframe: 1d
+# 6h_1d_adx_ema_v1
+# Strategy: 6-day ADX/EMA trend following with 1-day EMA filter
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Keltner Channel breakouts capture volatility expansion. 1-week ADX > 25 confirms strong trend.
-# Volume > 1.3x 20-day average confirms institutional participation. Designed for low trade frequency (~15-25/year)
-# to minimize fee decay. Works in bull markets via upper band breakouts and bear markets via lower band breakdowns.
+# Hypothesis: ADX > 25 identifies strong trends on daily timeframe. EMA(50) on 6h provides entry/exit timing.
+# Works in bull markets via ADX + price > EMA50 longs. Works in bear markets via ADX + price < EMA50 shorts.
+# Low turnover design targets ~15-30 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_channel_v2"
-timeframe = "1d"
+name = "6h_1d_adx_ema_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load 1-week data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1-day Keltner Channel (20-period, ATR multiplier 2)
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
-    ema_mid = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_band = ema_mid + 2 * atr
-    lower_band = ema_mid - 2 * atr
+    # 1d ADX(14) calculation
+    plus_dm = np.diff(df_1d['high'].values, prepend=0)
+    minus_dm = np.diff(df_1d['low'].values, prepend=0) * -1
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
     
-    # 1-week ADX (14-period) for trend strength filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    tr1 = np.abs(np.diff(df_1d['high'].values, prepend=df_1d['high'].values[0]))
+    tr2 = np.abs(np.diff(df_1d['low'].values, prepend=df_1d['low'].values[0]))
+    tr3 = np.abs(df_1d['high'].values - df_1d['low'].values)
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
     
-    # Calculate True Range and Directional Movement
-    tr1 = pd.Series(high_1w).rolling(2).max() - pd.Series(low_1w).rolling(2).min()
-    tr2 = abs(pd.Series(high_1w) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w) - pd.Series(close_1w).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    plus_dm = pd.Series(high_1w).diff()
-    minus_dm = pd.Series(low_1w).diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smooth TR, +DM, -DM
-    tr_smooth = tr.ewm(alpha=1/14, adjust=False).mean()
-    plus_dm_smooth = plus_dm.ewm(alpha=1/14, adjust=False).mean()
-    minus_dm_smooth = minus_dm.ewm(alpha=1/14, adjust=False).mean()
+    # Align 1d indicators to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # Calculate DX and ADX
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.ewm(alpha=1/14, adjust=False).mean()
-    adx_1w = adx.values
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # 1-day volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6h EMA50 for entry timing
+    ema_50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(adx_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_50_6h[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-day average
-        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
-        
-        # Keltner Channel breakout signals
-        breakout_up = close[i] > upper_band[i-1]
-        breakdown_down = close[i] < lower_band[i-1]
-        
-        # 1-week ADX trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx_1w_aligned[i] > 25
+        # ADX trend strength filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
         # Entry conditions
-        # Long: Close above upper Keltner band AND strong trend AND volume confirmation
-        if breakout_up and strong_trend and vol_confirm and position != 1:
+        # Long: Strong trend AND price above both 1d and 6h EMA50
+        if strong_trend and close[i] > ema_50_1d_aligned[i] and close[i] > ema_50_6h[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Close below lower Keltner band AND strong trend AND volume confirmation
-        elif breakdown_down and strong_trend and vol_confirm and position != -1:
+        # Short: Strong trend AND price below both 1d and 6h EMA50
+        elif strong_trend and close[i] < ema_50_1d_aligned[i] and close[i] < ema_50_6h[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite Keltner signal (close below mid for long, above mid for short)
-        elif position == 1 and close[i] < ema_mid[i]:
+        # Exit: Trend weakens (ADX < 20) OR price crosses opposite EMA
+        elif position == 1 and (adx_aligned[i] < 20 or close[i] < ema_50_6h[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ema_mid[i]:
+        elif position == -1 and (adx_aligned[i] < 20 or close[i] > ema_50_6h[i]):
             position = 0
             signals[i] = 0.0
         else:
