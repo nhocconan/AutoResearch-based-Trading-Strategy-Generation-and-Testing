@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels from 1d: long at S3 bounce with volume confirmation, short at R3 rejection with volume confirmation
-# - Long: price touches/bounces above S3 with volume > 1.5x 20-period average and RSI(14) < 40 (oversold)
-# - Short: price touches/rejects below R3 with volume > 1.5x 20-period average and RSI(14) > 60 (overbought)
-# - Exit: price reverts to midpoint between S3 and R3 (mean reversion)
-# - Uses 1d Camarilla levels calculated from prior 1d OHLC, aligned to 4h
-# - Works in both bull and bear markets by fading extremes at Camarilla levels
+# Hypothesis: 1d Donchian(20) breakout with volume confirmation and 1w EMA trend filter
+# - Long: price breaks above 20-day Donchian high with volume > 1.5x 20-day avg and price > 1w EMA50
+# - Short: price breaks below 20-day Donchian low with volume > 1.5x 20-day avg and price < 1w EMA50
+# - Exit: price returns to opposite Donchian level (mean reversion at channel)
+# - Uses 1d Donchian channels calculated from prior 20 days, aligned to 1d
+# - Uses 1w EMA50 for trend filter (avoid counter-trend trades)
+# - Volume confirmation reduces false breakouts
 # - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
 
-name = "4h_1d_camarilla_pivot_fade_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,87 +24,89 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla levels (MTF rule compliance)
+    # Load 1d data ONCE before loop for Donchian channels (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return signals
     
-    # Pre-compute 1d Camarilla levels (based on prior day OHLC)
+    # Pre-compute 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    # R3 = close + 1.1*(high-low)*1.1/4
-    # S3 = close - 1.1*(high-low)*1.1/4
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.1 * range_1d * 1.1 / 4
-    camarilla_s3 = close_1d - 1.1 * range_1d * 1.1 / 4
+    # Donchian high: max(high, lookback=20)
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Donchian low: min(low, lookback=20)
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 4h timeframe (use prior day's levels for current day)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Donchian levels to 1d timeframe (use completed 1d bar's levels)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Pre-compute 4h volume confirmation (20-period average)
-    volume = prices['volume'].values
+    # Pre-compute 1d volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute RSI(14) on 4h close
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Load 1w data ONCE before loop for EMA50 trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return signals
+    
+    # Pre-compute 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 1d timeframe (use completed 1w bar's EMA)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(rsi_values[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         volume_current = volume[i]
-        rsi_current = rsi_values[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Price position relative to Camarilla levels
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        midpoint = (r3 + s3) / 2
+        # Donchian levels
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
+        
+        # 1w EMA50 trend filter
+        ema50 = ema_50_1w_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: price at/below S3 with volume confirmation and oversold RSI
-        if close_price <= s3 * 1.001 and vol_confirm and rsi_current < 40:
+        # Long breakout: price breaks above upper Donchian with volume and uptrend
+        if close_price > upper and vol_confirm and close_price > ema50:
             enter_long = True
         
-        # Short: price at/above R3 with volume confirmation and overbought RSI
-        if close_price >= r3 * 0.999 and vol_confirm and rsi_current > 60:
+        # Short breakout: price breaks below lower Donchian with volume and downtrend
+        if close_price < lower and vol_confirm and close_price < ema50:
             enter_short = True
         
-        # Exit conditions: mean reversion to midpoint
+        # Exit conditions: mean reversion at opposite Donchian level
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price reaches midpoint
-            exit_long = close_price >= midpoint
+            # Exit long if price drops back to lower Donchian
+            exit_long = close_price < lower
         elif position == -1:
-            # Exit short if price reaches midpoint
-            exit_short = close_price <= midpoint
+            # Exit short if price rises back to upper Donchian
+            exit_short = close_price > upper
         
         # Trading logic
         if enter_long and position != 1:
