@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
+name = "12h_1d_camarilla_breakout_volume_trend_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -83,8 +83,8 @@ def generate_signals(prices):
         # Volume confirmation (1.5x average)
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filter: ADX > 20 (moderate trend)
-        trend_filter = adx[i] > 20
+        # Trend filter: ADX > 25 (strong trend filter to reduce trades)
+        trend_filter = adx[i] > 25
         
         # Long conditions: price breaks above H3 level with volume and trend
         long_signal = volume_confirmed and trend_filter and (price_high > h3_12h[i])
@@ -115,9 +115,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla breakout strategy for 12h timeframe.
-# Enters long when 12h price breaks above daily H3 level with volume >1.5x average and ADX>20.
+# Hypothesis: Daily Camarilla breakout strategy for 12h timeframe with stricter ADX filter (>25).
+# Enters long when 12h price breaks above daily H3 level with volume >1.5x average and ADX>25.
 # Enters short when price breaks below daily L3 level with same conditions.
 # Exits when price returns to the daily pivot level (mean reversion within the day's range).
-# Daily timeframe provides balanced signal frequency, ADX filter ensures trades in trending markets.
-# Target: 20-30 trades per year to minimize fee drag while capturing strong daily trends.
+# Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
+# Target: 15-25 trades per year to minimize fee drift while capturing strong daily trends.
