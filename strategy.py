@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v8"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,8 +31,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla formula: range = high - low
-    # Resistance levels: R4 = close + (range * 1.1/2), S4 = close - (range * 1.1/2)
+    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
+    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
     daily_range = high_1d - low_1d
+    
+    # Key levels for breakout: R4 (resistance) and S4 (support)
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
@@ -40,20 +43,20 @@ def generate_signals(prices):
     r3 = close_1d + (daily_range * 1.1 / 4)
     s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Volume confirmation: 4h volume > 2.0x 100-period average (reduces trades)
-    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    # Volume confirmation: 12h volume > 2.0x 40-period average (tightened to reduce trades)
+    vol_ma_40 = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_100[i])):
+            np.isnan(vol_ma_40[i])):
             signals[i] = 0.0
             continue
         
@@ -61,7 +64,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.0 * vol_ma_100[i]
+        vol_confirm = volume_current > 2.0 * vol_ma_40[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -102,12 +105,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 2.0x 100-period average.
-# Enters short when price breaks below S4 with volume > 2.0x 100-period average.
+# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 2.0x 40-period average.
+# Enters short when price breaks below S4 with volume > 2.0x 40-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (2.0x) and longer MA (100) to reduce trade frequency.
+# Uses higher volume threshold (2.0x) and shorter MA (40) to reduce trade frequency for 12h timeframe.
 # Position size set to 0.25 to manage risk in volatile markets.
-# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
+# Target: 12-37 trades per year (50-150 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 4h timeframe provides good balance between signal quality and trade frequency.
+# 12h timeframe provides fewer trades with higher quality signals, reducing fee drag impact.
