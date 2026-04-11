@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_donchian_breakout_v1"
-timeframe = "4h"
+name = "1h_4d_adaptive_kama_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,75 +20,108 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return signals
     
-    # Calculate 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return signals
     
-    # Upper band: highest high of last 20 periods
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h KAMA for trend filter
+    close_4h = df_4h['close'].values
+    change_4h = np.abs(np.diff(close_4h, prepend=close_4h[0]))
+    direction_4h = np.abs(np.diff(close_4h, k=10, prepend=close_4h[:10]))
+    er_4h = np.where(change_4h != 0, direction_4h / change_4h, 0)
+    sc_4h = (er_4h * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama_4h = np.zeros_like(close_4h)
+    kama_4h[0] = close_4h[0]
+    for i in range(1, len(close_4h)):
+        kama_4h[i] = kama_4h[i-1] + sc_4h[i] * (close_4h[i] - kama_4h[i-1])
+    kama_4h = np.roll(kama_4h, 1)  # shift for completed bar
+    kama_4h[0] = np.nan
     
-    # Shift by 1 to use only completed 12h bars
-    donchian_high = np.roll(donchian_high, 1)
-    donchian_low = np.roll(donchian_low, 1)
-    donchian_high[0] = np.nan
-    donchian_low[0] = np.nan
+    # Calculate 1d volatility regime (ATR-based)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
+                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
+                                  np.abs(low_1d[1:] - close_1d[:-1])))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    vol_regime = atr_1d / atr_ma_1d  # >1 = high vol, <1 = low vol
+    vol_regime = np.roll(vol_regime, 1)  # shift for completed bar
+    vol_regime[0] = np.nan
     
-    # Align 12h Donchian levels to 4h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Calculate 1h KAMA for entry signal
+    change_1h = np.abs(np.diff(close, prepend=close[0]))
+    direction_1h = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    er_1h = np.where(change_1h != 0, direction_1h / change_1h, 0)
+    sc_1h = (er_1h * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama_1h = np.zeros_like(close)
+    kama_1h[0] = close[0]
+    for i in range(1, len(close)):
+        kama_1h[i] = kama_1h[i-1] + sc_1h[i] * (close[i] - kama_1h[i-1])
     
-    # Calculate 4h ATR for volatility filter (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align 4h indicators to 1h timeframe
+    kama_4h_aligned = align_htf_to_ltf(prices, df_4h, kama_4h)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
     
     # Volume filter: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(40, n):  # Start after warmup
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_4h_aligned[i]) or np.isnan(vol_regime_aligned[i]) or
+            np.isnan(kama_1h[i]) or np.isnan(vol_ma_20[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
+        kama_4h_val = kama_4h_aligned[i]
+        vol_reg = vol_regime_aligned[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
-        atr_value = atr[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.3 * vol_ma
         
-        # Long: price breaks above 12h Donchian high with volume and volatility filter
-        long_signal = volume_confirmed and (price_high > donchian_high_aligned[i]) and (atr_value > 0)
+        # Trend filter: price vs 4h KAMA
+        trend_up = price_close > kama_4h_val
+        trend_down = price_close < kama_4h_val
         
-        # Short: price breaks below 12h Donchian low with volume and volatility filter
-        short_signal = volume_confirmed and (price_low < donchian_low_aligned[i]) and (atr_value > 0)
+        # Volatility regime filter: only trade in low volatility (mean reversion favorable)
+        low_volatility = vol_reg < 1.2
         
-        # Exit when price returns to the middle of the Donchian channel
-        mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
-        exit_long = position == 1 and price_close < mid
-        exit_short = position == -1 and price_close > mid
+        # Mean reversion entry: price deviates from 1h KAMA
+        kama_dev = (price_close - kama_1h[i]) / kama_1h[i]
+        long_signal = volume_confirmed and trend_down and low_volatility and (kama_dev < -0.008)
+        short_signal = volume_confirmed and trend_up and low_volatility and (kama_dev > 0.008)
+        
+        # Exit when price returns to KAMA or volatility increases
+        exit_long = position == 1 and (kama_dev >= -0.002 or vol_reg > 1.5)
+        exit_short = position == -1 and (kama_dev <= 0.002 or vol_reg > 1.5)
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -97,18 +130,17 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 4h Donchian breakout using 12h channels with volume confirmation.
-# Uses 12-hour Donchian channels (20-period) to identify major support/resistance.
-# Enters long when 4h price breaks above the 12h Donchian high with volume confirmation
-# (>1.3x 20-period average volume). Enters short when price breaks below the 12h
-# Donchian low with volume confirmation. Exits when price returns to the midpoint
-# of the channel. The 12h timeframe provides significant trend context while the
-# 4h timeframe allows for timely entries. Volume confirmation ensures participation
-# from market actors. Volatility filter (ATR > 0) ensures we only trade when there
-# is sufficient price movement. Designed for 20-50 trades per year to minimize
-# fee drift on 4h timeframe. Works in both bull and bear markets by following
-# institutional price action as defined by the 12h Donchian channels.
+# Hypothesis: Adaptive KAMA-based mean reversion on 1h with 4h trend filter and 1d volatility regime.
+# Uses Kaufman's Adaptive Moving Average (KAMA) which adapts to market noise - 
+# faster in trending markets, slower in ranging markets. 
+# 4h KAMA determines trend direction (only trade mean reversion against higher timeframe trend).
+# 1d ATR volatility regime filter: only trade in low volatility environments where mean reversion works.
+# 1h KAMA deviation triggers entries when price extends too far from adaptive mean.
+# Volume confirmation ensures institutional participation.
+# Session filter (08-20 UTC) reduces noise during low liquidity periods.
+# Position size fixed at 0.20 to manage risk and minimize churn.
+# Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag on 1h timeframe.
