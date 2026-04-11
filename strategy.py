@@ -1,20 +1,33 @@
-# Licensing Notice: This code is being provided for educational purposes only. It is not licensed for commercial use.
 #!/usr/bin/env python3
 """
-12h_1w_donchian_breakout_volume_v1
-Strategy: 12h Donchian Channel breakout with volume confirmation and weekly trend filter
-Timeframe: 12h
+1d_1w_camarilla_breakout_volume_v1
+Strategy: Daily Camarilla Pivot breakout with volume confirmation and weekly trend filter
+Timeframe: 1d
 Leverage: 1.0
-Hypothesis: Uses 12h price breakout above/below Donchian Channel (20-period high/low) confirmed by volume spike (>1.5x average volume) and filtered by weekly EMA50 trend direction. Designed to capture strong momentum moves in trending markets while avoiding false breakouts in chop. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Target: 50-150 total trades over 4 years.
+Hypothesis: Uses daily Camarilla Pivot levels (resistance/support) for breakout entries confirmed by volume spike (>1.5x average volume) and filtered by weekly EMA50 trend direction. Designed to capture strong momentum moves in trending markets while avoiding false breakouts in chop. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close arrays"""
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
+    R4 = close + range_val * 1.5000
+    R3 = close + range_val * 1.2500
+    R2 = close + range_val * 1.1666
+    R1 = close + range_val * 1.0833
+    S1 = close - range_val * 1.0833
+    S2 = close - range_val * 1.1666
+    S3 = close - range_val * 1.2500
+    S4 = close - range_val * 1.5000
+    return R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,15 +40,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load higher timeframe data ONCE before loop
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 12h Donchian Channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla levels
+    R1, R2, R3, R4, S1, S2, S3, S4 = calculate_camarilla(high, low, close)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,7 +63,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+        if (np.isnan(R1[i]) or np.isnan(R4[i]) or 
+            np.isnan(S1[i]) or np.isnan(S4[i]) or
             np.isnan(vol_avg[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -62,9 +75,9 @@ def generate_signals(prices):
         uptrend_1w = price_close > ema_50_1w_aligned[i]
         downtrend_1w = price_close < ema_50_1w_aligned[i]
         
-        # Breakout conditions
-        breakout_up = price_close > high_20[i-1]  # Use previous bar's high
-        breakout_down = price_close < low_20[i-1]  # Use previous bar's low
+        # Breakout conditions (using previous day's levels to avoid look-ahead)
+        breakout_up = price_close > R4[i-1]  # Break above R4
+        breakout_down = price_close < S4[i-1]  # Break below S4
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
@@ -75,9 +88,9 @@ def generate_signals(prices):
         # Short: downward breakout with volume in downtrend
         short_signal = breakout_down and vol_confirmed and downtrend_1w
         
-        # Exit when price returns to opposite Donchian level (mean reversion exit)
-        exit_long = position == 1 and price_close < low_20[i]
-        exit_short = position == -1 and price_close > high_20[i]
+        # Exit when price returns to R3/S3 levels (profit taking)
+        exit_long = position == 1 and price_close < R3[i]
+        exit_short = position == -1 and price_close > S3[i]
         
         # Trading logic
         if long_signal and position != 1:
