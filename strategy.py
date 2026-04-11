@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v10"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 100:
         return np.zeros(n)
     
@@ -20,43 +20,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate Camarilla pivot levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Camarilla formula: range = high - low
     # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
     # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
-    daily_range = high_1d - low_1d
+    weekly_range = high_1w - low_1w
     
     # Key levels for breakout: R4 (resistance) and S4 (support)
-    r4 = close_1d + (daily_range * 1.1 / 2)
-    s4 = close_1d - (daily_range * 1.1 / 2)
+    r4 = close_1w + (weekly_range * 1.1 / 2)
+    s4 = close_1w - (weekly_range * 1.1 / 2)
     
     # Exit levels: R3 and S3
-    r3 = close_1d + (daily_range * 1.1 / 4)
-    s3 = close_1d - (daily_range * 1.1 / 4)
+    r3 = close_1w + (weekly_range * 1.1 / 4)
+    s3 = close_1w - (weekly_range * 1.1 / 4)
     
-    # Volume confirmation: 4h volume > 2.0x 100-period average (reduced frequency)
-    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
+    # Volume confirmation: daily volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align weekly levels to daily timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
             np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_100[i])):
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -64,7 +64,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.0 * vol_ma_100[i]
+        vol_confirm = volume_current > 1.8 * vol_ma_20[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -105,12 +105,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 2.0x 100-period average.
-# Enters short when price breaks below S4 with volume > 2.0x 100-period average.
+# Hypothesis: 1d Camarilla breakout strategy using weekly pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 1.8x 20-period average.
+# Enters short when price breaks below S4 with volume > 1.8x 20-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (2.0x) and longer MA (100) to reduce trade frequency.
+# Uses higher volume threshold (1.8x) and moderate MA (20) to reduce trade frequency.
 # Position size set to 0.25 to manage risk in volatile markets.
 # Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 4h timeframe provides good balance between signal quality and trade frequency.
+# 1d timeframe reduces trade frequency to avoid fee drag while capturing major moves.
+# Weekly Camarilla provides stronger support/resistance levels than daily for breakout confirmation.
