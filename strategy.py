@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_keltner_squeeze_breakout_v1"
+name = "4h_1d_trix_volume_regime_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,101 +19,97 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    entry_price = 0.0
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
-    # Calculate 1d Keltner Channel
+    # Calculate TRIX on 1d close (15-period)
+    close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix_raw = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix_raw[0] = 0
+    trix = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # Calculate 1d ADX for regime filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA of typical price (20-period)
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
-    ema_tp = pd.Series(tp_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # ATR (10-period)
+    # True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
-    atr_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Keltner Bands
-    upper_keltner = ema_tp + (2.0 * atr_1d)
-    lower_keltner = ema_tp - (2.0 * atr_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Shift by 1 to use only completed 1d bars
-    upper_keltner = np.roll(upper_keltner, 1)
-    lower_keltner = np.roll(lower_keltner, 1)
-    upper_keltner[0] = np.nan
-    lower_keltner[0] = np.nan
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d Keltner bands to 4h timeframe
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    # DI and DX
+    di_plus = 100 * dm_plus14 / tr14
+    di_minus = 100 * dm_minus14 / tr14
+    dx = np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Bollinger Bands on 4h for squeeze detection (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2.0 * std_20)
-    lower_bb = sma_20 - (2.0 * std_20)
+    # Align 1d indicators to 4h
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Squeeze condition: BB width < Keltner width
-    bb_width = upper_bb - lower_bb
-    kc_width = upper_keltner_aligned - lower_keltner_aligned
-    squeeze = bb_width < kc_width
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation on 4h: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
-            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
+        trix_val = trix_aligned[i]
+        adx_val = adx_aligned[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Squeeze breakout conditions
-        squeeze_active = squeeze[i]
+        # Regime filter: ADX > 25 for trending market
+        trending = adx_val > 25
         
-        # Long: price breaks above upper Keltner during squeeze release with volume
-        long_signal = squeeze_active and price_high > upper_keltner_aligned[i] and volume_confirmed
+        # TRIX signals: zero-cross with momentum
+        trix_prev = trix_aligned[i-1] if i > 0 else 0
         
-        # Short: price breaks below lower Keltner during squeeze release with volume
-        short_signal = squeeze_active and price_low < lower_keltner_aligned[i] and volume_confirmed
+        # Long: TRIX crosses above zero in trending market with volume
+        long_signal = (trix_prev <= 0 and trix_val > 0) and trending and volume_confirmed
         
-        # Exit when price returns to the middle of Keltner channel (EMA of TP)
-        middle_keltner_aligned = align_htf_to_ltf(prices, df_1d, ema_tp)
-        if np.isnan(middle_keltner_aligned[i]):
-            middle_value = price_close
-        else:
-            middle_value = middle_keltner_aligned[i]
+        # Short: TRIX crosses below zero in trending market with volume
+        short_signal = (trix_prev >= 0 and trix_val < 0) and trending and volume_confirmed
         
-        exit_long = position == 1 and price_close < middle_value
-        exit_short = position == -1 and price_close > middle_value
+        # Exit when TRIX crosses zero in opposite direction
+        exit_long = position == 1 and trix_val < 0
+        exit_short = position == -1 and trix_val > 0
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            entry_price = price_close
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            entry_price = price_close
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
@@ -127,11 +123,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Keltner squeeze breakout strategy on 4h timeframe.
-# Uses 1d Keltner Channel to identify volatility contractions (squeeze) and expansions.
-# Enters long when price breaks above upper Keltner Band during squeeze release with volume confirmation (>1.5x avg volume).
-# Enters short when price breaks below lower Keltner Band during squeeze release with volume confirmation.
-# Exits when price returns to the middle of the Keltner Channel (EMA of typical price).
-# The squeeze condition (BB width < KC width) identifies low volatility periods primed for breakouts.
-# Works in both bull and bear markets by trading breakouts in either direction.
+# Hypothesis: TRIX (triple exponential average) zero-cross strategy on 4h timeframe.
+# Uses 1d TRIX for trend direction and 1d ADX for regime filtering (only trade when ADX > 25).
+# Enters long when TRIX crosses above zero in trending market with volume confirmation (>1.8x avg volume).
+# Enters short when TRIX crosses below zero in trending market with volume confirmation.
+# Exits when TRIX crosses zero in opposite direction.
+# Works in both bull and bear markets by trading momentum in the direction of the 1d trend.
 # Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
