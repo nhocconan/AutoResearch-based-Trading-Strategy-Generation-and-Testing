@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_camarilla_breakout_v1
-# Strategy: 1h Camarilla breakout with 4h trend and 1d volume confirmation
-# Timeframe: 1h
+# 12h_1d_cci_reversion_v1
+# Strategy: 12h CCI mean reversion with 1d trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels from daily pivot provide strong support/resistance.
-# Breakouts aligned with 4h trend and confirmed by 1d volume capture sustained moves
-# while avoiding false breakouts. Designed for low trade frequency (~20-50/year)
-# to minimize fee drag in both bull and bear markets.
+# Hypothesis: CCI > +100 indicates overbought conditions in a bearish trend (short),
+# CCI < -100 indicates oversold conditions in a bullish trend (long). Combined with
+# 1d EMA trend filter and volume confirmation to avoid false signals. Designed for
+# low trade frequency (~15-30/year) to minimize fee drift in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_v1"
-timeframe = "1h"
+name = "12h_1d_cci_reversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,82 +27,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Load 1d data for Camarilla levels and volume average
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    rng = prev_high - prev_low
-    H3 = prev_close + 1.1 * rng / 4
-    L3 = prev_close - 1.1 * rng / 4
-    H4 = prev_close + 1.1 * rng / 2
-    L4 = prev_close - 1.1 * rng / 2
+    # Calculate CCI(20) on 12h data
+    typical_price = (high + low + close) / 3
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True).values
+    cci = (typical_price - sma_tp) / (0.015 * mad)
     
-    # Align Camarilla levels to 1h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # 24-period (1d) volume average for confirmation
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # 20-period volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_avg_24[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(cci[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_avg_20[i]) or np.isnan(mad[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 24-period average
-        vol_confirm = volume[i] > 1.3 * vol_avg_24[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
         
-        # Breakout signals using Camarilla levels
-        breakout_up = high[i] > H3_aligned[i-1]
-        breakdown_down = low[i] < L3_aligned[i-1]
+        # Trend filter from 1d EMA50
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
-        # 4h EMA trend filter
-        trend_bullish = close[i] > ema_50_4h_aligned[i]
-        trend_bearish = close[i] < ema_50_4h_aligned[i]
+        # CCI signals: >100 overbought, <-100 oversold
+        cci_overbought = cci[i] > 100
+        cci_oversold = cci[i] < -100
         
         # Entry conditions
-        # Long: Breakout above H3 AND bullish trend AND volume confirmation
-        if breakout_up and trend_bullish and vol_confirm and position != 1:
+        # Long: CCI oversold AND bullish trend AND volume confirmation
+        if cci_oversold and trend_bullish and vol_confirm and position != 1:
             position = 1
-            signals[i] = 0.20
-        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
-        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
+            signals[i] = 0.25
+        # Short: CCI overbought AND bearish trend AND volume confirmation
+        elif cci_overbought and trend_bearish and vol_confirm and position != -1:
             position = -1
-            signals[i] = -0.20
-        # Exit: Opposite breakout using H4/L4 levels
-        elif position == 1 and low[i] < L4_aligned[i-1]:
+            signals[i] = -0.25
+        # Exit: CCI returns to neutral zone (-100 to 100)
+        elif position == 1 and cci[i] >= -100:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] > H4_aligned[i-1]:
+        elif position == -1 and cci[i] <= 100:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
