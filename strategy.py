@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v7"
+name = "4h_1d_camarilla_breakout_v10"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,6 +52,7 @@ def generate_signals(prices):
     r4_4h = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_4h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # 4h ATR for volatility filter
     tr1 = high[1:] - low[1:]
@@ -72,7 +73,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i]) or np.isnan(pivot_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -83,6 +84,7 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
         ema_val = ema_50[i]
+        pivot_val = pivot_4h[i]
         
         # Volume confirmation: high threshold for selectivity
         volume_confirmed = volume_current > 2.5 * vol_ma
@@ -97,9 +99,8 @@ def generate_signals(prices):
         short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i]) and (price_close < ema_val)
         
         # Exit when price returns to 1d pivot level
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        exit_long = position == 1 and price_close > pivot_4h[i]
-        exit_short = position == -1 and price_close < pivot_4h[i]
+        exit_long = position == 1 and price_close > pivot_val
+        exit_short = position == -1 and price_close < pivot_val
         
         # Trading logic
         if long_signal and position != 1:
