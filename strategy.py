@@ -3,23 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR-based stoploss
-# - Long: Price breaks above Camarilla H3 level (1d) + volume > 1.5x 20-period 1d average volume
-# - Short: Price breaks below Camarilla L3 level (1d) + volume > 1.5x 20-period 1d average volume
-# - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Camarilla level break
+# Hypothesis: 1d KAMA trend with weekly volume confirmation and ATR-based stoploss
+# - Long: KAMA rising (bullish trend) + weekly volume > 1.5x 20-week average + price > KAMA
+# - Short: KAMA falling (bearish trend) + weekly volume > 1.5x 20-week average + price < KAMA
+# - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite KAMA signal
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots provide mathematically derived support/resistance levels that work in both bull and bear markets
-# - Volume confirmation filters out weak breakouts and increases signal quality
+# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits
+# - KAMA adapts to market noise, reducing whipsaws in choppy markets
+# - Weekly volume confirmation filters out low-conviction moves
 # - ATR stoploss manages risk during volatile periods
+# - Works in both bull (trend following) and bear (trend following with stops) markets
 
-name = "4h_1d_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "1d_1w_kama_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,44 +34,38 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Load 1d data ONCE before loop for Camarilla levels and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop for volume confirmation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return signals
     
-    # Pre-compute 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute weekly volume confirmation (20-period average)
+    volume_1w = df_1w['volume'].values
+    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Pre-compute KAMA on daily timeframe
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.divide(change, volatility, out=np.zeros_like(change, dtype=float), where=volatility!=0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[9] = close[9]  # Seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama_aligned = kama  # Already on daily timeframe
     
-    # Camarilla levels: H3/H4 and L3/L4
-    h3 = close_1d + range_1d * 1.1 / 4.0
-    l3 = close_1d - range_1d * 1.1 / 4.0
-    h4 = close_1d + range_1d * 1.1 / 2.0
-    l4 = close_1d - range_1d * 1.1 / 2.0
-    
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # Pre-compute 1d volume confirmation (20-period average)
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    
-    # Pre-compute ATR for stoploss (4h timeframe)
+    # Pre-compute ATR for stoploss (daily timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(volume_sma_20_aligned[i]) or
+        if (np.isnan(kama_aligned[i]) or np.isnan(volume_sma_20_aligned[i]) or
             np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
@@ -78,26 +73,25 @@ def generate_signals(prices):
         # Current price data
         close_price = close[i]
         volume_current = volume[i]
+        kama_val = kama_aligned[i]
         
-        # Camarilla levels
-        h3_level = h3_aligned[i]
-        l3_level = l3_aligned[i]
-        h4_level = h4_aligned[i]
-        l4_level = l4_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
+        # Weekly volume confirmation: current volume > 1.5x 20-week average
         vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        
+        # KAMA direction: rising if current > previous, falling if current < previous
+        kama_rising = kama_val > kama_aligned[i-1]
+        kama_falling = kama_val < kama_aligned[i-1]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price closes above H3 level with volume confirmation
-        if close_price > h3_level and vol_confirm:
+        # Long: KAMA rising + volume confirmation + price above KAMA
+        if kama_rising and vol_confirm and close_price > kama_val:
             enter_long = True
         
-        # Short breakout: price closes below L3 level with volume confirmation
-        if close_price < l3_level and vol_confirm:
+        # Short: KAMA falling + volume confirmation + price below KAMA
+        if kama_falling and vol_confirm and close_price < kama_val:
             enter_short = True
         
         # Exit conditions
@@ -105,11 +99,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price hits ATR stoploss or breaks below L3 level
-            exit_long = (close_price <= long_stop) or (close_price < l3_level)
+            # Exit long if price hits ATR stoploss or KAMA turns falling
+            exit_long = (close_price <= long_stop) or kama_falling
         elif position == -1:
-            # Exit short if price hits ATR stoploss or breaks above H3 level
-            exit_short = (close_price >= short_stop) or (close_price > h3_level)
+            # Exit short if price hits ATR stoploss or KAMA turns rising
+            exit_short = (close_price >= short_stop) or kama_rising
         
         # Update stoploss levels when entering a position
         if enter_long:
