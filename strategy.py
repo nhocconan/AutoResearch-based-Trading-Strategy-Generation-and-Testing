@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_volatility_breakout_v1"
+name = "4h_1d_camarilla_breakout_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,10 +22,10 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return signals
     
-    # Calculate 1d ATR (14-period) for volatility filter
+    # Calculate 1d ATR for volatility filter (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -36,67 +36,82 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
     # Calculate 1d ATR MA (20-period) for volatility regime filter
-    atr_ma_20_1d = pd.Series(atr_14_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ma_20_1d = pd.Series(atr_14_1d_aligned).rolling(window=20, min_periods=20).mean().values
     
     # Calculate 1d ATR ratio (current / MA) for regime detection
-    atr_ratio_1d = np.where(atr_ma_20_1d > 0, atr_14_1d / atr_ma_20_1d, 1.0)
+    atr_ratio_1d = np.where(atr_ma_20_1d > 0, atr_14_1d_aligned / atr_ma_20_1d, 1.0)
     
-    # Align ATR ratio to 4h timeframe
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # Calculate Camarilla levels on 1d data (using previous 1d bar's range)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Calculate 1d price range (high - low) for breakout levels
-    range_1d = high_1d - low_1d
+    camarilla_H4 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
+    camarilla_L4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
     
-    # Align 1d range to 4h timeframe
-    range_1d_aligned = align_htf_to_ltf(prices, df_1d, range_1d)
-    
-    # Calculate 4h Donchian channel (20-period) for breakout confirmation
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
     # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Price momentum filter: close above/below 20-period SMA on 4h
+    close_sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(range_1d_aligned[i]) or
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(volume_sma_20[i])):
+        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i]) or
+            np.isnan(close_sma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         volume_current = volume[i]
         
-        # Volatility filter: trade only when volatility is elevated (ATR ratio > 1.2)
-        vol_filter = atr_ratio_1d_aligned[i] > 1.2
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
+        # Volatility regime filter: trade only when volatility is elevated (ATR ratio > 0.8)
+        vol_regime = atr_ratio_1d[i] > 0.8
         
-        # Breakout conditions using 1d range
-        breakout_level = range_1d_aligned[i]  # Use 1d range as breakout threshold
+        # Price momentum filter: price above SMA for longs, below SMA for shorts
+        mom_filter_long = price_close > close_sma_20[i]
+        mom_filter_short = price_close < close_sma_20[i]
         
-        # Long: Price breaks above 4h high + volatility + volume
-        enter_long = (price_high > high_20[i]) and vol_filter and vol_confirm
+        # Entry conditions
+        enter_long = False
+        enter_short = False
         
-        # Short: Price breaks below 4h low + volatility + volume
-        enter_short = (price_low < low_20[i]) and vol_filter and vol_confirm
+        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime + momentum filter
+        if price_close > camarilla_H4_aligned[i] and vol_confirm and vol_regime and mom_filter_long:
+            enter_long = True
         
-        # Exit conditions: reverse signal or volatility contraction
+        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime + momentum filter
+        if price_close < camarilla_L4_aligned[i] and vol_confirm and vol_regime and mom_filter_short:
+            enter_short = True
+        
+        # Exit conditions: price crosses back through the Camarilla mid-point (C level)
         exit_long = False
         exit_short = False
         
+        # Calculate Camarilla C level (close of previous 1d bar)
+        camarilla_C = prev_close_1d
+        camarilla_C_aligned = align_htf_to_ltf(prices, df_1d, camarilla_C)
+        
         if position == 1:
-            # Exit long on short signal or volatility contraction
-            exit_long = enter_short or (atr_ratio_1d_aligned[i] < 0.8)
+            # Exit long if price crosses below Camarilla C level
+            exit_long = price_close < camarilla_C_aligned[i]
         elif position == -1:
-            # Exit short on long signal or volatility contraction
-            exit_short = enter_long or (atr_ratio_1d_aligned[i] < 0.8)
+            # Exit short if price crosses above Camarilla C level
+            exit_short = price_close > camarilla_C_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
