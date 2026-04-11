@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_v1"
+name = "12h_1w_camarilla_breakout_v2"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
     # Calculate weekly OHLC for Camarilla pivot levels
@@ -67,7 +67,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
@@ -83,8 +83,8 @@ def generate_signals(prices):
         # Volume confirmation (1.5x average)
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filter: ADX > 25 (strong trend filter to reduce trades)
-        trend_filter = adx[i] > 25
+        # Trend filter: ADX > 20 (balanced to reduce trades while keeping edge)
+        trend_filter = adx[i] > 20
         
         # Long conditions: price breaks above R3 with volume and trend
         long_signal = volume_confirmed and trend_filter and (price_high > r3_12h[i])
@@ -115,12 +115,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Camarilla pivot breakout strategy for 12h timeframe with volume confirmation (>1.5x average volume) and ADX filter (>25).
-# Enters long when 12h price breaks above weekly R3 level (close + 1.166*range) with volume >1.5x average and ADX>25.
+# Hypothesis: Weekly Camarilla pivot breakout strategy for 12h timeframe with volume confirmation (>1.5x average volume) and ADX filter (>20).
+# Enters long when 12h price breaks above weekly R3 level (close + 1.166*range) with volume >1.5x average and ADX>20.
 # Enters short when price breaks below weekly S3 level (close - 1.166*range) with same conditions.
 # Exits when price returns to the weekly pivot level (mean reversion within the week's range).
 # Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
-# Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
+# Moderate ADX threshold balances trade frequency and signal quality.
 # Reduced position size to 0.25 to lower risk and drawdown.
-# Target: 12-37 trades per year to minimize fee drift while capturing strong weekly trends.
+# Target: 15-35 trades per year to minimize fee drift while capturing strong weekly trends.
 # Camarilla pivots work well in both bull and bear markets as they adapt to weekly volatility ranges.
