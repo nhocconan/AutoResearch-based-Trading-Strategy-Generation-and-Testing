@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_1w_camarilla_pivot_volume_v1
-# Strategy: 6h Camarilla pivot levels with 1d volume confirmation and 1w trend filter
-# Timeframe: 6h
+# 1d_1w_kama_rsi_chop_v1
+# Strategy: 1d KAMA direction with RSI filter and Chop regime
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels provide high-probability reversal points. 1d volume confirms institutional participation at these levels. 1w trend filter ensures alignment with higher timeframe direction. Designed for low trade frequency to minimize fee drag in choppy markets.
+# Hypothesis: KAMA adapts to trend changes, RSI filters extremes, Chop filter avoids whipsaw in range.
+# Works in bull via KAMA up + RSI<70, bear via KAMA down + RSI>30. Chop>61.8 avoids false signals in range.
+# Designed for low trade frequency (~10-25/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_camarilla_pivot_volume_v1"
-timeframe = "6h"
+name = "1d_1w_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,86 +21,81 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
     
     # Load 1w data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    # Using typical formula: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    # We'll calculate these for each day and align to 6h
-    prev_day_high = df_1d['high'].shift(1).values
-    prev_day_low = df_1d['low'].shift(1).values
-    prev_day_close = df_1d['close'].shift(1).values
+    # 1d KAMA (ER=10)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla levels for previous day
-    R4 = prev_day_close + 1.5 * (prev_day_high - prev_day_low)
-    R3 = prev_day_close + 1.1 * (prev_day_high - prev_day_low)
-    S3 = prev_day_close - 1.1 * (prev_day_high - prev_day_low)
-    S4 = prev_day_close - 1.5 * (prev_day_high - prev_day_low)
+    # 1d RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 6h timeframe
-    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    # 1d Chop(14)
+    atr = np.zeros(n)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((max_high - min_low) / (atr * 14)) / np.log10(14)
     
-    # 1d volume confirmation: current 1d volume > 1.5x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_confirm_1d = vol_1d > 1.5 * vol_avg_20_1d
-    vol_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm_1d.astype(float))
-    
-    # 1w trend filter: EMA21 on weekly close
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # 1w EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after sufficient warmup
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(R4_6h[i]) or np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(S4_6h[i]) or
-            np.isnan(vol_confirm_1d_aligned[i]) or np.isnan(ema_21_1w_aligned[i])):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema_50_1w_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Fade at S3/R3 levels with volume confirmation
-        fade_long = (low[i] <= S3_6h[i]) and (close[i] > S3_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
-        fade_short = (high[i] >= R3_6h[i]) and (close[i] < R3_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
+        # Chop filter: Chop > 61.8 = range (avoid trend signals)
+        chop_filter = chop[i] > 61.8
         
-        # Breakout continuation at S4/R4 levels with volume confirmation
-        breakout_long = (high[i] > S4_6h[i]) and (close[i] > S4_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
-        breakdown_short = (low[i] < R4_6h[i]) and (close[i] < R4_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
+        # KAMA direction
+        kama_up = close[i] > kama[i]
+        kama_down = close[i] < kama[i]
         
-        # 1w trend filter: only take longs in uptrend, shorts in downtrend
-        trend_up = close[i] > ema_21_1w_aligned[i]
-        trend_down = close[i] < ema_21_1w_aligned[i]
+        # RSI filter: avoid extremes
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
         
         # Entry conditions
-        # Long: Fade at S3 OR breakout above S4, with volume confirmation and trend alignment
-        if ((fade_long or breakout_long) and trend_up and position != 1):
+        # Long: KAMA up AND RSI not overbought AND Chop filter AND price above 1w EMA
+        if kama_up and rsi_not_overbought and chop_filter and close[i] > ema_50_1w_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Fade at R3 OR breakdown below R4, with volume confirmation and trend alignment
-        elif ((fade_short or breakdown_short) and trend_down and position != -1):
+        # Short: KAMA down AND RSI not oversold AND Chop filter AND price below 1w EMA
+        elif kama_down and rsi_not_oversold and chop_filter and close[i] < ema_50_1w_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite signal or loss of volume confirmation
-        elif position == 1 and (fade_short or breakdown_short or vol_confirm_1d_aligned[i] <= 0.5):
+        # Exit: Opposite KAMA signal
+        elif position == 1 and kama_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (fade_long or breakout_long or vol_confirm_1d_aligned[i] <= 0.5):
+        elif position == -1 and kama_up:
             position = 0
             signals[i] = 0.0
         else:
