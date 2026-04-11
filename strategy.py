@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_keltner_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,75 +20,70 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate weekly OHLC for Camarilla levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily ATR for Keltner channels
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift())
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift())
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Camarilla levels: H3, L3 (tighter than H4/L4 for more entries)
-    hl_range = high_1w - low_1w
-    camarilla_h3 = close_1w + 1.1 * hl_range / 4
-    camarilla_l3 = close_1w - 1.1 * hl_range / 4
+    # Calculate daily EMA for Keltner middle line
+    ema_20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 1d timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Calculate Keltner channels: Upper = EMA + 2*ATR, Lower = EMA - 2*ATR
+    keltner_upper = ema_20 + 2.0 * atr
+    keltner_lower = ema_20 - 2.0 * atr
     
-    # Volume confirmation: 10-period average on weekly volume
-    volume_sma_10 = pd.Series(df_1w['volume'].values).rolling(window=10, min_periods=10).mean().values
-    volume_sma_10_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_10)
+    # Align Keltner channels to 12h timeframe
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Trend filter: 20-period EMA on weekly close
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # Volume confirmation: 20-period average on daily volume
+    volume_sma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20)
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_sma_10_aligned[i]) or np.isnan(ema_20_aligned[i])):
+        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 10-period weekly average
-        vol_confirm = volume_current > 1.5 * volume_sma_10_aligned[i]
-        
-        # Trend filter: only trade in direction of 20 EMA
-        above_ema = price_close > ema_20_aligned[i]
-        below_ema = price_close < ema_20_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-day average
+        vol_confirm = volume_current > 1.3 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H3 + volume confirmation + above EMA20
-        if price_close > camarilla_h3_aligned[i] and vol_confirm and above_ema:
+        # Long: Price breaks above Keltner Upper + volume confirmation
+        if price_close > keltner_upper_aligned[i] and vol_confirm:
             enter_long = True
         
-        # Short: Price breaks below Camarilla L3 + volume confirmation + below EMA20
-        if price_close < camarilla_l3_aligned[i] and vol_confirm and below_ema:
+        # Short: Price breaks below Keltner Lower + volume confirmation
+        if price_close < keltner_lower_aligned[i] and vol_confirm:
             enter_short = True
         
-        # Exit conditions: price returns to the week's close (pivot point)
-        prev_close_1w = np.concatenate([[np.nan], close_1w[:-1]])
-        prev_close_aligned = align_htf_to_ltf(prices, df_1w, prev_close_1w)
-        exit_long = price_close < prev_close_aligned[i]
-        exit_short = price_close > prev_close_aligned[i]
+        # Exit conditions: price returns to the 20-day EMA (middle line)
+        exit_long = price_close < ema_20_aligned[i]
+        exit_short = price_close > ema_20_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -97,12 +92,13 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Camarilla H3/L3 breakout on weekly timeframe with volume confirmation and EMA20 trend filter.
-# Uses tighter Camarilla H3/L3 levels (Close ± 1.1*(High-Low)/4) for more frequent but still filtered entries.
-# Works in both bull (breakouts above H3) and bear (breakdowns below L3) by capturing institutional activity.
-# Volume confirmation (>1.5x 10-week average) ensures participation. EMA20 filter avoids counter-trend trades.
-# Position size 0.30 balances risk and return. Target: 10-25 trades/year to minimize fee drag.
+# Hypothesis: Keltner channel breakout on daily timeframe with volume confirmation.
+# Uses Keltner(20,2) channels: breakouts above upper channel signal strength,
+# breakdowns below lower channel signal weakness. Volume confirmation ensures
+# institutional participation. Works in both bull (breakouts) and bear (breakdowns).
+# Exit when price returns to the 20-day EMA (mean reversion to the mean).
+# Position size 0.25 balances risk and return. Target: 20-40 trades/year to minimize fee drag.
