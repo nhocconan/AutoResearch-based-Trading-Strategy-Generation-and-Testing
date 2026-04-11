@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_breakout_volume_v1
-Strategy: 12h breakout with 1d volume confirmation and ATR stoploss
-Timeframe: 12h
+1h_4d_rsi_trend_v1
+Strategy: 1h RSI mean reversion with 4h trend filter
+Timeframe: 1h
 Leverage: 1.0
-Hypothesis: Buy when 12h closes above prior 1d R3 with volume expansion; sell when 12h closes below prior 1d S3 with volume expansion. Uses 1d volume filter to confirm breakouts and avoid false signals. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 15-30 trades/year to minimize fee drag.
+Hypothesis: In 4h uptrend (price > EMA50), buy when 1h RSI < 30; in 4h downtrend (price < EMA50), sell when 1h RSI > 70. Uses 4h EMA50 for trend direction and 1h RSI for mean-reversion entries. Works in both bull and bear markets by following the higher timeframe trend while exploiting short-term overextensions on the 1h chart. Low-frequency design targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "1h_4d_rsi_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,49 +21,29 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_4h = get_htf_data(prices, '4h')
     
-    if len(df_1d) < 20:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h ATR for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # 12h volume filter: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === 1d Close (prior close for context) ===
-    close_1d_shifted = np.roll(df_1d['close'].values, 1)
-    close_1d_shifted[0] = np.nan
-    close_1d_prior = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
-    
-    # === 1d Camarilla (entry levels from prior 1d) ===
-    high_1d_shift = np.roll(df_1d['high'].values, 1)
-    low_1d_shift = np.roll(df_1d['low'].values, 1)
-    close_1d_shift = np.roll(df_1d['close'].values, 1)
-    high_1d_shift[0] = np.nan
-    low_1d_shift[0] = np.nan
-    close_1d_shift[0] = np.nan
-    
-    pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
-    range_1d = high_1d_shift - low_1d_shift
-    r3_1d = close_1d_shift + range_1d * 1.166
-    s3_1d = close_1d_shift - range_1d * 1.166
-    
-    # Align 1d Camarilla to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Session filter: 08-20 UTC (major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -74,44 +54,34 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(close_1d_prior[i]) or np.isnan(atr_12h[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or
             not in_session[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
-        volume_current = volume[i]
-        vol_ma = vol_ma_20[i]
+        ema_4h = ema_50_4h_aligned[i]
+        rsi_val = rsi[i]
         
-        # Volume confirmation: 12h volume must be expanded
-        volume_expanded = volume_current > 1.5 * vol_ma
+        # Trend filters
+        uptrend = price_close > ema_4h
+        downtrend = price_close < ema_4h
         
-        # Long conditions: 12h closes above prior 1d's R3 with volume expansion
-        long_signal = volume_expanded and (price_close > r3_1d_aligned[i])
+        # Entry conditions
+        long_signal = uptrend and (rsi_val < 30)
+        short_signal = downtrend and (rsi_val > 70)
         
-        # Short conditions: 12h closes below prior 1d's S3 with volume expansion
-        short_signal = volume_expanded and (price_close < s3_1d_aligned[i])
-        
-        # Exit when price returns to the 1d pivot (mean reversion within prior 1d's range)
-        exit_long = position == 1 and price_close < pivot_1d_aligned[i]
-        exit_short = position == -1 and price_close > pivot_1d_aligned[i]
-        
-        # Stoploss: 2.5 * ATR from entry
-        if position == 1:
-            # Track entry price implicitly through position holding
-            # We'll use a trailing stop based on highest high since entry
-            pass  # Will implement stoploss in next iteration
-        if position == -1:
-            pass
+        # Exit when RSI returns to neutral zone (40-60)
+        exit_long = position == 1 and (rsi_val > 40)
+        exit_short = position == -1 and (rsi_val < 60)
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -119,8 +89,8 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Buy when 12h closes above prior 1d R3 with volume expansion; sell when 12h closes below prior 1d S3 with volume expansion. Uses 1d volume filter to confirm breakouts and avoid false signals. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 15-30 trades/year to minimize fee drag.
+# Hypothesis: In 4h uptrend (price > EMA50), buy when 1h RSI < 30; in 4h downtrend (price < EMA50), sell when 1h RSI > 70. Uses 4h EMA50 for trend direction and 1h RSI for mean-reversion entries. Works in both bull and bear markets by following the higher timeframe trend while exploiting short-term overextensions on the 1h chart. Low-frequency design targets 15-30 trades/year to minimize fee drag.
