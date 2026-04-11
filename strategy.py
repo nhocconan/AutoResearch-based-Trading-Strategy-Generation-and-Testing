@@ -1,86 +1,93 @@
 #!/usr/bin/env python3
-# 1d_1w_keltner_trend_reversion_v2
-# Strategy: 1-day Keltner Channel mean reversion with 1-week trend filter
-# Timeframe: 1d
+# 6h_1d_cci_rvol_mean_reversion_v1
+# Strategy: 6-hour Commodity Channel Index (CCI) mean reversion with 1-day volume filter
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Price reversions from Keltner Channel extremes (2.0 ATR) combined with
-# weekly EMA(21) trend filter capture mean-reversion opportunities in both bull and bear markets.
-# Weekly trend ensures trades align with higher timeframe direction, reducing false signals.
-# Uses discrete position sizing (0.25) to minimize fee churn.
+# Hypothesis: CCI identifies overbought/oversold conditions on 6h timeframe. 
+# Mean reversion trades are taken when CCI crosses back from extreme levels (>100 or <-100) 
+# with confirmation from elevated 1-day relative volume (RVOL > 1.5) to filter for institutional interest.
+# Works in both bull and bear markets as mean reversion occurs during pullbacks in trends and 
+# during range-bound periods. Volume filter ensures trades occur with participation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_trend_reversion_v2"
-timeframe = "1d"
+name = "6h_1d_cci_rvol_mean_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for volume filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Daily volume average for RVOL calculation
+    vol_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # 1-day ATR(10) for Keltner Channel
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 6h CCI (20-period) for mean reversion signals
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
+    ma_tp = tp_series.rolling(window=20, min_periods=20).mean().values
     
-    # 1-day EMA(20) for Keltner Channel midline
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Mean deviation
+    mad = tp_series.rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
     
-    # Keltner Channel bands (2.0 ATR)
-    keltner_upper = ema_20 + 2.0 * atr
-    keltner_lower = ema_20 - 2.0 * atr
+    # Avoid division by zero
+    cci = (typical_price - ma_tp) / (0.015 * mad + 1e-10)
+    
+    # Daily relative volume: current day volume / 20-day average volume
+    # Note: we use the current day's volume aligned to 6s bars
+    vol_1d_current = df_1d['volume'].values
+    vol_1d_current_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
+    rvol_1d = vol_1d_current_aligned / (vol_avg_20_1d_aligned + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after EMA/ATR warmup
+    for i in range(20, n):  # Start after CCI warmup
         # Skip if any required data is invalid
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(ema_20[i])):
+        if (np.isnan(cci[i]) or np.isnan(rvol_1d[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion signals: price at Keltner extremes
-        touch_upper = close[i] >= keltner_upper[i]
-        touch_lower = close[i] <= keltner_lower[i]
+        # Mean reversion conditions
+        # Long: CCI crosses above -100 from below (oversold bounce)
+        long_signal = (cci[i-1] <= -100) and (cci[i] > -100)
+        # Short: CCI crosses below 100 from above (overbought reversal)
+        short_signal = (cci[i-1] >= 100) and (cci[i] < 100)
         
-        # Trend filter: price above/below weekly EMA21
-        uptrend = close[i] > ema_21_1w_aligned[i]
-        downtrend = close[i] < ema_21_1w_aligned[i]
+        # Volume filter: elevated daily volume suggests participation
+        vol_filter = rvol_1d[i] > 1.5
         
-        # Entry logic: reversion from extreme + trend alignment
-        if touch_lower and uptrend and position != 1:
+        # Entry logic: mean reversion + volume confirmation
+        if long_signal and vol_filter and position != 1:
             position = 1
             signals[i] = 0.25
-        elif touch_upper and downtrend and position != -1:
+        elif short_signal and vol_filter and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to midline (EMA20)
-        elif position == 1 and close[i] <= ema_20[i]:
+        # Exit: opposite mean reversion signal
+        elif position == 1 and short_signal:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= ema_20[i]:
+        elif position == -1 and long_signal:
             position = 0
             signals[i] = 0.0
         else:
