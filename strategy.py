@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v3"
+name = "4h_1d_donchian_breakout_volume_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,36 +22,21 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d high, low, close for pivot calculation
+    # 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # 1d pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # 1d Camarilla levels - using correct formulas
-    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    r4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    s4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    donch_high_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Shift by 1 to use only completed 1d bars
-    r3_1d = np.roll(r3_1d, 1)
-    r4_1d = np.roll(r4_1d, 1)
-    s3_1d = np.roll(s3_1d, 1)
-    s4_1d = np.roll(s4_1d, 1)
-    r3_1d[0] = np.nan
-    r4_1d[0] = np.nan
-    s3_1d[0] = np.nan
-    s4_1d[0] = np.nan
+    donch_high_1d = np.roll(donch_high_1d, 1)
+    donch_low_1d = np.roll(donch_low_1d, 1)
+    donch_high_1d[0] = np.nan
+    donch_low_1d[0] = np.nan
     
-    # Align 1d levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align 1d Donchian levels to 4h timeframe
+    donch_high_4h = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_4h = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
     # 4h ADX for trend strength filter
     tr1 = high[1:] - low[1:]
@@ -72,25 +57,16 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 2.0x 20-period average (higher threshold to reduce trades)
+    # 4h volume filter: volume > 1.8x 20-period average (balance between signal quality and trade count)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 4h RSI filter to avoid counter-trend entries
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i]) or np.isnan(rsi[i])):
+        if (np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -100,27 +76,24 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         adx_val = adx[i]
-        rsi_val = rsi[i]
         
-        # Volume confirmation: higher threshold to reduce trades
-        volume_confirmed = volume_current > 2.0 * vol_ma
+        # Volume confirmation
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Trend filter: ADX > 35 for stronger trending market
-        trend_filter = adx_val > 35
+        # Trend filter: ADX > 30 for trending market
+        trend_filter = adx_val > 30
         
-        # RSI filter: avoid overbought/oversold extremes for entry
-        rsi_filter = (rsi_val > 30) and (rsi_val < 70)
+        # Long conditions: price breaks above 1d Donchian high with volume and trend
+        long_signal = volume_confirmed and trend_filter and (price_high > donch_high_4h[i])
         
-        # Long conditions: price breaks below S3 (oversold bounce) with volume and trend
-        long_signal = volume_confirmed and trend_filter and rsi_filter and (price_low < s3_4h[i])
+        # Short conditions: price breaks below 1d Donchian low with volume and trend
+        short_signal = volume_confirmed and trend_filter and (price_low < donch_low_4h[i])
         
-        # Short conditions: price breaks above R3 (overbought rejection) with volume and trend
-        short_signal = volume_confirmed and trend_filter and rsi_filter and (price_high > r3_4h[i])
-        
-        # Exit when price returns to 1d pivot level
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        exit_long = position == 1 and price_close > pivot_4h[i]
-        exit_short = position == -1 and price_close < pivot_4h[i]
+        # Exit when price returns to the middle of 1d Donchian channel
+        donch_mid_1d = (donch_high_1d + donch_low_1d) / 2
+        donch_mid_4h = align_htf_to_ltf(prices, df_1d, donch_mid_1d)
+        exit_long = position == 1 and price_close < donch_mid_4h[i]
+        exit_short = position == -1 and price_close > donch_mid_4h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -140,10 +113,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Camarilla levels act as strong support/resistance for 4h price action.
-# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>2x average),
-# strong trending market (ADX > 35), and RSI not in extreme zones (30-70).
-# Enters short when price breaks above R3 (overbought rejection) with same conditions.
-# Exits when price returns to 1d pivot level.
-# Uses higher volume and trend thresholds plus RSI filter to reduce trades to ~15-25/year.
-# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
+# Hypothesis: 1d Donchian breakout with volume confirmation and ADX trend filter.
+# Enters long when 4h price breaks above 20-day 1d Donchian high with volume >1.8x average and ADX>30.
+# Enters short when price breaks below 20-day 1d Donchian low with same conditions.
+# Exits when price returns to the midpoint of the 1d Donchian channel.
+# Works in both bull and breakout markets by capturing strong directional moves.
+# Moderate thresholds target ~20-30 trades/year to minimize fee drag.
