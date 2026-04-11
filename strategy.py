@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_kelly_volatility_v1
-# Strategy: 1d Kelly fraction position sizing based on volatility-adjusted momentum with 1w trend filter
-# Timeframe: 1d
+# 12h_1d_camarilla_volume_crsi_v1
+# Strategy: 12h Camarilla pivot breakout with volume confirmation and CRSI mean reversion filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Kelly criterion optimizes position sizing based on win probability and payoff ratio.
-# Uses 1w EMA for trend direction and daily volatility for position sizing. Low frequency (~10-20/year) to minimize fee drag.
+# Hypothesis: Camarilla pivot levels on 1d provide strong support/resistance. Breakouts with volume confirmation
+# indicate institutional interest. CRSI(3,2,100) < 15 filters for oversold conditions in uptrends and > 85 for
+# overbought in downtrends, improving win rate by avoiding false breakouts. Works in both bull (breakouts) and
+# bear (mean reversion at pivots) markets. Target: 15-25 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_kelly_volatility_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_volume_crsi_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -25,111 +27,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily returns for win probability estimation
-    returns = np.diff(close, prepend=close[0]) / close
+    # Camarilla formula: Close + (High-Low) * multiplier
+    # Key levels: H3/L3, H4/L4
+    camarilla_h4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_l4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    camarilla_h3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Rolling win probability and average win/loss over 60 days
-    win_prob = np.zeros(n)
-    avg_win = np.zeros(n)
-    avg_loss = np.zeros(n)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    for i in range(60, n):
-        period_returns = returns[i-60:i]
-        wins = period_returns[period_returns > 0]
-        losses = period_returns[period_returns < 0]
-        
-        if len(wins) > 0:
-            avg_win[i] = np.mean(wins)
-        if len(losses) > 0:
-            avg_loss[i] = np.mean(-losses)  # positive value
-        
-        if len(period_returns) > 0:
-            win_prob[i] = len(wins) / len(period_returns)
+    # CRSI calculation: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    # RSI(3)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/3, adjust=False, min_periods=3).mean()
+    avg_loss = loss.ewm(alpha=1/3, adjust=False, min_periods=3).mean()
+    rs = avg_gain / avg_loss
+    rsi3 = 100 - (100 / (1 + rs))
     
-    # Kelly fraction: f = (bp - q) / b where b = avg_win/avg_loss, p = win_prob, q = 1-p
-    kelly_fraction = np.zeros(n)
-    for i in range(60, n):
-        if avg_loss[i] > 0 and avg_win[i] > 0:
-            b = avg_win[i] / avg_loss[i]
-            p = win_prob[i]
-            q = 1 - p
-            kelly = (b * p - q) / b
-            # Cap Kelly at 0.3 and floor at 0
-            kelly_fraction[i] = max(0, min(0.3, kelly))
+    # Streak RSI (2-period)
+    up_days = (delta > 0).astype(int)
+    down_days = (delta < 0).astype(int)
+    streak_up = up_days * (up_days.groupby((up_days == 0).cumsum()).cumcount() + 1)
+    streak_down = down_days * (down_days.groupby((down_days == 0).cumsum()).cumcount() + 1)
+    streak_rsi_raw = streak_up - streak_down
+    streak_rsi = pd.Series(streak_rsi_raw).ewm(alpha=1/2, adjust=False, min_periods=2).mean()
+    streak_rsi = 100 * (streak_rsi + 1) / 2  # Scale to 0-100
     
-    # Volatility adjustment: reduce size in high volatility
-    # Calculate 10-day ATR as volatility proxy
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Percent Rank (100-period)
+    rank = pd.Series(close).rolling(window=100, min_periods=100).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    )
     
-    # Normalize ATR by price for volatility regime
-    atr_ratio = np.zeros(n)
-    for i in range(10, n):
-        if close[i] > 0:
-            atr_ratio[i] = atr_10[i] / close[i]
+    crsi = (rsi3 + streak_rsi + rank) / 3
     
-    # Volatility regime: reduce size when volatility is high (above 70th percentile)
-    vol_threshold = np.zeros(n)
-    for i in range(60, n):
-        if i >= 60:
-            vol_threshold[i] = np.percentile(atr_ratio[max(0, i-60):i], 70)
-    
-    vol_adjustment = np.ones(n)
-    for i in range(60, n):
-        if atr_ratio[i] > vol_threshold[i]:
-            vol_adjustment[i] = 0.5  # Reduce size by half in high volatility
-    
-    # Final position size: Kelly * volatility adjustment
-    position_size = kelly_fraction * vol_adjustment
-    
-    # Trend filter: only take positions aligned with 1w trend
-    uptrend = close > ema_21_1w_aligned
-    downtrend = close < ema_21_1w_aligned
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(30, n):  # Start after sufficient data
         # Skip if any required data is invalid
-        if np.isnan(ema_21_1w_aligned[i]) or np.isnan(position_size[i]):
-            signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
+        if (np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or 
+            np.isnan(crsi.iloc[i]) if hasattr(crsi, 'iloc') else np.isnan(crsi[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry logic: Kelly sizing with trend alignment
-        if uptrend[i] and position != 1:
+        # Get current CRSI value
+        crsi_val = crsi.iloc[i] if hasattr(crsi, 'iloc') else crsi[i]
+        
+        # Long signal: price breaks above H3/H4 with volume and CRSI not overbought
+        if (close[i] > h3_12h[i] and vol_confirm[i] and crsi_val < 85 and position != 1):
             position = 1
-            signals[i] = position_size[i]
-        elif downtrend[i] and position != -1:
+            signals[i] = 0.25
+        # Short signal: price breaks below L3/L4 with volume and CRSI not oversold
+        elif (close[i] < l3_12h[i] and vol_confirm[i] and crsi_val > 15 and position != -1):
             position = -1
-            signals[i] = -position_size[i]
-        # Exit: trend reversal
-        elif position == 1 and not uptrend[i]:
+            signals[i] = -0.25
+        # Exit: price returns to median level or CRSI extreme
+        elif position == 1 and (close[i] < (h3_12h[i] + l3_12h[i]) / 2 or crsi_val > 90):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and not downtrend[i]:
+        elif position == -1 and (close[i] > (h3_12h[i] + l3_12h[i]) / 2 or crsi_val < 10):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            if position == 1:
-                signals[i] = position_size[i]
-            elif position == -1:
-                signals[i] = -position_size[i]
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
