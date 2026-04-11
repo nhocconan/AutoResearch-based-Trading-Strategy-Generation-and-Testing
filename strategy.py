@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R mean reversion with 1d trend filter
-# - Williams %R(14) from 6h: identifies overbought/oversold conditions
-# - Long when %R < -80 (oversold) and 1d EMA(50) > EMA(200) (bullish trend)
-# - Short when %R > -20 (overbought) and 1d EMA(50) < EMA(200) (bearish trend)
+# Hypothesis: 4h Camarilla pivot + volume spike + choppiness regime filter
+# - Uses 12h Camarilla levels from prior day as support/resistance zones
+# - Long when price touches S3 level with volume > 1.5x 20-period average
+# - Short when price touches R3 level with volume > 1.5x 20-period average
+# - Choppiness regime filter: only trade when CHOP(14) < 38.2 (trending) OR > 61.8 (range) to avoid whipsaws
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 6h
-# - Works in both bull (mean reversion in uptrend) and bear (mean reversion in downtrend) markets
-# - Williams %R provides clear reversal signals, 1d EMA filter ensures we trade with higher timeframe trend
+# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits for 4h
+# - Works in both bull (breakouts from pivot levels) and bear (reversals at pivot levels) markets
+# - 12h HTF provides stable pivot levels less prone to noise than lower timeframes
 
-name = "6h_1d_williamsr_trendfilter_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,65 +25,99 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Load 12h data ONCE before loop for Camarilla levels and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return signals
     
-    # Pre-compute 1d EMAs for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate prior 12h bar's OHLC for Camarilla levels
+    # Shift by 1 to use only completed 12h bars
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align 1d EMAs to 6h timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate Camarilla levels for each completed 12h bar
+    # H4 = Close + 1.1*(High-Low)*1.1/2
+    # L4 = Close - 1.1*(High-Low)*1.1/2
+    # R3 = Close + 1.1*(High-Low)*1.1/4
+    # S3 = Close - 1.1*(High-Low)*1.1/4
+    # We'll use R3/S3 as entry levels
+    hl_range = high_12h - low_12h
+    r3_level = close_12h + 1.1 * hl_range * 1.1 / 4
+    s3_level = close_12h - 1.1 * hl_range * 1.1 / 4
     
-    # Pre-compute 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_low - lowest_low + 1e-10)  # Add small epsilon to avoid division by zero
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3_level)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3_level)
+    
+    # 12h volume SMA (20-period)
+    volume_12h = df_12h['volume'].values
+    volume_series = pd.Series(volume_12h)
+    volume_sma_20_12h = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    
+    # Calculate 4h Choppiness Index (14-period)
+    # CHOP = 100 * log10(sum(TR(14)) / (ATR(14)*14)) / log10(14)
+    tr1 = pd.Series(high).shift(1) - pd.Series(low).shift(1)
+    tr2 = abs(pd.Series(high).shift(1) - pd.Series(close).shift(1))
+    tr3 = abs(pd.Series(low).shift(1) - pd.Series(close).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(tr_sum_14 / (atr_14 * 14)) / np.log10(14)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: bullish if EMA50 > EMA200, bearish if EMA50 < EMA200
-        bullish_trend = ema_50_aligned[i] > ema_200_aligned[i]
-        bearish_trend = ema_50_aligned[i] < ema_200_aligned[i]
+        # Current price data
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
+        volume_current = volume[i]
         
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Price touching Camarilla levels (with small buffer)
+        touch_s3 = price_low <= s3_aligned[i] * 1.001  # Allow 0.1% buffer
+        touch_r3 = price_high >= r3_aligned[i] * 0.999  # Allow 0.1% buffer
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        
+        # Choppiness regime filter: avoid choppy markets (38.2 <= CHOP <= 61.8)
+        chop_value = chop[i]
+        chop_filter = (chop_value < 38.2) or (chop_value > 61.8)
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Oversold + bullish trend
-        if oversold and bullish_trend:
+        # Long: Touch S3 + volume confirmation + trending/range regime
+        if touch_s3 and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short: Overbought + bearish trend
-        if overbought and bearish_trend:
+        # Short: Touch R3 + volume confirmation + trending/range regime
+        if touch_r3 and vol_confirm and chop_filter:
             enter_short = True
         
-        # Exit conditions: opposite Williams %R level or trend change
+        # Exit conditions: opposite touch or volatility collapse
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if overbought OR trend turns bearish
-            exit_long = (williams_r[i] > -20) or (not bullish_trend)
+            # Exit long if price touches R3 or enters choppy zone
+            exit_long = touch_r3 or not chop_filter
         elif position == -1:
-            # Exit short if oversold OR trend turns bullish
-            exit_short = (williams_r[i] < -80) or (not bearish_trend)
+            # Exit short if price touches S3 or enters choppy zone
+            exit_short = touch_s3 or not chop_filter
         
         # Trading logic
         if enter_long and position != 1:
