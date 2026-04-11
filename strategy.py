@@ -1,35 +1,20 @@
 #!/usr/bin/env python3
-# 4h_1d_ema_volume_breakout_v1
-# Strategy: 4h EMA20 breakout with 1d volume confirmation and ADX trend filter
+# 4h_12h_camarilla_breakout_volume_v1
+# Strategy: 4h breakout at Camarilla levels calculated from 12h close, with volume confirmation
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Breakouts above EMA20 (calculated on 1d close) with above-average daily volume
-# and strong trend (ADX > 25) capture momentum in both bull and bear markets.
-# Uses EMA20 for dynamic support/resistance and volume/ADX for confirmation to reduce false signals.
-# Target: 20-40 trades/year to avoid overtrading.
+# Hypothesis: Camarilla levels derived from 12h price action provide strong support/resistance.
+# Breakouts above resistance or below support with above-average volume capture momentum.
+# Volume confirmation reduces false breakouts. Works in both bull and bear markets by
+# following the direction of the breakout. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_ema_volume_breakout_v1"
+name = "4h_12h_camarilla_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
-
-def calculate_atr(high, low, close, period=14):
-    """Calculate Average True Range"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr = np.zeros_like(tr)
-    if len(tr) < period:
-        return atr
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -42,94 +27,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 30:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ADX for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from 12h OHLC
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Camarilla levels: based on previous day's range
+    # R4 = Close + Range * 1.1/2
+    # R3 = Close + Range * 1.1/4
+    # R2 = Close + Range * 1.1/6
+    # R1 = Close + Range * 1.1/12
+    # S1 = Close - Range * 1.1/12
+    # S2 = Close - Range * 1.1/6
+    # S3 = Close - Range * 1.1/4
+    # S4 = Close - Range * 1.1/2
+    # where Range = High - Low
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
-                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
-                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
-    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
-                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
-                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
+    range_12h = high_12h - low_12h
+    r4 = close_12h + range_12h * 1.1 / 2
+    r3 = close_12h + range_12h * 1.1 / 4
+    r2 = close_12h + range_12h * 1.1 / 6
+    r1 = close_12h + range_12h * 1.1 / 12
+    s1 = close_12h - range_12h * 1.1 / 12
+    s2 = close_12h - range_12h * 1.1 / 6
+    s3 = close_12h - range_12h * 1.1 / 4
+    s4 = close_12h - range_12h * 1.1 / 2
     
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align Camarilla levels to 4h (using previous 12h bar's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
     
-    period = 14
-    tr14 = wilders_smooth(tr, period)
-    dm_plus_14 = wilders_smooth(dm_plus, period)
-    dm_minus_14 = wilders_smooth(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 
-                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smooth(dx, period)
-    
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 1d volume average (20-period) for confirmation
-    vol_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    
-    # Calculate EMA20 on 1d close
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Volume confirmation: 12h volume > average
+    vol_12h = df_12h['volume'].values
+    vol_avg_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
-            np.isnan(ema20_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current 1d volume (aligned)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
-        vol_confirm = vol_1d_current > 1.5 * vol_avg_20_aligned[i]
+        # Current 12h volume (aligned)
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, vol_12h)[i]
+        vol_confirm = vol_12h_current > vol_avg_20_aligned[i]
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trend_filter = adx_aligned[i] > 25
+        # Breakout conditions using Camarilla levels
+        breakout_above_r1 = close[i] > r1_aligned[i-1]  # break above R1
+        breakout_below_s1 = close[i] < s1_aligned[i-1]  # break below S1
         
-        # Breakout conditions using EMA20
-        breakout_up = close[i] > ema20_aligned[i-1]  # break above prior EMA20
-        breakout_down = close[i] < ema20_aligned[i-1]  # break below prior EMA20
+        long_signal = breakout_above_r1 and vol_confirm
+        short_signal = breakout_below_s1 and vol_confirm
         
-        long_signal = breakout_up and vol_confirm and trend_filter
-        short_signal = breakout_down and vol_confirm and trend_filter
-        
-        # Exit conditions: opposite breakout or trend weakening
-        long_exit = close[i] < ema20_aligned[i-1] or adx_aligned[i] < 20
-        short_exit = close[i] > ema20_aligned[i-1] or adx_aligned[i] < 20
+        # Exit conditions: opposite breakout or volume failure
+        long_exit = close[i] < s1_aligned[i-1] or not vol_confirm
+        short_exit = close[i] > r1_aligned[i-1] or not vol_confirm
         
         if long_signal and position != 1:
             position = 1
