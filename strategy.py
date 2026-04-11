@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d trend filter + volume confirmation
-# - Donchian breakout on 12h: price > 20-period high for long, price < 20-period low for short
+# Hypothesis: 4h Donchian(20) breakout + 1d trend filter + volume confirmation
+# - Donchian breakout on 4h: price > 20-period high for long, price < 20-period low for short
 # - Trend filter: 1d EMA50 > EMA200 for long bias, EMA50 < EMA200 for short bias
-# - Volume confirmation: 12h volume > 1.5x 20-period average
+# - Volume confirmation: 4h volume > 1.5x 20-period average
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
 # - Donchian breakouts capture strong momentum moves
 # - 1d EMA filter ensures we trade with the higher timeframe trend
 # - Volume confirmation filters out weak breakouts
 # - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
 
-name = "12h_1d_donchian_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,13 +48,13 @@ def generate_signals(prices):
     trend_bias[ema_50_aligned > ema_200_aligned] = 1
     trend_bias[ema_50_aligned < ema_200_aligned] = -1
     
-    # Pre-compute 12h Donchian channels (20-period)
+    # Pre-compute 4h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     volume_series = pd.Series(volume)
     volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
