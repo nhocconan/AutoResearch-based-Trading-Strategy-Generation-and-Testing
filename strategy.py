@@ -3,25 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high and 1w trend is up; short when price breaks below Donchian(20) low and 1w trend is down.
-# Uses volume > 1.5x 20-period average to confirm breakout strength.
-# Designed for 10-30 trades/year on 1d timeframe with low frequency to minimize fee drag.
+# Hypothesis: 12h Trend Reversal using 1d RSI divergence and 1w trend filter.
+# Long when 1d RSI makes higher low while price makes lower low (bullish divergence) and 1w trend up.
+# Short when 1d RSI makes lower high while price makes higher high (bearish divergence) and 1w trend down.
+# Uses momentum divergence to detect exhaustion in trends, effective in both bull and bear markets.
+# Target: 15-30 trades/year on 12h timeframe.
 
-name = "1d_1w_donchian_volume_trend_v1"
-timeframe = "1d"
+name = "12h_1d_1w_rsi_divergence_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
     # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -29,55 +29,105 @@ def generate_signals(prices):
     if len(df_1d) < 20 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d RSI(14)
+    close_1d = df_1d['close']
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
     
-    # Align Donchian channels to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align 1d RSI to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Calculate 1w EMA(20) for trend filter
+    # Calculate 1w EMA(40) for trend filter
     close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Calculate volume confirmation (volume > 1.5x 20-period average)
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after Donchian period
+    # Track recent lows/highs for divergence detection
+    lookback = 10  # Look back 10 periods for swing points
+    
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ma_20[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_40_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume confirmation
-        breakout_up = high[i] > donchian_high_aligned[i] and volume[i] > 1.5 * volume_ma_20[i]
-        breakout_down = low[i] < donchian_low_aligned[i] and volume[i] > 1.5 * volume_ma_20[i]
+        # Find recent swing low and high in price and RSI
+        # Look back 'lookback' periods to find lowest low and highest high
+        start_idx = max(0, i - lookback)
+        end_idx = i
         
-        # Trend filter
-        is_uptrend = close[i] > ema_20_1w_aligned[i]
-        is_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Price swing points
+        price_low = np.min(low[start_idx:end_idx+1])
+        price_high = np.max(high[start_idx:end_idx+1])
+        price_low_idx = np.where(low[start_idx:end_idx+1] == price_low)[0][0] + start_idx
+        price_high_idx = np.where(high[start_idx:end_idx+1] == price_high)[0][0] + start_idx
         
-        # Entry conditions
-        donchian_long = breakout_up and is_uptrend
-        donchian_short = breakout_down and is_downtrend
+        # RSI at those points
+        rsi_at_price_low = rsi_1d_aligned[price_low_idx] if not np.isnan(rsi_1d_aligned[price_low_idx]) else 50
+        rsi_at_price_high = rsi_1d_aligned[price_high_idx] if not np.isnan(rsi_1d_aligned[price_high_idx]) else 50
         
-        # Exit conditions: opposite Donchian breakout
-        exit_long = low[i] < donchian_low_aligned[i]
-        exit_short = high[i] > donchian_high_aligned[i]
+        # Current RSI and price
+        current_rsi = rsi_1d_aligned[i]
+        current_price = close[i]
+        
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i > lookback:
+            # Find previous swing low
+            prev_start = max(0, i - lookback*2)
+            prev_end = i - lookback
+            if prev_end > prev_start:
+                prev_price_low = np.min(low[prev_start:prev_end+1])
+                prev_price_low_idx = np.where(low[prev_start:prev_end+1] == prev_price_low)[0][0] + prev_start
+                prev_rsi_low = rsi_1d_aligned[prev_price_low_idx] if not np.isnan(rsi_1d_aligned[prev_price_low_idx]) else 50
+                
+                # Current low is lower than previous low, but RSI is higher
+                if price_low < prev_price_low and rsi_at_price_low > prev_rsi_low:
+                    bullish_div = True
+        
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i > lookback:
+            # Find previous swing high
+            prev_start = max(0, i - lookback*2)
+            prev_end = i - lookback
+            if prev_end > prev_start:
+                prev_price_high = np.max(high[prev_start:prev_end+1])
+                prev_price_high_idx = np.where(high[prev_start:prev_end+1] == prev_price_high)[0][0] + prev_start
+                prev_rsi_high = rsi_1d_aligned[prev_price_high_idx] if not np.isnan(rsi_1d_aligned[prev_price_high_idx]) else 50
+                
+                # Current high is higher than previous high, but RSI is lower
+                if price_high > prev_price_high and rsi_at_price_high < prev_rsi_high:
+                    bearish_div = True
+        
+        # Determine 1w trend direction
+        is_uptrend = close[i] > ema_40_1w_aligned[i]
+        is_downtrend = close[i] < ema_40_1w_aligned[i]
+        
+        # Entry conditions: divergence with trend alignment
+        # Long on bullish divergence in uptrend
+        # Short on bearish divergence in downtrend
+        long_signal = bullish_div and is_uptrend
+        short_signal = bearish_div and is_downtrend
+        
+        # Exit conditions: opposite divergence or trend change
+        exit_long = bearish_div or not is_uptrend
+        exit_short = bullish_div or not is_downtrend
         
         # Priority: entry > exit > hold
-        if donchian_long and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif donchian_short and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
