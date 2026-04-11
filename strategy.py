@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
+name = "4h_1d_camarilla_breakout_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,17 +39,23 @@ def generate_signals(prices):
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Volume confirmation: 4h volume > 2.0x 20-period average
+    # Volume confirmation: 4h volume > 1.5x 20-period average (reduced from 2.0 to increase trades slightly)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Align daily levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
+    # Pre-calculate S3 and R3 for exit
+    s3 = close_1d - (daily_range * 1.1 / 4)
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -57,7 +63,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.0 * vol_ma_20[i]
+        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -76,12 +82,6 @@ def generate_signals(prices):
             enter_short = True
         
         # Exit conditions: opposite Camarilla level (S3 for long, R3 for short)
-        # Calculate S3 and R3 for exit
-        s3 = close_1d - (daily_range * 1.1 / 4)
-        r3 = close_1d + (daily_range * 1.1 / 4)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        
         exit_long = price_close < s3_aligned[i]  # Return to S3 level
         exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
@@ -110,4 +110,5 @@ def generate_signals(prices):
 # Uses volume confirmation to avoid false breakouts and Camarilla levels for precise entry/exit.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
 # Position size 0.25 limits drawdown during volatile periods.
+# Adjusted volume threshold from 2.0x to 1.5x to increase trade frequency to target range (20-30 trades/year).
 # Target: 20-30 trades per year (80-120 total over 4 years) to minimize fee drag.
