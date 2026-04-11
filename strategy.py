@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ATR stoploss
-# - Long: Price breaks above Camarilla H3 level (1d) + volume > 1.5x 20-period average (1d)
-# - Short: Price breaks below Camarilla L3 level (1d) + volume > 1.5x 20-period average (1d)
-# - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Camarilla level breakout
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots provide mathematically derived support/resistance levels that work in ranging and trending markets
-# - Volume confirmation filters out false breakouts and increases signal quality
-# - ATR stoploss manages risk during volatile periods while allowing trends to run
+# Hypothesis: 12h Williams Alligator + Elder Ray combination with volume confirmation
+# - Uses Alligator (Jaw/Teeth/Lips) to identify trend direction and avoid choppy markets
+# - Elder Ray (Bull Power/Bear Power) to measure trend strength relative to EMA
+# - Volume confirmation to filter weak signals
+# - Primary timeframe: 12h (lower frequency = less fee drag, better generalization)
+# - HTF: 1d for trend context
+# - Designed to work in both bull (trend following) and bear (mean reversion in extremes) markets
+# - Discrete position sizing (±0.25) to minimize fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
 
-name = "4h_1d_camarilla_pivot_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_alligator_elder_ray_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,99 +30,120 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
-    long_stop = 0.0
-    short_stop = 0.0
     
-    # Load 1d data ONCE before loop for Camarilla levels and volume confirmation
+    # Load 1d data ONCE before loop for HTF context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA for Elder Ray calculation
     close_1d = df_1d['close'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate pivot point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate Camarilla levels
-    # H4 = PP + 1.5 * (High - Low)
-    # H3 = PP + 1.0 * (High - Low)
-    # L3 = PP - 1.0 * (High - Low)
-    # L4 = PP - 1.5 * (High - Low)
-    camarilla_h3 = pp + 1.0 * (high_1d - low_1d)
-    camarilla_l3 = pp - 1.0 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Pre-compute 1d volume confirmation (20-period average)
+    # Pre-compute 1d volume average for confirmation
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 12h timeframe
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute ATR for stoploss (4h timeframe)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Pre-compute Williams Alligator on 12h timeframe
+    # Jaw (blue): 13-period SMMA smoothed by 8 periods
+    # Teeth (red): 8-period SMMA smoothed by 5 periods  
+    # Lips (green): 5-period SMMA smoothed by 3 periods
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT) / N
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    for i in range(50, n):  # Start after 50-bar warmup
+    # Calculate Alligator components
+    jaw = smma(close, 13)  # 13-period SMMA
+    jaw = smma(jaw, 8)     # smoothed by 8
+    
+    teeth = smma(close, 8)   # 8-period SMMA
+    teeth = smma(teeth, 5)   # smoothed by 5
+    
+    lips = smma(close, 5)    # 5-period SMMA
+    lips = smma(lips, 3)     # smoothed by 3
+    
+    # Pre-compute Elder Ray components on 12h
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_12 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_12
+    bear_power = low - ema_12
+    
+    # Smooth the power indicators
+    bull_power_smooth = pd.Series(bull_power).ewm(span=6, adjust=False, min_periods=6).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=6, adjust=False, min_periods=6).mean().values
+    
+    for i in range(100, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_13_aligned[i]) or np.isnan(volume_sma_20_aligned[i]) or
+            np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         volume_current = volume[i]
         
-        # Camarilla levels
-        h3_level = camarilla_h3_aligned[i]
-        l3_level = camarilla_l3_aligned[i]
+        # Volume confirmation: current volume > 1.2x 20-period average
+        vol_confirm = volume_current > 1.2 * volume_sma_20_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Alligator trend detection
+        # When Lips > Teeth > Jaw = uptrend (green above red above blue)
+        # When Lips < Teeth < Jaw = downtrend (green below red below blue)
+        # When intertwined = choppy/no trend
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
+        
+        uptrend = lips_above_teeth and teeth_above_jaw
+        downtrend = lips_below_teeth and teeth_below_jaw
+        
+        # Elder Ray trend strength
+        strong_bull = bull_power_smooth[i] > 0 and bull_power_smooth[i] > bear_power_smooth[i]
+        strong_bear = bear_power_smooth[i] < 0 and abs(bear_power_smooth[i]) > abs(bull_power_smooth[i])
+        
+        # HTF trend filter from 1d EMA
+        htf_uptrend = close_price > ema_13_aligned[i]
+        htf_downtrend = close_price < ema_13_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price closes above Camarilla H3 with volume confirmation
-        if close_price > h3_level and vol_confirm:
+        # Long: Alligator uptrend + Elder Ray bullish + HTF uptrend + volume confirmation
+        if uptrend and strong_bull and htf_uptrend and vol_confirm:
             enter_long = True
         
-        # Short breakout: price closes below Camarilla L3 with volume confirmation
-        if close_price < l3_level and vol_confirm:
+        # Short: Alligator downtrend + Elder Ray bearish + HTF downtrend + volume confirmation
+        if downtrend and strong_bear and htf_downtrend and vol_confirm:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: reverse signals or loss of momentum
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price hits ATR stoploss or breaks below L3 level
-            exit_long = (close_price <= long_stop) or (close_price < l3_level)
+            # Exit long if trend weakens or reverses
+            exit_long = (not uptrend) or (not strong_bull) or (not htf_uptrend) or downtrend
         elif position == -1:
-            # Exit short if price hits ATR stoploss or breaks above H3 level
-            exit_short = (close_price >= short_stop) or (close_price > h3_level)
-        
-        # Update stoploss levels when entering a position
-        if enter_long:
-            entry_price = close_price
-            long_stop = entry_price - 2.0 * atr_14[i]
-        elif enter_short:
-            entry_price = close_price
-            short_stop = entry_price + 2.0 * atr_14[i]
-        
-        # Update trailing stoploss for existing positions
-        if position == 1:
-            # Trail long stop upward: max of current stop and (high - 2*ATR)
-            long_stop = max(long_stop, high[i] - 2.0 * atr_14[i])
-        elif position == -1:
-            # Trail short stop downward: min of current stop and (low + 2*ATR)
-            short_stop = min(short_stop, low[i] + 2.0 * atr_14[i])
+            # Exit short if trend weakens or reverses
+            exit_short = (not downtrend) or (not strong_bear) or (not htf_downtrend) or uptrend
         
         # Trading logic
         if enter_long and position != 1:
