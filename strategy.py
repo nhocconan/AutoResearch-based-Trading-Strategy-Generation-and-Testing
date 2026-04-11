@@ -3,20 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Power + 1w/1d regime filter
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-# - Strong trend when Bull Power > 0 and Bear Power < 0 (both bulls and bears in control)
-# - Regime filter: Only trade when 1w ADX > 25 (trending market) to avoid chop
-# - Entry: Go long when Bull Power crosses above 0 with regime confirmation
-# - Entry: Go short when Bear Power crosses above 0 with regime confirmation (Bear Power rising = weakening bears)
-# - Exit: Opposite cross or regime breakdown (ADX < 20)
+# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + chop regime filter
+# - Long when price touches or crosses above Camarilla H4 level (strong resistance turned support)
+# - Short when price touches or crosses below Camarilla L4 level (strong support turned resistance)
+# - Volume confirmation: current volume > 1.8x 20-period average (using 1d aligned volume)
+# - Chop regime filter: only trade when Choppiness Index (14) > 61.8 (range-bound market) for mean reversion
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) for 6f
-# - Works in bull markets (strong bull power) and bear markets (strong bear power)
-# - Weekly ADX ensures we only trade in strong trends, avoiding whipsaws in ranging markets
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
+# - Works in both bull (mean reversion in range) and bear (mean reversion in range) markets
+# - 1d HTF provides reliable Camarilla levels, reducing false signals from lower timeframe noise
 
-name = "6h_1w_elder_ray_regime_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,108 +22,111 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return signals
-    
-    # Pre-compute 13-period EMA for Elder Ray (using daily close as proxy)
+    # Load 1d data ONCE before loop for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
+    # Pre-compute 1d OHLC for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate EMA13 on daily closes
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align daily EMA13 to 6h timeframe
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    # Calculate Camarilla levels from previous 1d bar
+    # H4 = Close + 1.5*(High - Low)
+    # L4 = Close - 1.5*(High - Low)
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Calculate Elder Ray components
-    bull_power = high - ema13_aligned  # High - EMA13
-    bear_power = ema13_aligned - low   # EMA13 - Low
+    # Pre-compute 1d volume SMA (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_series = pd.Series(volume_1d)
+    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate weekly ADX for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute Choppiness Index (14) on 1d
+    # TR = max(H-L, abs(H-PC), abs(L-PC))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Set first TR to 0 (no previous close)
+    tr_1d[0] = 0.0
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    # True range of high-low over 14 periods
+    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Choppiness Index = 100 * log10(sum_TR_14 / (max_high_14 - min_low_14)) / log10(14)
+    # Avoid division by zero
+    denominator = max_high_14 - min_low_14
+    chop_14_1d = np.where(
+        denominator > 0,
+        100 * np.log10(tr_sum_14 / denominator) / np.log10(14),
+        50.0  # neutral value when no range
+    )
     
-    # True Range
-    tr1 = pd.Series(high_1w).shift(1) - pd.Series(low_1w).shift(1)
-    tr2 = abs(pd.Series(high_1w).shift(1) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w).shift(1) - pd.Series(close_1w).shift(1))
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    plus_dm = pd.Series(high_1w).diff()
-    minus_dm = pd.Series(low_1w).diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di_14 = 100 * plus_dm_14 / tr_14
-    minus_di_14 = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx_14 = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align weekly ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_14)
+    # Align 1d indicators to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    chop_14_aligned = align_htf_to_ltf(prices, df_1d, chop_14_1d)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(chop_14_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Previous values for crossover detection
-        bull_power_prev = bull_power[i-1]
-        bear_power_prev = bear_power[i-1]
+        # Current price data
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
+        volume_current = volume[i]
         
-        # Regime filter: only trade in trending markets (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
-        weak_trend = adx_aligned[i] < 20  # Exit regime
+        # Camarilla touch conditions (with small buffer to avoid whipsaw)
+        # Using 0.1% buffer around levels
+        buffer = 0.001
+        touch_long = price_low <= camarilla_h4_aligned[i] * (1 + buffer) and price_high >= camarilla_h4_aligned[i] * (1 - buffer)
+        touch_short = price_high >= camarilla_l4_aligned[i] * (1 - buffer) and price_low <= camarilla_l4_aligned[i] * (1 + buffer)
         
-        # Elder Ray signals
-        bull_crossover = (bull_power_prev <= 0) and (bull_power[i] > 0)  # Bull power crosses above zero
-        bear_crossover = (bear_power_prev <= 0) and (bear_power[i] > 0)  # Bear power crosses above zero (weakening bears)
+        # Volume confirmation: current volume > 1.8x 20-period average (using 1d aligned volume)
+        vol_confirm = volume_current > 1.8 * volume_sma_20_aligned[i]
+        
+        # Chop regime filter: only trade when Chop > 61.8 (range-bound market)
+        chop_filter = chop_14_aligned[i] > 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Bull power crosses above zero in strong trend
-        if bull_crossover and strong_trend:
+        # Long: Touch Camarilla H4 (resistance turned support) + volume + chop
+        if touch_long and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short: Bear power crosses above zero (indicating weakening bearish momentum) in strong trend
-        # This suggests bears are losing control, potential for trend continuation or reversal
-        if bear_crossover and strong_trend:
+        # Short: Touch Camarilla L4 (support turned resistance) + volume + chop
+        if touch_short and vol_confirm and chop_filter:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: opposite Camarilla touch or chop regime change
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if bear power crosses above zero OR trend weakens
-            exit_long = bear_crossover or weak_trend
+            # Exit long if price touches L4 OR chop drops below 61.8 (trending)
+            exit_long = touch_short or (not chop_filter)
         elif position == -1:
-            # Exit short if bull power crosses above zero OR trend weakens
-            exit_short = bull_crossover or weak_trend
+            # Exit short if price touches H4 OR chop drops below 61.8 (trending)
+            exit_exit_short = touch_long or (not chop_filter)
+            exit_short = exit_exit_short
         
         # Trading logic
         if enter_long and position != 1:
