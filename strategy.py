@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_trix_volume_regime_v1"
-timeframe = "4h"
+name = "1d_1w_keltner_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,96 +20,71 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate daily TRIX (15-period EMA applied 3 times)
-    close_1d = df_1d['close'].values
+    # Calculate weekly ATR (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # TRIX calculation: EMA(EMA(EMA(close, 15), 15), 15)
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
     
-    # TRIX = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix = trix_raw.fillna(0).values
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Shift by 1 to use only completed daily bars
-    trix = np.roll(trix, 1)
-    trix[0] = 0
+    # Keltner Channels: 20-period EMA ± 2 * ATR
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20 + 2 * atr_20
+    lower_keltner = ema_20 - 2 * atr_20
     
-    # Align TRIX to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Shift by 1 to use only completed weekly bars
+    upper_keltner = np.roll(upper_keltner, 1)
+    lower_keltner = np.roll(lower_keltner, 1)
+    ema_20 = np.roll(ema_20, 1)
+    upper_keltner[0] = np.nan
+    lower_keltner[0] = np.nan
+    ema_20[0] = np.nan
     
-    # Calculate 4h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align weekly Keltner channels to daily timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 4h volume ratio (current vs 20-period average)
+    # Daily volume filter: volume > 1.8x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h ADX(14) for trend strength
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Daily close for breakout confirmation
+    close_daily = close
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
-    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    for i in range(140, n):  # Start after warmup periods
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(trix_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        price_close = close[i]
+        price_close = close_daily[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: current volume > 1.8x average
+        # Volume confirmation
         volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending = adx[i] > 25
+        # Long breakout: price closes above upper Keltner band
+        long_signal = volume_confirmed and (price_close > upper_keltner_aligned[i])
         
-        # Long conditions: TRIX > 0 (bullish momentum) AND RSI > 50 (bullish bias) with volume and trend
-        long_signal = volume_confirmed and trending and (trix_aligned[i] > 0) and (rsi[i] > 50)
+        # Short breakout: price closes below lower Keltner band
+        short_signal = volume_confirmed and (price_close < lower_keltner_aligned[i])
         
-        # Short conditions: TRIX < 0 (bearish momentum) AND RSI < 50 (bearish bias) with volume and trend
-        short_signal = volume_confirmed and trending and (trix_aligned[i] < 0) and (rsi[i] < 50)
-        
-        # Exit when TRIX crosses zero (momentum reversal)
-        exit_long = position == 1 and trix_aligned[i] <= 0
-        exit_short = position == -1 and trix_aligned[i] >= 0
+        # Exit when price returns to middle (EMA20)
+        exit_long = position == 1 and price_close < ema_20_aligned[i]
+        exit_short = position == -1 and price_close > ema_20_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -130,14 +105,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: TRIX momentum + RSI bias + volume confirmation + ADX trend filter on 4h.
-# Uses daily TRIX (triple EMA momentum oscillator) to capture medium-term momentum shifts.
-# Enters long when daily TRIX > 0 (bullish momentum) AND 4h RSI > 50 (bullish bias)
-# with volume confirmation (>1.8x average) and ADX > 25 (trending market).
-# Enters short when daily TRIX < 0 (bearish momentum) AND 4h RSI < 50 (bearish bias)
-# with volume confirmation and ADX > 25.
-# Exits when daily TRIX crosses zero (momentum reversal).
-# This combination filters out ranging markets (low ADX) and false momentum signals.
-# Target: 80-150 total trades over 4 years (20-38/year) to minimize fee drag.
-# TRIX is particularly effective in crypto markets for catching sustained moves.
-# Works in both bull and bear markets by aligning with the dominant momentum regime.
+# Hypothesis: Weekly Keltner Channel breakout with volume confirmation on daily timeframe.
+# Uses weekly ATR-based channels (EMA20 ± 2*ATR(20)) to identify volatility expansion.
+# Enters long when daily close breaks above upper weekly Keltner band with volume > 1.8x average.
+# Enters short when daily close breaks below lower weekly Keltner band with volume confirmation.
+# Exits when price returns to the weekly EMA20 (middle of Keltner channel).
+# Works in both bull and bear markets by capturing volatility expansion breakouts.
+# Weekly timeframe filters noise, daily timeframe provides timely execution.
+# Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag on 1d timeframe.
