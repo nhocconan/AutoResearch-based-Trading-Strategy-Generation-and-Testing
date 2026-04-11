@@ -1,96 +1,133 @@
 #!/usr/bin/env python3
-# 4h_1d_4h_vwap_vwap_std_v1
-# Strategy: 4h price action relative to 1-day VWAP bands with volume confirmation
-# Timeframe: 4h
+# 1d_1w_kama_rsi_volume_v1
+# Strategy: 1-day KAMA direction with 1-week trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: The 1-day VWAP acts as a dynamic fair value with bands capturing institutional interest. Price deviations beyond 1 standard deviation from VWAP, confirmed by volume spikes and aligned with the 4-hour trend, provide high-probability mean-reversion or continuation entries. Designed for low trade frequency to avoid fee drag in both trending and ranging markets.
+# Hypothesis: KAMA adapts to market noise, reducing false signals in choppy markets. Combined with 1-week trend alignment and volume confirmation, it captures strong trends while avoiding whipsaws. Designed for low trade frequency (10-30/year) to minimize fee drag in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_4h_vwap_vwap_std_v1"
-timeframe = "4h"
+name = "1d_1w_kama_rsi_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day VWAP and standard deviation
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
-    vwap_denominator = df_1d['volume'].cumsum()
-    vwap = vwap_numerator / vwap_denominator
+    # Calculate KAMA on 1d data
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
     
-    # Calculate standard deviation of price from VWAP
-    deviation = typical_price - vwap
-    variance = (deviation ** 2 * df_1d['volume']).cumsum() / vwap_denominator
-    vwap_std = np.sqrt(variance)
+    # Proper ER calculation
+    er = np.zeros(n)
+    for i in range(10, n):
+        price_change = np.abs(close[i] - close[i-10])
+        price_volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
+        if price_volatility > 0:
+            er[i] = price_change / price_volatility
+        else:
+            er[i] = 0
     
-    # VWAP bands (1 standard deviation)
-    vwap_upper = vwap + vwap_std
-    vwap_lower = vwap - vwap_std
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Align VWAP and bands to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap.values)
-    vwap_upper_aligned = align_htf_to_ltf(prices, df_1d, vwap_upper.values)
-    vwap_lower_aligned = align_htf_to_ltf(prices, df_1d, vwap_lower.values)
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 4-hour trend filter: EMA crossover
-    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_up = ema_fast > ema_slow
-    trend_down = ema_fast < ema_slow
+    # Align KAMA to 1d (it's already 1d, but for consistency)
+    kama_aligned = kama  # no alignment needed as both are 1d
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > 1.5 * vol_avg_20
+    # Calculate RSI on 1d
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.zeros(n)
+    rsi = np.zeros(n)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
+    
+    # 1-week EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Volume confirmation: 20-period average
+    vol_avg_20 = np.zeros(n)
+    for i in range(20, n):
+        vol_avg_20[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_aligned[i]) or np.isnan(vwap_upper_aligned[i]) or 
-            np.isnan(vwap_lower_aligned[i]) or np.isnan(trend_up[i]) or 
-            np.isnan(trend_down[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion signals
-        # Price below lower VWAP band (oversold)
-        oversold = close[i] < vwap_lower_aligned[i]
-        # Price above upper VWAP band (overbought)
-        overbought = close[i] > vwap_upper_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
+        
+        # KAMA direction: price above KAMA = bullish, below = bearish
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # 1-week EMA trend filter
+        trend_bullish = close[i] > ema_20_1w_aligned[i]
+        trend_bearish = close[i] < ema_20_1w_aligned[i]
+        
+        # RSI filter: avoid extreme overbought/oversold
+        rsi_not_extreme = (rsi[i] > 20) and (rsi[i] < 80)
         
         # Entry conditions
-        # Long: Oversold AND uptrend AND volume confirmation
-        if oversold and trend_up[i] and vol_confirm[i] and position != 1:
+        # Long: Price above KAMA AND bullish trend AND volume confirmation AND RSI not extreme
+        if price_above_kama and trend_bullish and vol_confirm and rsi_not_extreme and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Overbought AND downtrend AND volume confirmation
-        elif overbought and trend_down[i] and vol_confirm[i] and position != -1:
+        # Short: Price below KAMA AND bearish trend AND volume confirmation AND RSI not extreme
+        elif price_below_kama and trend_bearish and vol_confirm and rsi_not_extreme and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Price returns to VWAP (mean reversion complete)
-        elif position == 1 and close[i] >= vwap_aligned[i]:
+        # Exit: Opposite KAMA cross
+        elif position == 1 and price_below_kama:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= vwap_aligned[i]:
+        elif position == -1 and price_above_kama:
             position = 0
             signals[i] = 0.0
         else:
