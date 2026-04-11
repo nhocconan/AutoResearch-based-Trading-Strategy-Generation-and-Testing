@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 12h trend filter and volume confirmation
-# - Uses 12h timeframe for trend direction (EMA50) to avoid counter-trend trades
-# - Enters on breakout of Camarilla R4/S4 levels (strong continuation) or fade at R3/S3 (mean reversion in range)
-# - Volume confirmation: current volume > 1.3x 20-period average to filter weak breakouts
-# - Designed for 6h timeframe to capture medium-term swings with lower frequency (target: 12-30 trades/year)
-# - Works in bull markets via R4 breakout continuation and in bear markets via S3 fade or R4 breakdown
-# - Discrete position sizing (0.25) to minimize fee churn while maintaining meaningful exposure
+# Hypothesis: 4h Camarilla pivot long/short with 1d trend filter and volume confirmation
+# - Long: price touches Camarilla L3 (support) from below, 1d EMA(50) uptrend, volume > 1.3x 20-period avg
+# - Short: price touches Camarilla H3 (resistance) from above, 1d EMA(50) downtrend, volume > 1.3x 20-period avg
+# - Exit: price reaches Camarilla L4/H4 (extreme levels) or opposite H3/L3 level
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Target: 20-35 trades/year (80-140 total over 4 years) to stay within fee drag limits
+# - Camarilla levels provide institutional support/resistance that work in ranging and trending markets
 
-name = "6h_12h_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,42 +28,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for Camarilla levels and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load 1d data ONCE before loop for trend filter (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 12h Camarilla levels (based on previous 12h bar's range)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for each 12h bar
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    camarilla_r4 = close_12h + 1.5 * (high_12h - low_12h)
-    camarilla_r3 = close_12h + 1.1 * (high_12h - low_12h)
-    camarilla_s3 = close_12h - 1.1 * (high_12h - low_12h)
-    camarilla_s4 = close_12h - 1.5 * (high_12h - low_12h)
+    # Pre-compute 4h Camarilla levels from previous day's OHLC
+    # Need previous day's high, low, close - using 1d data shifted by 1
+    if len(df_1d) < 2:
+        return signals
+        
+    # Previous day's OHLC (1d data)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Align Camarilla levels to 6h timeframe (wait for completed 12h bar)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    # Calculate Camarilla levels for each 1d bar
+    # Camarilla formulas:
+    # H4 = close + ((high - low) * 1.1 / 2)
+    # H3 = close + ((high - low) * 1.1 / 4)
+    # L3 = close - ((high - low) * 1.1 / 4)
+    # L4 = close - ((high - low) * 1.1 / 2)
+    camarilla_h4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    camarilla_h3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_l3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_l4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
     
-    # Pre-compute 12h EMA(50) for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align Camarilla levels to 4h timeframe (completed 1d bar only)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Pre-compute 6h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,51 +80,43 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Camarilla levels from aligned arrays
-        r4 = r4_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        s4 = s4_aligned[i]
+        # Camarilla levels
+        h3 = camarilla_h3_aligned[i]
+        l3 = camarilla_l3_aligned[i]
+        h4 = camarilla_h4_aligned[i]
+        l4 = camarilla_l4_aligned[i]
         
         # Volume confirmation: current volume > 1.3x 20-period average
         vol_confirm = volume_current > 1.3 * volume_sma_20[i]
         
-        # 12h EMA trend bias
-        ema_bias_long = close_price > ema_50_12h_aligned[i]
-        ema_bias_short = close_price < ema_50_12h_aligned[i]
+        # 1d EMA trend filter
+        ema_bias_long = close_price > ema_50_1d_aligned[i]
+        ema_bias_short = close_price < ema_50_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price breaks above R4 with volume and long trend bias (strong continuation)
-        if close_price > r4 and vol_confirm and ema_bias_long:
-            enter_long = True
+        # Long: price touches L3 from below with volume confirmation and long-term uptrend
+        if close_price <= l3 and low[i] < l3 and close_price > l3 * 0.999:  # Touched L3 from below
+            if vol_confirm and ema_bias_long:
+                enter_long = True
         
-        # Long mean reversion: price drops to S3 with volume and long trend bias (fade in uptrend)
-        elif close_price < s3 and vol_confirm and ema_bias_long:
-            enter_long = True
+        # Short: price touches H3 from above with volume confirmation and long-term downtrend
+        if close_price >= h3 and high[i] > h3 and close_price < h3 * 1.001:  # Touched H3 from above
+            if vol_confirm and ema_bias_short:
+                enter_short = True
         
-        # Short breakout: price breaks below S4 with volume and short trend bias (strong continuation)
-        elif close_price < s4 and vol_confirm and ema_bias_short:
-            enter_short = True
-        
-        # Short mean reversion: price rises to R3 with volume and short trend bias (fade in downtrend)
-        elif close_price > r3 and vol_confirm and ema_bias_short:
-            enter_short = True
-        
-        # Exit conditions: return to mean (midpoint of R3-S3) or opposite Camarilla extreme
+        # Exit conditions
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to R3-S3 midpoint or reaches R4 (take profit)
-            mid_point = (r3 + s3) / 2
-            exit_long = close_price <= mid_point or close_price >= r4
+            # Exit long if price reaches L4 (extreme support) or crosses above H3 (opposite resistance)
+            exit_long = close_price <= l4 or close_price >= h3
         elif position == -1:
-            # Exit short if price returns to R3-S3 midpoint or reaches S4 (take profit)
-            mid_point = (r3 + s3) / 2
-            exit_short = close_price >= mid_point or close_price <= s4
+            # Exit short if price reaches H4 (extreme resistance) or crosses below L3 (opposite support)
+            exit_short = close_price >= h4 or close_price <= l3
         
         # Trading logic
         if enter_long and position != 1:
