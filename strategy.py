@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with 1w volume confirmation and chop regime filter
-# - Uses weekly HTF for trend context and volume confirmation
-# - Enters long when price breaks above Camarilla H3 level with volume > 1.5x weekly average
-# - Enters short when price breaks below Camarilla L3 level with volume > 1.5x weekly average
-# - Only trades when weekly choppiness index < 38.2 (strong trending regime)
-# - Uses discrete position sizing (±0.25) to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots work in both bull (breakouts with volume) and bear (breakdowns with volume) markets
-# - Weekly timeframe provides reliable regime filter and volume confirmation for 12h entries
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+# - Donchian levels from 4h: upper/lower bands act as dynamic support/resistance
+# - Long when price breaks above upper band with 1d volume > 1.5x 20-period average AND 1w close > 1w SMA(50) (bullish weekly trend)
+# - Short when price breaks below lower band with 1d volume > 1.5x 20-period average AND 1w close < 1w SMA(50) (bearish weekly trend)
+# - ATR stoploss: exit when price moves 2.5*ATR against position from entry
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
+# - Weekly trend filter ensures we only trade in direction of higher timeframe momentum, reducing false breakouts
+# - Volume confirmation ensures breakouts have participation, avoiding low-conviction moves
 
-name = "12h_1w_camarilla_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_1w_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,57 +29,51 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0  # track entry price for ATR-based stoploss
     
-    # Load weekly data ONCE before loop for Camarilla pivots, volume, and chop regime
+    # Load 1d data ONCE before loop for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return signals
+    
+    # Load 1w data ONCE before loop for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return signals
     
-    # Pre-compute weekly indicators
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Pre-compute 1d volume SMA (20-period)
+    volume_1d = df_1d['volume'].values
+    volume_series = pd.Series(volume_1d)
+    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute 1w close and SMA(50) for trend filter
     close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    close_1w_series = pd.Series(close_1w)
+    sma_50_1w = close_1w_series.rolling(window=50, min_periods=50).mean().values
     
-    # Calculate Camarilla pivot levels (based on previous weekly bar)
-    # H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), etc.
-    weekly_range = high_1w - low_1w
-    camarilla_h3 = close_1w + 1.1 * weekly_range  # H3 resistance level
-    camarilla_l3 = close_1w - 1.1 * weekly_range  # L3 support level
-    camarilla_h4 = close_1w + 1.5 * weekly_range  # H4 (stoploss level)
-    camarilla_l4 = close_1w - 1.5 * weekly_range  # L4 (stoploss level)
+    # Align 1d and 1w indicators to 4h timeframe
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Weekly volume SMA (20-period)
-    volume_series = pd.Series(volume_1w)
-    volume_sma_20_1w = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Pre-compute 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly choppiness index (14-period)
-    # CHOP = 100 * log10(sum(ATR14) / (max(high,n) - min(low,n))) / log10(n)
-    tr1 = pd.Series(high_1w).shift(1) - pd.Series(low_1w).shift(1)
-    tr2 = abs(pd.Series(high_1w).shift(1) - pd.Series(close_1w).shift(1))
-    tr3 = abs(pd.Series(low_1w).shift(1) - pd.Series(close_1w).shift(1))
-    tr_1w = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
-    max_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    chop_denominator = max_high_14 - min_low_14
-    # Avoid division by zero
-    chop_denominator = np.where(chop_denominator == 0, 1e-10, chop_denominator)
-    chop_ratio = atr_14_1w / chop_denominator
-    chop_1w = 100 * np.log10(chop_ratio) / np.log10(14)
-    
-    # Align weekly indicators to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
-    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
+    # Pre-compute 4h ATR(14) for stoploss
+    tr1 = pd.Series(high).shift(1) - pd.Series(low).shift(1)
+    tr2 = abs(pd.Series(high).shift(1) - pd.Series(close).shift(1))
+    tr3 = abs(pd.Series(low).shift(1) - pd.Series(close).shift(1))
+    tr_4h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_sma_20_aligned[i]) or np.isnan(chop_1w_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(close_1w_aligned[i]) or 
+            np.isnan(sma_50_1w_aligned[i]) or np.isnan(atr_14_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -89,51 +83,56 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         
-        # Camarilla breakout conditions (using previous bar's levels)
-        breakout_long = price_close > camarilla_h3_aligned[i-1]  # Close above H3
-        breakout_short = price_close < camarilla_l3_aligned[i-1]  # Close below L3
+        # Donchian breakout conditions
+        breakout_long = price_close > donchian_upper[i-1]  # Close above previous period's upper band
+        breakout_short = price_close < donchian_lower[i-1]  # Close below previous period's lower band
         
-        # Volume confirmation: current volume > 1.5x 20-period weekly average
+        # Volume confirmation: current volume > 1.5x 20-period average (using 1d aligned volume)
         vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
-        # Chop regime filter: only trade when weekly chop < 38.2 (strong trending regime)
-        chop_filter = chop_1w_aligned[i] < 38.2
+        # Weekly trend filter: 1w close above/below 50-period SMA
+        weekly_uptrend = close_1w_aligned[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close_1w_aligned[i] < sma_50_1w_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Camarilla H3 breakout + volume confirmation + chop filter
-        if breakout_long and vol_confirm and chop_filter:
+        # Long: Donchian upper breakout + volume confirmation + weekly uptrend
+        if breakout_long and vol_confirm and weekly_uptrend:
             enter_long = True
         
-        # Short: Camarilla L3 breakdown + volume confirmation + chop filter
-        if breakout_short and vol_confirm and chop_filter:
+        # Short: Donchian lower breakdown + volume confirmation + weekly downtrend
+        if breakout_short and vol_confirm and weekly_downtrend:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla breakout or regime change
+        # Exit conditions: ATR-based stoploss or opposite Donchian breakout
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below L3 OR chop regime becomes too high
-            exit_long = (price_close < camarilla_l3_aligned[i-1]) or (chop_1w_aligned[i] >= 38.2)
+            # Exit long if price drops 2.5*ATR below entry price OR breaks below lower band
+            exit_long = (price_close < entry_price - 2.5 * atr_14_4h[i]) or (price_close < donchian_lower[i-1])
         elif position == -1:
-            # Exit short if price breaks above H3 OR chop regime becomes too high
-            exit_short = (price_close > camarilla_h3_aligned[i-1]) or (chop_1w_aligned[i] >= 38.2)
+            # Exit short if price rises 2.5*ATR above entry price OR breaks above upper band
+            exit_short = (price_close > entry_price + 2.5 * atr_14_4h[i]) or (price_close > donchian_upper[i-1])
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
+            entry_price = price_close
             signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
+            entry_price = price_close
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
+            entry_price = 0.0
             signals[i] = 0.0
         elif position == -1 and exit_short:
             position = 0
+            entry_price = 0.0
             signals[i] = 0.0
         else:
             # Maintain current position
