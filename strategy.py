@@ -10,6 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # - Uses discrete position sizing (0.25) to minimize fee churn
 # - Target: 20-50 trades/year to stay within fee drag limits while capturing strong trending moves
 # - ADX filter ensures we only trade when weekly trend is strong, reducing whipsaws in ranging markets
+# - Works in both bull and bear markets by filtering for strong weekly trends only
 
 name = "4h_1d_1w_donchian_volume_adx_v1"
 timeframe = "4h"
