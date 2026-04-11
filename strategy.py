@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_funding_zscore_mean_reversion
-# Strategy: Funding rate mean reversion with weekly trend filter and volume confirmation
-# Timeframe: 1d
+# 6h_1d_elder_ray_zone_v1
+# Strategy: Elder Ray Power Zone with 1d trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Extreme funding rates (Z-score) signal mean reversion. Weekly trend filter ensures
-# trades align with higher timeframe momentum. Volume confirmation filters weak signals.
-# Works in bull by fading euphoria and in bear by fading panic.
+# Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) identifies
+# strong/weak price action relative to trend. Trade when both powers align with 1d EMA trend
+# and volume confirms. Works in bull via bull power strength, in bear via bear power weakness.
+# Low turnover expected due to dual confirmation requirements.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_funding_zscore_mean_reversion"
-timeframe = "1d"
+name = "6h_1d_elder_ray_zone_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -26,47 +27,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_uptrend = ema_50_1w > np.roll(ema_50_1w, 1)  # Rising EMA
-    weekly_uptrend[0] = False  # First value invalid
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    # Daily EMA13 for trend filter
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_trend = ema13_1d > np.roll(ema13_1d, 1)  # Rising EMA13 = uptrend
+    ema13_trend[0] = False  # First value invalid
+    ema13_trend_aligned = align_htf_to_ltf(prices, df_1d, ema13_trend)
     
-    # Daily ATR(14) for volatility normalization
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 6h EMA13 for Elder Ray calculation
+    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Funding rate proxy using price deviation from weekly VWAP
-    # Since we don't have direct funding data, use deviation from weekly VWAP as proxy
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    # Weekly VWAP calculation
-    pv_sum = pd.Series(pv).rolling(window=5*7*12, min_periods=5*7*12).sum()  # Approx 5 days of 12h periods per week
-    vol_sum = pd.Series(volume).rolling(window=5*7*12, min_periods=5*7*12).sum()
-    weekly_vwap = pv_sum / vol_sum
-    weekly_vwap = np.nan_to_num(weekly_vwap, nan=close[0])
+    # Elder Ray Power
+    bull_power = high - ema13_6h  # Strength above trend
+    bear_power = ema13_6h - low   # Weakness below trend
     
-    # Deviation from weekly VWAP as funding proxy
-    deviation = (close - weekly_vwap) / atr
-    
-    # Z-score of deviation over 60-day lookback
-    def rolling_zscore(arr, window):
-        mean = pd.Series(arr).rolling(window=window, min_periods=window).mean()
-        std = pd.Series(arr).rolling(window=window, min_periods=window).std()
-        return (arr - mean) / (std + 1e-10)
-    
-    zscore = rolling_zscore(deviation, 60)
+    # Smooth powers (3-period) to reduce noise
+    bull_power_smooth = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().values
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,26 +58,33 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after zscore warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(zscore[i]) or np.isnan(weekly_uptrend_aligned[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(atr[i])):
+        if (np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(ema13_trend_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion signals with weekly trend filter
-        long_signal = (zscore[i] < -2.0) and weekly_uptrend_aligned[i] and vol_spike[i]
-        short_signal = (zscore[i] > 2.0) and (not weekly_uptrend_aligned[i]) and vol_spike[i]
+        # Entry conditions
+        long_entry = (bull_power_smooth[i] > 0 and  # Bull power positive
+                     bear_power_smooth[i] < 0 and   # Bear power negative (confirms trend)
+                     ema13_trend_aligned[i] and     # 1d uptrend
+                     vol_spike[i])                  # Volume confirmation
         
-        # Exit conditions: Z-score reverts to mean or opposite extreme
-        exit_long = position == 1 and (zscore[i] > -0.5 or zscore[i] > 2.0)
-        exit_short = position == -1 and (zscore[i] < 0.5 or zscore[i] < -2.0)
+        short_entry = (bull_power_smooth[i] < 0 and  # Bull power negative
+                      bear_power_smooth[i] > 0 and   # Bear power positive
+                      not ema13_trend_aligned[i] and # 1d downtrend
+                      vol_spike[i])                  # Volume confirmation
+        
+        # Exit conditions: power divergence or trend change
+        exit_long = position == 1 and (bull_power_smooth[i] <= 0 or not ema13_trend_aligned[i])
+        exit_short = position == -1 and (bear_power_smooth[i] <= 0 or ema13_trend_aligned[i])
         
         # Trading logic
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
