@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -63,8 +63,8 @@ def generate_signals(prices):
     # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 4h trend filter: close > 20 EMA for long, < 20 EMA for short (more responsive)
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # 4h trend filter: close > 50 EMA for long, < 50 EMA for short
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -72,7 +72,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_20[i])):
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
@@ -82,7 +82,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
-        ema_val = ema_20[i]
+        ema_val = ema_50[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma
@@ -90,10 +90,10 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely low volatility
         vol_filter = atr_val > 0.004 * price_close  # ATR > 0.4% of price
         
-        # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA20
+        # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA50
         long_signal = volume_confirmed and vol_filter and (price_low < s3_4h[i]) and (price_close > ema_val)
         
-        # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA20
+        # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA50
         short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i]) and (price_close < ema_val)
         
         # Exit when price returns to 1d pivot level
@@ -104,10 +104,10 @@ def generate_signals(prices):
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -116,15 +116,15 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
 # Hypothesis: 1d Camarilla levels act as strong support/resistance for 4h price action.
 # Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.5x average),
-# sufficient volatility (ATR > 0.4% of price), and above 4h 20 EMA (trend filter).
-# Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA20.
+# sufficient volatility (ATR > 0.4% of price), and above 4h 50 EMA (trend filter).
+# Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA50.
 # Exits when price returns to 1d pivot level, capturing mean reversion.
-# Reduced EMA period from 50 to 20 for more responsiveness in changing markets.
-# Designed for 20-50 trades per year (~80-200/4 years) on 4h timeframe, balancing opportunity and fee cost.
+# Reduced trade frequency by using 50 EMA instead of 20 EMA for more stable trend filtering.
+# Designed for 15-30 trades per year (~60-120/4 years) on 4h timeframe, balancing opportunity and fee cost.
 # Works in both bull (buying dips) and bear (selling rallies) markets.
