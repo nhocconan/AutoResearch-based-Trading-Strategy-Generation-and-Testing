@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
-# - Long: price breaks above Camarilla H3 level, volume > 1.5x 20-period avg, 1w EMA(21) bullish (price > EMA)
-# - Short: price breaks below Camarilla L3 level, volume > 1.5x 20-period avg, 1w EMA(21) bearish (price < EMA)
-# - Exit: price returns to Camarilla pivot point (PP)
-# - Uses discrete position sizing ±0.25 to limit drawdown and reduce fee churn
-# - Target: 15-25 trades/year (60-100 total over 4 years) to stay within fee drag limits
-# - Camarilla levels derived from prior day's range work well in both trending and ranging markets
-# - 1w EMA filter ensures we only trade with the higher timeframe trend, reducing whipsaw in bear markets
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d ADX regime filter
+# - Long: price breaks above 20-period Donchian high, volume > 1.5x 20-period avg, 1d ADX > 25 (trending)
+# - Short: price breaks below 20-period Donchian low, volume > 1.5x 20-period avg, 1d ADX > 25 (trending)
+# - Exit: price returns to 10-period Donchian midpoint (mean reversion within channel)
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within fee drag limits
+# - Donchian channels work well in both trending and ranging markets when combined with ADX filter
+# - Volume confirmation ensures breakouts have conviction
+# - 1d ADX > 25 ensures we only trade in trending regimes, avoiding whipsaws in chop
 
-name = "1d_1w_camarilla_ema_volume_v2"
-timeframe = "1d"
+name = "12h_1d_donchian_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,46 +30,60 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop for EMA trend filter (MTF rule compliance)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
-        return signals
-    
-    # Pre-compute 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Load 1d data ONCE before loop for Camarilla pivot calculation
+    # Load 1d data ONCE before loop for ADX regime filter (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d OHLC for Camarilla levels
+    # Pre-compute 1d ADX(14) for regime detection
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
-    # PP = (H + L + C) / 3
-    # H3 = C + ((H-L) * 1.1/4)
-    # L3 = C - ((H-L) * 1.1/4)
-    PP = (high_1d + low_1d + close_1d) / 3
-    H3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    L3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high_1d[0] - low_1d[0]
     
-    # Align Camarilla levels to 1d timeframe (same timeframe, so identity alignment)
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Pre-compute 1d volume confirmation (20-period average)
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr14
+    di_minus = 100 * dm_minus_14 / tr14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 12h timeframe (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute 12h Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    midpoint_10 = (pd.Series(high).rolling(window=10, min_periods=10).max().values +
+                   pd.Series(low).rolling(window=10, min_periods=10).min().values) / 2
+    
+    # Pre-compute 12h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(PP_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(midpoint_10[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -76,28 +91,27 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Camarilla levels
-        PP_level = PP_aligned[i]
-        H3_level = H3_aligned[i]
-        L3_level = L3_aligned[i]
+        # Donchian levels
+        upper_channel = highest_20[i]
+        lower_channel = lowest_20[i]
+        midpoint = midpoint_10[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # 1w EMA trend filter
-        ema_bullish = close_price > ema_21_1w_aligned[i]
-        ema_bearish = close_price < ema_21_1w_aligned[i]
+        # Regime filter: 1d ADX > 25 (trending market)
+        trending = adx_aligned[i] > 25
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above Camarilla H3, volume confirmation, 1w EMA bullish
-        if close_price > H3_level and vol_confirm and ema_bullish:
+        # Long breakout: price above Donchian high, volume confirmation, trending
+        if close_price > upper_channel and vol_confirm and trending:
             enter_long = True
         
-        # Short breakout: price below Camarilla L3, volume confirmation, 1w EMA bearish
-        if close_price < L3_level and vol_confirm and ema_bearish:
+        # Short breakout: price below Donchian low, volume confirmation, trending
+        if close_price < lower_channel and vol_confirm and trending:
             enter_short = True
         
         # Exit conditions
@@ -105,11 +119,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to pivot point
-            exit_long = close_price <= PP_level
+            # Exit long if price returns to 10-period midpoint (mean reversion)
+            exit_long = close_price <= midpoint
         elif position == -1:
-            # Exit short if price returns to pivot point
-            exit_short = close_price >= PP_level
+            # Exit short if price returns to 10-period midpoint (mean reversion)
+            exit_short = close_price >= midpoint
         
         # Trading logic
         if enter_long and position != 1:
