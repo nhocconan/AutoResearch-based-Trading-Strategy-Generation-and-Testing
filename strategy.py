@@ -1,16 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_cci_extreme_v1"
-timeframe = "6h"
+name = "12h_1w_1d_camarilla_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,77 +20,90 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d and 1w data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 14 or len(df_1w) < 4:
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate 1d CCI (20-period)
-    tp_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
-    cci_1d = np.where(mad == 0, 0, cci_1d)
+    # Calculate weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate 1w CCI (14-period)
-    tp_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3
-    sma_tp_1w = pd.Series(tp_1w).rolling(window=14, min_periods=14).mean().values
-    mad_1w = pd.Series(tp_1w).rolling(window=14, min_periods=14).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    cci_1w = (tp_1w - sma_tp_1w) / (0.015 * mad_1w)
-    cci_1w = np.where(mad_1w == 0, 0, cci_1w)
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return signals
     
-    # Shift by 1 to use only completed bars (avoid look-ahead)
-    cci_1d = np.roll(cci_1d, 1)
-    cci_1w = np.roll(cci_1w, 1)
-    cci_1d[0] = np.nan
-    cci_1w[0] = np.nan
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align HTF CCI to 6t timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
-    cci_1w_aligned = align_htf_to_ltf(prices, df_1w, cci_1w)
+    # Previous day's range
+    range_1d = high_1d - low_1d
     
-    # Volume confirmation: volume > 1.3x 20-period average (6t)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels (based on previous close)
+    l4 = close_1d - (range_1d * 1.1000)
+    l3 = close_1d - (range_1d * 1.1000 / 2)
+    h3 = close_1d + (range_1d * 1.1000 / 2)
+    h4 = close_1d + (range_1d * 1.1000)
     
-    # Trend filter: 50-period EMA on 6t
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Shift by 1 to use only completed 1d bars
+    l4 = np.roll(l4, 1)
+    l3 = np.roll(l3, 1)
+    h3 = np.roll(h3, 1)
+    h4 = np.roll(h4, 1)
+    l4[0] = np.nan
+    l3[0] = np.nan
+    h3[0] = np.nan
+    h4[0] = np.nan
     
-    for i in range(100, n):
+    # Align 1d Camarilla levels to 12h timeframe
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    
+    # Volume confirmation: volume > 2.0x 50-period average on 12h
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    
+    for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(cci_1w_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
+        if (np.isnan(l4_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
-        vol_ma = vol_ma_20[i]
+        vol_ma = vol_ma_50[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        volume_confirmed = volume_current > 2.0 * vol_ma
         
-        # Trend direction
-        uptrend = price_close > ema_50[i]
-        downtrend = price_close < ema_50[i]
+        # Weekly trend filter
+        weekly_uptrend = price_close > ema_50_1w_aligned[i]
+        weekly_downtrend = price_close < ema_50_1w_aligned[i]
         
-        # CCI extreme levels
-        cci_1d_val = cci_1d_aligned[i]
-        cci_1w_val = cci_1w_aligned[i]
+        # Long: price breaks above H3/H4 with volume in weekly uptrend
+        long_signal = volume_confirmed and weekly_uptrend and (price_high > h3_aligned[i] or price_high > h4_aligned[i])
         
-        # Long: CCI < -100 on both 1d and 1w (oversold) + volume + uptrend
-        long_signal = volume_confirmed and uptrend and (cci_1d_val < -100) and (cci_1w_val < -100)
+        # Short: price breaks below L3/L4 with volume in weekly downtrend
+        short_signal = volume_confirmed and weekly_downtrend and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
         
-        # Short: CCI > 100 on both 1d and 1w (overbought) + volume + downtrend
-        short_signal = volume_confirmed and downtrend and (cci_1d_val > 100) and (cci_1w_val > 100)
+        # Exit when price returns to the previous day's close (pivot point)
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        if np.isnan(prev_close_aligned[i]):
+            pivot_value = price_close
+        else:
+            pivot_value = prev_close_aligned[i]
         
-        # Exit when CCI returns to neutral zone (-50 to 50) on 1d
-        exit_long = position == 1 and (cci_1d_val > -50)
-        exit_short = position == -1 and (cci_1d_val < 50)
+        exit_long = position == 1 and price_close < pivot_value
+        exit_short = position == -1 and price_close > pivot_value
         
         # Trading logic
         if long_signal and position != 1:
@@ -112,12 +124,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: CCI extreme readings on both daily and weekly timeframes signal overextended
-# market conditions likely to reverse. In bear markets, extreme negative CCI on both
-# timeframes often precedes bounces; in bull markets, extreme positive CCI precedes pullbacks.
-# Volume confirmation ensures institutional participation. Trend filter (50 EMA) aligns
-# with intermediate-term direction to avoid counter-trend traps. The dual timeframe
-# requirement (1d AND 1w) increases signal reliability. Exits on return to neutral CCI
-# (-50 to 50) capture mean reversion while limiting exposure. Designed for low trade
-# frequency (target: 15-35 trades/year) to minimize fee drag in 6h timeframe. Works
-# across BTC, ETH, and SOL by identifying exhaustion points in any market regime.
+# Hypothesis: Camarilla pivot breakout strategy on 12h timeframe with weekly trend filter.
+# Uses 1d Camarilla levels (L3, L4, H3, H4) from the previous day's price action.
+# Enters long when price breaks above H3 or H4 with volume confirmation (>2x average volume) during weekly uptrend (price > weekly 50 EMA).
+# Enters short when price breaks below L3 or L4 with volume confirmation during weekly downtrend (price < weekly 50 EMA).
+# Exits when price returns to the previous day's close (pivot point).
+# The Camarilla levels identify key support/resistance levels where price often reverses or accelerates.
+# Weekly EMA(50) filter ensures we trade with the higher timeframe momentum, reducing whipsaw.
+# Volume confirmation (>2x average) reduces false breakouts.
+# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag on 12h timeframe.
+# Works in both bull and bear markets by trading breakouts in the direction of the weekly trend.
