@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_kama_volatility_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_keltner_channel_breakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,69 +21,98 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return signals
     
-    # Calculate KAMA on 12h close
-    close_12h = df_12h['close'].values
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)
-    # ER = |change| / volatility, avoid division by zero
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    # Calculate weekly ATR for Keltner Channels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1w = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Align 12h KAMA to 4h
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    # Calculate weekly Keltner Channels (20, 2.0)
+    ema_close_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_close_1w + 2.0 * atr_1w
+    lower_keltner = ema_close_1w - 2.0 * atr_1w
     
-    # Volatility filter: ATR > 1.5 * ATR(50)
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr > 1.5 * atr_50
+    # Align weekly Keltner Channels to daily timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
     
-    # Volume confirmation: volume > 2.0 * volume MA(20)
+    # Volume confirmation: volume > 1.5x 20-period average (daily)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > 2.0 * vol_ma_20
+    
+    # Trend filter: ADX > 25 for trending market (daily)
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    tr1_d = high - low
+    tr2_d = np.abs(high - np.roll(close, 1))
+    tr3_d = np.abs(low - np.roll(close, 1))
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    tr_d[0] = tr1_d[0]
+    
+    atr_d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / (atr_d + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / (atr_d + 1e-10)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    trending_market = adx > 25
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(atr_50[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
-        kama_val = kama_aligned[i]
-        vol_filt = volatility_filter[i]
-        vol_conf = volume_confirmed[i]
+        volume_current = volume[i]
+        upper_keltner = upper_keltner_aligned[i]
+        lower_keltner = lower_keltner_aligned[i]
+        adx_val = adx[i]
+        trending = trending_market[i]
         
-        # Entry signals
-        long_signal = price_close > kama_val and vol_filt and vol_conf
-        short_signal = price_close < kama_val and vol_filt and vol_conf
+        # Volume confirmation
+        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
+        
+        # Entry signals - only in trending markets
+        long_signal = False
+        short_signal = False
+        
+        # Long: price breaks above upper Keltner channel with volume and trend
+        if price_high > upper_keltner and volume_confirmed and trending:
+            long_signal = True
+        
+        # Short: price breaks below lower Keltner channel with volume and trend
+        if price_low < lower_keltner and volume_confirmed and trending:
+            short_signal = True
         
         # Exit conditions
-        exit_long = position == 1 and price_close < kama_val
-        exit_short = position == -1 and price_close > kama_val
-        # Stop loss
-        stop_long = position == 1 and price_low < (entry_price - 2.5 * atr[i])
-        stop_short = position == -1 and price_high > (entry_price + 2.5 * atr[i])
+        # Stop loss conditions
+        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_d[i])
+        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_d[i])
+        
+        # Exit when price returns to middle of Keltner channel (mean reversion within trend)
+        middle_keltner = (upper_keltner + lower_keltner) / 2.0
+        exit_long = position == 1 and price_close < middle_keltner
+        exit_short = position == -1 and price_close > middle_keltner
         
         # Trading logic
         if long_signal and position != 1:
@@ -106,10 +135,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: KAMA volatility breakout strategy with volume confirmation on 4h timeframe.
-# Uses 12h KAMA to filter noise and identify the true trend direction.
-# Enters long when price crosses above 12h KAMA with high volatility (ATR > 1.5*ATR50) and high volume (>2x avg volume).
-# Enters short when price crosses below 12h KAMA with same conditions.
-# Uses ATR-based stop loss (2.5x) and exits when price crosses back below/above KAMA.
-# Designed for low trade frequency (<50 trades/year) to minimize fee drag.
-# Works in both bull and bear markets by adapting to volatility regimes and using KAMA's adaptive smoothing.
+# Hypothesis: Keltner Channel breakout strategy with volume confirmation and ADX trend filter on daily timeframe.
+# Enters long when price breaks above weekly Keltner upper channel (EMA20 + 2*ATR) with volume confirmation (>1.5x avg volume) in trending markets (ADX > 25).
+# Enters short when price breaks below weekly Keltner lower channel (EMA20 - 2*ATR) with volume confirmation and ADX > 25.
+# Uses weekly timeframe for Keltner Channels to capture multi-week breakouts and avoid false signals.
+# Volume confirmation ensures institutional participation, ADX filter avoids whipsaws in sideways markets.
+# Exits when price returns to the middle of the channel or ATR stop loss (2.0x) is hit.
+# Designed for 1d timeframe with tight entry conditions to target 30-100 total trades over 4 years (7-25/year).
+# Works in both bull and bear markets by trading breakouts in either direction with trend filter.
