@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Williams Alligator with 1w trend filter and volume confirmation.
-# The Alligator consists of three SMAs (Jaw=13, Teeth=8, Lips=5) with future offsets.
-# Enter long when Lips > Teeth > Jaw (bullish alignment) and price > Lips, with 1w close > 1w SMA(50) and volume expansion.
-# Enter short when Lips < Teeth < Jaw (bearish alignment) and price < Lips, with 1w close < 1w SMA(50) and volume expansion.
-# Uses 1d timeframe for Alligator calculation and 1w for trend filter.
-# Designed for 15-35 trades/year on 1d timeframe with focus on trend alignment.
-# Volume filter ensures breakouts have conviction, reducing false signals.
-# 1w trend filter prevents counter-trend trading in choppy markets.
+# Hypothesis: 6h Volume Weighted Average Price (VWAP) deviation with 12h trend filter.
+# Long when price > VWAP and rising VWAP slope, with 12h EMA(50) uptrend and volume expansion.
+# Short when price < VWAP and falling VWAP slope, with 12h EMA(50) downtrend and volume expansion.
+# VWAP resets daily, capturing institutional participation and mean reversion to fair value.
+# Designed for 15-35 trades/year on 6h timeframe with focus on institutional flow.
+# Volume filter ensures moves have conviction, reducing false signals in chop.
+# 12h trend filter prevents counter-trading in strong trends.
 
-name = "1d_1w_alligator_volume_trend_v1"
-timeframe = "1d"
+name = "6h_12h_vwap_deviation_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,65 +26,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Alligator (already the base timeframe, but we use it for consistency)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d Alligator components (SMAs with specific periods)
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # Using SMA as approximation for SMMA (common in implementations)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Align 12h EMA to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1w SMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    # Calculate daily VWAP (resets at 00:00 UTC)
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3.0
+    # Price * volume
+    pv = typical_price * volume
+    # Cumulative sums
+    cum_pv = np.cumsum(pv)
+    cum_volume = np.cumsum(volume)
+    # VWAP = cumulative PV / cumulative volume
+    vwap = np.divide(cum_pv, cum_volume, out=np.zeros_like(cum_pv), where=cum_volume!=0)
+    # Reset VWAP at daily boundary (00:00 UTC)
+    dates = pd.to_datetime(prices['open_time']).date
+    # Find where date changes
+    date_changes = np.concatenate(([True], dates[1:] != dates[:-1]))
+    # Reset cumulative sums at each new day
+    cum_pv = np.where(date_changes, pv, cum_pv + pv)
+    cum_volume = np.where(date_changes, volume, cum_volume + volume)
+    vwap = np.divide(cum_pv, cum_volume, out=np.zeros_like(cum_pv), where=cum_volume!=0)
     
-    # Align 1w SMA to 1d timeframe
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # Calculate VWAP slope (3-period change)
+    vwap_slope = vwap - np.roll(vwap, 3)
+    # Handle first 3 values
+    vwap_slope[:3] = 0
+    
+    # Calculate price deviation from VWAP as percentage
+    price_dev = (close - vwap) / vwap * 100
     
     # Calculate volume moving average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(13, n):  # Start after Jaw period (longest SMA)
+    for i in range(20, n):  # Start after VWAP and volume MA warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(sma_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap[i]) or np.isnan(vwap_slope[i]) or 
+            np.isnan(price_dev[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume filter: current volume > 1.5 * 20-period average volume
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Determine 1w trend direction
-        is_uptrend = close[i] > sma_50_1w_aligned[i]
-        is_downtrend = close[i] < sma_50_1w_aligned[i]
+        # Determine 12h trend direction
+        is_uptrend = close[i] > ema_50_12h_aligned[i]
+        is_downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Alligator alignment conditions
-        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        bearish_alignment = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-        
-        # Price relative to Lips (strongest signal)
-        price_above_lips = close[i] > lips[i]
-        price_below_lips = close[i] < lips[i]
+        # VWAP deviation conditions
+        price_above_vwap = price_dev[i] > 0.15  # Price > VWAP by 0.15%
+        price_below_vwap = price_dev[i] < -0.15  # Price < VWAP by 0.15%
+        vwap_rising = vwap_slope[i] > 0  # VWAP slope positive
+        vwap_falling = vwap_slope[i] < 0  # VWAP slope negative
         
         # Entry conditions
-        bullish_entry = bullish_alignment and price_above_lips and vol_filter and is_uptrend
-        bearish_entry = bearish_alignment and price_below_lips and vol_filter and is_downtrend
+        bullish_entry = price_above_vwap and vwap_rising and vol_filter and is_uptrend
+        bearish_entry = price_below_vwap and vwap_falling and vol_filter and is_downtrend
         
-        # Exit conditions: opposite alignment
-        exit_long = bearish_alignment  # Bearish alignment triggers long exit
-        exit_short = bullish_alignment  # Bullish alignment triggers short exit
+        # Exit conditions: price crosses VWAP in opposite direction
+        exit_long = price_dev[i] < -0.05  # Price crosses below VWAP by 0.05%
+        exit_short = price_dev[i] > 0.05   # Price crosses above VWAP by 0.05%
         
         # Priority: entry > exit > hold
         if bullish_entry and position != 1:
