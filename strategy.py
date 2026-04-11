@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h ADX trend filter
-# - Long: price breaks above Donchian upper band (20-period high), volume > 1.5x 20-period avg, 12h ADX(14) > 25 (trending)
-# - Short: price breaks below Donchian lower band (20-period low), volume > 1.5x 20-period avg, 12h ADX(14) > 25 (trending)
-# - Exit: price returns to Donchian midpoint (mean of upper/lower bands)
+# Hypothesis: 1d Camarilla pivot breakout with 1w trend filter and volume confirmation
+# - Long: price breaks above Camarilla H3 level, volume > 1.5x 20-period avg, 1w ADX(14) > 25 (trending)
+# - Short: price breaks below Camarilla L3 level, volume > 1.5x 20-period avg, 1w ADX(14) > 25 (trending)
+# - Exit: price returns to Camarilla pivot point (PP) or ATR-based stop (2x ATR)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee drag limits
-# - Donchian channels work in both trending and ranging markets when combined with volume and trend filters
-# - Using 12h HTF for ADX provides smoother trend signal than 1d, reducing whipsaw in ranging markets
+# - Target: 15-25 trades/year (60-100 total over 4 years) to stay within fee drag limits
+# - Camarilla pivots work well in ranging markets; ADX filter ensures we only trade in trending conditions
+# - Volume confirmation avoids false breakouts
 
-name = "4h_12h_donchian_adx_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_adx_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,28 +29,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for ADX trend filter (MTF rule compliance)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load 1w data ONCE before loop for ADX trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return signals
     
-    # Pre-compute 12h ADX(14) for trend filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1w ADX(14) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr_12h = np.maximum(high_12h - low_12h, np.maximum(np.abs(high_12h - np.roll(close_12h, 1)), np.abs(low_12h - np.roll(close_12h, 1))))
-    tr_12h[0] = high_12h[0] - low_12h[0]
+    tr_1w = np.maximum(high_1w - low_1w, np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), np.abs(low_1w - np.roll(close_1w, 1))))
+    tr_1w[0] = high_1w[0] - low_1w[0]
     
     # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
     dm_plus[0] = 0
     dm_minus[0] = 0
     
     # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    tr_14 = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
@@ -62,15 +62,33 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align 12h ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Align 1w ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Pre-compute 4h Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2
+    # Pre-compute Camarilla pivot levels (based on previous day's OHLC)
+    # Camarilla levels: H4, H3, H2, H1, PP, L1, L2, L3, L4
+    # H3 = PP + 1.1 * (High - Low) / 2
+    # L3 = PP - 1.1 * (High - Low) / 2
+    # PP = (High + Low + Close) / 3
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Shift OHLC by 1 to use previous day's data (no look-ahead)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    
+    # First bar: use current values (will be overwritten anyway due to warmup)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Pivot point
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    
+    # Camarilla H3 and L3 levels
+    camarilla_h3 = pp + 1.1 * (prev_high - prev_low) / 2.0
+    camarilla_l3 = pp - 1.1 * (prev_high - prev_low) / 2.0
+    
+    # Pre-compute volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Pre-compute ATR for stoploss
@@ -80,7 +98,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(donch_mid[i]) or
+        if (np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or np.isnan(pp[i]) or
             np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
@@ -89,27 +107,27 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Donchian levels
-        upper_band = donch_high[i]
-        lower_band = donch_low[i]
-        mid_band = donch_mid[i]
+        # Camarilla levels
+        h3_level = camarilla_h3[i]
+        l3_level = camarilla_l3[i]
+        pivot_point = pp[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Trend filter: 12h ADX > 25 (indicates trending market)
+        # Trend filter: 1w ADX > 25 (indicates trending market)
         adx_trend = adx_aligned[i] > 25
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above Donchian upper band, volume confirmation, trending
-        if close_price > upper_band and vol_confirm and adx_trend:
+        # Long breakout: price above Camarilla H3, volume confirmation, trending
+        if close_price > h3_level and vol_confirm and adx_trend:
             enter_long = True
         
-        # Short breakout: price below Donchian lower band, volume confirmation, trending
-        if close_price < lower_band and vol_confirm and adx_trend:
+        # Short breakout: price below Camarilla L3, volume confirmation, trending
+        if close_price < l3_level and vol_confirm and adx_trend:
             enter_short = True
         
         # Exit conditions
@@ -117,11 +135,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to midpoint
-            exit_long = (close_price <= mid_band)
+            # Exit long if price returns to pivot point or ATR-based stop (2x ATR)
+            exit_long = (close_price <= pivot_point) or (close_price <= entry_price - 2.0 * atr_14[i])
         elif position == -1:
-            # Exit short if price returns to midpoint
-            exit_short = (close_price >= mid_band)
+            # Exit short if price returns to pivot point or ATR-based stop (2x ATR)
+            exit_short = (close_price >= pivot_point) or (close_price >= entry_price + 2.0 * atr_14[i])
         
         # Track entry price for stoploss calculation
         if enter_long or enter_short:
