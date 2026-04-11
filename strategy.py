@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v2
-# Strategy: 4h Camarilla pivot breakout with 1d volume confirmation
+# 4h_1d_camarilla_breakout_v3
+# Strategy: 4h Camarilla pivot breakout with 1d volume and ADX trend filter
 # Timeframe: 4h
 # Leverage: 1.0
 # Hypothesis: Camarilla pivot levels from prior 1d act as strong support/resistance.
-# Breakouts above/below these levels with above-average 1d volume indicate institutional participation.
-# Works in bull (breakouts continue) and bear (breakdowns continue) markets.
-# Volume filter reduces false breakouts. Target: 20-50 trades/year.
+# Breakouts above/below these levels with above-average 1d volume and ADX > 25
+# indicate institutional participation with trend strength. Works in bull (breakouts continue)
+# and bear (breakdowns continue) markets. Volume and trend filters reduce false breakouts.
+# Target: 20-50 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,7 +31,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 1d Camarilla levels from previous day
@@ -73,16 +74,60 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
+    # Calculate ADX on 1d for trend strength
+    # ADX calculation requires high, low, close
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr14 = wilders_smooth(tr, 14)
+    dm_plus_14 = wilders_smooth(dm_plus, 14)
+    dm_minus_14 = wilders_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 
+                  100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smooth(dx, 14)
+    
+    # Align ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
             np.isnan(r2_aligned[i]) or np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_avg_20_aligned[i])):
+            np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -90,15 +135,18 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
         vol_confirm = vol_1d_current > 1.5 * vol_avg_20_aligned[i]
         
-        # Breakout conditions
-        # Long: close > R1 with volume confirmation
-        # Short: close < S1 with volume confirmation
-        long_breakout = close[i] > r1_aligned[i] and vol_confirm
-        short_breakout = close[i] < s1_aligned[i] and vol_confirm
+        # Trend filter: ADX > 25 indicates strong trend
+        trend_filter = adx_aligned[i] > 25
         
-        # Exit conditions: reverse breakout
-        long_exit = close[i] < s1_aligned[i]  # price breaks below S1
-        short_exit = close[i] > r1_aligned[i]  # price breaks above R1
+        # Breakout conditions with volume and trend confirmation
+        # Long: close > R1 with volume confirmation and trend filter
+        # Short: close < S1 with volume confirmation and trend filter
+        long_breakout = close[i] > r1_aligned[i] and vol_confirm and trend_filter
+        short_breakout = close[i] < s1_aligned[i] and vol_confirm and trend_filter
+        
+        # Exit conditions: reverse breakout OR trend weakening
+        long_exit = (close[i] < s1_aligned[i]) or (adx_aligned[i] < 20)
+        short_exit = (close[i] > r1_aligned[i]) or (adx_aligned[i] < 20)
         
         if long_breakout and position != 1:
             position = 1
