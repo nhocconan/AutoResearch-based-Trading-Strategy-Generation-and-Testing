@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout + 1d volume spike + 1w ADX regime filter (low ADX for ranging markets)
+# Hypothesis: 4h Donchian breakout + 1d volume spike + 1w ADX regime filter (low ADX for ranging markets)
 # - Long: price breaks above Donchian upper channel (20-period) + 1d volume > 1.8x 20-period volume average + 1w ADX < 25
 # - Short: price breaks below Donchian lower channel (20-period) + 1d volume > 1.8x 20-period volume average + 1w ADX < 25
 # - Exit: price returns to Donchian midpoint (mean reversion)
