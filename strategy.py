@@ -1,23 +1,16 @@
-# 4h_1d_camarilla_breakout_v2
-# Strategy: 4h breakout of Camarilla pivot levels calculated from 1d OHLC, with volume confirmation and ADX trend filter
-# Timeframe: 4h
-# Leverage: 1.0
-# Hypothesis: Camarilla pivot levels derived from daily OHLC act as strong support/resistance.
-# Breakouts above R4 or below S4 with above-average volume and trending market (ADX>25)
-# capture momentum. Works in both bull and bear markets by following breakout direction.
-# Target: 20-40 trades/year.
+#!/usr/bin/env python3
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -54,7 +47,7 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # ADX trend filter (14-period)
+    # ADX trend filter (14-period) - compute only once
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -86,6 +79,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
+    # Start from index 30 to ensure sufficient data
     for i in range(30, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
@@ -93,21 +87,21 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current 1d volume (aligned)
+        # Current 1d volume (aligned) - use precomputed volume data
         vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
         vol_confirm = vol_1d_current > vol_avg_20_aligned[i]
         
         # ADX trend filter: only trade in trending markets
         trend_filter = adx[i] > 25
         
-        # Breakout conditions using Camarilla levels
+        # Breakout conditions using Camarilla levels (use previous bar's levels)
         breakout_above = close[i] > r4_aligned[i-1]  # break above R4
         breakout_below = close[i] < s4_aligned[i-1]  # break below S4
         
         long_signal = breakout_above and vol_confirm and trend_filter
         short_signal = breakout_below and vol_confirm and trend_filter
         
-        # Exit conditions: opposite breakout or volume failure or trend weakness
+        # Exit conditions
         long_exit = close[i] < s4_aligned[i-1] or not vol_confirm or adx[i] < 20
         short_exit = close[i] > r4_aligned[i-1] or not vol_confirm or adx[i] < 20
         
