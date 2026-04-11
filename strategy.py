@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_cci_volatility_v1"
-timeframe = "12h"
+name = "4h_1d_elder_ray_power_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,39 +22,34 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate daily CCI(20) for trend filter
+    # Calculate daily components for Elder Ray
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Typical price
-    tp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # SMA of typical price
-    sma_tp_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
-    # Mean deviation
-    md_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # CCI
-    cci_1d = (tp_1d - sma_tp_1d) / (0.015 * md_1d)
+    # Daily EMA(13) as the trend reference
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align CCI to 12h timeframe
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Bull Power = High - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    # Bear Power = Low - EMA13
+    bear_power_1d = low_1d - ema13_1d
     
-    # 12h Bollinger Bands for volatility breakout
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
+    # Align to 4h timeframe
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
-    # Volume confirmation: 12h volume > 1.3x 20-period average
+    # Volume confirmation: 4h volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(cci_1d_aligned[i]) or np.isnan(sma_20[i]) or np.isnan(std_20[i]) or 
-            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -62,32 +57,27 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 1.3 * vol_ma_20[i]
+        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Trend filter: CCI > 0 for long, CCI < 0 for short
-        cci = cci_1d_aligned[i]
-        trend_long = cci > 0
-        trend_short = cci < 0
-        
-        # Volatility breakout entries
-        breakout_up = price_close > upper_bb[i]
-        breakout_down = price_close < lower_bb[i]
+        # Elder Ray signals
+        bull_power = bull_power_aligned[i]
+        bear_power = bear_power_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Upside breakout + bullish trend + volume confirmation
-        if breakout_up and trend_long and vol_confirm:
+        # Long: Bull Power > 0 (bulls in control) + price above EMA13 + volume confirmation
+        if bull_power > 0 and price_close > ema13_aligned[i] and vol_confirm:
             enter_long = True
         
-        # Short: Downside breakout + bearish trend + volume confirmation
-        if breakout_down and trend_short and vol_confirm:
+        # Short: Bear Power < 0 (bears in control) + price below EMA13 + volume confirmation
+        if bear_power < 0 and price_close < ema13_aligned[i] and vol_confirm:
             enter_short = True
         
-        # Exit conditions: price crosses back to middle Bollinger Band
-        exit_long = price_close < sma_20[i]
-        exit_short = price_close > sma_20[i]
+        # Exit conditions: power signal reverses
+        exit_long = bull_power <= 0
+        exit_short = bear_power >= 0
         
         # Trading logic
         if enter_long and position != 1:
@@ -108,7 +98,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Bollinger Band volatility breakout filtered by daily CCI(20) trend.
-# In bull markets (CCI>0), we buy upside breakouts; in bear markets (CCI<0), we sell downside breakouts.
-# Volume confirmation ensures institutional participation. The daily CCI filter provides multi-timeframe
-# alignment, preventing counter-trend trades. Position size 0.25 manages drawdown. Target: 50-150 trades.
+# Hypothesis: Elder Ray Power (Bull Power = High - EMA13, Bear Power = Low - EMA13) on daily timeframe
+# with 4h execution. Works in bull markets (Bull Power > 0) and bear markets (Bear Power < 0) by
+# measuring actual bull/bear strength relative to trend. Volume confirmation ensures participation.
+# EMA13 filter prevents counter-trend trades. Position size 0.25 limits drawdown. Target: 50-150 trades.
