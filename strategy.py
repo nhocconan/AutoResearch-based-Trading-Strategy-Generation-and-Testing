@@ -1,114 +1,99 @@
 #!/usr/bin/env python3
-# 6h_1d_1w_camarilla_trix_v1
-# Strategy: 6x Camarilla pivot levels + TRIX momentum + volume confirmation
-# Timeframe: 6h
+# 12h_1w_kama_rsi_vol_v1
+# Strategy: 12h KAMA trend direction with RSI momentum and volume confirmation, 1w trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels from daily chart provide strong support/resistance zones.
-# TRIX (12) filters momentum, and volume confirms breakout/breakdown.
-# Long when price breaks above R3 with TRIX>0 and volume spike.
-# Short when price breaks below S3 with TRIX<0 and volume spike.
-# Uses weekly trend filter (price > weekly EMA200 for longs, < for shorts) to avoid counter-trend trades.
-# Low frequency (~15-30/year) to minimize fee drag, works in bull/bear via trend filter.
+# Hypothesis: KAMA adapts to market noise, providing reliable trend signals. In trending markets,
+# KAMA follows price closely; in ranging markets, it stays flat. Combined with RSI for momentum
+# confirmation and weekly trend filter to avoid counter-trend trades, this should capture major
+# moves while minimizing whipsaws. Low frequency (~15-30/year) to reduce fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_camarilla_trix_v1"
-timeframe = "6h"
+name = "12h_1w_kama_rsi_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
     
     # Load 1w data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
+    
     if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d Camarilla pivot levels (based on previous day)
-    # Formula: 
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H3 = Close + 1.0 * (High - Low)
-    # L3 = Close - 1.0 * (High - Low)
-    # H2 = Close + 0.5 * (High - Low)
-    # L2 = Close - 0.5 * (High - Low)
-    # H1 = Close + 0.25 * (High - Low)
-    # L1 = Close - 0.25 * (High - Low)
-    # We use H3/L3 as primary entry/exit levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    H3 = prev_close + 1.0 * (prev_high - prev_low)
-    L3 = prev_close - 1.0 * (prev_high - prev_low)
-    H4 = prev_close + 1.5 * (prev_high - prev_low)
-    L4 = prev_close - 1.5 * (prev_high - prev_low)
-    
-    # Align Camarilla levels to 6h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # 1w EMA200 for trend filter
+    # 1w EMA(50) for trend filter
     close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # TRIX calculation: Triple EMA of price, then 1-period percent change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.pct_change() * 100
+    # KAMA calculation
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.zeros_like(change)
+    for i in range(len(change)):
+        if volatility[i] != 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: current volume > 1.5x 30-period average
     vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_avg_20)
+    vol_avg_30 = vol_series.rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (1.5 * vol_avg_30)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Start after warmup for weekly EMA200
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(trix.iloc[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below weekly EMA200
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
+        # Trend filter: price above/below 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry logic: Camarilla breakout + TRIX momentum + volume confirmation
-        if (close[i] > H3_aligned[i] and trix.iloc[i] > 0 and 
+        # Entry logic: KAMA direction + RSI momentum + volume + trend alignment
+        if (close[i] > kama[i] and  # Price above KAMA (uptrend)
+            rsi[i] > 50 and rsi[i] > rsi[i-1] and  # RSI > 50 and rising
             vol_confirm[i] and uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        elif (close[i] < L3_aligned[i] and trix.iloc[i] < 0 and 
+        elif (close[i] < kama[i] and  # Price below KAMA (downtrend)
+              rsi[i] < 50 and rsi[i] < rsi[i-1] and  # RSI < 50 and falling
               vol_confirm[i] and downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price retreats to opposite Camarilla level or TRIX divergence
-        elif position == 1 and (close[i] < L3_aligned[i] or trix.iloc[i] <= 0):
+        # Exit: trend change or momentum loss
+        elif position == 1 and (close[i] <= kama[i] or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > H3_aligned[i] or trix.iloc[i] >= 0):
+        elif position == -1 and (close[i] >= kama[i] or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
