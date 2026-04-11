@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_keltner_breakout_volume_trend_v5"
+name = "4h_1d_cci_extreme_volume_rsi"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,44 +22,40 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily OHLC for Keltner channel calculation
+    # Daily OHLC for CCI calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily EMA(20) and ATR(10) for Keltner channel
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate daily CCI(20)
+    tp_1d = (high_1d + low_1d + close_1d) / 3
+    sma_tp_20 = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci_20 = (tp_1d - sma_tp_20) / (0.015 * mad)
     
-    # Keltner channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Align daily CCI to 4h timeframe
+    cci_20_4h = align_htf_to_ltf(prices, df_1d, cci_20)
     
-    # Shift by 1 to use only completed daily bars (previous day's levels)
-    keltner_upper = np.roll(keltner_upper, 1)
-    keltner_lower = np.roll(keltner_lower, 1)
-    keltner_upper[0] = np.nan
-    keltner_lower[0] = np.nan
-    
-    # Align daily Keltner levels to 4h timeframe
-    upper_4h = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    lower_4h = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    
-    # 4h ATR for volatility filter (14 period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h RSI(14) for mean reversion
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rsi_14 = 100 - (100 / (1 + rs))
     
     # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 4h ADX for trend strength (14 period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
     minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
     tr_dm = tr[1:]
@@ -73,14 +69,12 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+        if (np.isnan(cci_20_4h[i]) or np.isnan(rsi_14[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
@@ -90,16 +84,15 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 (strong trend filter to reduce trades)
         trend_filter = adx[i] > 25
         
-        # Long conditions: price breaks above upper Keltner with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > upper_4h[i])
+        # Long conditions: CCI > 100 (overbought) with volume and trend -> short reversal
+        short_signal = volume_confirmed and trend_filter and (cci_20_4h[i] > 100)
         
-        # Short conditions: price breaks below lower Keltner with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < lower_4h[i])
+        # Short conditions: CCI < -100 (oversold) with volume and trend -> long reversal
+        long_signal = volume_confirmed and trend_filter and (cci_20_4h[i] < -100)
         
-        # Exit when price returns to the opposite side of the EMA (mean reversion)
-        ema_4h = align_htf_to_ltf(prices, df_1d, ema_20)
-        exit_long = position == 1 and price_close < ema_4h[i]
-        exit_short = position == -1 and price_close > ema_4h[i]
+        # Exit when RSI returns to neutral zone (40-60)
+        exit_long = position == 1 and (rsi_14[i] >= 40 and rsi_14[i] <= 60)
+        exit_short = position == -1 and (rsi_14[i] >= 40 and rsi_14[i] <= 60)
         
         # Trading logic
         if long_signal and position != 1:
@@ -119,13 +112,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Keltner breakout strategy for 4h timeframe with ADX filter (>25) and volume confirmation (>1.5x average volume).
-# Enters long when 4h price breaks above daily upper Keltner band (EMA20 + 2*ATR10) with volume >1.5x average and ADX>25.
-# Enters short when price breaks below daily lower Keltner band (EMA20 - 2*ATR10) with same conditions.
-# Exits when price returns to the daily EMA20 (mean reversion within the day's range).
-# Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
-# Target: 20-30 trades per year to minimize fee drift while capturing strong daily trends.
-# This strategy targets a less saturated approach (Keltner channels) compared to the overused Camarilla and Donchian channels,
-# while still capturing the core principle of price channel breakouts with volume and trend confirmation.
-# Keltner channels adapt better to volatility changes than fixed percentage channels, making them suitable for both bull and bear markets.
-# The 4h timeframe provides a balance between capturing daily moves and reducing noise compared to lower timeframes.
+# Hypothesis: Daily CCI extreme levels with volume confirmation and ADX filter for 4h timeframe.
+# Enters long when daily CCI < -100 (oversold) with volume >1.5x average and ADX>25.
+# Enters short when daily CCI > 100 (overbought) with volume >1.5x average and ADX>25.
+# Exits when 4h RSI returns to neutral zone (40-60).
+# CCI extremes identify potential reversal points, volume confirms institutional interest,
+# and ADX>25 ensures we only trade in trending markets where reversals are more likely.
+# This strategy targets reversals in trending markets, which works in both bull and bear markets.
+# Low expected trade frequency due to strict CCI thresholds and ADX filter.
