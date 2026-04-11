@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_williams_alligator_v1
-# Strategy: 12h Williams Alligator with 1d trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_12h_camarilla_volume_trend_v1
+# Strategy: 4h Camarilla pivot breakout with 12h trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Williams Alligator (Jaw, Teeth, Lips) identifies trend phases. 
-# Entry when Lips cross above Teeth (bullish) or below Teeth (bearish) with 1d EMA trend alignment and volume confirmation.
-# Exits on opposite cross. Designed for low trade frequency (~15-30/year) to avoid fee drag.
+# Hypothesis: Camarilla levels from daily pivot provide strong support/resistance.
+# Breakouts aligned with 12h trend and volume confirmation capture sustained moves
+# while avoiding false breakouts. Designed for low trade frequency (~25-40/year)
+# to minimize fee drag in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_williams_alligator_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,47 +27,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Load 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on 12h data
-    # Jaw (blue line): 13-period SMMA, shifted 8 bars forward
-    # Teeth (red line): 8-period SMMA, shifted 5 bars forward  
-    # Lips (green line): 5-period SMMA, shifted 3 bars forward
-    # SMMA = Smoothed Moving Average (similar to Wilder's smoothing)
+    # Calculate Camarilla levels from previous 1d bar
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        if len(arr) < period:
-            return np.full(len(arr), np.nan)
-        result = np.full(len(arr), np.nan)
-        # First value is simple moving average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    rng = prev_high - prev_low
+    H4 = prev_close + 1.1 * rng / 2
+    L4 = prev_close - 1.1 * rng / 2
+    H3 = prev_close + 1.1 * rng / 4
+    L3 = prev_close - 1.1 * rng / 4
+    H2 = prev_close + 1.1 * rng / 6
+    L2 = prev_close - 1.1 * rng / 6
     
-    jaw = smma(close, 13)  # 13-period SMMA
-    teeth = smma(close, 8)  # 8-period SMMA
-    lips = smma(close, 5)   # 5-period SMMA
-    
-    # Shift the lines as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    
-    # Set NaN for shifted values that don't have enough data
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Camarilla levels to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
     # 20-period volume average for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -76,50 +70,37 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(lips_shifted[i]) or np.isnan(teeth_shifted[i]) or 
-            np.isnan(jaw_shifted[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Alligator signals
-        # Bullish: Lips above Teeth (and Teeth above Jaw for strong trend)
-        bullish_align = lips_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > jaw_shifted[i]
-        # Bearish: Lips below Teeth (and Teeth below Jaw for strong trend)
-        bearish_align = lips_shifted[i] < teeth_shifted[i] and teeth_shifted[i] < jaw_shifted[i]
+        # Breakout signals using Camarilla levels
+        breakout_up = high[i] > H3_aligned[i-1]
+        breakdown_down = low[i] < L3_aligned[i-1]
         
-        # Cross signals (using previous bar to avoid look-ahead)
-        lips_above_teeth_prev = lips_shifted[i-1] > teeth_shifted[i-1]
-        lips_below_teeth_prev = lips_shifted[i-1] < teeth_shifted[i-1]
-        lips_above_teeth_now = lips_shifted[i] > teeth_shifted[i]
-        lips_below_teeth_now = lips_shifted[i] < teeth_shifted[i]
-        
-        # Bullish cross: Lips cross above Teeth
-        bullish_cross = lips_above_teeth_now and not lips_above_teeth_prev
-        # Bearish cross: Lips cross below Teeth
-        bearish_cross = lips_below_teeth_now and not lips_below_teeth_prev
-        
-        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_50_1d_aligned[i]
-        trend_bearish = close[i] < ema_50_1d_aligned[i]
+        # 12h EMA trend filter
+        trend_bullish = close[i] > ema_50_12h_aligned[i]
+        trend_bearish = close[i] < ema_50_12h_aligned[i]
         
         # Entry conditions
-        # Long: Bullish cross AND bullish trend AND volume confirmation
-        if bullish_cross and trend_bullish and vol_confirm and position != 1:
+        # Long: Breakout above H3 AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Bearish cross AND bearish trend AND volume confirmation
-        elif bearish_cross and trend_bearish and vol_confirm and position != -1:
+        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite cross
-        elif position == 1 and bearish_cross:  # Lips cross below Teeth
+        # Exit: Opposite breakout using H4/L4 levels
+        elif position == 1 and low[i] < L4_aligned[i-1]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bullish_cross:  # Lips cross above Teeth
+        elif position == -1 and high[i] > H4_aligned[i-1]:
             position = 0
             signals[i] = 0.0
         else:
