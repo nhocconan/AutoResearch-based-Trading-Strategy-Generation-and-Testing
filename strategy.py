@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_volume_trend_v2
-# Strategy: 1d Camarilla pivot levels (L3, H3) with volume confirmation and weekly EMA20 trend filter
-# Timeframe: 1d
+# 6h_1d_camarilla_breakout_v1
+# Strategy: 6-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Combines Camarilla pivot reversals (mean reversion at L3/H3) with volume confirmation
-# and filtered by weekly EMA20 trend alignment. Works in both bull and bear markets by following
-# the higher timeframe trend (1w). Targets 30-100 trades over 4 years to minimize fee drag.
+# Hypothesis: Uses daily Camarilla pivot levels (R3/S3 for reversals, R4/S4 for breakouts) 
+# filtered by 1-day EMA50 trend and volume spikes. Works in both bull and bear markets by
+# aligning with higher timeframe trend while capturing intraday momentum bursts. 
+# Targets 50-150 trades over 4 years to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_trend_v2"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,59 +28,84 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d OHLC for Camarilla pivots and EMA50
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla pivot levels for previous day
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + (H-L) * 1.1/2
+    # R3 = C + (H-L) * 1.1/4
+    # S3 = C - (H-L) * 1.1/4
+    # S4 = C - (H-L) * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r4_1d = close_1d + range_1d * 1.1 / 2.0
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
+    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d data to 6h timeframe (wait for daily close)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
-    # Daily Camarilla pivot levels (based on previous day's OHLC)
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    # Set first value to current day's values to avoid NaN in first bar
-    prev_close[0] = close[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels: L3 = pivot - 1.1 * range/6, H3 = pivot + 1.1 * range/6
-    L3 = pivot - (1.1 * range_hl / 6)
-    H3 = pivot + (1.1 * range_hl / 6)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg[i]) or 
-            np.isnan(L3[i]) or np.isnan(H3[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend_1w = price_close > ema_20_1w_aligned[i]
-        downtrend_1w = price_close < ema_20_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Camarilla reversal signals with volume confirmation
-        long_signal = (price_close <= L3[i]) and vol_spike[i] and uptrend_1w
-        short_signal = (price_close >= H3[i]) and vol_spike[i] and downtrend_1w
+        # Camarilla breakout signals (using previous day's levels)
+        breakout_up = price_close > r4_1d_aligned[i]   # Break above R4
+        breakdown_down = price_close < s4_1d_aligned[i]  # Break below S4
+        reverse_at_r3 = price_close < r3_1d_aligned[i] and price_close > r3_1d_aligned[i-1]  # Reject at R3
+        reverse_at_s3 = price_close > s3_1d_aligned[i] and price_close < s3_1d_aligned[i-1]  # Reject at S3
         
-        # Exit when price returns to pivot level (mean reversion complete)
-        exit_long = position == 1 and price_close >= pivot[i]
-        exit_short = position == -1 and price_close <= pivot[i]
+        # Volume confirmation
+        vol_confirmed = vol_spike[i]
+        
+        # Long: Break above R4 with volume in uptrend OR rejection at R3 with volume in uptrend
+        long_signal = (breakout_up and vol_confirmed and uptrend_1d) or \
+                      (reverse_at_r3 and vol_confirmed and uptrend_1d)
+        
+        # Short: Break below S4 with volume in downtrend OR rejection at S3 with volume in downtrend
+        short_signal = (breakdown_down and vol_confirmed and downtrend_1d) or \
+                       (reverse_at_s3 and vol_confirmed and downtrend_1d)
+        
+        # Exit when price returns to the 1d pivot level or opposite Camarilla level
+        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = position == 1 and (price_close < pivot_1d_aligned[i] or 
+                                       price_close < s3_1d_aligned[i])
+        exit_short = position == -1 and (price_close > pivot_1d_aligned[i] or 
+                                         price_close > r3_1d_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
