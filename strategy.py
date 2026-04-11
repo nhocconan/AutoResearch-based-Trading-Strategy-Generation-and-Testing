@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h/1d trend filter and session filter
-# Long when: 1h RSI crosses above 50 AND 4h close > 1d EMA200 AND 1h volume > 1.5x avg volume
-# Short when: 1h RSI crosses below 50 AND 4h close < 1d EMA200 AND 1h volume > 1.5x avg volume
-# Exit when RSI crosses back to 50 or trend reverses
-# Session filter: 08-20 UTC only
-# Target: 15-37 trades/year on 1h (60-150 total over 4 years)
+# Hypothesis: 12h Camarilla pivot reversal with 1d volume spike and 1d ADX trend filter
+# Long when price crosses above Camarilla L3 (support) with volume > 2x average and ADX < 20 (range)
+# Short when price crosses below Camarilla H3 (resistance) with volume > 2x average and ADX < 20 (range)
+# Exit when price reaches Camarilla H3 (for longs) or L3 (for shorts) or ADX > 25 (trend onset)
+# Designed for 15-35 trades/year on 12h timeframe with mean reversion in ranging markets
 
-name = "1h_4h_1d_rsi_trend_momentum_v1"
-timeframe = "1h"
+name = "12h_1d_camarilla_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -25,93 +24,114 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Precompute hour for session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
-        return np.zeros(n)
-    
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(200) for trend filter
+    # Calculate 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate 4h close for trend filter
-    close_4h = df_4h['close'].values
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate 14-period RSI on 1h
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
+    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(arr, period):
+        result = np.zeros_like(arr)
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    for i in range(15, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    tr_smooth = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = np.nan
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
     
-    # Calculate 20-period average volume for volume filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = np.zeros_like(dx)
+    adx[13] = np.mean(dx[:14])  # First ADX at index 13 (14-period)
+    for i in range(14, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    # Align ADX to 12h timeframe
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate 1d average volume for volume spike filter
+    vol_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Camarilla levels use previous day's close, high, low
+    close_1d_prev = np.concatenate([[close_1d[0]], close_1d[:-1]])  # Previous day close
+    high_1d_prev = np.concatenate([[high_1d[0]], high_1d[:-1]])    # Previous day high
+    low_1d_prev = np.concatenate([[low_1d[0]], low_1d[:-1]])      # Previous day low
+    
+    # Typical price for pivot calculation
+    typical_price = (high_1d_prev + low_1d_prev + close_1d_prev) / 3
+    range_1d = high_1d_prev - low_1d_prev
+    
+    # Camarilla levels
+    camarilla_h3 = typical_price + range_1d * 1.1 / 4
+    camarilla_l3 = typical_price - range_1d * 1.1 / 4
+    camarilla_h4 = typical_price + range_1d * 1.1 / 2
+    camarilla_l4 = typical_price - range_1d * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):  # Wait for EMA200 to be valid
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(close_4h_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        if (np.isnan(adx_14_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Volume spike: current volume > 2x 20-period average
+        volume_spike = volume[i] > 2.0 * vol_ma_20_1d_aligned[i]
         
-        # Volume filter: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Range condition: ADX < 20 (no strong trend)
+        is_range = adx_14_1d_aligned[i] < 20
         
-        # Trend filters
-        trend_1d_up = close[i] > ema_200_1d_aligned[i]
-        trend_1d_down = close[i] < ema_200_1d_aligned[i]
-        trend_4h_up = close_4h_aligned[i] > ema_200_1d_aligned[i]
-        trend_4h_down = close_4h_aligned[i] < ema_200_1d_aligned[i]
+        # Trend onset: ADX > 25 (trend starting)
+        is_trend = adx_14_1d_aligned[i] > 25
         
-        # RSI crossover signals
-        rsi_cross_up = rsi[i-1] < 50 and rsi[i] >= 50
-        rsi_cross_down = rsi[i-1] > 50 and rsi[i] <= 50
+        # Entry conditions: price crosses Camarilla L3/H3 with volume spike in ranging market
+        long_entry = (close[i-1] <= camarilla_l3_aligned[i-1] and close[i] > camarilla_l3_aligned[i-1]) and volume_spike and is_range
+        short_entry = (close[i-1] >= camarilla_h3_aligned[i-1] and close[i] < camarilla_h3_aligned[i-1]) and volume_spike and is_range
         
-        # Entry conditions
-        long_entry = rsi_cross_up and volume_filter and trend_1d_up and trend_4h_up and in_session
-        short_entry = rsi_cross_down and volume_filter and trend_1d_down and trend_4h_down and in_session
-        
-        # Exit conditions
-        long_exit = rsi_cross_down or not (trend_1d_up and trend_4h_up) or not in_session
-        short_exit = rsi_cross_up or not (trend_1d_down and trend_4h_down) or not in_session
+        # Exit conditions: price reaches opposite Camarilla level or trend starts
+        long_exit = (close[i] >= camarilla_h3_aligned[i]) or is_trend
+        short_exit = (close[i] <= camarilla_l3_aligned[i]) or is_trend
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -120,6 +140,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
