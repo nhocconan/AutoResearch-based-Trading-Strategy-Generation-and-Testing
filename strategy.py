@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,37 +20,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate Camarilla pivot levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
-    daily_range = high_1d - low_1d
+    weekly_range = high_1w - low_1w
+    r4 = close_1w + (weekly_range * 1.1 / 2)
+    s4 = close_1w - (weekly_range * 1.1 / 2)
+    r3 = close_1w + (weekly_range * 1.1 / 4)
+    s3 = close_1w - (weekly_range * 1.1 / 4)
     
-    # Key levels for breakout: R4 (resistance) and S4 (support)
-    r4 = close_1d + (daily_range * 1.1 / 2)
-    s4 = close_1d - (daily_range * 1.1 / 2)
-    
-    # Exit levels: R3 and S3
-    r3 = close_1d + (daily_range * 1.1 / 4)
-    s3 = close_1d - (daily_range * 1.1 / 4)
-    
-    # Volume confirmation: 4h volume > 1.5x 50-period average (moderate threshold)
+    # Volume confirmation: daily volume > 2.0x 50-period average
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # Align daily levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align weekly levels to daily timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
@@ -63,36 +56,28 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation - moderate threshold
-        vol_confirm = volume_current > 1.5 * vol_ma_50[i]
+        # Volume confirmation - strict to reduce trades
+        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above R4
-        breakout_down = price_close < s4_aligned[i]  # Break below S4
+        # Breakout conditions using weekly Camarilla levels
+        breakout_up = price_close > r4_aligned[i]
+        breakout_down = price_close < s4_aligned[i]
         
         # Entry conditions
-        enter_long = False
-        enter_short = False
-        
-        # Long: Break above R4 with volume confirmation
-        if breakout_up and vol_confirm:
-            enter_long = True
-        
-        # Short: Break below S4 with volume confirmation
-        if breakout_down and vol_confirm:
-            enter_short = True
+        enter_long = breakout_up and vol_confirm
+        enter_short = breakout_down and vol_confirm
         
         # Exit conditions: return to opposite S3/R3 levels
-        exit_long = price_close < s3_aligned[i]  # Return to S3 level
-        exit_short = price_close > r3_aligned[i]  # Return to R3 level
+        exit_long = price_close < s3_aligned[i]
+        exit_short = price_close > r3_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -101,17 +86,15 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 1.5x 50-period average.
-# Enters short when price breaks below S4 with volume > 1.5x 50-period average.
-# Exits when price returns to S3/R3 levels respectively.
-# Uses moderate volume threshold (1.5x) to balance trade frequency and signal quality.
-# Position size set to 0.25 to manage risk during volatile periods.
-# Target: 20-40 trades per year (80-160 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 4h timeframe provides balance between signal quality and trade frequency.
-# Daily Camarilla levels provide institutional reference points for significant breakouts.
+# Hypothesis: 1d Camarilla breakout strategy using weekly pivot levels with volume confirmation.
+# Enters long when price breaks above weekly R4 with volume > 2.0x 50-period average.
+# Enters short when price breaks below weekly S4 with volume > 2.0x 50-period average.
+# Exits when price returns to weekly S3/R3 levels respectively.
+# Uses strict volume threshold (2.0x) to achieve 10-25 trades per year.
+# Position size set to 0.30 to balance risk and reward.
+# Weekly timeframe provides institutional reference points that work in both bull and bear markets.
+# Target: 10-25 trades per year (40-100 total over 4 years) to minimize fee drag.
