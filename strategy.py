@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-# 6h_1w_camarilla_volume_v1
-# Strategy: 6s Camarilla pivot levels from 1d, with 1w trend filter and volume confirmation
-# Timeframe: 6h
+# 12h_1d_keltner_channel_v1
+# Strategy: 12h Keltner Channel breakout with 1w trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) work better when aligned with weekly trend and volume spikes.
-# In bull/bear markets, weekly trend filters out counter-trend trades. Volume confirms institutional interest.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: Price breaking above/below Keltner Channel (EMA-based) during strong weekly trend
+# with volume confirmation captures breakouts in both bull and bear markets. Weekly trend filter
+# ensures we only trade in the direction of higher timeframe momentum, reducing whipsaw.
+# Volume confirmation adds conviction to breakouts. Designed for low frequency (15-25 trades/year)
+# to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_camarilla_volume_v1"
-timeframe = "6h"
+name = "12h_1d_keltner_channel_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,83 +28,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
-    
-    # Load 1w data ONCE before loop for trend filter
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar (H, L, C)
-    # Using yesterday's H, L, C for today's levels (no look-ahead)
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Daily data for ATR (used in Keltner Channel)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla: multiplier = 1.1/12
-    # R4 = C + (H-L) * 1.1/2
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    # S4 = C - (H-L) * 1.1/2
-    camarilla_multiplier = 1.1 / 12
-    r4 = close_1d + (high_1d - low_1d) * camarilla_multiplier * 6  # *6 because 1.1/2 = 6*(1.1/12)
-    r3 = close_1d + (high_1d - low_1d) * camarilla_multiplier * 3  # *3 because 1.1/4 = 3*(1.1/12)
-    s3 = close_1d - (high_1d - low_1d) * camarilla_multiplier * 3
-    s4 = close_1d - (high_1d - low_1d) * camarilla_multiplier * 6
+    # ATR(14) for Keltner Channel width
+    tr1 = high_1d[1:] - low_1d[:-1]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.insert(tr, 0, 0)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 6h timeframe (using previous day's levels)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # EMA(20) for Keltner Channel middle line (using daily data)
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 1w EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Keltner Channel bounds
+    upper_keltner = ema_20 + 2 * atr
+    lower_keltner = ema_20 - 2 * atr
     
-    # Volume spike: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (vol_ma * 1.5)
+    # Align daily Keltner levels to 12h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    
+    # Volume average for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma.iloc[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
+            np.isnan(lower_keltner_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Weekly trend filter
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Mean reversion at S3/R3 with volume spike
-        long_mr = (close[i] <= s3_6h[i]) and vol_spike.iloc[i] and uptrend and position != 1
-        short_mr = (close[i] >= r3_6h[i]) and vol_spike.iloc[i] and downtrend and position != -1
+        # Volume confirmation (current volume > 1.5x average)
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Breakout continuation at S4/R4 with volume spike
-        long_break = (close[i] >= s4_6h[i]) and vol_spike.iloc[i] and uptrend and position != 1
-        short_break = (close[i] <= r4_6h[i]) and vol_spike.iloc[i] and downtrend and position != -1
-        
-        # Entry logic
-        if long_mr or long_break:
+        # Entry conditions
+        if weekly_uptrend and close[i] > upper_keltner_aligned[i] and volume_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_mr or short_break:
+        elif weekly_downtrend and close[i] < lower_keltner_aligned[i] and volume_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit when price reverts to mean (opposite S3/R3) or volume dries up
-        elif position == 1 and (close[i] >= r3_6h[i] or not vol_spike.iloc[i]):
+        # Exit conditions: opposite weekly trend or price returns to middle
+        elif position == 1 and (not weekly_uptrend or close[i] < ema_20[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] <= s3_6h[i] or not vol_spike.iloc[i]):
+        elif position == -1 and (not weekly_downtrend or close[i] > ema_20[i]):
             position = 0
             signals[i] = 0.0
         else:
