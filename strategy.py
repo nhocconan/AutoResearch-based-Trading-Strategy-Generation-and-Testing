@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v5"
+name = "4h_1d_camarilla_breakout_volume_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,13 +42,20 @@ def generate_signals(prices):
     # Volume confirmation: 4h volume > 3x 30-period average (more selective to reduce trades)
     vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
+    # Key levels for exit: R3 and S3
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    s3 = close_1d - (daily_range * 1.1 / 4)
+    
     # Align daily levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
@@ -76,12 +83,6 @@ def generate_signals(prices):
             enter_short = True
         
         # Exit conditions: opposite Camarilla level (S3 for long, R3 for short)
-        # Calculate S3 and R3 for exit
-        s3 = close_1d - (daily_range * 1.1 / 4)
-        r3 = close_1d + (daily_range * 1.1 / 4)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        
         exit_long = price_close < s3_aligned[i]  # Return to S3 level
         exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
