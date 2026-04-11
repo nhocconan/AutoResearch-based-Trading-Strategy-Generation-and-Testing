@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_williams_alligator_v1"
-timeframe = "6h"
+name = "4h_1d_keltner_squeeze_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,121 +19,106 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
-    # Load 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 34 or len(df_1d) < 34:
+    if len(df_1d) < 50:
         return signals
     
-    # Williams Alligator on 12h: 3 SMAs (Jaw=13, Teeth=8, Lips=5) with future shift
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    median_12h = (high_12h + low_12h) / 2.0
-    
-    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
-    jaw_12h = pd.Series(median_12h).rolling(window=13, min_periods=13).mean().values
-    jaw_12h = np.roll(jaw_12h, 8)
-    jaw_12h[:8] = np.nan
-    
-    # Teeth (red): 8-period SMMA, shifted 5 bars forward
-    teeth_12h = pd.Series(median_12h).rolling(window=8, min_periods=8).mean().values
-    teeth_12h = np.roll(teeth_12h, 5)
-    teeth_12h[:5] = np.nan
-    
-    # Lips (green): 5-period SMMA, shifted 3 bars forward
-    lips_12h = pd.Series(median_12h).rolling(window=5, min_periods=5).mean().values
-    lips_12h = np.roll(lips_12h, 3)
-    lips_12h[:3] = np.nan
-    
-    # Align Alligator lines to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
-    
-    # 1d ADX for trend strength filter (14-period)
+    # Calculate 1d Keltner Channel
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
+    # EMA of typical price (20-period)
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    ema_tp = pd.Series(tp_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # ATR (10-period)
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     tr_1d[0] = tr1[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    # Keltner Bands
+    upper_keltner = ema_tp + (2.0 * atr_1d)
+    lower_keltner = ema_tp - (2.0 * atr_1d)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Shift by 1 to use only completed 1d bars
+    upper_keltner = np.roll(upper_keltner, 1)
+    lower_keltner = np.roll(lower_keltner, 1)
+    upper_keltner[0] = np.nan
+    lower_keltner[0] = np.nan
     
-    # Smoothed values
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    # Align 1d Keltner bands to 4h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
     
-    # DI and ADX
-    plus_di_1d = 100 * plus_dm_smooth / atr_1d
-    minus_di_1d = 100 * minus_dm_smooth / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).rolling(window=14, min_periods=14).mean().values
+    # Bollinger Bands on 4h for squeeze detection (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2.0 * std_20)
+    lower_bb = sma_20 - (2.0 * std_20)
     
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Squeeze condition: BB width < Keltner width
+    bb_width = upper_bb - lower_bb
+    kc_width = upper_keltner_aligned - lower_keltner_aligned
+    squeeze = bb_width < kc_width
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator signals
-        # Alligator sleeping: jaws, teeth, lips intertwined (no clear trend)
-        # Alligator awakening: lines diverge in specific order
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        
-        # Bullish alignment: Lips > Teeth > Jaw (green > red > blue)
-        bullish_align = lips_val > teeth_val and teeth_val > jaw_val
-        # Bearish alignment: Lips < Teeth < Jaw (green < red < blue)
-        bearish_align = lips_val < teeth_val and teeth_val < jaw_val
-        
-        # Trend strength filter: ADX > 25
-        strong_trend = adx_aligned[i] > 25
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
+        volume_current = volume[i]
+        vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume[i] > 1.3 * vol_ma_20[i]
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Entry signals
-        long_signal = bullish_align and strong_trend and volume_confirmed
-        short_signal = bearish_align and strong_trend and volume_confirmed
+        # Squeeze breakout conditions
+        squeeze_active = squeeze[i]
         
-        # Exit when Alligator starts to sleep again (lines re-intertwine)
-        # Or when trend weakens (ADX < 20)
-        exit_condition = (
-            (abs(lips_val - teeth_val) < 0.001 * close[i]) or  # Lines close together
-            (adx_aligned[i] < 20)
-        )
+        # Long: price breaks above upper Keltner during squeeze release with volume
+        long_signal = squeeze_active and price_high > upper_keltner_aligned[i] and volume_confirmed
+        
+        # Short: price breaks below lower Keltner during squeeze release with volume
+        short_signal = squeeze_active and price_low < lower_keltner_aligned[i] and volume_confirmed
+        
+        # Exit when price returns to the middle of Keltner channel (EMA of TP)
+        middle_keltner_aligned = align_htf_to_ltf(prices, df_1d, ema_tp)
+        if np.isnan(middle_keltner_aligned[i]):
+            middle_value = price_close
+        else:
+            middle_value = middle_keltner_aligned[i]
+        
+        exit_long = position == 1 and price_close < middle_value
+        exit_short = position == -1 and price_close > middle_value
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
+            entry_price = price_close
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
+            entry_price = price_close
             signals[i] = -0.25
-        elif position != 0 and exit_condition:
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
@@ -142,12 +127,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Williams Alligator on 12h with ADX filter on 1d for 6h timeframe.
-# The Alligator identifies trend formation and direction: 
-# - Bullish when Lips > Teeth > Jaw (green > red > blue)
-# - Bearish when Lips < Teeth < Jaw (green < red < blue)
-# ADX > 25 on 1d ensures we only trade in strong trending markets.
-# Volume confirmation (>1.3x average) filters out low-credibility breakouts.
-# Exits when the Alligator goes back to sleep (lines intertwine) or trend weakens (ADX < 20).
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to avoid fee drag.
-# Works in both bull and bear markets by trading the direction of the trend once established.
+# Hypothesis: Keltner squeeze breakout strategy on 4h timeframe.
+# Uses 1d Keltner Channel to identify volatility contractions (squeeze) and expansions.
+# Enters long when price breaks above upper Keltner Band during squeeze release with volume confirmation (>1.5x avg volume).
+# Enters short when price breaks below lower Keltner Band during squeeze release with volume confirmation.
+# Exits when price returns to the middle of the Keltner Channel (EMA of typical price).
+# The squeeze condition (BB width < KC width) identifies low volatility periods primed for breakouts.
+# Works in both bull and bear markets by trading breakouts in either direction.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
