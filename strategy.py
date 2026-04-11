@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-# 1d_1w_funding_zscore_v1
-# Strategy: Funding rate mean reversion on 1d with weekly trend filter
-# Timeframe: 1d
+# 6h_12h_1d_ichimoku_cloud_v1
+# Strategy: 6h Ichimoku Cloud with 1d trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Funding rate extremes predict mean reversion. In both bull and bear markets,
-# extreme positive funding (longs pay shorts) precedes short-term price declines,
-# while extreme negative funding precedes short-term rallies. Weekly trend filter
-# ensures we trade with the higher timeframe momentum to avoid counter-trend whipsaws.
-# Low frequency (~10-25/year) to minimize fee drag.
+# Hypothesis: Ichimoku Cloud provides strong support/resistance and trend direction.
+# In bull markets: price above cloud (Senkou Span A/B) with TK cross bullish.
+# In bear markets: price below cloud with TK cross bearish.
+# Uses 1d ADX > 25 to filter for trending markets only, reducing whipsaws in ranging conditions.
+# Volume confirmation ensures breaks have conviction.
+# Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_funding_zscore_v1"
-timeframe = "1d"
+name = "6h_12h_1d_ichimoku_cloud_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,75 +24,143 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Funding data placeholder - in real implementation, this would load from
-    # data/processed/funding/*.parquet. For now, we'll simulate with a proxy
-    # using price action to demonstrate the concept
-    # In practice, replace this with actual funding rate data:
-    # funding_rate = load_funding_rate(symbol, prices.index)
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Proxy for funding rate using price momentum (for demonstration)
-    # Actual strategy would use real funding rate data
-    returns = np.diff(np.log(close), prepend=0)
-    funding_proxy = pd.Series(returns).rolling(window=7, min_periods=7).mean().values  # Weekly average return as proxy
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate z-score of funding proxy (30-day window)
-    funding_series = pd.Series(funding_proxy)
-    funding_mean = funding_series.rolling(window=30, min_periods=30).mean()
-    funding_std = funding_series.rolling(window=30, min_periods=30).std()
-    funding_zscore = (funding_proxy - funding_mean) / funding_std
-    # Replace NaN with 0 (no extreme)
-    funding_zscore = np.nan_to_num(funding_zscore, nan=0.0)
+    # 1d ADX(14) for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Load weekly trend filter ONCE before loop
-    # Note: In production, replace funding proxy with actual funding rate data
-    # and load weekly price data for trend filter
-    try:
-        df_1w = get_htf_data(prices, '1w')
-        if len(df_1w) >= 50:
-            close_1w = df_1w['close'].values
-            # Weekly EMA(20) for trend filter
-            ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-            ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-        else:
-            # Fallback: use daily EMA if insufficient weekly data
-            ema_20_daily = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-            ema_20_1w_aligned = ema_20_daily
-    except:
-        # Fallback: use daily EMA if weekly data unavailable
-        ema_20_daily = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-        ema_20_1w_aligned = ema_20_daily
+    # Calculate ADX components
+    plus_dm = np.zeros(len(high_1d))
+    minus_dm = np.zeros(len(high_1d))
+    tr = np.zeros(len(high_1d))
+    
+    for i in range(1, len(high_1d)):
+        high_diff = high_1d[i] - high_1d[i-1]
+        low_diff = low_1d[i-1] - low_1d[i]
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        tr[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
+    
+    # Smooth with Wilder's smoothing (equivalent to RMA)
+    atr = np.zeros(len(high_1d))
+    plus_dm_smooth = np.zeros(len(high_1d))
+    minus_dm_smooth = np.zeros(len(high_1d))
+    
+    # Initial values
+    atr[0] = tr[0]
+    plus_dm_smooth[0] = plus_dm[0]
+    minus_dm_smooth[0] = minus_dm[0]
+    
+    # Wilder's smoothing: new_val = (prev * (n-1) + current) / n
+    for i in range(1, len(high_1d)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * 13 + plus_dm[i]) / 14
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * 13 + minus_dm[i]) / 14
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    dx = np.where((plus_di + minus_di) != 0, 100 * abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # ADX: smoothed DX
+    adx = np.zeros(len(dx))
+    adx[0] = dx[0]
+    for i in range(1, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    adx_1d = adx
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Ichimoku Cloud calculation (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    def rolling_max(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
+    
+    def rolling_min(arr, window):
+        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
+    
+    tenkan_sen = (rolling_max(high, 9) + rolling_min(low, 9)) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun_sen = (rolling_max(high, 26) + rolling_min(low, 26)) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    senkou_span_b = (rolling_max(high, 52) + rolling_min(low, 52)) / 2
+    
+    # Align Ichimoku components to 6t timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after z-score warmup
+    for i in range(52, n):  # Need enough data for Ichimoku
         # Skip if any required data is invalid
-        if np.isnan(ema_20_1w_aligned[i]):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or np.isnan(senkou_span_a_aligned[i]) or 
+            np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend filter: only trade in trending markets (ADX > 25)
+        trending = adx_1d_aligned[i] > 25
         
-        # Funding extreme signals
-        extreme_long = funding_zscore[i] < -2.0  # Extreme negative funding -> long
-        extreme_short = funding_zscore[i] > 2.0   # Extreme positive funding -> short
+        # Determine cloud boundaries (account for Senkou Span B being plotted 26 periods ahead)
+        # For current price, Senkou Span A/B values from 26 periods ago form the cloud
+        if i >= 26:
+            span_a = senkou_span_a_aligned[i-26]
+            span_b = senkou_span_b_aligned[i-26]
+        else:
+            # Not enough data for cloud, skip
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
         
-        # Entry logic: funding extreme + trend alignment
-        if extreme_long and uptrend and position != 1:
+        # Cloud top and bottom
+        cloud_top = max(span_a, span_b)
+        cloud_bottom = min(span_a, span_b)
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # TK Cross
+        tk_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        
+        # Entry logic: TK cross + price vs cloud + trend + volume
+        if (tk_bullish and price_above_cloud and trending and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        elif extreme_short and downtrend and position != -1:
+        elif (tk_bearish and price_below_cloud and trending and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: funding returns to neutral or trend change
-        elif position == 1 and (funding_zscore[i] > -0.5 or not uptrend):
+        # Exit: TK cross reversal or price enters cloud
+        elif position == 1 and (tk_bearish or not price_above_cloud):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (funding_zscore[i] < 0.5 or not downtrend):
+        elif position == -1 and (tk_bullish or not price_below_cloud):
             position = 0
             signals[i] = 0.0
         else:
@@ -98,9 +168,3 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
-
-# Note: For actual deployment, replace the funding proxy with real funding rate data:
-# 1. Load funding rate data: funding_df = pd.read_parquet(f"data/processed/funding/{symbol}.parquet")
-# 2. Align to price index: funding_aligned = align_htf_to_ltf(prices, funding_df, funding_df['funding_rate'].values)
-# 3. Use funding_aligned for z-score calculation instead of funding_proxy
-# The proxy is used here only to demonstrate the structure and avoid missing data errors.
