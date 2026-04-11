@@ -1,40 +1,24 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Strategy: 12-hour Camarilla pivot breakout with daily trend filter and volume confirmation
-# Timeframe: 12h
+# 1d_1w_rsi_divergence_v1
+# Strategy: Daily RSI divergence with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Price breaks out of Camarilla pivot levels during high volume periods, with daily trend filter to avoid counter-trend trades. Works in bull by capturing breakouts with trend, and in bear by fading false breakouts via trend filter. Volume confirms institutional participation.
+# Hypothesis: RSI divergence (price makes new high/low but RSI does not) signals reversals. 
+# Weekly trend filter ensures trades align with higher timeframe momentum. 
+# Volume confirmation filters weak signals. Works in bull by catching pullbacks in uptrend,
+# and in bear by catching bounces in downtrend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "1d_1w_rsi_divergence_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_camarilla_pivots(high, low, close):
-    """Calculate Camarilla pivot levels for a given period"""
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    
-    # Resistance levels
-    r4 = close + range_val * 1.1 / 2.0
-    r3 = close + range_val * 1.1 / 4.0
-    r2 = close + range_val * 1.1 / 6.0
-    r1 = close + range_val * 1.1 / 12.0
-    
-    # Support levels
-    s1 = close - range_val * 1.1 / 12.0
-    s2 = close - range_val * 1.1 / 6.0
-    s3 = close - range_val * 1.1 / 4.0
-    s4 = close - range_val * 1.1 / 2.0
-    
-    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -43,90 +27,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivots for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly RSI for trend filter (14-period)
+    close_1w = df_1w['close'].values
+    delta_1w = np.diff(close_1w, prepend=close_1w[0])
+    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
+    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
+    avg_gain_1w = pd.Series(gain_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_1w = pd.Series(loss_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_1w = avg_gain_1w / (avg_loss_1w + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs_1w))
+    rsi_1w_trend = rsi_1w > 50  # Uptrend when RSI > 50
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_trend)
     
-    # Calculate Camarilla levels for each daily bar
-    r4_1d = np.zeros(len(df_1d))
-    r3_1d = np.zeros(len(df_1d))
-    r2_1d = np.zeros(len(df_1d))
-    r1_1d = np.zeros(len(df_1d))
-    pivot_1d = np.zeros(len(df_1d))
-    s1_1d = np.zeros(len(df_1d))
-    s2_1d = np.zeros(len(df_1d))
-    s3_1d = np.zeros(len(df_1d))
-    s4_1d = np.zeros(len(df_1d))
+    # Daily RSI (14-period) for divergence
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    for i in range(len(df_1d)):
-        r4, r3, r2, r1, p, s1, s2, s3, s4 = calculate_camarilla_pivots(high_1d[i], low_1d[i], close_1d[i])
-        r4_1d[i] = r4
-        r3_1d[i] = r3
-        r2_1d[i] = r2
-        r1_1d[i] = r1
-        pivot_1d[i] = p
-        s1_1d[i] = s1
-        s2_1d[i] = s2
-        s3_1d[i] = s3
-        s4_1d[i] = s4
-    
-    # Align daily Camarilla levels to 12h timeframe (with 1-day delay for confirmation)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d, additional_delay_bars=1)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d, additional_delay_bars=1)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d, additional_delay_bars=1)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d, additional_delay_bars=1)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d, additional_delay_bars=1)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d, additional_delay_bars=1)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d, additional_delay_bars=1)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d, additional_delay_bars=1)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d, additional_delay_bars=1)
-    
-    # Daily EMA for trend filter
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Volume average (20-period) for confirmation on 12h data
+    # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    # Track recent highs/lows for divergence (14-period lookback)
+    lookback = 14
+    
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(s2_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(rsi[i]) or np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        price_close = close[i]
+        # Get lookback window
+        start_idx = i - lookback
+        if start_idx < 0:
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+            
+        # Price and RSI in lookback window
+        price_window = close[start_idx:i+1]
+        rsi_window = rsi[start_idx:i+1]
         
-        # Trend filter: price above/below daily EMA20
-        uptrend_1d = price_close > ema_20_1d_aligned[i]
-        downtrend_1d = price_close < ema_20_1d_aligned[i]
+        # Find recent high and low
+        recent_high = np.max(price_window)
+        recent_low = np.min(price_window)
+        rsi_at_high = rsi_window[np.argmax(price_window)]
+        rsi_at_low = rsi_window[np.argmin(price_window)]
         
-        # Breakout signals: price breaks Camarilla levels with volume
-        long_breakout = (price_close > r4_1d_aligned[i]) and vol_spike[i]
-        short_breakout = (price_close < s4_1d_aligned[i]) and vol_spike[i]
+        # Current values
+        price_now = close[i]
+        rsi_now = rsi[i]
         
-        # Exit when price returns to daily pivot or opposite breakout
-        exit_long = position == 1 and (price_close < pivot_1d_aligned[i])
-        exit_short = position == -1 and (price_close > pivot_1d_aligned[i])
+        # Bullish divergence: price makes lower low but RSI makes higher low
+        bull_div = (price_now <= recent_low * 1.001) and (rsi_now > rsi_at_low + 5)
+        # Bearish divergence: price makes higher high but RSI makes lower high
+        bear_div = (price_now >= recent_high * 0.999) and (rsi_now < rsi_at_high - 5)
         
-        # Trading logic: only trade in direction of daily trend
-        if long_breakout and uptrend_1d and position != 1:
+        # Exit conditions: RSI crosses 50 or opposite divergence
+        exit_long = position == 1 and (rsi_now < 50 or bear_div)
+        exit_short = position == -1 and (rsi_now > 50 or bull_div)
+        
+        # Trading logic: only trade in direction of weekly trend
+        if bull_div and rsi_1w_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and downtrend_1d and position != -1:
+        elif bear_div and not rsi_1w_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
