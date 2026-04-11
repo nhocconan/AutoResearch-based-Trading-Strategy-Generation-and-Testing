@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and ATR trend filter
-# - Long: price breaks above Camarilla H3 level, volume > 1.3x 20-period avg, ATR(14) > ATR(50) (trending)
-# - Short: price breaks below Camarilla L3 level, volume > 1.3x 20-period avg, ATR(14) > ATR(50) (trending)
+# Hypothesis: 4h Camarilla pivot breakout with volume spike and chop regime filter
+# - Long: price breaks above Camarilla H3 level, volume > 1.5x 20-period avg, Chop > 61.8 (ranging market)
+# - Short: price breaks below Camarilla L3 level, volume > 1.5x 20-period avg, Chop > 61.8 (ranging market)
 # - Exit: price returns to Camarilla pivot point (PP)
-# - Uses 1d EMA(50) trend filter: price > EMA for long bias, price < EMA for short bias
-# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee drag limits
 # - Camarilla levels derived from prior day's range work well in both trending and ranging markets
+# - Chop regime filter avoids false breakouts in strong trends, focuses on mean reversion in ranges
 
-name = "12h_1d_camarilla_atr_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_chop_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,15 +29,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla pivot calculation and EMA trend filter (MTF rule compliance)
+    # Load 1d data ONCE before loop for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return signals
-    
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Pre-compute 1d OHLC for Camarilla levels
     high_1d = df_1d['high'].values
@@ -52,28 +47,38 @@ def generate_signals(prices):
     R3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
     S3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute ATR filters for regime detection
+    # Pre-compute Chop regime filter (14-period)
     # True Range
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
-    # ATR(14) for current volatility
+    # ATR(14) for numerator
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR(50) for longer-term volatility comparison
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Max and min close over 14 periods for denominator
+    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
+    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
+    # Chop = 100 * log10(sum(atr14) / log10(range)) / log10(14)
+    # Simplified: Chop = 100 * log10(atr14_sum / (max_close - min_close)) / log10(14)
+    # We'll use: Chop = 100 * log10(atr14_sum / (max_high - min_low)) / log10(14)
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    atr_sum = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    range_hl = max_high - min_low
+    # Avoid division by zero
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(14)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
         if (np.isnan(PP_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(volume_sma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -86,26 +91,22 @@ def generate_signals(prices):
         R3_level = R3_aligned[i]
         S3_level = S3_aligned[i]
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume_current > 1.3 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Trend filter: ATR(14) > ATR(50) (indicates trending market)
-        atr_trend = atr_14[i] > atr_50[i]
-        
-        # 1d EMA trend bias
-        ema_bias_long = close_price > ema_50_1d_aligned[i]
-        ema_bias_short = close_price < ema_50_1d_aligned[i]
+        # Chop regime filter: Chop > 61.8 indicates ranging market (good for mean reversion)
+        chop_regime = chop[i] > 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above Camarilla R3, volume confirmation, trending, long bias
-        if close_price > R3_level and vol_confirm and atr_trend and ema_bias_long:
+        # Long breakout: price above Camarilla R3, volume confirmation, ranging market
+        if close_price > R3_level and vol_confirm and chop_regime:
             enter_long = True
         
-        # Short breakout: price below Camarilla S3, volume confirmation, trending, short bias
-        if close_price < S3_level and vol_confirm and atr_trend and ema_bias_short:
+        # Short breakout: price below Camarilla S3, volume confirmation, ranging market
+        if close_price < S3_level and vol_confirm and chop_regime:
             enter_short = True
         
         # Exit conditions
