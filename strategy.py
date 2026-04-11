@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v6"
+name = "12h_1d_camarilla_breakout_v7"
 timeframe = "12h"
 leverage = 1.0
 
@@ -117,7 +117,7 @@ def generate_signals(prices):
 
 # Hypothesis: Daily Camarilla pivot breakout strategy for 12h timeframe with very strict volume confirmation (>3x average volume) and strong ADX filter (>40).
 # Enters long when 12h price breaks above daily R3 level (close + 1.166*range) with volume >3x average and ADX>40.
-# Enters short when price breaks below daily S3 level (close - 1.166*range) with same conditions.
+# Enters short when price breaks below daily S3 level (close - 1.166*range) with volume >3x average and ADX>40.
 # Exits when price returns to the daily pivot level (mean reversion within the day's range).
 # Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
 # Very strict filters reduce trade frequency to avoid overtrading while maintaining edge in strong trends.
