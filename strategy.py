@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_volume_v1
-# Strategy: Daily Camarilla pivot levels with weekly trend filter and volume confirmation
-# Timeframe: 1d
+# 6h_1d_cci_volume_v1
+# Strategy: 6h CCI extreme reversal with daily volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels provide high-probability reversal zones. 
-# Weekly EMA filter ensures trades align with higher timeframe trend. Volume confirmation 
-# filters false breaks. Designed for low trade frequency (~10-25/year) to minimize fee drag.
-# Works in bull markets via buying dips in uptrend and selling rallies in downtrend.
+# Hypothesis: CCI > +100 indicates overbought, < -100 indicates oversold.
+# In ranging markets (common in BTC/ETH 2025), extreme CCI readings often precede mean reversion.
+# Daily volume > 1.5x 20-period average confirms participation.
+# Works in bull markets via shorting overextended rallies and bear markets via buying capitulation.
+# Low trade frequency expected (~15-30/year) due to strict CCI extremes + volume filter.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "6h_1d_cci_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,79 +28,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA21 for trend filter
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    
-    # Daily Camarilla pivot levels (based on previous day)
-    # Typical price = (H + L + C) / 3
+    # 6h CCI (20-period)
     typical_price = (high + low + close) / 3.0
-    # Shift to get previous day's values
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_typical = (prev_high + prev_low + prev_close) / 3.0
-    # First day: use current values
-    prev_typical[0] = typical_price[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
+    tp_mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (typical_price - tp_mean) / (0.015 * tp_mad)
+    cci_values = cci.values
     
-    # Camarilla levels
-    range_val = prev_high - prev_low
-    # Resistance levels
-    r1 = prev_close + range_val * 1.1 / 12
-    r2 = prev_close + range_val * 1.1 / 6
-    r3 = prev_close + range_val * 1.1 / 4
-    r4 = prev_close + range_val * 1.1 / 2
-    # Support levels
-    s1 = prev_close - range_val * 1.1 / 12
-    s2 = prev_close - range_val * 1.1 / 6
-    s3 = prev_close - range_val * 1.1 / 4
-    s4 = prev_close - range_val * 1.1 / 2
-    
-    # Daily volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d volume average (20-period)
+    vol_avg_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_avg_20[i]) or 
-            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(prev_typical[i])):
+        if np.isnan(cci_values[i]) or np.isnan(vol_avg_20_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
+        # Daily volume confirmation: current 6h bar volume > 1.5x 20-period daily average
+        # Note: Comparing 6h volume to daily average requires scaling
+        # Approximate: 6h volume should be > (1.5 * daily_avg / 4) since 4x6h = 1d
+        vol_confirm = volume[i] > 1.5 * vol_avg_20_aligned[i] / 4.0
         
-        # Trend filter: price above/below weekly EMA21
-        trend_bullish = close[i] > ema_21_1w_aligned[i]
-        trend_bearish = close[i] < ema_21_1w_aligned[i]
+        # CCI extreme conditions
+        cci_overbought = cci_values[i] > 100
+        cci_oversold = cci_values[i] < -100
         
         # Entry conditions
-        # Long: Price touches S3/S4 support in uptrend with volume confirmation
-        if trend_bullish and vol_confirm and position != 1:
-            if low[i] <= s3[i] or low[i] <= s4[i]:
-                position = 1
-                signals[i] = 0.25
-        # Short: Price touches R3/R4 resistance in downtrend with volume confirmation
-        elif trend_bearish and vol_confirm and position != -1:
-            if high[i] >= r3[i] or high[i] >= r4[i]:
-                position = -1
-                signals[i] = -0.25
-        # Exit: Opposite touch or trend reversal
-        elif position == 1 and (high[i] >= r1[i] or not trend_bullish):
+        # Long: CCI oversold AND volume confirmation
+        if cci_oversold and vol_confirm and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short: CCI overbought AND volume confirmation
+        elif cci_overbought and vol_confirm and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit: CCI returns to neutral zone (-50 to 50)
+        elif position == 1 and cci_values[i] < 50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (low[i] <= s1[i] or not trend_bearish):
+        elif position == -1 and cci_values[i] > -50:
             position = 0
             signals[i] = 0.0
         else:
