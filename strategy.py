@@ -1,21 +1,22 @@
-#!/usr/bin/env python3
+# #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with weekly pivot levels and daily volume confirmation.
-# Uses weekly Camarilla levels for trend direction and daily levels for entry.
-# Fades at daily S3/R3 in direction of weekly trend and breaks out at daily S4/R4.
-# Volume filter confirms institutional participation. Designed for 12-37 trades/year.
-# Weekly trend filter reduces whipsaw in sideways markets and improves win rate.
+# Hypothesis: 12h timeframe with weekly trend filter and daily RSI extremes.
+# Uses weekly EMA(34) to determine trend direction and daily RSI(14) for entry.
+# Enters long when weekly trend is up and daily RSI < 30 (oversold).
+# Enters short when weekly trend is down and daily RSI > 70 (overbought).
+# Volume filter requires current volume > 1.3 * 20-period average volume.
+# Designed for 12-37 trades/year with clear trend-following logic.
 
-name = "12h_1w1d_camarilla_trend_v1"
+name = "12h_1w1d_rsi_trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,55 +25,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily and weekly data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly and daily data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1w) < 35 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels for trend direction
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate weekly EMA(34) for trend direction
     close_1w = df_1w['close'].values
+    ema_34_1w = np.full_like(close_1w, np.nan, dtype=float)
+    alpha = 2 / (34 + 1)
+    for i in range(len(close_1w)):
+        if i == 0:
+            ema_34_1w[i] = close_1w[i]
+        elif np.isnan(ema_34_1w[i-1]):
+            ema_34_1w[i] = close_1w[i]
+        else:
+            ema_34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_34_1w[i-1]
     
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    prev_close_1w[0] = np.nan
-    
-    daily_range_1w = prev_high_1w - prev_low_1w
-    r4_1w = prev_close_1w + daily_range_1w * 1.1 / 2
-    r3_1w = prev_close_1w + daily_range_1w * 1.1 / 4
-    s3_1w = prev_close_1w - daily_range_1w * 1.1 / 4
-    s4_1w = prev_close_1w - daily_range_1w * 1.1 / 2
-    
-    # Weekly trend: price above R3 = bullish, below S3 = bearish
-    weekly_trend_bull = prev_close_1w > (r3_1w + s3_1w) / 2  # Above midpoint
-    weekly_trend_bear = prev_close_1w < (r3_1w + s3_1w) / 2  # Below midpoint
+    # Weekly trend: price above EMA = bullish, below EMA = bearish
+    weekly_trend_up = close_1w > ema_34_1w
+    weekly_trend_down = close_1w < ema_34_1w
     
     # Align weekly trend to 12h
-    weekly_trend_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bull)
-    weekly_trend_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bear)
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
     
-    # Calculate daily Camarilla levels for entry
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily RSI(14) for entry signals
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Wilder's smoothing (alpha = 1/14)
+    alpha_rsi = 1 / 14
+    avg_gain = np.full_like(gain, np.nan, dtype=float)
+    avg_loss = np.full_like(loss, np.nan, dtype=float)
     
-    daily_range_1d = prev_high_1d - prev_low_1d
-    r4_1d = prev_close_1d + daily_range_1d * 1.1 / 2
-    r3_1d = prev_close_1d + daily_range_1d * 1.1 / 4
-    s3_1d = prev_close_1d - daily_range_1d * 1.1 / 4
-    s4_1d = prev_close_1d - daily_range_1d * 1.1 / 2
+    for i in range(len(gain)):
+        if i < 14:
+            if i == 0:
+                avg_gain[i] = gain[i]
+                avg_loss[i] = loss[i]
+            else:
+                avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i if i > 0 else gain[i]
+                avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i if i > 0 else loss[i]
+        else:
+            avg_gain[i] = alpha_rsi * gain[i] + (1 - alpha_rsi) * avg_gain[i-1]
+            avg_loss[i] = alpha_rsi * loss[i] + (1 - alpha_rsi) * avg_loss[i-1]
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Daily average volume (20-period)
     volume_1d = df_1d['volume'].values
@@ -80,11 +83,8 @@ def generate_signals(prices):
     for i in range(19, len(volume_1d)):
         vol_avg_20[i] = np.mean(volume_1d[i-19:i+1])
     
-    # Align daily levels and volume to 12h
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align daily indicators to 12h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
@@ -92,50 +92,37 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vol_avg_aligned[i]) or
-            np.isnan(weekly_trend_bull_aligned[i]) or np.isnan(weekly_trend_bear_aligned[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(vol_avg_aligned[i]) or
+            np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * daily average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.3 * daily average volume
+        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
         
         # Determine weekly trend direction
-        is_bullish_week = weekly_trend_bull_aligned[i]
-        is_bearish_week = weekly_trend_bear_aligned[i]
+        is_up_trend = weekly_trend_up_aligned[i]
+        is_down_trend = weekly_trend_down_aligned[i]
         
-        # Fade at S3/R3 in direction of weekly trend
-        fade_long = (low[i] <= s3_1d_aligned[i] and vol_filter and is_bullish_week)
-        fade_short = (high[i] >= r3_1d_aligned[i] and vol_filter and is_bearish_week)
+        # Entry conditions
+        rsi_value = rsi_aligned[i]
         
-        # Breakout at S4/R4 (always active, but stronger with trend)
-        breakout_long = (high[i] >= r4_1d_aligned[i] and vol_filter)
-        breakout_short = (low[i] <= s4_1d_aligned[i] and vol_filter)
+        # Long: weekly trend up + RSI oversold (<30) + volume
+        long_signal = is_up_trend and (rsi_value < 30) and vol_filter
+        # Short: weekly trend down + RSI overbought (>70) + volume
+        short_signal = is_down_trend and (rsi_value > 70) and vol_filter
         
-        # Exit when price returns to weekly midpoint or opposite S3/R3
-        weekly_midpoint = (r3_1w + s3_1w) / 2
-        weekly_midpoint_aligned = align_htf_to_ltf(prices, df_1w, weekly_midpoint)
-        
+        # Exit conditions: opposite RSI extreme or trend change
         exit_long = (position == 1 and 
-                    (low[i] <= weekly_midpoint_aligned[i] or 
-                     high[i] >= s3_1d_aligned[i]))  # Exit long if hits weekly midpoint or daily S3
+                    (rsi_value > 70 or not is_up_trend))
         exit_short = (position == -1 and 
-                     (high[i] >= weekly_midpoint_aligned[i] or 
-                      low[i] <= r3_1d_aligned[i]))  # Exit short if hits weekly midpoint or daily R3
+                     (rsi_value < 30 or not is_down_trend))
         
-        # Priority: breakout > fade > hold
-        if breakout_long and position != 1:
+        # Update position and signals
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif breakout_short and position != -1:
-            position = -1
-            signals[i] = -0.25
-        elif fade_long and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif fade_short and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
