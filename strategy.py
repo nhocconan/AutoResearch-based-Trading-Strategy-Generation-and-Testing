@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# - Long: Price breaks above Camarilla R4 (1d) + 1d close > 1d open (bullish day) + volume > 1.5x 20-period 6h average
-# - Short: Price breaks below Camarilla S4 (1d) + 1d close < 1d open (bearish day) + volume > 1.5x 20-period 6h average
-# - Exit: Opposite Camarilla level break (R3/S3) or ATR trailing stop (2.5 ATR from extreme)
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation and ATR-based stoploss
+# - Long: Price breaks above Camarilla H3 level (1d) + volume > 1.5x 20-period 1d average volume
+# - Short: Price breaks below Camarilla L3 level (1d) + volume > 1.5x 20-period 1d average volume
+# - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Camarilla level break
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots from higher timeframe (1d) provide institutional levels that work in both bull and bear markets
-# - 1d trend filter ensures we only trade in direction of higher timeframe momentum
+# - Camarilla pivots provide mathematical support/resistance levels that work in both trends and ranges
 # - Volume confirmation filters out weak breakouts and increases signal quality
-# - ATR stoploss manages risk during volatile periods
+# - ATR stoploss manages risk during volatile periods while allowing trends to run
 
-name = "6h_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +26,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -35,83 +33,70 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Load 1d data ONCE before loop for Camarilla pivots and trend filter
+    # Load 1d data ONCE before loop for Camarilla pivots and volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d Camarilla levels (based on previous day's OHLC)
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    # Pre-compute 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
-    r4_1d = close_1d + 1.5 * range_1d
-    r3_1d = close_1d + 1.1 * range_1d
-    s3_1d = close_1d - 1.1 * range_1d
-    s4_1d = close_1d - 1.5 * range_1d
     
-    # Align Camarilla levels to 6h timeframe
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Camarilla levels: H3, H4, L3, L4
+    h3 = pivot + (range_1d * 1.1 / 4.0)
+    h4 = pivot + (range_1d * 1.1 / 2.0)
+    l3 = pivot - (range_1d * 1.1 / 4.0)
+    l4 = pivot - (range_1d * 1.1 / 2.0)
     
-    # Pre-compute 1d trend filter (bullish/bearish day based on close vs open)
-    open_1d = df_1d['open'].values
-    bullish_day = close_1d > open_1d  # True for bullish day
-    bearish_day = close_1d < open_1d  # True for bearish day
-    bullish_day_aligned = align_htf_to_ltf(prices, df_1d, bullish_day.astype(float))
-    bearish_day_aligned = align_htf_to_ltf(prices, df_1d, bearish_day.astype(float))
+    # Pre-compute 1d volume confirmation (20-period average)
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 6h volume confirmation (20-period average)
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
-    # Pre-compute ATR for stoploss (6h timeframe)
+    # Pre-compute ATR for stoploss (12h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(bullish_day_aligned[i]) or np.isnan(bearish_day_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(volume_sma_20_aligned[i]) or
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
         volume_current = volume[i]
-        high_price = high[i]
-        low_price = low[i]
         
         # Camarilla levels
-        r4 = r4_1d_aligned[i]
-        r3 = r3_1d_aligned[i]
-        s3 = s3_1d_aligned[i]
-        s4 = s4_1d_aligned[i]
-        
-        # Trend filter
-        bullish_today = bullish_day_aligned[i] > 0.5
-        bearish_today = bearish_day_aligned[i] > 0.5
+        h3_level = h3_aligned[i]
+        l3_level = l3_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price breaks above R4 with bullish 1d trend and volume confirmation
-        if close_price > r4 and bullish_today and vol_confirm:
+        # Long breakout: price closes above H3 level with volume confirmation
+        if close_price > h3_level and vol_confirm:
             enter_long = True
         
-        # Short breakout: price breaks below S4 with bearish 1d trend and volume confirmation
-        if close_price < s4 and bearish_today and vol_confirm:
+        # Short breakout: price closes below L3 level with volume confirmation
+        if close_price < l3_level and vol_confirm:
             enter_short = True
         
         # Exit conditions
@@ -119,27 +104,27 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below R3 (profit target) or hits ATR stoploss
-            exit_long = (close_price < r3) or (close_price <= long_stop)
+            # Exit long if price hits ATR stoploss or breaks below L3 level
+            exit_long = (close_price <= long_stop) or (close_price < l3_level)
         elif position == -1:
-            # Exit short if price breaks above S3 (profit target) or hits ATR stoploss
-            exit_short = (close_price > s3) or (close_price >= short_stop)
+            # Exit short if price hits ATR stoploss or breaks above H3 level
+            exit_short = (close_price >= short_stop) or (close_price > h3_level)
         
         # Update stoploss levels when entering a position
         if enter_long:
             entry_price = close_price
-            long_stop = entry_price - 2.5 * atr_14[i]
+            long_stop = entry_price - 2.0 * atr_14[i]
         elif enter_short:
             entry_price = close_price
-            short_stop = entry_price + 2.5 * atr_14[i]
+            short_stop = entry_price + 2.0 * atr_14[i]
         
         # Update trailing stoploss for existing positions
         if position == 1:
-            # Trail long stop upward: max of current stop and (high - 2.5*ATR)
-            long_stop = max(long_stop, high_price - 2.5 * atr_14[i])
+            # Trail long stop upward: max of current stop and (high - 2*ATR)
+            long_stop = max(long_stop, high[i] - 2.0 * atr_14[i])
         elif position == -1:
-            # Trail short stop downward: min of current stop and (low + 2.5*ATR)
-            short_stop = min(short_stop, low_price + 2.5 * atr_14[i])
+            # Trail short stop downward: min of current stop and (low + 2*ATR)
+            short_stop = min(short_stop, low[i] + 2.0 * atr_14[i])
         
         # Trading logic
         if enter_long and position != 1:
