@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX(14) filter and volume confirmation.
-# Long when price breaks above Donchian upper band, ADX > 25, and volume > 1.5x average.
-# Short when price breaks below Donchian lower band, ADX > 25, and volume > 1.5x average.
-# Exit when price reverses to touch the opposite Donchian band or ADX drops below 20.
-# Designed for 15-25 trades/year on 12h timeframe with strong trend capture and low turnover.
-# Uses ADX to filter only strong trends, avoiding whipsaws in ranging markets.
-# Volume filter ensures breakouts have institutional participation.
+# Hypothesis: 6h Institutional Flow Detector using 1d Volume Weighted Average Price (VWAP) deviation and 1w trend filter.
+# Long when price deviates below 1d VWAP by >1.5σ and 1w trend is up; short when price deviates above 1d VWAP by >1.5σ and 1w trend is down.
+# Uses volume-weighted price deviation to detect institutional accumulation/distribution.
+# 1w trend filter prevents counter-trend trading. Designed for 15-30 trades/year on 6h timeframe.
 
-name = "12h_1d_donchian_adx_volume_v1"
-timeframe = "12h"
+name = "6h_1d_1w_vwap_deviation_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,90 +23,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 20 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d VWAP (typical price * volume) / volume
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Align 1d VWAP to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Calculate 1d VWAP standard deviation (20-period)
+    typical_price_1d_series = pd.Series(typical_price_1d.values)
+    volume_1d_series = pd.Series(df_1d['volume'].values)
+    vwap_deviation = typical_price_1d_series - vwap_1d
+    vwap_std_20 = vwap_deviation.rolling(window=20, min_periods=20).std().values
+    vwap_std_20_aligned = align_htf_to_ltf(prices, df_1d, vwap_std_20)
     
-    # Smoothed values
-    def _wilder_smooth(values, period):
-        smoothed = np.zeros_like(values)
-        smoothed[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-        return smoothed
-    
-    tr_sum = _wilder_smooth(tr, 14)
-    plus_dm_sum = _wilder_smooth(plus_dm, 14)
-    minus_dm_sum = _wilder_smooth(minus_dm, 14)
-    
-    # Avoid division by zero
-    plus_di = np.where(tr_sum > 0, 100 * plus_dm_sum / tr_sum, 0)
-    minus_di = np.where(tr_sum > 0, 100 * minus_dm_sum / tr_sum, 0)
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = _wilder_smooth(dx, 14)
-    
-    # Align 1d ADX to 12h timeframe
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Donchian channels (20-period) on 12h
-    donchian_window = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Calculate volume moving average (20-period)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1w EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(donchian_window, n):
+    for i in range(20, n):  # Start after VWAP std period
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx_14_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_std_20_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period average volume
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Price deviation from 1d VWAP in standard deviations
+        price_dev = (close[i] - vwap_1d_aligned[i]) / vwap_std_20_aligned[i] if vwap_std_20_aligned[i] > 0 else 0
         
-        # Trend filter: ADX > 25
-        strong_trend = adx_14_1d_aligned[i] > 25
+        # Determine 1w trend direction
+        is_uptrend = close[i] > ema_20_1w_aligned[i]
+        is_downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Weak trend filter for exit: ADX < 20
-        weak_trend = adx_14_1d_aligned[i] < 20
+        # Entry conditions: significant deviation from VWAP with trend alignment
+        # Long when price is significantly below VWAP (accumulation) and 1w trend up
+        # Short when price is significantly above VWAP (distribution) and 1w trend down
+        vwap_long_signal = price_dev < -1.5 and is_uptrend
+        vwap_short_signal = price_dev > 1.5 and is_downtrend
         
-        # Entry conditions
-        bullish_breakout = (high[i] > donchian_high[i-1]) and vol_filter and strong_trend
-        bearish_breakout = (low[i] < donchian_low[i-1]) and vol_filter and strong_trend
-        
-        # Exit conditions
-        exit_long = (low[i] < donchian_low[i]) or weak_trend
-        exit_short = (high[i] > donchian_high[i]) or weak_trend
+        # Exit conditions: price returns toward VWAP
+        exit_long = price_dev > -0.5  # Return to within 0.5σ of VWAP
+        exit_short = price_dev < 0.5   # Return to within 0.5σ of VWAP
         
         # Priority: entry > exit > hold
-        if bullish_breakout and position != 1:
+        if vwap_long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_breakout and position != -1:
+        elif vwap_short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
