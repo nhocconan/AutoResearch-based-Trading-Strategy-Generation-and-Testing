@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 4h_12h_trix_volume_regime_v1
-# Strategy: 4h TRIX momentum with 12h trend filter and volume confirmation
-# Timeframe: 4h
+# 1h_4h_1d_ema_cross_volume_v1
+# Strategy: 1h EMA cross with 4h/1d trend filter and volume confirmation
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: TRIX (TRIple Exponential Average) filters noise and identifies smooth momentum.
-# Long when TRIX > 0 and rising, short when TRIX < 0 and falling, with 12h EMA trend filter.
-# Volume spike (1.5x 20-period average) confirms momentum strength. Designed for moderate
-# frequency (25-40 trades/year) to balance signal quality and fee drag in bull/bear markets.
+# Hypothesis: 1h EMA cross (9/21) provides timely entries, filtered by 4h EMA50 trend and 1d EMA200 trend.
+# Volume spike (1.5x 20-period average) confirms momentum. Designed for 15-30 trades/year to avoid fee drag.
+# Works in bull/bear by requiring alignment with higher timeframe trends.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_trix_volume_regime_v1"
-timeframe = "4h"
+name = "1h_4h_1d_ema_cross_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,24 +26,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 30:
+    if len(df_4h) < 50 or len(df_1d) < 200:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA(50) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # TRIX calculation: Triple EMA of price, then ROC
-    # TRIX = EMA(EMA(EMA(close, period), period), period) ROC
-    period = 15
-    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
-    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
-    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
-    trix = ema3.pct_change(periods=1) * 100  # Rate of change
+    # 1d EMA(200) for trend filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # 1h EMA(9) and EMA(21) for entry signal
+    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean()
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean()
     
     # Volume spike: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -53,39 +55,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # Start after warmup period
+    for i in range(100, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(trix.iloc[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(ema9.iloc[i]) or np.isnan(ema21.iloc[i]) or 
             np.isnan(volume_spike[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend filters: 4h and 1d trends
+        uptrend_4h = close[i] > ema_50_4h_aligned[i]
+        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        uptrend_1d = close[i] > ema_200_1d_aligned[i]
+        downtrend_1d = close[i] < ema_200_1d_aligned[i]
         
-        # TRIX signals: positive and rising = bullish momentum
-        trix_now = trix.iloc[i]
-        trix_prev = trix.iloc[i-1]
-        trix_bullish = trix_now > 0 and trix_now > trix_prev
-        trix_bearish = trix_now < 0 and trix_now < trix_prev
+        # EMA cross signals
+        ema9_now = ema9.iloc[i]
+        ema21_now = ema21.iloc[i]
+        ema9_prev = ema9.iloc[i-1]
+        ema21_prev = ema21.iloc[i-1]
+        ema_cross_bull = ema9_now > ema21_now and ema9_prev <= ema21_prev
+        ema_cross_bear = ema9_now < ema21_now and ema9_prev >= ema21_prev
         
-        # Entry logic: TRIX momentum + volume spike + trend alignment
-        if (trix_bullish and volume_spike[i] and uptrend and position != 1):
+        # Entry logic: EMA cross + volume spike + trend alignment (both 4h and 1d must agree)
+        if (ema_cross_bull and volume_spike[i] and uptrend_4h and uptrend_1d and position != 1):
             position = 1
-            signals[i] = 0.25
-        elif (trix_bearish and volume_spike[i] and downtrend and position != -1):
+            signals[i] = 0.20
+        elif (ema_cross_bear and volume_spike[i] and downtrend_4h and downtrend_1d and position != -1):
             position = -1
-            signals[i] = -0.25
-        # Exit: TRIX momentum reversal or trend change
-        elif position == 1 and (not trix_bullish or not uptrend):
+            signals[i] = -0.20
+        # Exit: EMA cross reversal or trend disagreement
+        elif position == 1 and (ema_cross_bear or not (uptrend_4h and uptrend_1d)):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not trix_bearish or not downtrend):
+        elif position == -1 and (ema_cross_bull or not (downtrend_4h and downtrend_1d)):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
