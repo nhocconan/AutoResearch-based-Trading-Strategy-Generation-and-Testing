@@ -1,15 +1,3 @@
-# 4h_1d_camarilla_breakout_volume_v19
-# Hypothesis: This strategy combines daily Camarilla pivot levels with volume confirmation and volatility regime filtering. 
-# The Camarilla levels act as dynamic support/resistance levels derived from the previous day's range, which are particularly 
-# effective in ranging markets. Volume confirmation ensures breakouts are backed by genuine market participation, while 
-# the volatility regime filter (using ATR ratio) avoids trading during low-volatility periods where false breakouts are common.
-# The strategy is designed to work in both bull and bear markets by focusing on mean-reversion around key daily levels 
-# rather than pure trend following. Entry requires: 1) Price breaking above/below Camarilla H4/L4 levels, 2) Volume > 1.5x 20-period average, 
-# 3) ATR ratio > 0.8 (elevated volatility), and 4) Price above/below 20-period SMA for momentum alignment. 
-# Exit occurs when price crosses back through the Camarilla C level (previous day's close). 
-# Position size is 0.25 to manage risk and reduce overtrading. 
-# Expected trade frequency: ~20-40 trades per year per symbol, balancing opportunity with cost efficiency.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
