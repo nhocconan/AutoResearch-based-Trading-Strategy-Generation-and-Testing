@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_v1
-# Strategy: 12-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_volume_trend_v4
+# Strategy: 4-hour Camarilla pivot breakout with 1-day trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
 # Hypothesis: Uses daily Camarilla pivot levels (R3/S3 for reversals, R4/S4 for breakouts) 
 # filtered by 1-day EMA50 trend and volume spikes. Works in both bull and bear markets by
 # aligning with higher timeframe trend while capturing intraday momentum bursts. 
-# Targets 50-150 trades over 4 years to minimize fee drag.
+# Targets 80-180 trades over 4 years to minimize fee drag and improve generalization.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,12 +55,13 @@ def generate_signals(prices):
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d data to 12h timeframe (wait for daily close)
+    # Align 1d data to 4h timeframe (wait for daily close)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -101,7 +102,6 @@ def generate_signals(prices):
                        (reverse_at_s3 and vol_confirmed and downtrend_1d)
         
         # Exit when price returns to the 1d pivot level or opposite Camarilla level
-        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
         exit_long = position == 1 and (price_close < pivot_1d_aligned[i] or 
                                        price_close < s3_1d_aligned[i])
         exit_short = position == -1 and (price_close > pivot_1d_aligned[i] or 
