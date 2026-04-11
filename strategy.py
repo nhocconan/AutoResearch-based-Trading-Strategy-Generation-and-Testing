@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d ATR filter and volume confirmation.
-# Long when price breaks above Donchian(20) high with volume > 1.3x 1d average and ATR(14) > 1d ATR(14) EMA.
-# Short when price breaks below Donchian(20) low with same conditions.
-# Uses 1d ATR regime filter to avoid low-volatility chop. Designed for 20-40 trades/year.
-# Works in bull/bear markets by filtering breakouts with volatility regime.
+# Hypothesis: 4h timeframe with 12h Donchian breakout + volume confirmation + ADX trend filter.
+# Uses 12h Donchian channels to capture momentum, volume filter to avoid false breakouts,
+# and ADX to only trade in trending markets. Designed for low trade frequency (~20-30/year)
+# to minimize fee drag while capturing strong momentum in both bull and bear markets.
+# Works in bull/bear markets by only taking breakouts when ADX > 25 (trending).
 
-name = "4h_1d_donchian_atr_volume_v1"
+name = "4h_12h_donchian_volume_adx_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,62 +24,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate daily ATR(14) and its EMA for regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian upper/lower bands
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # True Range components
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
+    # Align 12h Donchian to 4h timeframe
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    
+    # Calculate 12h ADX for trend filter (14-period)
+    # True Range
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.concatenate([[low_12h[0]], low_12h[:-1]]))
+    tr3 = np.abs(low_12h - np.concatenate([[high_12h[0]], high_12h[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # EMA of ATR for regime filter
-    atr_ema_1d = pd.Series(atr_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Directional Movement
+    dm_plus = np.where((high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]])) > 
+                       (np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h),
+                       np.maximum(high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h) > 
+                        (high_12h - np.concatenate([[high_12h[0]], high_12h[:-1]])),
+                        np.maximum(np.concatenate([[low_12h[0]], low_12h[:-1]]) - low_12h, 0), 0)
     
-    # Daily average volume for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Align all daily indicators to 4h timeframe
-    atr_ema_aligned = align_htf_to_ltf(prices, df_1d, atr_ema_1d)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # Volume confirmation: 4h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure Donchian is valid
-    for i in range(20, n):
+    # Start from index 50 to ensure all indicators are valid
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(atr_ema_aligned[i]) or np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility filter: current 1d ATR EMA > 0 (always true if calculated) 
-        # Volume filter: current volume > 1.3x 20-day average volume
-        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trend_filter = adx_aligned[i] > 25
         
-        # Entry conditions: price breaks Donchian bands with volume confirmation
-        long_entry = (high[i] > high_max[i] and vol_filter)
-        short_entry = (low[i] < low_min[i] and vol_filter)
+        # Volume filter: current volume > 1.5 * 20-period average volume
+        vol_filter = volume[i] > 1.5 * vol_ma[i]
         
-        # Exit conditions: price returns to opposite Donchian band (trailing exit)
-        exit_long = low[i] < low_min[i]  # Exit long if price breaks lower band
-        exit_short = high[i] > high_max[i]  # Exit short if price breaks upper band
+        # Entry conditions: price breaks 12h Donchian with trend and volume confirmation
+        long_entry = (high[i] > upper_12h_aligned[i] and trend_filter and vol_filter)
+        short_entry = (low[i] < lower_12h_aligned[i] and trend_filter and vol_filter)
+        
+        # Exit conditions: price returns to opposite Donchian level
+        exit_long = low[i] < lower_12h_aligned[i]
+        exit_short = high[i] > upper_12h_aligned[i]
         
         if long_entry and position != 1:
             position = 1
