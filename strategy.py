@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-# - Donchian breakout: price > upper(20) or price < lower(20) on 6h timeframe
-# - Weekly pivot direction: price > weekly pivot (from 1d data) for long, < for short
-# - Volume confirmation: 6h volume > 1.5x 20-period average (from 1d data aligned)
+# Hypothesis: 12h Williams %R + 1d ATR-based volatility filter + volume confirmation
+# - Williams %R(14) identifies overbought/oversold conditions on 12h chart
+# - Long: Williams %R crosses above -80 (oversold recovery) AND ATR(14) > 1.2 * ATR(50) (expanding volatility) AND volume > 1.3x 20-period average
+# - Short: Williams %R crosses below -20 (overbought rejection) AND ATR(14) > 1.2 * ATR(50) (expanding volatility) AND volume > 1.3x 20-period average
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Donchian provides clear breakout levels, weekly pivot gives HTF bias, volume filters weak signals
-# - Works in bull markets (breakouts with HTF up bias) and bear markets (breakdowns with HTF down bias)
+# - Williams %R captures mean reversion in ranging markets and momentum in trending markets
+# - ATR ratio filter ensures we only trade during volatile expansion phases (avoids chop)
+# - Volume confirmation filters out weak breakouts
+# - Works in bull markets (buying dips) and bear markets (selling rallies)
 
-name = "6h_1d_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_williamsr_atr_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,76 +30,89 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for weekly pivot and volume
+    # Load 1d data ONCE before loop for ATR and volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d weekly pivot (using prior week's high, low, close)
-    # For each 1d bar, calculate pivot based on prior 7 days (approximate week)
-    df_1d = df_1d.copy()
-    df_1d['weekly_high'] = pd.Series(df_1d['high']).rolling(window=7, min_periods=7).max().shift(1)
-    df_1d['weekly_low'] = pd.Series(df_1d['low']).rolling(window=7, min_periods=7).min().shift(1)
-    df_1d['weekly_close'] = pd.Series(df_1d['close']).rolling(window=7, min_periods=7).last().shift(1)
-    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_pivot = (df_1d['weekly_high'] + df_1d['weekly_low'] + df_1d['weekly_close']) / 3
-    weekly_pivot_values = weekly_pivot.values
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot_values)
+    # Pre-compute 1d ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First bar: no previous close
+    tr2[0] = 0  # First bar: no previous close
+    tr3[0] = 0  # First bar: no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_50
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Pre-compute 1d volume confirmation (20-period average)
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute Donchian channels on 6h timeframe
-    donchian_window = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Pre-compute Williams %R on 12h timeframe
+    highest_high = pd.Series(close).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(close).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    for i in range(donchian_window, n):  # Start after Donchian warmup
+    # Williams %R crossover signals
+    williams_r_prev = np.roll(williams_r, 1)
+    williams_r_prev[0] = williams_r[0]  # First bar: no previous value
+    
+    # Long signal: Williams %R crosses above -80 (from below)
+    williams_r_cross_above_80 = (williams_r_prev <= -80) & (williams_r > -80)
+    # Short signal: Williams %R crosses below -20 (from above)
+    williams_r_cross_below_20 = (williams_r_prev >= -20) & (williams_r < -20)
+    
+    for i in range(60, n):  # Start after 60-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(atr_ratio_aligned[i]) or 
+            np.isnan(volume_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
-        close_current = close[i]
         volume_current = volume[i]
         
-        # Donchian breakout conditions
-        breakout_up = close_current > upper_channel[i]
-        breakdown_down = close_current < lower_channel[i]
+        # Volatility filter: ATR(14) > 1.2 * ATR(50) (expanding volatility)
+        vol_filter = atr_ratio_aligned[i] > 1.2
         
-        # Weekly pivot direction from 1d data
-        above_weekly_pivot = close_current > weekly_pivot_aligned[i]
-        below_weekly_pivot = close_current < weekly_pivot_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume_current > 1.3 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Donchian breakout up + above weekly pivot + volume confirmation
-        if breakout_up and above_weekly_pivot and vol_confirm:
+        # Long: Williams %R crosses above -80 + volatility expansion + volume confirmation
+        if williams_r_cross_above_80[i] and vol_filter and vol_confirm:
             enter_long = True
         
-        # Short: Donchian breakdown down + below weekly pivot + volume confirmation
-        if breakdown_down and below_weekly_pivot and vol_confirm:
+        # Short: Williams %R crosses below -20 + volatility expansion + volume confirmation
+        if williams_r_cross_below_20[i] and vol_filter and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Donchian touch or loss of HTF bias
+        # Exit conditions: reverse Williams %R crossover or loss of volatility/volume
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price touches lower channel OR goes below weekly pivot
-            exit_long = (close_current <= lower_channel[i]) or (not above_weekly_pivot)
+            # Exit long if Williams %R crosses below -80 OR volatility contracts OR volume weakens
+            exit_long = (williams_r_cross_below_20[i]) or (not vol_filter) or (not vol_confirm)
         elif position == -1:
-            # Exit short if price touches upper channel OR goes above weekly pivot
-            exit_short = (close_current >= upper_channel[i]) or (not below_weekly_pivot)
+            # Exit short if Williams %R crosses above -20 OR volatility contracts OR volume weakens
+            exit_short = (williams_r_cross_above_80[i]) or (not vol_filter) or (not vol_confirm)
         
         # Trading logic
         if enter_long and position != 1:
