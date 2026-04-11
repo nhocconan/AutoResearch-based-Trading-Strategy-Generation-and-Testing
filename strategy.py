@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_v3"
+name = "4h_12h_camarilla_breakout_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,7 +25,7 @@ def generate_signals(prices):
     if len(df_12h) < 2:
         return signals
     
-    # Calculate 12h ATR for volatility filter (14-period)
+    # Calculate 12h ATR (14-period)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
@@ -36,16 +36,9 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     atr_14_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    
-    # Calculate 12h ATR MA (20-period) for volatility regime filter
-    atr_ma_20_12h = pd.Series(atr_14_12h_aligned).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 12h ATR ratio (current / MA) for regime detection
-    atr_ratio_12h = np.where(atr_ma_20_12h > 0, atr_14_12h_aligned / atr_ma_20_12h, 1.0)
     
     # Calculate 12h ATR MA (50-period) for trend filter
-    atr_ma_50_12h = pd.Series(atr_14_12h_aligned).rolling(window=50, min_periods=50).mean().values
+    atr_ma_50_12h = pd.Series(atr_14_12h).rolling(window=50, min_periods=50).mean().values
     
     # Calculate Camarilla levels on 12h data (using previous 12h bar's range)
     prev_high_12h = np.roll(high_12h, 1)
@@ -57,10 +50,12 @@ def generate_signals(prices):
     
     camarilla_H4_12h = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 2
     camarilla_L4_12h = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 2
+    camarilla_C_12h = prev_close_12h  # Mid-point (C level)
     
     # Align Camarilla levels to 4h timeframe
     camarilla_H4_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H4_12h)
     camarilla_L4_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L4_12h)
+    camarilla_C_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_C_12h)
     
     # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,18 +63,19 @@ def generate_signals(prices):
     for i in range(200, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_H4_12h_aligned[i]) or np.isnan(camarilla_L4_12h_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_12h[i]) or np.isnan(atr_ma_50_12h[i])):
+            np.isnan(camarilla_C_12h_aligned[i]) or np.isnan(volume_sma_20[i]) or
+            np.isnan(atr_ma_50_12h[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average (stricter filter)
+        # Volume confirmation: current volume > 2.0x 20-period average
         vol_confirm = volume_current > 2.0 * volume_sma_20[i]
         
         # Trend filter: trade only when ATR is above its 50-period MA (trending market)
-        trending = atr_14_12h_aligned[i] > atr_ma_50_12h[i]
+        trending = atr_14_12h[i] > atr_ma_50_12h[i]
         
         # Entry conditions
         enter_long = False
@@ -95,13 +91,9 @@ def generate_signals(prices):
         if price_below_L4 and vol_confirm and trending:
             enter_short = True
         
-        # Exit conditions: price crosses back through the Camarilla mid-point (C level)
+        # Exit conditions: price crosses back through the Camarilla C level (mid-point)
         exit_long = False
         exit_short = False
-        
-        # Calculate Camarilla C level (close of previous 12h bar)
-        camarilla_C_12h = prev_close_12h
-        camarilla_C_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_C_12h)
         
         if position == 1:
             # Exit long if price crosses below Camarilla C level
@@ -129,8 +121,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla breakout on 12h timeframe with stricter volume confirmation (2.0x) and ATR trend filter.
+# Hypothesis: Camarilla breakout on 12h timeframe with volume confirmation and ATR trend filter.
 # Uses 12h Camarilla levels (H4/L4) for entry and C level for exit.
 # Volume confirmation (>2.0x 20-period average) ensures strong institutional participation.
 # ATR trend filter (ATR > 50-period MA) ensures we only trade in trending markets.
-# Reduced position size to 0.25 to manage risk. Target: 15-30 trades/year to minimize fee drag.
+# Reduced position size to 0.25 to manage risk and target 20-40 trades/year to minimize fee drag.
+# Designed to work in both bull and bear markets by requiring trending conditions (avoiding chop).
