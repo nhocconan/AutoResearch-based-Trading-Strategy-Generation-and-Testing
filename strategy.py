@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ATR regime filter
-# - Donchian levels from 4h: upper/lower bands act as dynamic support/resistance
+# Hypothesis: 12h Donchian(20) breakout + 1d volume spike + ATR regime filter
+# - Donchian levels from 12h: upper/lower bands act as dynamic support/resistance
 # - Long when price breaks above upper band with volume > 2.0x 20-period average (strong conviction)
 # - Short when price breaks below lower band with volume > 2.0x 20-period average
 # - ATR regime filter: only trade when ATR(14) > 1.5 * ATR(50) to avoid low volatility chop and false breakouts
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits for 4h
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
 # - Volume spike requirement (>2.0x average) ensures we only trade high-conviction breakouts
 # - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
 # - 1d HTF provides reliable volume confirmation, reducing false signals from lower timeframe noise
 
-name = "4h_1d_donchian_volume_atr_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -54,12 +54,12 @@ def generate_signals(prices):
     volume_series = pd.Series(volume_1d)
     volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
-    # Pre-compute 4h Donchian channels (20-period)
+    # Pre-compute 12h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
