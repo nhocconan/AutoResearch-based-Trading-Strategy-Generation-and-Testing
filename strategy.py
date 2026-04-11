@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
+"""
+12h_1w_ema_trend_follow_v1
+Trend following on 12h timeframe using 21-period EMA on weekly close.
+Long when price > EMA, short when price < EMA.
+Entries only when price touches EMA (pullback) with volume confirmation.
+Designed for low trade frequency (~15-25/year) to minimize fee drag.
+Works in both bull and bear markets by following the trend defined by weekly EMA.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_cloud_trend_v2"
-timeframe = "6h"
+name = "12h_1w_ema_trend_follow_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,85 +21,67 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Ichimoku components on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 21-period EMA on weekly close
+    close_1w = df_1w['close'].values
+    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Align EMA to 12h timeframe (waits for weekly bar to close)
+    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Align to 6h timeframe (Ichimoku signals confirmed after 26-period shift)
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a, additional_delay_bars=26)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b, additional_delay_bars=26)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
-    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
-    
-    # Volume confirmation: 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: 24-period average on 12h timeframe
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
-        # Skip if any required data is invalid
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(vol_avg_20[i])):
+    for i in range(30, n):
+        # Skip if EMA or volume data is invalid
+        if np.isnan(ema_21_aligned[i]) or np.isnan(vol_avg_24[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume confirmation: current volume > 1.5x 24-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_24[i]
         
-        # Ichimoku signals
-        tk_cross = tenkan_6h[i] > kijun_6h[i]  # Tenkan above Kijun
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
+        # Price touching EMA (within 0.5% for long, 0.5% below for short)
+        ema_touch_long = low[i] <= ema_21_aligned[i] * 1.005 and high[i] >= ema_21_aligned[i] * 0.995
+        ema_touch_short = high[i] >= ema_21_aligned[i] * 0.995 and low[i] <= ema_21_aligned[i] * 1.005
+        
+        # Trend direction based on EMA slope (using previous value to avoid look-ahead)
+        if i > 30:
+            ema_slope = ema_21_aligned[i] - ema_21_aligned[i-1]
+            trend_up = ema_slope > 0
+            trend_down = ema_slope < 0
+        else:
+            trend_up = True  # Default to allow initial entry
+            trend_down = False
         
         # Entry conditions
-        # Long: TK cross bullish + price above cloud + volume confirmation
-        if tk_cross and price_above_cloud and vol_confirm and position != 1:
+        # Long: Price touches EMA from below AND uptrend AND volume confirmation
+        if ema_touch_long and trend_up and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: TK cross bearish + price below cloud + volume confirmation
-        elif not tk_cross and price_below_cloud and vol_confirm and position != -1:
+        # Short: Price touches EMA from above AND downtrend AND volume confirmation
+        elif ema_touch_short and trend_down and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: TK cross reverses
-        elif position == 1 and not tk_cross:
+        # Exit: Price crosses EMA in opposite direction
+        elif position == 1 and high[i] < ema_21_aligned[i] * 0.995:  # Cross below EMA
             position = 0
             signals[i] = 0.0
-        elif position == -1 and tk_cross:
+        elif position == -1 and low[i] > ema_21_aligned[i] * 1.005:  # Cross above EMA
             position = 0
             signals[i] = 0.0
         else:
