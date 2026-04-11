@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Williams Alligator with volume confirmation
-# - Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs
-# - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-# - Long: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND volume > 1.5x 20-period average
-# - Short: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND volume > 1.5x 20-period average
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# Hypothesis: 12h Donchian breakout with 1d volume spike and choppiness filter
+# - Long: price breaks above Donchian(20) high AND 1d volume > 2.0x 20-period average AND chop < 61.8 (trending)
+# - Short: price breaks below Donchian(20) low AND 1d volume > 2.0x 20-period average AND chop < 61.8 (trending)
+# - Uses ATR(14) trailing stop: exit long if price < highest_high - 2.5*ATR, exit short if price < lowest_low + 2.5*ATR
+# - Position size: ±0.25 (discrete to minimize fee churn)
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Williams Alligator identifies trend direction and alignment
-# - Elder Ray measures bull/bear power behind the move
-# - Volume confirmation filters out weak signals
-# - Works in both bull (strong bull power) and bear (strong bear power) markets
+# - Donchian provides objective breakout levels
+# - 1d volume spike confirms institutional participation
+# - Choppiness filter avoids whipsaws in ranging markets
+# - ATR stop manages risk without look-ahead
 
-name = "6h_alligator_elder_ray_volume_v1"
-timeframe = "6h"
+name = "12h_donchian_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,66 +41,72 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute Williams Alligator on 6h timeframe
-    # Jaw: 13-period SMA, shifted 8 bars
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMA, shifted 5 bars
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMA, shifted 3 bars
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Pre-compute 12h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute Elder Ray on 6h timeframe
-    # EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    # Pre-compute ATR(14) for trailing stop
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Pre-compute 12h choppiness index (14-period)
+    # Chop = 100 * log10(sum(atr,14) / (log10(highest_high - lowest_low,14))) / log10(14)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hhll = highest_high - lowest_low
+    # Avoid division by zero and log of zero
+    hhll_safe = np.where(hhll > 0, hhll, 1e-10)
+    chop = 100 * np.log10(atr_sum) / np.log10(14) / np.log10(hhll_safe)
+    # Handle invalid values
+    chop = np.where((atr_sum > 0) & (hhll > 0), chop, 50.0)  # default to neutral
     
     for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr[i]) or
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         volume_current = volume[i]
         
-        # Williams Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # break above previous period's high
+        breakout_down = close[i] < lowest_low[i-1]  # break below previous period's low
         
-        # Elder Ray power
-        bull_power_positive = bull_power[i] > 0
-        bear_power_negative = bear_power[i] < 0
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume_current > 2.0 * volume_sma_20_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Choppiness filter: chop < 61.8 indicates trending market (good for breakouts)
+        chop_filter = chop[i] < 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: bullish Alligator alignment + positive Bull Power + volume confirmation
-        if bullish_alignment and bull_power_positive and vol_confirm:
+        # Long: bullish breakout + volume confirmation + trending market
+        if breakout_up and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short: bearish Alligator alignment + negative Bear Power + volume confirmation
-        if bearish_alignment and bear_power_negative and vol_confirm:
+        # Short: bearish breakout + volume confirmation + trending market
+        if breakout_down and vol_confirm and chop_filter:
             enter_short = True
         
-        # Exit conditions: reverse Alligator alignment or loss of power
+        # Exit conditions: ATR trailing stop
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if Alligator turns bearish OR Bull Power becomes negative
-            exit_long = (not bullish_alignment) or (not bull_power_positive)
+            # Exit long if price drops below highest_high - 2.5*ATR
+            exit_long = close[i] < (highest_high[i] - 2.5 * atr[i])
         elif position == -1:
-            # Exit short if Alligator turns bullish OR Bear Power becomes positive
-            exit_short = (not bearish_alignment) or (not bear_power_negative)
+            # Exit short if price rises above lowest_low + 2.5*ATR
+            exit_short = close[i] > (lowest_low[i] + 2.5 * atr[i])
         
         # Trading logic
         if enter_long and position != 1:
