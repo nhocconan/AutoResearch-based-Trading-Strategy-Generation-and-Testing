@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_pivot_volume_v1
-Strategy: 1d Camarilla pivot breakout with volume confirmation and 1w trend filter
-Timeframe: 1d
+4h_1d_camarilla_breakout_volume_trend_v3
+Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Uses weekly trend filter (price above/below weekly EMA20) to determine direction, then looks for breakouts of daily Camarilla H3/L3 levels with volume confirmation (>1.5x average volume). Designed to capture strong trending moves while avoiding false breakouts in choppy markets. Weekly trend ensures we only trade in the direction of the higher timeframe momentum, reducing whipsaw. Target: 30-100 total trades over 4 years (7-25/year).
+Hypothesis: Uses daily Camarilla pivot levels (H4/L4) for breakout entries on 4h timeframe with volume confirmation (>2x average volume) and filtered by 1d EMA50 trend. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses higher timeframe (1d) for direction and 4h only for timing. Reduced trade frequency by requiring strict trend alignment and volume confirmation. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_volume_trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,67 +26,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load higher timeframe data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 4h EMA20 for trend filter (optional, using price vs EMA)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Daily average volume (20-period)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume confirmation threshold
+    vol_spike = volume > (2.0 * vol_avg)  # Volume spike filter
     
     # Calculate Camarilla levels from previous day's data
-    # We need to shift the daily data by 1 to avoid look-ahead
-    high_1 = np.roll(high, 1)
-    low_1 = np.roll(low, 1)
-    close_1 = np.roll(close, 1)
-    # Set first value to NaN since there's no previous day
-    high_1[0] = np.nan
-    low_1[0] = np.nan
-    close_1[0] = np.nan
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_cama = df_1d['close'].values
     
-    # Calculate Camarilla H3 and L3 levels
-    camarilla_H3 = close_1 + 1.1 * (high_1 - low_1) / 4
-    camarilla_L3 = close_1 - 1.1 * (high_1 - low_1) / 4
+    # Calculate Camarilla levels for each day
+    camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_avg[i]) or
-            np.isnan(camarilla_H3[i]) or np.isnan(camarilla_L3[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below weekly EMA20
-        uptrend_1w = price_close > ema_20_1w_aligned[i]
-        downtrend_1w = price_close < ema_20_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = price_close > ema_50_1d_aligned[i]
+        downtrend = price_close < ema_50_1d_aligned[i]
         
         # Breakout conditions using Camarilla levels
-        breakout_up = price_close > camarilla_H3[i]
-        breakout_down = price_close < camarilla_L3[i]
+        breakout_up = price_close > camarilla_H4_aligned[i]
+        breakout_down = price_close < camarilla_L4_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
         # Long: upward breakout with volume in uptrend
-        long_signal = breakout_up and vol_confirmed and uptrend_1w
+        long_signal = breakout_up and vol_confirmed and uptrend
         
         # Short: downward breakout with volume in downtrend
-        short_signal = breakout_down and vol_confirmed and downtrend_1w
+        short_signal = breakout_down and vol_confirmed and downtrend
         
-        # Exit when price returns to the opposite Camarilla level (H3 for shorts, L3 for longs)
-        exit_long = position == 1 and price_close < camarilla_L3[i]
-        exit_short = position == -1 and price_close > camarilla_H3[i]
+        # Exit when price returns to the 4h EMA20 or opposite Camarilla level
+        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
+        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
