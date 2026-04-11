@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-4h_1d_momentum_reversal_v1
-Strategy: 4h momentum reversal using RSI divergence and volume confirmation filtered by 1d trend
+4h_1d_camarilla_pivot_volume_v1
+Strategy: 4h Camarilla pivot levels with volume confirmation and 1d trend filter
 Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Captures reversals at RSI extremes (overbought/oversold) with volume confirmation, only in direction of higher timeframe (1d) trend. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend). Target: 20-60 total trades over 4 years.
+Hypothesis: Uses daily Camarilla pivot levels (H4, L4, H6, L6) as key support/resistance levels.
+Enters long when price breaks above H4 with volume confirmation in a 1d uptrend, and short when price breaks below L4 with volume confirmation in a 1d downtrend.
+Exits when price returns to the pivot point (P). Uses volume spike (>1.5x average) to filter false breakouts.
+Designed to work in both bull and bear markets by following the 1d trend direction.
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_momentum_reversal_v1"
+name = "4h_1d_camarilla_pivot_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,62 +33,81 @@ def generate_signals(prices):
     # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 4h EMA20 for dynamic exit (optional, can use pivot point)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 4h volume average (20-period)
+    # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
-    # 1d RSI(14) for trend filter
+    # Calculate daily Camarilla pivot levels from previous day
+    # H4 = Close + 1.5 * (High - Low)
+    # L4 = Close - 1.5 * (High - Low)
+    # H6 = Close + 2.0 * (High - Low)
+    # L6 = Close - 2.0 * (High - Low)
+    # P = (High + Low + Close) / 3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    camarilla_p = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Align to 4h timeframe (wait for daily bar to close)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
+    
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi[i]) or np.isnan(vol_avg[i]) or np.isnan(rsi_1d_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_20[i]) if i >= 20 else True) or \
+           np.isnan(camarilla_h4_aligned[i]) or \
+           np.isnan(camarilla_l4_aligned[i]) or \
+           np.isnan(camarilla_p_aligned[i]) or \
+           np.isnan(vol_avg[i]) or \
+           np.isnan(ema_50_1d_aligned[i]):
+            # Hold current position if valid, otherwise flat
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
             continue
         
-        # Trend filter: 1d RSI > 50 = uptrend, < 50 = downtrend
-        uptrend_1d = rsi_1d_aligned[i] > 50
-        downtrend_1d = rsi_1d_aligned[i] < 50
+        price_close = close[i]
         
-        # Reversal conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Trend filter: price above/below 1d EMA50
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > camarilla_h4_aligned[i-1]  # Use previous bar's level
+        breakout_down = price_close < camarilla_l4_aligned[i-1]  # Use previous bar's level
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: RSI oversold with volume in uptrend
-        long_signal = rsi_oversold and vol_confirmed and uptrend_1d
+        # Long: upward breakout with volume in uptrend
+        long_signal = breakout_up and vol_confirmed and uptrend_1d
         
-        # Short: RSI overbought with volume in downtrend
-        short_signal = rsi_overbought and vol_confirmed and downtrend_1d
+        # Short: downward breakout with volume in downtrend
+        short_signal = breakout_down and vol_confirmed and downtrend_1d
         
-        # Exit when RSI returns to neutral (40-60)
-        exit_long = position == 1 and rsi[i] > 40
-        exit_short = position == -1 and rsi[i] < 60
+        # Exit when price returns to pivot point (P)
+        exit_long = position == 1 and price_close < camarilla_p_aligned[i]
+        exit_short = position == -1 and price_close > camarilla_p_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
