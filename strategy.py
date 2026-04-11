@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with volume confirmation and 1d trend filter
-# - Long: price breaks above Camarilla R4, volume > 2.0x 20-period avg, 1d close > 1d EMA(50)
-# - Short: price breaks below Camarilla S4, volume > 2.0x 20-period avg, 1d close < 1d EMA(50)
-# - Exit: price returns to Camarilla pivot point (PP) or opposite Camarilla level (R3/S3)
-# - Uses discrete position sizing (0.25) to minimize fee churn
+# Hypothesis: 12h Williams Alligator with Elder Ray filter and volume confirmation
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
+# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# - Long: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND volume > 1.5x 20-bar avg
+# - Short: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND volume > 1.5x 20-bar avg
+# - Exit: Alligator lines cross (Lips-Teeth or Teeth-Jaw crossover)
+# - Uses 1d trend filter: price > EMA(50) for long bias, price < EMA(50) for short bias
 # - Target: 12-30 trades/year (50-120 total over 4 years) to stay within fee drag limits
-# - Camarilla levels from 1d provide institutional support/resistance; breakouts with volume
-#   and 1d trend alignment capture strong moves in both bull and bear markets
+# - Alligator identifies trends, Elder Ray confirms strength, volume adds conviction
+# - Works in both bull/bear by capturing strong trending moves with filter
 
-name = "6h_1d_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "12h_1d_alligator_elder_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,50 +31,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla levels and EMA trend filter
+    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d OHLC for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels from previous 1d bar
-    # PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1 / 2
-    # R3 = PP + (H - L) * 1.1 / 4
-    # S3 = PP - (H - L) * 1.1 / 4
-    # S4 = PP - (H - L) * 1.1 / 2
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    hl_range = high_1d - low_1d
-    camarilla_pp = typical_price
-    camarilla_r4 = camarilla_pp + hl_range * 1.1 / 2
-    camarilla_r3 = camarilla_pp + hl_range * 1.1 / 4
-    camarilla_s3 = camarilla_pp - hl_range * 1.1 / 4
-    camarilla_s4 = camarilla_pp - hl_range * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
     # Pre-compute 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 6h volume confirmation (20-period average)
+    # Pre-compute median price for Alligator (12h)
+    median_price = (high + low) / 2
+    
+    # Williams Alligator lines (12h)
+    # Jaw: 13-period SMMA, 8 periods ahead
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # shift 8 bars ahead
+    # Teeth: 8-period SMMA, 5 periods ahead
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # shift 5 bars ahead
+    # Lips: 5-period SMMA, 3 periods ahead
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # shift 3 bars ahead
+    
+    # Pre-compute Elder Ray (12h)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Pre-compute volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_pp_aligned[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -80,15 +75,21 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Camarilla levels
-        r4 = camarilla_r4_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        pp = camarilla_pp_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        s4 = camarilla_s4_aligned[i]
+        # Alligator alignment
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
+        bullish_alignment = lips_above_teeth and teeth_above_jaw
+        bearish_alignment = lips_below_teeth and teeth_below_jaw
+        
+        # Elder Ray confirmation
+        bull_confirm = bull_power[i] > 0
+        bear_confirm = bear_power[i] < 0
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
         # 1d EMA trend bias
         ema_bias_long = close_price > ema_50_1d_aligned[i]
@@ -98,24 +99,24 @@ def generate_signals(prices):
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above Camarilla R4, volume confirmation, long bias
-        if close_price > r4 and vol_confirm and ema_bias_long:
+        # Long: bullish Alligator + Bull Power > 0 + volume + long bias
+        if bullish_alignment and bull_confirm and vol_confirm and ema_bias_long:
             enter_long = True
         
-        # Short breakout: price below Camarilla S4, volume confirmation, short bias
-        if close_price < s4 and vol_confirm and ema_bias_short:
+        # Short: bearish Alligator + Bear Power < 0 + volume + short bias
+        if bearish_alignment and bear_confirm and vol_confirm and ema_bias_short:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: Alligator lines cross (Lips-Teeth or Teeth-Jaw)
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to Camarilla PP or drops to R3 (profit taking)
-            exit_long = close_price <= pp or close_price <= r3
+            # Exit long on bearish cross: Lips < Teeth OR Teeth < Jaw
+            exit_long = (lips[i] < teeth[i]) or (teeth[i] < jaw[i])
         elif position == -1:
-            # Exit short if price returns to Camarilla PP or rises to S3 (profit taking)
-            exit_short = close_price >= pp or close_price >= s3
+            # Exit short on bullish cross: Lips > Teeth OR Teeth > Jaw
+            exit_short = (lips[i] > teeth[i]) or (teeth[i] > jaw[i])
         
         # Trading logic
         if enter_long and position != 1:
