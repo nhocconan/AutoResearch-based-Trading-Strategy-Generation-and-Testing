@@ -3,13 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elliott_wave_oscillator_v2"
+# Hypothesis: 6h Donchian breakout with 12h trend filter and volume confirmation
+# Uses 12h EMA for trend direction to avoid counter-trend trades
+# Volume filter ensures breakouts have conviction
+# Target: 50-150 total trades over 4 years (12-37/year)
+# Works in bull/bear by only trading with 12h trend
+name = "6h_12h_donchian_trend_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -18,84 +23,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate Elliott Wave Oscillator (EWO)
-    # EWO = SMA(5) - SMA(34) on daily closes
-    sma5 = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    sma34 = pd.Series(close_1d).rolling(window=34, min_periods=34).mean().values
-    ewo = sma5 - sma34
+    # Calculate 6-period average 12h volume for confirmation
+    volume_12h = df_12h['volume'].values
+    vol_avg_6_12h = pd.Series(volume_12h).rolling(window=6, min_periods=6).mean().values
+    vol_avg_6_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_6_12h)
     
-    # Shift to avoid look-ahead (use previous day's EWO for current day)
-    ewo = np.roll(ewo, 1)
-    ewo[0] = np.nan
-    
-    # Align EWO to 6h timeframe
-    ewo_aligned = align_htf_to_ltf(prices, df_1d, ewo)
-    
-    # Calculate daily ATR for volatility filter
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate 6-period average volume for confirmation (on daily)
-    vol_avg_6 = pd.Series(volume_1d).rolling(window=6, min_periods=6).mean().values
-    vol_avg_6_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_6)
+    # Calculate 6h Donchian channels (20-period)
+    # Highest high and lowest low over past 20 periods
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 40 to ensure sufficient data
-    for i in range(40, n):
+    # Start from index 60 to ensure sufficient data
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(ewo_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(vol_avg_6_aligned[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(vol_avg_6_12h_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current daily volume (aligned)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirm = vol_1d_current > vol_avg_6_aligned[i]
+        # Current 12h volume (aligned)
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
+        vol_confirm = vol_12h_current > vol_avg_6_12h_aligned[i]
         
         price = close[i]
         
-        # EWO conditions with volume confirmation
-        # Long when EWO crosses above 0 with volume (bullish wave)
-        long_signal = (ewo_aligned[i] > 0) and vol_confirm
-        # Short when EWO crosses below 0 with volume (bearish wave)
-        short_signal = (ewo_aligned[i] < 0) and vol_confirm
+        # Donchian breakout conditions with trend and volume filters
+        # Long when price breaks above 20-period high AND above 12h EMA AND volume confirms
+        long_breakout = price > highest_high[i-1]  # Previous bar's high to avoid look-ahead
+        long_trend = price > ema_12h_aligned[i]
+        long_signal = long_breakout and long_trend and vol_confirm
         
-        # Volatility filter: avoid trading in extremely low volatility
-        # Only trade when ATR is above 30% of its 20-period average
-        atr_ma_20 = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean()
-        atr_ma_20_val = atr_ma_20.iloc[i] if hasattr(atr_ma_20, 'iloc') else atr_ma_20[i] if i < len(atr_ma_20) else np.nan
-        vol_filter = not np.isnan(atr_ma_20_val) and atr_1d_aligned[i] > (0.3 * atr_ma_20_val)
+        # Short when price breaks below 20-period low AND below 12h EMA AND volume confirms
+        short_breakout = price < lowest_low[i-1]   # Previous bar's low to avoid look-ahead
+        short_trend = price < ema_12h_aligned[i]
+        short_signal = short_breakout and short_trend and vol_confirm
         
-        if long_signal and vol_filter and position != 1:
+        # Exit conditions
+        exit_long = price < ema_12h_aligned[i]  # Exit when price crosses below 12h EMA
+        exit_short = price > ema_12h_aligned[i]  # Exit when price crosses above 12h EMA
+        
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and vol_filter and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (ewo_aligned[i] < 0 or not vol_filter):
-            # Exit long when EWO turns bearish or volatility drops
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (ewo_aligned[i] > 0 or not vol_filter):
-            # Exit short when EWO turns bullish or volatility drops
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
