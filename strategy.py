@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_engulfing_momentum_v1
-Strategy: 6h engulfing candles with 12h/1d momentum filters
-Timeframe: 6h
+4h_1d_camarilla_breakout_volume_trend_v3
+Strategy: 4h price action with 1d Camarilla confluence
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Bullish/bearish engulfing patterns on 6h timeframe, when aligned with 12h momentum (price > 20-period EMA) and 1d trend (price > 50-period EMA), provide high-probability entries. This captures momentum shifts while avoiding counter-trend trades. Works in bull markets by catching continuations and in bear markets by fading overextended moves into key levels.
+Hypothesis: Buy when 4h breaks above daily R3 with volume confirmation and 1d trend filter; sell when breaks below daily S3 with volume confirmation and 1d trend filter. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_engulfing_momentum_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,91 +27,103 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 6h EMA for momentum filter
-    close_6h = close
-    ema_20_6h = pd.Series(close_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50_6h = pd.Series(close_6h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 6h ATR for volatility filter
+    # 4h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_6h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === 12h EMA (trend filter) ===
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # 4h volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === 1d EMA (trend filter) ===
+    # === 1d EMA50 (trend filter) ===
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # === 1d Camarilla (entry levels) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's Camarilla levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + range_1d * 1.166
+    s3_1d = close_1d - range_1d * 1.166
+    
+    # Shift to use only completed daily bars
+    r3_1d = np.roll(r3_1d, 1)
+    s3_1d = np.roll(s3_1d, 1)
+    r3_1d[0] = np.nan
+    s3_1d[0] = np.nan
+    
+    # Align daily Camarilla to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # Session filter: 0-23 UTC (covers major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 0) & (hours <= 23)
     
+    # Minimum holding period: 2 bars (8 hours) to reduce churn
+    hold_count = np.zeros(n, dtype=int)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(ema_20_6h[i]) or np.isnan(ema_50_6h[i]) or
-            np.isnan(atr_6h[i]) or np.isnan(ema_20_12h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or not in_session[i]):
+        # Decrease hold counter
+        if hold_count[i] > 0:
+            hold_count[i] -= 1
+        
+        # Skip if any required data is invalid or outside session or holding
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i]) or
+            not in_session[i] or hold_count[i] > 0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        price_open = high[i] - (high[i] - low[i])  # approximate open from high-low range
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
+        volume_current = volume[i]
+        vol_ma = vol_ma_20[i]
+        ema_50 = ema_50_1d_aligned[i]
         
-        # Bullish engulfing: current green candle engulfs previous red candle
-        prev_close = close[i-1]
-        prev_open = high[i-1] - (high[i-1] - low[i-1])  # approximate previous open
+        # Volume confirmation: 4h volume must be elevated
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        bullish_engulfing = (price_close > price_open and  # current candle is green
-                           prev_close < prev_open and      # previous candle was red
-                           price_close >= prev_open and    # current close >= previous open
-                           price_open <= prev_close)       # current open <= previous close
+        # Trend filter: price must be above/below 1d EMA50
+        uptrend_1d = price_close > ema_50
+        downtrend_1d = price_close < ema_50
         
-        # Bearish engulfing: current red candle engulfs previous green candle
-        bearish_engulfing = (price_close < price_open and  # current candle is red
-                           prev_close > prev_open and      # previous candle was green
-                           price_close <= prev_open and    # current close <= previous open
-                           price_open >= prev_close)       # current open >= previous close
+        # Long conditions: 4h breaks above 1d R3 with volume + 1d uptrend
+        long_signal = volume_confirmed and (price_high > r3_1d_aligned[i]) and uptrend_1d
         
-        # Momentum filters
-        uptrend_12h = price_close > ema_20_12h_aligned[i]
-        uptrend_1d = price_close > ema_50_1d_aligned[i]
-        downtrend_12h = price_close < ema_20_12h_aligned[i]
-        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        # Short conditions: 4h breaks below 1d S3 with volume + 1d downtrend
+        short_signal = volume_confirmed and (price_low < s3_1d_aligned[i]) and downtrend_1d
         
-        # Long conditions: bullish engulfing + 12h uptrend + 1d uptrend
-        long_signal = bullish_engulfing and uptrend_12h and uptrend_1d
+        # Exit when price returns to the 1d pivot (mean reversion within 1d range)
+        pivot_1d_today = (high_1d + low_1d + close_1d) / 3
+        pivot_1d_4h = align_htf_to_ltf(prices, df_1d, pivot_1d_today)
+        exit_long = position == 1 and price_close < pivot_1d_4h[i]
+        exit_short = position == -1 and price_close > pivot_1d_4h[i]
         
-        # Short conditions: bearish engulfing + 12h downtrend + 1d downtrend
-        short_signal = bearish_engulfing and downtrend_12h and downtrend_1d
-        
-        # Exit conditions: opposite engulfing or loss of trend
-        exit_long = (bearish_engulfing and downtrend_12h) or (price_close < ema_20_6h[i])
-        exit_short = (bullish_engulfing and uptrend_12h) or (price_close > ema_50_6h[i])
-        
-        # Trading logic
+        # Trading logic with minimum holding period
         if long_signal and position != 1:
             position = 1
+            hold_count[i] = 2  # Hold for 2 bars minimum
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
+            hold_count[i] = 2  # Hold for 2 bars minimum
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
@@ -124,4 +136,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Bullish/bearish engulfing patterns on 6h timeframe, when aligned with 12h momentum (price > 20-period EMA) and 1d trend (price > 50-period EMA), provide high-probability entries. This captures momentum shifts while avoiding counter-trend trades. Works in bull markets by catching continuations and in bear markets by fading overextended moves into key levels.
+# Hypothesis: Buy when 4h breaks above daily R3 with volume confirmation and 1d trend filter; sell when breaks below daily S3 with volume confirmation and 1d trend filter. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend.
