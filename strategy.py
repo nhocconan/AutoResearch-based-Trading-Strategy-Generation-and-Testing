@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1d RSI filter.
-# Long: price breaks above Donchian(20) high + 1d volume > 1.5x 20-period average + 1d RSI(14) > 50
-# Short: price breaks below Donchian(20) low + 1d volume > 1.5x 20-period average + 1d RSI(14) < 50
-# Exit: opposite Donchian breakout
-# Uses volume and RSI on 1d to filter breakouts, ensuring institutional participation.
-# Designed for 20-50 trades/year on 4h timeframe with focus on avoiding false breakouts.
+# Hypothesis: 12h Camarilla pivot levels from 1d with volume confirmation and ADX filter.
+# Long when price breaks above H4 resistance with volume > 1.5x average and ADX > 20.
+# Short when price breaks below L4 support with volume > 1.5x average and ADX > 20.
+# Camarilla levels provide institutional-grade support/resistance; volume confirms breakout strength.
+# ADX filter ensures we only trade in trending markets, avoiding chop.
+# Target: 15-25 trades/year on 12h timeframe, suitable for both bull and bear markets.
 
-name = "4h_1d_donchian_volume_rsi_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,64 +27,94 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d volume moving average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d RSI(14)
+    # Calculate Camarilla levels for previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_1d = (100 - (100 / (1 + rs))).values
     
-    # Align 1d indicators to 4h timeframe
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Camarilla formula: range = high - low
+    range_1d = high_1d - low_1d
+    # Resistance levels: H4 = close + 1.5 * range, H3 = close + 1.25 * range
+    # Support levels: L3 = close - 1.25 * range, L4 = close - 1.5 * range
+    camarilla_h4 = close_1d + 1.5 * range_1d
+    camarilla_l4 = close_1d - 1.5 * range_1d
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 12h timeframe (previous day's levels)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Calculate ADX (14-period) on 12h data
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    
+    # Avoid division by zero
+    plus_di14 = np.where(tr14 != 0, 100 * plus_dm14 / tr14, 0)
+    minus_di14 = np.where(tr14 != 0, 100 * minus_dm14 / tr14, 0)
+    dx = np.where((plus_di14 + minus_di14) != 0, 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Volume moving average (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after sufficient data for indicators
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: 1d volume > 1.5 * 20-period average volume
-        vol_filter = vol_ma_20_1d_aligned[i] > 0 and volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume filter: current volume > 1.5 * 20-period average volume
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # RSI filter: 1d RSI > 50 for long, < 50 for short
-        rsi_filter_long = rsi_14_1d_aligned[i] > 50
-        rsi_filter_short = rsi_14_1d_aligned[i] < 50
+        # ADX filter: trending market (ADX > 20)
+        adx_filter = adx[i] > 20
         
         # Entry conditions
-        bullish_breakout = close[i] > donchian_high[i]
-        bearish_breakout = close[i] < donchian_low[i]
+        bullish_breakout = (close[i] > camarilla_h4_aligned[i]) and vol_filter and adx_filter
+        bearish_breakout = (close[i] < camarilla_l4_aligned[i]) and vol_filter and adx_filter
         
-        bullish_entry = bullish_breakout and vol_filter and rsi_filter_long
-        bearish_entry = bearish_breakout and vol_filter and rsi_filter_short
-        
-        # Exit conditions: opposite breakout
-        exit_long = bearish_breakout
-        exit_short = bullish_breakout
+        # Exit conditions: price returns to midpoint of Camarilla range
+        camarilla_mid = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
+        exit_long = close[i] < camarilla_mid
+        exit_short = close[i] > camarilla_mid
         
         # Priority: entry > exit > hold
-        if bullish_entry and position != 1:
+        if bullish_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_entry and position != -1:
+        elif bearish_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
