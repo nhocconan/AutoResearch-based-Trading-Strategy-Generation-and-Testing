@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_cci_mean_reversion_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -21,30 +21,59 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate CCI on daily
+    # Calculate daily OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # True Price
-    tp = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels (based on previous day)
+    # Typical price
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    # Previous day's range
+    range_1d = high_1d - low_1d
     
-    # SMA of TP
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    # Camarilla levels for current day (based on previous day's data)
+    # Resistance levels
+    r4 = close_1d + range_1d * 1.1 / 2
+    r3 = close_1d + range_1d * 1.1 / 4
+    r2 = close_1d + range_1d * 1.1 / 6
+    r1 = close_1d + range_1d * 1.1 / 12
+    # Support levels
+    s1 = close_1d - range_1d * 1.1 / 12
+    s2 = close_1d - range_1d * 1.1 / 6
+    s3 = close_1d - range_1d * 1.1 / 4
+    s4 = close_1d - range_1d * 1.1 / 2
     
-    # Mean Deviation
-    mad = np.abs(tp - sma_tp)
-    mean_dev = pd.Series(mad).rolling(window=20, min_periods=20).mean().values
+    # Shift levels to avoid look-ahead (use previous day's levels for current day)
+    r4 = np.roll(r4, 1)
+    r3 = np.roll(r3, 1)
+    r2 = np.roll(r2, 1)
+    r1 = np.roll(r1, 1)
+    s1 = np.roll(s1, 1)
+    s2 = np.roll(s2, 1)
+    s3 = np.roll(s3, 1)
+    s4 = np.roll(s4, 1)
+    # Set first day to NaN
+    r4[0] = r3[0] = r2[0] = r1[0] = s1[0] = s2[0] = s3[0] = s4[0] = np.nan
     
-    # CCI
-    cci = (tp - sma_tp) / (0.015 * mean_dev)
-    cci = np.where(mean_dev == 0, 0, cci)
+    # Align Camarilla levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Align CCI to 12h timeframe
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    # Calculate 4-day average volume for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_avg_4 = pd.Series(volume_1d).rolling(window=4, min_periods=4).mean().values
+    vol_avg_4_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_4)
     
     # Calculate daily ATR for volatility filter
     tr1 = high_1d - low_1d
@@ -53,52 +82,51 @@ def generate_signals(prices):
     tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     tr_1d[0] = tr1[0]
     atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align ATR to 12h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 40 to ensure sufficient data
-    for i in range(40, n):
+    # Start from index 50 to ensure sufficient data
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(cci_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_avg_4_aligned[i]) or
+            np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # CCI extremes for mean reversion
-        cci_extreme_long = cci_aligned[i] < -150
-        cci_extreme_short = cci_aligned[i] > 150
-        
-        # Volatility filter: only trade when ATR is above its 30-period average (avoid low vol chop)
-        atr_avg_30 = pd.Series(atr_1d_aligned).rolling(window=30, min_periods=30).mean()
-        atr_avg_30_val = atr_avg_30.iloc[i] if hasattr(atr_avg_30, 'iloc') else atr_avg_30[i] if i < len(atr_avg_30) else np.nan
-        vol_filter = not np.isnan(atr_avg_30_val) and atr_1d_aligned[i] > atr_avg_30_val
-        
-        # Exit conditions: CCI returns to neutral zone
-        cci_neutral = (cci_aligned[i] >= -50) and (cci_aligned[i] <= 50)
+        # Current daily volume (aligned)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
+        vol_confirm = vol_1d_current > vol_avg_4_aligned[i]
         
         price = close[i]
         
-        # Entry conditions: CCI extreme with volatility confirmation
-        long_signal = vol_filter and cci_extreme_long
-        short_signal = vol_filter and cci_extreme_short
+        # Breakout conditions with volume confirmation
+        # Long when price breaks above R3 with volume
+        long_breakout = (price > r3_aligned[i]) and vol_confirm
+        # Short when price breaks below S3 with volume
+        short_breakout = (price < s3_aligned[i]) and vol_confirm
         
-        # Exit conditions: CCI returns to neutral zone
-        long_exit = cci_neutral
-        short_exit = cci_neutral
+        # Volatility filter: avoid trading in extremely low volatility
+        # Only trade when ATR is above 50% of its 20-period average
+        atr_ma_20 = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean()
+        atr_ma_20_val = atr_ma_20.iloc[i] if hasattr(atr_ma_20, 'iloc') else atr_ma_20[i] if i < len(atr_ma_20) else np.nan
+        vol_filter = not np.isnan(atr_ma_20_val) and atr_1d_aligned[i] > (0.5 * atr_ma_20_val)
         
-        if long_signal and position != 1:
+        if long_breakout and vol_filter and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_breakout and vol_filter and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and long_exit:
+        elif position == 1 and (price < r1_aligned[i] or not vol_filter):
+            # Exit long when price returns to R1 or volatility drops
             position = 0
             signals[i] = 0.0
-        elif position == -1 and short_exit:
+        elif position == -1 and (price > s1_aligned[i] or not vol_filter):
+            # Exit short when price returns to S1 or volatility drops
             position = 0
             signals[i] = 0.0
         else:
