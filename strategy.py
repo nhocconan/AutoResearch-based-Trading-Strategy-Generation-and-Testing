@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_alligator_trend_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,37 +23,31 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate Williams Alligator on daily data
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Jaw (Blue): 13-period SMMA, shifted 8 bars forward
-    jaw = pd.Series((high_1d + low_1d) / 2).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)
+    # Camarilla levels for each day
+    camarilla_h3 = []
+    camarilla_l3 = []
+    for i in range(len(df_1d)):
+        high_val = high_1d[i]
+        low_val = low_1d[i]
+        close_val = close_1d[i]
+        camarilla_h3.append(close_val + (high_val - low_val) * 1.1 / 4)
+        camarilla_l3.append(close_val - (high_val - low_val) * 1.1 / 4)
+    camarilla_h3 = np.array(camarilla_h3)
+    camarilla_l3 = np.array(camarilla_l3)
     
-    # Teeth (Red): 8-period SMMA, shifted 5 bars forward
-    teeth = pd.Series((high_1d + low_1d) / 2).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)
+    # Align daily Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Lips (Green): 5-period SMMA, shifted 3 bars forward
-    lips = pd.Series((high_1d + low_1d) / 2).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)
-    
-    # Convert to numpy arrays and handle NaN from shift
-    jaw = jaw.fillna(0).values
-    teeth = teeth.fillna(0).values
-    lips = lips.fillna(0).values
-    
-    # Align Alligator lines to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for stop loss
@@ -64,15 +58,15 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Trend strength filter: avoid weak trends
+    # Filter: Avoid choppy markets - require ATR ratio > 0.6
     atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     atr_ratio = atr / (atr_ma_50 + 1e-10)
-    strong_trend = atr_ratio > 0.7
+    trending_market = atr_ratio > 0.6
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(strong_trend[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
             signals[i] = 0.0
             continue
         
@@ -80,40 +74,37 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
+        h3 = h3_aligned[i]
+        l3 = l3_aligned[i]
         atr_val = atr[i]
-        strong_trend_val = strong_trend[i]
+        trending = trending_market[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma_20[i]
+        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Alligator alignment conditions
-        # Bullish alignment: Lips > Teeth > Jaw (green above red above blue)
-        bullish_aligned = lips_val > teeth_val and teeth_val > jaw_val
-        # Bearish alignment: Lips < Teeth < Jaw (green below red below blue)
-        bearish_aligned = lips_val < teeth_val and teeth_val < jaw_val
-        
-        # Entry signals
+        # Entry signals - only in trending markets to avoid whipsaws
         long_signal = False
         short_signal = False
         
-        # Long: Bullish alignment + price above teeth + volume + strong trend
-        if bullish_aligned and price_close > teeth_val and volume_confirmed and strong_trend_val:
+        # Long: price breaks above daily Camarilla H3 with volume and trending
+        if price_high > h3 and volume_confirmed and trending:
             long_signal = True
         
-        # Short: Bearish alignment + price below teeth + volume + strong trend
-        if bearish_aligned and price_close < teeth_val and volume_confirmed and strong_trend_val:
+        # Short: price breaks below daily Camarilla L3 with volume and trending
+        if price_low < l3 and volume_confirmed and trending:
             short_signal = True
         
-        # Exit conditions: when alignment breaks
-        exit_long = position == 1 and not bullish_aligned
-        exit_short = position == -1 and not bearish_aligned
+        # Exit conditions
+        # Calculate daily midpoint for exit: (H3 + L3) / 2
+        midpoint = (h3 + l3) / 2
         
         # Stop loss conditions
-        stop_long = position == 1 and price_low < (entry_price - 2.5 * atr_val)
-        stop_short = position == -1 and price_high > (entry_price + 2.5 * atr_val)
+        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
+        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
+        
+        # Exit to midpoint
+        exit_long = position == 1 and price_close < midpoint
+        exit_short = position == -1 and price_close > midpoint
         
         # Trading logic
         if long_signal and position != 1:
@@ -136,11 +127,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s Williams Alligator trend-following strategy with volume confirmation.
-# Uses Williams Alligator (Jaw/Teeth/Lips) on daily timeframe to identify trend direction and alignment.
-# Enters long when Lips > Teeth > Jaw (bullish alignment) and price is above Teeth with volume confirmation.
-# Enters short when Lips < Teeth < Jaw (bearish alignment) and price is below Teeth with volume confirmation.
-# Includes ATR-based trend strength filter to avoid weak/choppy markets.
-# Exits when Alligator alignment breaks or ATR stop loss (2.5x) is hit.
-# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in both bull and bear markets by following established trends identified by the Alligator.
+# Hypothesis: 4h Camarilla breakout strategy with volume confirmation and trend filter.
+# Enters long when price breaks above daily Camarilla H3 level with volume confirmation (>1.5x avg volume) in trending markets (ATR ratio > 0.6).
+# Enters short when price breaks below daily Camarilla L3 level with volume confirmation and trending.
+# Uses Camarilla levels from daily timeframe for key support/resistance levels.
+# Uses volume confirmation to ensure institutional participation and trend filter to avoid whipsaws in sideways markets.
+# Exits when price returns to daily midpoint or ATR stop loss (2x) is hit.
+# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
+# Works in both bull and bear markets by trading breakouts in either direction with trend filter.
