@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_keltner_channel_breakout_volume_v1
-Strategy: 4h Keltner Channel breakout with volume confirmation and 1d trend filter
-Timeframe: 4h
+6h_1w_1d_camarilla_breakout_volume_v1
+Strategy: 6h Camarilla breakout with weekly trend filter and daily volume confirmation
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses Keltner Channel (EMA20 + 2*ATR(10)) breakouts for trend continuation. 
-Volume confirmation (>1.5x average volume) filters false breakouts. 
-1d EMA50 trend filter ensures alignment with higher timeframe trend. 
-Designed to work in both bull and bear markets by capturing strong momentum moves 
-while avoiding choppy conditions. Target: 20-50 trades/year.
+Hypothesis: Uses weekly Camarilla levels for structural support/resistance, filtered by 1d EMA50 trend direction, with daily volume spike confirmation. Designed to capture high-probability breakouts in trending markets while avoiding false signals in chop. Weekly timeframe provides strong trend filter for 6b entries, reducing false breakouts in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_keltner_channel_breakout_volume_v1"
-timeframe = "4h"
+name = "6h_1w_1d_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,42 +27,41 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 10 or len(df_1d) < 20:
         return np.zeros(n)
-    
-    # 4h EMA20 for Keltner Channel middle line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # 4h ATR(10) for Keltner Channel width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Keltner Channel bands
-    kc_upper = ema_20 + 2 * atr_10
-    kc_lower = ema_20 - 2 * atr_10
     
     # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume average (20-period)
+    # Weekly Camarilla levels (based on previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Camarilla H4/L4 levels: Close +/- 1.1*(High-Low)/2
+    camarilla_H4_1w = close_1w + 1.1 * (high_1w - low_1w) / 2
+    camarilla_L4_1w = close_1w - 1.1 * (high_1w - low_1w) / 2
+    
+    # Align weekly Camarilla levels to 6h timeframe
+    camarilla_H4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_H4_1w)
+    camarilla_L4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_L4_1w)
+    
+    # Daily volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_1w_aligned[i]) or np.isnan(camarilla_L4_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -76,9 +71,9 @@ def generate_signals(prices):
         uptrend = price_close > ema_50_1d_aligned[i]
         downtrend = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = price_close > kc_upper[i]
-        breakout_down = price_close < kc_lower[i]
+        # Breakout conditions using weekly Camarilla levels
+        breakout_up = price_close > camarilla_H4_1w_aligned[i]
+        breakout_down = price_close < camarilla_L4_1w_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
@@ -89,9 +84,9 @@ def generate_signals(prices):
         # Short: downward breakout with volume in downtrend
         short_signal = breakout_down and vol_confirmed and downtrend
         
-        # Exit when price returns to the middle line (EMA20)
-        exit_long = position == 1 and price_close < ema_20[i]
-        exit_short = position == -1 and price_close > ema_20[i]
+        # Exit when price returns to the opposite Camarilla level
+        exit_long = position == 1 and price_close < camarilla_L4_1w_aligned[i]
+        exit_short = position == -1 and price_close > camarilla_H4_1w_aligned[i]
         
         # Trading logic
         if long_signal and position != 1:
