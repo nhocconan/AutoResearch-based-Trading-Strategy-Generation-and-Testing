@@ -1,18 +1,14 @@
-#!/usr/bin/env python3
-"""
-1d_1w_Camarilla_Pivot_Breakout_Volume
-Hypothesis: Uses 1d Camarilla pivot levels with weekly trend filter and volume confirmation.
-Trades breakouts of key intraday pivot levels (L3, H3) only in direction of weekly trend.
-Designed for low trade frequency (<25/year) with high win rate by combining institutional levels,
-trend alignment, and volume confirmation. Works in bull/bear by following weekly trend direction.
-"""
+# 6h_1d_Aroon_Oscillator_Volume_Filter
+# Hypothesis: Aroon oscillator identifies trend strength and direction on 1d timeframe. 
+# Combined with volume confirmation on 6h, it captures strong trends while avoiding chop.
+# Works in bull/bear by following 1d trend direction. Target: 15-30 trades/year per symbol.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_Pivot_Breakout_Volume"
-timeframe = "1d"
+name = "6h_1d_Aroon_Oscillator_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,69 +22,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Load 1d data ONCE before loop for Aroon oscillator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 25:
         return np.zeros(n)
     
-    # Calculate 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 6-period volume moving average for confirmation
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
-    # Volume filter: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Aroon oscillator on 1d (25-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align 1w EMA20 to daily timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Aroon Up: ((25 - days since 25-day high) / 25) * 100
+    aroon_up = np.full(len(high_1d), np.nan)
+    for i in range(24, len(high_1d)):
+        lookback = high_1d[i-24:i+1]
+        high_idx = len(lookback) - 1 - np.argmax(lookback[::-1])  # index of highest value
+        aroon_up[i] = ((24 - high_idx) / 24) * 100
+    
+    # Aroon Down: ((25 - days since 25-day low) / 25) * 100
+    aroon_down = np.full(len(low_1d), np.nan)
+    for i in range(24, len(low_1d)):
+        lookback = low_1d[i-24:i+1]
+        low_idx = len(lookback) - 1 - np.argmin(lookback[::-1])  # index of lowest value
+        aroon_down[i] = ((24 - low_idx) / 24) * 100
+    
+    # Aroon Oscillator = Aroon Up - Aroon Down
+    aroon_osc = aroon_up - aroon_down
+    
+    # Align Aroon oscillator to 6h timeframe
+    aroon_osc_aligned = align_htf_to_ltf(prices, df_1d, aroon_osc)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(25, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if np.isnan(aroon_osc_aligned[i]) or np.isnan(vol_ma_6[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Calculate Camarilla pivot levels using previous day's data
-        # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low)
-        #          L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_close = close[i-1]
+        # Volume confirmation: current volume > 1.5x 6-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_6[i]
         
-        # Skip if previous day data is invalid
-        if np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
+        # Aroon oscillator signals: >50 = strong uptrend, <-50 = strong downtrend
+        strong_uptrend = aroon_osc_aligned[i] > 50
+        strong_downtrend = aroon_osc_aligned[i] < -50
         
-        # Calculate pivot levels
-        range_hl = prev_high - prev_low
-        h3 = prev_close + 1.1 * range_hl
-        l3 = prev_close - 1.1 * range_hl
+        # Entry conditions
+        long_entry = strong_uptrend and volume_filter
+        short_entry = strong_downtrend and volume_filter
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
-        
-        # Trend filter: price above/below 1w EMA20
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
-        
-        # Breakout conditions using Camarilla levels
-        breakout_up = close[i] > h3  # Break above H3 level
-        breakdown_down = close[i] < l3  # Break below L3 level
-        
-        # Entry conditions: only trade in direction of weekly trend
-        long_entry = breakout_up and volume_filter and uptrend
-        short_entry = breakdown_down and volume_filter and downtrend
-        
-        # Exit conditions: return to opposite Camarilla level or trend reversal
-        # Calculate L3 and H3 for exit conditions (same as entry)
-        l3_exit = prev_close - 1.1 * range_hl
-        h3_exit = prev_close + 1.1 * range_hl
-        
-        long_exit = (close[i] < l3_exit) or (not uptrend)  # Break below L3 or trend change
-        short_exit = (close[i] > h3_exit) or (not downtrend)  # Break above H3 or trend change
+        # Exit conditions: trend weakening or reversal
+        long_exit = aroon_osc_aligned[i] < 0  # Oscillator falls below zero
+        short_exit = aroon_osc_aligned[i] > 0  # Oscillator rises above zero
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
