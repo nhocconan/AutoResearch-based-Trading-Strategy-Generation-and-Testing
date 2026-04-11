@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1d_donchian_breakout_volume_trend_v1
-Strategy: 6h Donchian breakout with volume confirmation and 1d EMA trend filter
-Timeframe: 6h
+4h_12h_donchian_breakout_volume_trend_v1
+Strategy: 4h Donchian breakout with volume confirmation and 12h EMA trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Uses 6h Donchian channel breakouts with volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend alignment. Designed to capture strong trending moves while avoiding false breakouts in chop. The 1d EMA provides higher timeframe trend filter to avoid counter-trend trades. Target: 50-150 total trades over 4 years.
+Hypothesis: Combines Donchian(20) breakout for trend capture with volume confirmation (>1.8x average volume) and 12h EMA50 trend alignment to filter false breakouts. Designed to work in both bull and bear markets by only taking breakouts aligned with the higher timeframe trend. Target: 20-50 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "6h"
+name = "4h_12h_donchian_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,58 +27,56 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 60-period Donchian channel (20 periods of 6h = 5 days, but we'll use 60 for more significance)
-    # Actually, let's use 20-period Donchian for 6h (5 days worth of data)
-    donchian_period = 20
-    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # 4h Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (1.8 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(donchian_period, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend_1d = price_close > ema_50_1d_aligned[i]
-        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend_12h = price_close > ema_50_12h_aligned[i]
+        downtrend_12h = price_close < ema_50_12h_aligned[i]
         
         # Donchian breakout conditions
-        breakout_up = price_close > highest_high[i]
-        breakout_down = price_close < lowest_low[i]
+        breakout_up = price_close > high_max[i]
+        breakout_down = price_close < low_min[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
         # Long: upward breakout with volume in uptrend
-        long_signal = breakout_up and vol_confirmed and uptrend_1d
+        long_signal = breakout_up and vol_confirmed and uptrend_12h
         
         # Short: downward breakout with volume in downtrend
-        short_signal = breakout_down and vol_confirmed and downtrend_1d
+        short_signal = breakout_down and vol_confirmed and downtrend_12h
         
-        # Exit when price returns to the opposite Donchian level or when trend changes
-        exit_long = position == 1 and (price_close < lowest_low[i] or not uptrend_1d)
-        exit_short = position == -1 and (price_close > highest_high[i] or not downtrend_1d)
+        # Exit when price returns to the opposite Donchian level
+        exit_long = position == 1 and price_close < low_min[i]
+        exit_short = position == -1 and price_close > high_max[i]
         
         # Trading logic
         if long_signal and position != 1:
