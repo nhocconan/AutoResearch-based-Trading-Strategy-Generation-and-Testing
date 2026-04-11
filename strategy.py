@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation and 1d ADX trend filter
-# - Long: price breaks above Camarilla H3 level, volume > 1.5x 20-period avg, 1d ADX(14) > 25
-# - Short: price breaks below Camarilla L3 level, volume > 1.5x 20-period avg, 1d ADX(14) > 25
-# - Exit: price returns to Camarilla H4/L4 levels or ATR-based stop
+# Hypothesis: 12h Camarilla pivot breakout with 1d volume spike and 1w ADX trend filter
+# - Long: price breaks above Camarilla H3, volume > 2.0x 20-period avg, 1w ADX(14) > 25
+# - Short: price breaks below Camarilla L3, volume > 2.0x 20-period avg, 1w ADX(14) > 25
+# - Exit: price returns to Camarilla H4/L4 levels or ATR-based stop (2.0)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots work well on 6h timeframe with volume and trend confirmation
-# - 1d ADX filter ensures we only trade in strong daily trends, reducing whipsaw
+# - Stronger volume filter (2.0x vs 1.5x) reduces overtrading while maintaining edge
+# - Camarilla pivots work well on 12h timeframe with volume and trend confirmation
+# - 1w ADX filter ensures we only trade in strong weekly trends, reducing whipsaw in bear markets
 
-name = "6h_1d_camarilla_adx_volume_v1"
-timeframe = "6h"
+name = "12h_1d_1w_camarilla_adx_volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,9 +31,45 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load 1d data ONCE before loop for Camarilla pivots, volume, and ADX
+    # Load 1w data ONCE before loop for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return signals
+    
+    # Pre-compute 1w ADX(14) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr_1w = np.maximum(high_1w - low_1w, np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), np.abs(low_1w - np.roll(close_1w, 1))))
+    tr_1w[0] = high_1w[0] - low_1w[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1w ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Load 1d data ONCE before loop for Camarilla pivots and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return signals
     
     # Pre-compute 1d Camarilla levels (based on previous day's OHLC)
@@ -46,7 +83,7 @@ def generate_signals(prices):
     camarilla_l3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     camarilla_l4 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align 1d Camarilla levels to 6h timeframe
+    # Align 1d Camarilla levels to 12h timeframe
     h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
@@ -57,38 +94,7 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 1d ADX(14) for trend filter
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    # True Range
-    tr_1d = np.maximum(high_1d_arr - low_1d_arr, np.maximum(np.abs(high_1d_arr - np.roll(close_1d_arr, 1)), np.abs(low_1d_arr - np.roll(close_1d_arr, 1))))
-    tr_1d[0] = high_1d_arr[0] - low_1d_arr[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d_arr - np.roll(high_1d_arr, 1)) > (np.roll(low_1d_arr, 1) - low_1d_arr), np.maximum(high_1d_arr - np.roll(high_1d_arr, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d_arr, 1) - low_1d_arr) > (high_1d_arr - np.roll(high_1d_arr, 1)), np.maximum(np.roll(low_1d_arr, 1) - low_1d_arr, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Pre-compute ATR for stoploss (6h timeframe)
+    # Pre-compute ATR for stoploss (12h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
@@ -111,10 +117,10 @@ def generate_signals(prices):
         h4_level = h4_aligned[i]
         l4_level = l4_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (stricter filter)
+        vol_confirm = volume_current > 2.0 * volume_sma_20_aligned[i]
         
-        # Trend filter: 1d ADX > 25 (indicates trending market)
+        # Trend filter: 1w ADX > 25 (indicates trending market)
         adx_trend = adx_aligned[i] > 25
         
         # Entry conditions
