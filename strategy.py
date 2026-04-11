@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Trend
-Hypothesis: Combines daily Camarilla pivot levels with 12-hour price action and volume confirmation.
-Trades breakouts from key pivot levels (H3/L3) only when aligned with daily trend.
-Designed for 15-30 trades/year per symbol with high win rate by avoiding false breakouts.
-Works in bull/bear by following daily trend direction - avoids counter-trend losses during reversals.
+1d_1w_Camarilla_Pivot_Breakout_Volume
+Hypothesis: Uses 1d Camarilla pivot levels with weekly trend filter and volume confirmation.
+Trades breakouts of key intraday pivot levels (L3, H3) only in direction of weekly trend.
+Designed for low trade frequency (<25/year) with high win rate by combining institutional levels,
+trend alignment, and volume confirmation. Works in bull/bear by following weekly trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Trend"
-timeframe = "12h"
+name = "1d_1w_Camarilla_Pivot_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,63 +26,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for pivot levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 12-period moving average for volume filter
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate 1w EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Volume filter: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate pivot point and ranges
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    
-    # Camarilla levels: H3/L3 are key breakout levels
-    h3 = close_1d + (range_hl * 1.1 / 2)
-    l3 = close_1d - (range_hl * 1.1 / 2)
-    
-    # Daily trend filter: price above/below 20-period EMA
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    uptrend_1d = close_1d > ema_20_1d
-    downtrend_1d = close_1d < ema_20_1d
-    
-    # Align 1d indicators to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d.astype(float))
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d.astype(float))
+    # Align 1w EMA20 to daily timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(12, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(uptrend_1d_aligned[i]) or np.isnan(downtrend_1d_aligned[i]) or
-            np.isnan(vol_ma_12[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 12-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_12[i]
+        # Calculate Camarilla pivot levels using previous day's data
+        # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low)
+        #          L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
         
-        # Breakout conditions using Camarilla H3/L3 levels
-        breakout_up = close[i] > h3_aligned[i-1]  # Break above H3
-        breakdown_down = close[i] < l3_aligned[i-1]  # Break below L3
+        # Skip if previous day data is invalid
+        if np.isnan(prev_high) or np.isnan(prev_low) or np.isnan(prev_close):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
         
-        # Entry conditions: only trade in direction of daily trend
-        long_entry = breakout_up and volume_filter and uptrend_1d_aligned[i]
-        short_entry = breakdown_down and volume_filter and downtrend_1d_aligned[i]
+        # Calculate pivot levels
+        range_hl = prev_high - prev_low
+        h3 = prev_close + 1.1 * range_hl
+        l3 = prev_close - 1.1 * range_hl
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        
+        # Trend filter: price above/below 1w EMA20
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
+        
+        # Breakout conditions using Camarilla levels
+        breakout_up = close[i] > h3  # Break above H3 level
+        breakdown_down = close[i] < l3  # Break below L3 level
+        
+        # Entry conditions: only trade in direction of weekly trend
+        long_entry = breakout_up and volume_filter and uptrend
+        short_entry = breakdown_down and volume_filter and downtrend
         
         # Exit conditions: return to opposite Camarilla level or trend reversal
-        long_exit = (close[i] < l3_aligned[i]) or (not uptrend_1d_aligned[i])
-        short_exit = (close[i] > h3_aligned[i]) or (not downtrend_1d_aligned[i])
+        # Calculate L3 and H3 for exit conditions (same as entry)
+        l3_exit = prev_close - 1.1 * range_hl
+        h3_exit = prev_close + 1.1 * range_hl
+        
+        long_exit = (close[i] < l3_exit) or (not uptrend)  # Break below L3 or trend change
+        short_exit = (close[i] > h3_exit) or (not downtrend)  # Break above H3 or trend change
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
