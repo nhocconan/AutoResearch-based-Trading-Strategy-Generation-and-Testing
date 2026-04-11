@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_pivot_volume_v1
-# Strategy: 12h Camarilla pivot levels from 1d with volume confirmation
-# Timeframe: 12h
+# 4h_1d_adx_donchian_breakout_v1
+# Strategy: 4h Donchian(20) breakout with ADX trend strength filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance in 12h timeframe.
-# Price reverses at L3/H3 levels with volume confirmation. Works in both bull/bear markets
-# as it captures mean reversion at key institutional levels. Low frequency (~20-30/year)
-# to minimize fee drag.
+# Hypothesis: Donchian breakouts capture breakout momentum, while ADX > 25 ensures we only trade in strong trends.
+# Volume confirmation avoids false breakouts. Works in both bull (long breakouts) and bear (short breakouts).
+# Low frequency (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_1d_adx_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,39 +21,65 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
+    # 1d ADX(14) for trend strength filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate ADX components
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
     
-    # Camarilla levels
-    H4 = pivot + (range_1d * 1.1 / 2)
-    H3 = pivot + (range_1d * 1.1 / 4)
-    H2 = pivot + (range_1d * 1.1 / 6)
-    H1 = pivot + (range_1d * 1.1 / 12)
-    L1 = pivot - (range_1d * 1.1 / 12)
-    L2 = pivot - (range_1d * 1.1 / 6)
-    L3 = pivot - (range_1d * 1.1 / 4)
-    L4 = pivot - (range_1d * 1.1 / 2)
+    # Add first element as 0 for alignment
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
     
-    # Align Camarilla levels to 12h timeframe (previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    atr = np.zeros_like(tr)
+    plus_di = np.zeros_like(tr)
+    minus_di = np.zeros_like(tr)
+    dx = np.zeros_like(tr)
+    adx = np.zeros_like(tr)
+    
+    atr[0] = tr[0]
+    plus_di[0] = 0
+    minus_di[0] = 0
+    
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+        plus_di[i] = (plus_di[i-1] * 13 + plus_dm[i]) / (atr[i] * 100) if atr[i] != 0 else 0
+        minus_di[i] = (minus_di[i-1] * 13 + minus_dm[i]) / (atr[i] * 100) if atr[i] != 0 else 0
+        dx[i] = (np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100) if (plus_di[i] + minus_di[i]) != 0 else 0
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14 if i >= 14 else dx[i]
+    
+    # Pad beginning with NaN for first 14 periods
+    adx_full = np.full_like(tr, np.nan)
+    adx_full[14:] = adx[14:]
+    adx_1d = adx_full
+    
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Donchian(20) channels
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -64,26 +89,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry logic: price at Camarilla H3/L3 with volume confirmation
-        if (close[i] <= H3_aligned[i] and close[i] >= H3_aligned[i] * 0.999 and  # Near H3 resistance
-            vol_confirm[i] and position != -1):
-            position = -1
-            signals[i] = -0.25
-        elif (close[i] >= L3_aligned[i] and close[i] <= L3_aligned[i] * 1.001 and  # Near L3 support
-              vol_confirm[i] and position != 1):
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_1d_aligned[i] > 25
+        
+        # Entry logic: Donchian breakout + ADX + volume
+        if (close[i] > highest_high[i] and strong_trend and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Exit: price moves away from pivot level
-        elif position == 1 and close[i] < L3_aligned[i] * 0.995:
+        elif (close[i] < lowest_low[i] and strong_trend and vol_confirm[i] and position != -1):
+            position = -1
+            signals[i] = -0.25
+        # Exit: trend weakening or opposite breakout
+        elif position == 1 and (not strong_trend or close[i] < lowest_low[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > H3_aligned[i] * 1.005:
+        elif position == -1 and (not strong_trend or close[i] > highest_high[i]):
             position = 0
             signals[i] = 0.0
         else:
