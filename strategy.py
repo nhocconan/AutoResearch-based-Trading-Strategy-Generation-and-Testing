@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v5"
+name = "4h_1d_camarilla_breakout_v6"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate 1d high, low, close for pivot calculation
@@ -60,19 +60,19 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 2.0x 20-period average (more selective)
+    # 4h volume filter: volume > 2.5x 20-period average (selective)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 4h trend filter: close > 89 EMA for long, < 89 EMA for short (slower EMA)
-    ema_89 = pd.Series(close).ewm(span=89, min_periods=89, adjust=False).mean().values
+    # 4h trend filter: close > 50 EMA for long, < 50 EMA for short
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(89, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_89[i])):
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
@@ -82,18 +82,18 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
-        ema_val = ema_89[i]
+        ema_val = ema_50[i]
         
-        # Volume confirmation: stricter threshold
-        volume_confirmed = volume_current > 2.0 * vol_ma
+        # Volume confirmation: high threshold for selectivity
+        volume_confirmed = volume_current > 2.5 * vol_ma
         
         # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_val > 0.005 * price_close  # ATR > 0.5% of price
+        vol_filter = atr_val > 0.008 * price_close  # ATR > 0.8% of price
         
-        # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA89
+        # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA50
         long_signal = volume_confirmed and vol_filter and (price_low < s3_4h[i]) and (price_close > ema_val)
         
-        # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA89
+        # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA50
         short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i]) and (price_close < ema_val)
         
         # Exit when price returns to 1d pivot level
@@ -104,10 +104,10 @@ def generate_signals(prices):
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25  # Reduced size to 25%
+            signals[i] = 0.30  # Size: 30%
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -116,15 +116,14 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
 # Hypothesis: 1d Camarilla levels act as strong support/resistance for 4h price action.
-# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>2.0x average),
-# sufficient volatility (ATR > 0.5% of price), and above 4h 89 EMA (trend filter).
-# Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA89.
+# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>2.5x average),
+# sufficient volatility (ATR > 0.8% of price), and above 4h 50 EMA (trend filter).
+# Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA50.
 # Exits when price returns to 1d pivot level, capturing mean reversion.
-# Used stricter volume filter (2.0x vs 1.8x) to reduce trades.
-# Target: 10-20 trades per year (~40-80/4 years) on 4h timeframe to minimize fee drag.
-# Works in both bull (buying dips) and bear (selling rallies) markets.
+# Uses highly selective volume filter (2.5x) and volatility filter to reduce trades to ~15-25/year.
+# Works in both bull (buying dips) and bear (selling rallies) markets by fading extremes.
