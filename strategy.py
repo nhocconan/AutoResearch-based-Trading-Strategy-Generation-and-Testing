@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 4h_12h_camarilla_volume_crossover_v1
-# Strategy: 4-hour Camarilla pivot level crossover with 12-hour volume surge and momentum filter
-# Timeframe: 4h
+# 6h_1w_donchian_weekly_pivot_volume_v1
+# Strategy: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance. A crossover above/below
-# key levels (H3/L3) with 12h volume surge (>2x average) and aligned 12h momentum (close > open)
-# captures institutional breakouts. Works in bull by catching breakouts, in bear by catching
-# breakdowns with volume confirmation. Low-frequency, high-conviction trades avoid fee drag.
+# Hypothesis: Donchian breakouts capture trend momentum. Weekly pivot (from 1w) provides
+# directional bias: long above weekly pivot, short below. Volume confirms breakout strength.
+# Works in bull by riding uptrends, in bear by catching breakdowns below pivot.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume_crossover_v1"
-timeframe = "4h"
+name = "6h_1w_donchian_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,90 +25,81 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 20:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day (using 1d data for pivot calculation)
-    # Since we're on 4h timeframe, we use daily OHLC for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly pivot point and support/resistance levels
+    # Using typical price: (H + L + C) / 3
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    pivot = typical_price.values
+    # Calculate R1, S1, R2, S2
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    r1 = 2 * pivot - low_w
+    s1 = 2 * pivot - high_w
+    r2 = pivot + (high_w - low_w)
+    s2 = pivot - (high_w - low_w)
     
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Use weekly pivot as trend filter: above pivot = bullish bias, below = bearish
+    weekly_bias = pivot > (high_w + low_w + df_1w['close'].values) / 3  # Actually just pivot > typical price? No, pivot IS typical price
+    # Correction: weekly bias based on current price vs weekly pivot
+    # We'll compute this inside loop using current price and last weekly pivot
     
-    # Calculate Camarilla levels using previous day's OHLC
-    # Camarilla formulas: 
-    # H4 = C + (H-L) * 1.1/2
-    # H3 = C + (H-L) * 1.1/4
-    # L3 = C - (H-L) * 1.1/4
-    # L4 = C - (H-L) * 1.1/2
-    # Where C = (H+L+C)/3 (typical price)
+    # Align weekly pivot to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # Get previous day's OHLC (we need to shift by 1 to avoid look-ahead)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 6h Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate pivot points
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    h3 = pivot + range_hl * 1.1 / 4.0
-    l3 = pivot - range_hl * 1.1 / 4.0
-    h4 = pivot + range_hl * 1.1 / 2.0
-    l4 = pivot - range_hl * 1.1 / 2.0
-    
-    # Align Camarilla levels to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    
-    # 12h volume average for surge detection
-    vol_12h = df_12h['volume'].values
-    vol_avg_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_surge_12h = vol_12h > (2.0 * vol_avg_12h)  # Volume surge: >2x average
-    vol_surge_aligned = align_htf_to_ltf(prices, df_12h, vol_surge_12h)
-    
-    # 12h momentum filter: close > open (bullish candle)
-    close_12h = df_12h['close'].values
-    open_12h = df_12h['open'].values
-    momentum_12h = close_12h > open_12h  # Bullish momentum
-    momentum_aligned = align_htf_to_ltf(prices, df_12h, momentum_12h)
+    # Volume confirmation (20-period average)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup for indicators
+    for i in range(lookback, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(vol_surge_aligned[i]) or np.isnan(momentum_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(pivot_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        # Long: price crosses above H3 with volume surge and bullish 12h momentum
-        long_breakout = (close[i] > h3_aligned[i]) and vol_surge_aligned[i] and momentum_aligned[i]
-        # Short: price crosses below L3 with volume surge and bearish 12h momentum
-        short_breakout = (close[i] < l3_aligned[i]) and vol_surge_aligned[i] and (not momentum_aligned[i])
+        # Current price and levels
+        price_now = close[i]
+        donchian_high = highest_high[i]
+        donchian_low = lowest_low[i]
+        weekly_pivot = pivot_aligned[i]
         
-        # Exit conditions: reverse signal or price reaches opposite extreme level
-        exit_long = position == 1 and (close[i] < l3_aligned[i] or 
-                                      (close[i] > h3_aligned[i] and not momentum_aligned[i]))
-        exit_short = position == -1 and (close[i] > h3_aligned[i] or 
-                                        (close[i] < l3_aligned[i] and momentum_aligned[i]))
+        # Determine weekly bias: price above/below weekly pivot
+        bias_long = price_now > weekly_pivot
+        bias_short = price_now < weekly_pivot
         
-        # Trading logic
-        if long_breakout and position != 1:
+        # Breakout conditions with volume confirmation
+        breakout_long = (price_now > donchian_high) and vol_spike[i]
+        breakout_short = (price_now < donchian_low) and vol_spike[i]
+        
+        # Exit conditions: opposite Donchian breakout or loss of bias
+        exit_long = position == 1 and (
+            (price_now < donchian_low) or  # Price breaks below Donchian low
+            not bias_long  # Lost bullish bias
+        )
+        exit_short = position == -1 and (
+            (price_now > donchian_high) or  # Price breaks above Donchian high
+            not bias_short  # Lost bearish bias
+        )
+        
+        # Trading logic: trade breakouts in direction of weekly bias
+        if breakout_long and bias_long and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif breakout_short and bias_short and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
