@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 6h_1d_weekly_pivot_volume_breakout_v1
-# Strategy: 6-hour breakout at weekly pivot levels (R4/S4) with 1-day volume confirmation
-# Timeframe: 6h
+# 12h_1w_camarilla_pivot_volume_v1
+# Strategy: 12-hour Camarilla pivot breakout with 1-week trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Weekly pivot levels (R4/S4) act as strong support/resistance. Breakouts above R4 or below S4
-# with above-average volume (1-day volume > 20-period average) capture institutional momentum.
-# Works in bull markets by catching upward breakouts and in bear markets by capturing breakdowns.
-# Uses 1-day volume filter to avoid false breakouts in low-volume environments.
+# Hypothesis: Price breakouts above/below weekly Camarilla pivot levels (R4/S4) with volume > 2x average
+# capture institutional momentum. The 1-week EMA(50) trend filter ensures trades align with higher timeframe
+# direction, reducing false breakouts. Works in bull by catching continuation breakouts and in bear by
+# capturing breakdowns with volume confirmation. Targets 12-37 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_weekly_pivot_volume_breakout_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,58 +27,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for weekly pivot and volume filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for Camarilla pivots and trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from daily data
-    # Need at least 5 days (1 week) of data
-    high_5d = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    low_5d = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    close_5d = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    # Weekly OHLC for Camarilla calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Weekly pivot formula: P = (H + L + C) / 3
-    weekly_pivot = (high_5d + low_5d + close_5d) / 3.0
-    # Weekly support/resistance levels
-    # R4 = P + 3*(H - L)  (strongest resistance)
-    # S4 = P - 3*(H - L)  (strongest support)
-    weekly_r4 = weekly_pivot + 3.0 * (high_5d - low_5d)
-    weekly_s4 = weekly_pivot - 3.0 * (high_5d - low_5d)
+    # Calculate weekly Camarilla levels: R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
+    camarilla_r4 = close_1w + (high_1w - low_1w) * 1.1 / 2
+    camarilla_s4 = close_1w - (high_1w - low_1w) * 1.1 / 2
     
-    # Align weekly pivot levels to 6h timeframe
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1d, weekly_r4)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1d, weekly_s4)
+    # Align weekly Camarilla levels to 12h timeframe (wait for weekly close)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
-    # 1-day volume filter: current day volume > 20-day average volume
-    vol_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = vol_1d / (vol_avg_20 + 1e-10)  # Avoid division by zero
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # Weekly EMA(50) for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 12h Relative Volume (RVOL): current volume / 20-period average volume
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    rvol = volume / (vol_avg_20 + 1e-10)  # Avoid division by zero
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(5, n):  # Start after weekly pivot warmup
+    for i in range(20, n):  # Start after RVOL warmup
         # Skip if any required data is invalid
-        if (np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(rvol[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Breakout conditions
-        bull_breakout = close[i] > weekly_r4_aligned[i-1]  # Break above weekly R4
-        bear_breakout = close[i] < weekly_s4_aligned[i-1]  # Break below weekly S4
+        bull_breakout = close[i] > camarilla_r4_aligned[i-1]  # Break above prior R4
+        bear_breakout = close[i] < camarilla_s4_aligned[i-1]   # Break below prior S4
         
-        # Volume confirmation: current day volume > 2x 20-day average
-        vol_confirm = vol_ratio_aligned[i] > 2.0
+        # Volume confirmation: RVOL > 2.0
+        vol_confirm = rvol[i] > 2.0
         
-        # Entry logic: breakout + volume confirmation
-        if bull_breakout and vol_confirm and position != 1:
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
+        
+        # Entry logic: breakout + volume + trend alignment
+        if bull_breakout and vol_confirm and uptrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bear_breakout and vol_confirm and position != -1:
+        elif bear_breakout and vol_confirm and downtrend and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit: opposite breakout with volume confirmation
