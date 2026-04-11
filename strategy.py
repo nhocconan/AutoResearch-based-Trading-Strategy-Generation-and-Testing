@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_trend_v3
+4h_1d_camarilla_breakout_volume_trend_v4
 Strategy: 4h price action with 1d Camarilla confluence
 Timeframe: 4h
 Leverage: 1.0
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v3"
+name = "4h_1d_camarilla_breakout_volume_trend_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -72,7 +72,7 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 0) & (hours <= 23)
     
-    # Minimum holding period: 2 bars (8 hours) to reduce churn
+    # Minimum holding period: 3 bars (12 hours) to reduce churn
     hold_count = np.zeros(n, dtype=int)
     
     signals = np.zeros(n)
@@ -119,11 +119,11 @@ def generate_signals(prices):
         # Trading logic with minimum holding period
         if long_signal and position != 1:
             position = 1
-            hold_count[i] = 2  # Hold for 2 bars minimum
+            hold_count[i] = 3  # Hold for 3 bars minimum
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            hold_count[i] = 2  # Hold for 2 bars minimum
+            hold_count[i] = 3  # Hold for 3 bars minimum
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
