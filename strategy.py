@@ -3,18 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot + volume spike + choppiness regime filter
-# - Uses 12h Camarilla levels from prior day as support/resistance zones
-# - Long when price touches S3 level with volume > 1.5x 20-period average
-# - Short when price touches R3 level with volume > 1.5x 20-period average
-# - Choppiness regime filter: only trade when CHOP(14) < 38.2 (trending) OR > 61.8 (range) to avoid whipsaws
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits for 4h
-# - Works in both bull (breakouts from pivot levels) and bear (reversals at pivot levels) markets
-# - 12h HTF provides stable pivot levels less prone to noise than lower timeframes
+# Hypothesis: 6h Ichimoku Cloud Breakout with Weekly Trend Filter
+# - Tenkan-sen (9) and Kijun-sen (26) cross signals filtered by Kumo (cloud) color
+# - Weekly trend filter: only trade long when weekly close > weekly SMA(50)
+# - Only trade short when weekly close < weekly SMA(50)
+# - Kumo (cloud) from Senkou Span A (26) and Senkou Span B (52) acts as support/resistance
+# - Long when Tenkan crosses above Kijun AND price above Kumo AND weekly uptrend
+# - Short when Tenkan crosses below Kijun AND price below Kumo AND weekly downtrend
+# - Exit when Tenkan/Kijun cross reverses OR price crosses Kumo in opposite direction
+# - Weekly filter ensures we only trade with the higher timeframe trend, reducing whipsaws
+# - Target: 50-150 total trades over 4 years (12-37/year) to stay within 6h limits
+# - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Works in both bull (trend following with weekly uptrend) and bear (trend following with weekly downtrend)
 
-name = "4h_12h_camarilla_volume_chop_v1"
-timeframe = "4h"
+name = "6h_1w_ichimoku_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,60 +25,52 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for Camarilla levels and volume
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate prior 12h bar's OHLC for Camarilla levels
-    # Shift by 1 to use only completed 12h bars
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute weekly SMA(50) for trend filter
+    weekly_close = df_1w['close'].values
+    weekly_sma_50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    weekly_sma_50_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma_50)
     
-    # Calculate Camarilla levels for each completed 12h bar
-    # H4 = Close + 1.1*(High-Low)*1.1/2
-    # L4 = Close - 1.1*(High-Low)*1.1/2
-    # R3 = Close + 1.1*(High-Low)*1.1/4
-    # S3 = Close - 1.1*(High-Low)*1.1/4
-    # We'll use R3/S3 as entry levels
-    hl_range = high_12h - low_12h
-    r3_level = close_12h + 1.1 * hl_range * 1.1 / 4
-    s3_level = close_12h - 1.1 * hl_range * 1.1 / 4
+    # Pre-compute Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    tenkan_sen = tenkan_sen.values
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3_level)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    kijun_sen = kijun_sen.values
     
-    # 12h volume SMA (20-period)
-    volume_12h = df_12h['volume'].values
-    volume_series = pd.Series(volume_12h)
-    volume_sma_20_12h = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low).rolling(window=52, min_periods=52).min()) / 2)
+    # Shift both spans forward by 26 periods (we'll handle alignment differently)
+    senkou_a = senkou_a.values
+    senkou_b = senkou_b.values
     
-    # Calculate 4h Choppiness Index (14-period)
-    # CHOP = 100 * log10(sum(TR(14)) / (ATR(14)*14)) / log10(14)
-    tr1 = pd.Series(high).shift(1) - pd.Series(low).shift(1)
-    tr2 = abs(pd.Series(high).shift(1) - pd.Series(close).shift(1))
-    tr3 = abs(pd.Series(low).shift(1) - pd.Series(close).shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Kumo (Cloud) boundaries: Senkou Span A and B
+    # For cloud color: green when Senkou A > Senkou B (bullish), red when Senkou A < Senkou B (bearish)
+    # We'll use the current cloud (values from 26 periods ago) for support/resistance
     
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    tr_sum_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(tr_sum_14 / (atr_14 * 14)) / np.log10(14)
-    
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(52, n):  # Start after 52-bar warmup for Senkou Span B
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(volume_sma_20_aligned[i]) or np.isnan(chop[i])):
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(weekly_sma_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -83,41 +78,53 @@ def generate_signals(prices):
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
-        volume_current = volume[i]
         
-        # Price touching Camarilla levels (with small buffer)
-        touch_s3 = price_low <= s3_aligned[i] * 1.001  # Allow 0.1% buffer
-        touch_r3 = price_high >= r3_aligned[i] * 0.999  # Allow 0.1% buffer
+        # Ichimoku signals
+        tenkan = tenkan_sen[i]
+        kijun = kijun_sen[i]
+        senkou_a_val = senkou_a[i]
+        senkou_b_val = senkou_b[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Kumo (Cloud) top and bottom
+        kumotop = max(senkou_a_val, senkou_b_val)
+        kumobottom = min(senkou_a_val, senkou_b_val)
         
-        # Choppiness regime filter: avoid choppy markets (38.2 <= CHOP <= 61.8)
-        chop_value = chop[i]
-        chop_filter = (chop_value < 38.2) or (chop_value > 61.8)
+        # Kumo twist (color): green if Senkou A > Senkou B (bullish), red if Senkou A < Senkou B (bearish)
+        kumo_bullish = senkou_a_val > senkou_b_val
+        
+        # Weekly trend filter
+        weekly_trend_up = weekly_sma_50_aligned[i] > 0 and price_close > weekly_sma_50_aligned[i]
+        weekly_trend_down = weekly_sma_50_aligned[i] > 0 and price_close < weekly_sma_50_aligned[i]
+        
+        # Tenkan/Kijun cross signals (using current vs previous)
+        tenkan_prev = tenkan_sen[i-1]
+        kijun_prev = kijun_sen[i-1]
+        
+        tk_cross_up = tenkan > kijun and tenkan_prev <= kijun_prev  # Crossed up
+        tk_cross_down = tenkan < kijun and tenkan_prev >= kijun_prev  # Crossed down
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Touch S3 + volume confirmation + trending/range regime
-        if touch_s3 and vol_confirm and chop_filter:
+        # Long: TK cross up + price above Kumo + weekly uptrend
+        if tk_cross_up and price_close > kumotop and weekly_trend_up:
             enter_long = True
         
-        # Short: Touch R3 + volume confirmation + trending/range regime
-        if touch_r3 and vol_confirm and chop_filter:
+        # Short: TK cross down + price below Kumo + weekly downtrend
+        if tk_cross_down and price_close < kumobottom and weekly_trend_down:
             enter_short = True
         
-        # Exit conditions: opposite touch or volatility collapse
+        # Exit conditions: TK cross reverse OR price crosses Kumo in opposite direction
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price touches R3 or enters choppy zone
-            exit_long = touch_r3 or not chop_filter
+            # Exit long if TK cross down OR price falls below Kumo bottom
+            exit_long = tk_cross_down or (price_close < kumobottom)
         elif position == -1:
-            # Exit short if price touches S3 or enters choppy zone
-            exit_short = touch_s3 or not chop_filter
+            # Exit short if TK cross up OR price rises above Kumo top
+            exit_short = tk_cross_up or (price_close > kumotop)
         
         # Trading logic
         if enter_long and position != 1:
