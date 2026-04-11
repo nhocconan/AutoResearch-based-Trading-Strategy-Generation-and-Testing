@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
+name = "12h_1d_camarilla_breakout_volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -39,8 +39,8 @@ def generate_signals(prices):
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Volume confirmation: 12h volume > 3x 30-period average (more selective to reduce trades)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: 12h volume > 3.5x 40-period average (more selective to reduce trades)
+    vol_ma_40 = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
     
     # Align daily levels to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -49,7 +49,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma_30[i])):
+            np.isnan(vol_ma_40[i])):
             signals[i] = 0.0
             continue
         
@@ -57,7 +57,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 3.0 * vol_ma_30[i]
+        vol_confirm = volume_current > 3.5 * vol_ma_40[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -105,11 +105,11 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 3x 30-period average.
-# Enters short when price breaks below S4 with volume > 3x 30-period average.
+# Enters long when price breaks above R4 with volume > 3.5x 40-period average.
+# Enters short when price breaks below S4 with volume > 3.5x 40-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (3x vs 2.5x) and longer MA (30 vs 20) to significantly reduce false breakouts and overtrading.
+# Uses higher volume threshold (3.5x vs 3x) and longer MA (40 vs 30) to further reduce false breakouts and overtrading.
 # Position size set to 0.25 to improve risk-adjusted returns.
-# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
+# Target: 10-20 trades per year (40-80 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
 # 12h timeframe reduces trade frequency compared to lower timeframes, minimizing fee drag while capturing significant moves.
