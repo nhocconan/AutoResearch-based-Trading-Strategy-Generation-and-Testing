@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R overbought/oversold + 1w trend filter + volume confirmation
-# - Williams %R(14) from 1w: identifies overbought (> -20) and oversold (< -80) conditions
-# - Long when %R crosses above -80 from below (oversold bounce) with 1w uptrend (price > EMA50)
-# - Short when %R crosses below -20 from above (overbought rejection) with 1w downtrend (price < EMA50)
-# - Volume confirmation: current volume > 1.5x 20-period average to avoid low-volume false signals
+# Hypothesis: 1d KAMA + RSI + Chop regime
+# - KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing smooth trend in both trending and ranging markets
+# - RSI(14) for momentum confirmation: long when RSI > 50, short when RSI < 50
+# - Choppiness Index (CHOP) regime filter: only trade when CHOP > 61.8 (ranging market) for mean reversion or CHOP < 38.2 (trending) for trend following
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
-# - Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
-# - 1w HTF provides reliable trend context, reducing counter-trend whipsaws
+# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits for 1d
+# - Works in both bull (trend following when CHOP low) and bear (mean reversion when CHOP high) markets
+# - Weekly trend filter from 1w timeframe ensures alignment with higher timeframe momentum
 
-name = "12h_1w_williamsr_trend_volume_v1"
-timeframe = "12h"
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,91 +24,104 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop for Williams %R, trend, and volume
+    # Load 1d data for KAMA and RSI (though prices is already 1d, we compute indicators)
+    # Load 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return signals
     
-    # Extract 1w arrays
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute KAMA (10-period ER, 2 and 30 for SC)
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(10))
+    volatility = abs(close_series.diff(1)).rolling(window=10, min_periods=1).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Williams %R (14-period)
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1w) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Pre-compute RSI(14)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Calculate 1w EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Pre-compute Choppiness Index (14-period)
+    atr_1 = abs(high - low)
+    atr_2 = abs(np.roll(high, 1) - np.roll(close, 1))
+    atr_3 = abs(np.roll(low, 1) - np.roll(close, 1))
+    tr = np.maximum(atr_1, np.maximum(atr_2, atr_3))
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(tr14 / (highest_high - lowest_low)) / np.log10(14)
+    chop = chop.fillna(50).values  # neutral when undefined
     
-    # Calculate 1w volume SMA (20-period)
-    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    
-    # Align 1w indicators to 12h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1w, williams_r)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
+    # Pre-compute 1w EMA(20) for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         price_close = close[i]
-        volume_current = volume[i]
         
-        # Williams %R signals
-        wr_prev = williams_r_aligned[i-1] if i > 0 else williams_r_aligned[i]
-        wr_curr = williams_r_aligned[i]
+        # KAMA trend: price above/below KAMA
+        kama_trend = price_close > kama[i]
         
-        # Oversold bounce: %R crosses above -80 from below
-        oversold_bounce = (wr_prev <= -80) and (wr_curr > -80)
+        # RSI momentum: above/below 50
+        rsi_momentum = rsi[i] > 50
         
-        # Overbought rejection: %R crosses below -20 from above
-        overbought_rejection = (wr_prev >= -20) and (wr_curr < -20)
+        # Chop regime: >61.8 = ranging (mean revert), <38.2 = trending (trend follow)
+        chop_ranging = chop[i] > 61.8
+        chop_trending = chop[i] < 38.2
         
-        # Trend filter: price above/below EMA50
-        uptrend = price_close > ema_50_aligned[i]
-        downtrend = price_close < ema_50_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Weekly trend filter: price above/below weekly EMA20
+        weekly_trend = price_close > ema_20_1w_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Oversold bounce + uptrend + volume confirmation
-        if oversold_bounce and uptrend and vol_confirm:
+        # Long conditions: 
+        #   - In trending market (CHOP < 38.2): price > KAMA AND RSI > 50 AND weekly uptrend
+        #   - In ranging market (CHOP > 61.8): price < KAMA AND RSI < 50 (mean reversion to upside)
+        if (chop_trending and kama_trend and rsi_momentum and weekly_trend) or \
+           (chop_ranging and not kama_trend and not rsi_momentum):
             enter_long = True
         
-        # Short: Overbought rejection + downtrend + volume confirmation
-        if overbought_rejection and downtrend and vol_confirm:
+        # Short conditions:
+        #   - In trending market (CHOP < 38.2): price < KAMA AND RSI < 50 AND weekly downtrend
+        #   - In ranging market (CHOP > 61.8): price > KAMA AND RSI > 50 (mean reversion to downside)
+        if (chop_trending and not kama_trend and not rsi_momentum and not weekly_trend) or \
+           (chop_ranging and kama_trend and rsi_momentum):
             enter_short = True
         
-        # Exit conditions: opposite Williams %R cross or trend change
+        # Exit conditions: opposite signal or chop regime shift
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if overbought rejection occurs OR trend turns down
-            exit_long = overbought_rejection or (not uptrend)
+            # Exit long if short signal or chop shifts to strong trending against position
+            exit_long = enter_short or (chop_trending and not kama_trend and not rsi_momentum)
         elif position == -1:
-            # Exit short if oversold bounce occurs OR trend turns up
-            exit_short = oversold_bounce or (not downtrend)
+            # Exit short if long signal or chop shifts to strong trending against position
+            exit_short = enter_long or (chop_trending and kama_trend and rsi_momentum)
         
         # Trading logic
         if enter_long and position != 1:
