@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_ma_volume_squeeze_v1"
-timeframe = "12h"
+name = "6h_1d_1w_donchian_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,75 +20,109 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
+    # Load daily and weekly data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 50 or len(df_1w) < 10:
         return signals
     
-    # Daily EMA50 for trend direction
+    # Daily close for weekly pivot calculation (using previous day's close)
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate weekly pivot points from previous week's OHLC
+    # Using Monday's open, week's high, week's low, Friday's close
+    # For simplicity, use previous week's data
+    week_open = df_1w['open'].values
+    week_high = df_1w['high'].values
+    week_low = df_1w['low'].values
+    week_close = df_1w['close'].values
+    
+    # Pivot point = (H + L + C) / 3
+    pivot = (week_high + week_low + week_close) / 3
+    # Support and resistance levels
+    r1 = 2 * pivot - week_low
+    s1 = 2 * pivot - week_high
+    r2 = pivot + (week_high - week_low)
+    s2 = pivot - (week_high - week_low)
+    r3 = week_high + 2 * (pivot - week_low)
+    s3 = week_low - 2 * (week_high - pivot)
+    
+    # Align weekly levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # Daily trend filter: EMA50
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h MA20 for dynamic support/resistance
-    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # 6h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Bands for squeeze detection (20, 2)
-    ma_20_bb = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20_bb + 2 * std_20
-    lower_bb = ma_20_bb - 2 * std_20
-    
-    # Volume spike detection (volume > 2x 20-period average)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily EMA to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ma_20[i]) or 
-            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or
+            np.isnan(s3_6h[i]) or np.isnan(ema_50_1d_6h[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
-        ma_20_val = ma_20[i]
-        ema_trend = ema_50_1d_aligned[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        ema_trend = ema_50_1d_6h[i]
         
-        # Bollinger Band squeeze: bandwidth < 5% of price (low volatility)
-        bb_width = (upper_bb[i] - lower_bb[i]) / ma_20_bb[i] if ma_20_bb[i] != 0 else 1
-        squeeze = bb_width < 0.05
+        # Breakout conditions
+        breakout_long = price_high > donch_high
+        breakout_short = price_low < donch_low
         
-        # Volume confirmation: volume spike
-        volume_spike = volume_current > 2.0 * vol_ma_20[i]
+        # Weekly pivot direction filter
+        above_pivot = price_close > pivot_6h[i]
+        below_pivot = price_close < pivot_6h[i]
         
-        # Trend filter: price relative to daily EMA50
-        above_trend = price_close > ema_trend
-        below_trend = price_close < ema_trend
+        # Volume confirmation
+        volume_ok = volume_current > 1.5 * vol_ma_20[i]
         
-        # Mean reversion signals from Bollinger Bands with volume confirmation
-        long_signal = False
-        short_signal = False
+        # Trend filter: align with daily EMA50
+        trend_up = price_close > ema_trend
+        trend_down = price_close < ema_trend
         
-        # Long: price at lower BB during squeeze + volume spike + above daily EMA trend
-        if squeeze and volume_spike and price_close <= lower_bb[i] and above_trend:
-            long_signal = True
+        # Entry signals
+        long_entry = False
+        short_entry = False
         
-        # Short: price at upper BB during squeeze + volume spike + below daily EMA trend
-        if squeeze and volume_spike and price_close >= upper_bb[i] and below_trend:
-            short_signal = True
+        # Long: Donchian breakout + above weekly pivot + volume + up trend
+        if breakout_long and above_pivot and volume_ok and trend_up:
+            long_entry = True
         
-        # Exit: return to middle Bollinger Band (mean reversion complete)
-        exit_long = price_close >= ma_20_bb[i]
-        exit_short = price_close <= ma_20_bb[i]
+        # Short: Donchian breakdown + below weekly pivot + volume + down trend
+        if breakout_short and below_pivot and volume_ok and trend_down:
+            short_entry = True
+        
+        # Exit conditions: opposite Donchian level or pivot cross
+        exit_long = price_low < donch_low or price_close < pivot_6h[i]
+        exit_short = price_high > donch_high or price_close > pivot_6h[i]
         
         # Trading logic
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
@@ -103,12 +137,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Bollinger Band squeeze strategy with daily EMA50 trend filter and volume confirmation.
-# Enters long when price touches lower BB during low volatility squeeze with volume spike and price above daily EMA50.
-# Enters short when price touches upper BB during squeeze with volume spike and price below daily EMA50.
-# Exits when price returns to middle Bollinger Band (20-period MA).
-# Uses Bollinger Band squeeze (<5% width) to identify low volatility periods primed for expansion.
-# Volume confirmation (>2x 20-period average) ensures institutional participation.
-# Daily EMA50 filter ensures trades align with higher timeframe trend.
-# Target: 15-25 trades per year to minimize fee drag while capturing explosive moves after consolidation.
-# Works in both bull and bear markets by trading mean reversion explosions from squeezed conditions.
+# Hypothesis: 6s Donchian breakout filtered by weekly pivot direction and daily trend.
+# Enters long when price breaks above 6h Donchian high (20-period) while above weekly pivot,
+# with volume confirmation and aligned with daily EMA50 uptrend.
+# Enters short when price breaks below 6h Donchian low while below weekly pivot,
+# with volume confirmation and aligned with daily EMA50 downtrend.
+# Weekly pivot provides institutional reference points; Donchian captures breakouts.
+# Daily EMA50 ensures trades align with higher timeframe trend.
+# Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+# Target: 15-25 trades per year to minimize fee drag while capturing strong moves.
+# Weekly pivot adds institutional intelligence not present in pure Donchian strategies.
