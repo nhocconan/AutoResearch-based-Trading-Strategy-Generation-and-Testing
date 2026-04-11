@@ -1,92 +1,110 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_v2
-# Strategy: 4h Camarilla pivot breakout with volume confirmation and daily trend filter
-# Timeframe: 4h
+# 6h_1d_1w_ichimoku_cloud_trend_v1
+# Strategy: Ichimoku Cloud trend following on 6h with daily cloud filter
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels (from daily high/low/close) act as strong support/resistance.
-# Breakouts above H4 (resistance) or below L4 (support) with volume confirmation and
-# alignment with daily trend (price vs daily EMA50) capture institutional moves.
-# Works in bull markets (breakouts above H4 in uptrend) and bear markets (breakdowns below L4 in downtrend).
-# Volume confirms breakout sincerity. Target: 25-40 trades/year to minimize fee drag.
+# Hypothesis: Ichimoku Cloud provides strong trend identification. Use daily cloud color (Senkou Span A/B) as higher timeframe trend filter. Enter long when 6h price is above both daily cloud and 6d Tenkan-Kijun cross, short when below. This avoids whipsaws by aligning with higher timeframe trend. Works in both bull and bear markets by following the dominant trend on daily timeframe.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "6h_1d_1w_ichimoku_cloud_trend_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components: Tenkan, Kijun, Senkou Span A/B, Chikou"""
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for pivot calculation and trend filter
+    # Load 1d data ONCE before loop for cloud filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Daily EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate Camarilla levels from daily OHLC
-    # Typical Camarilla: based on previous day's range
+    # Calculate Ichimoku on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate levels: H4, L4 (primary breakout levels)
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + 1.5 * range_1d
-    camarilla_l4 = close_1d - 1.5 * range_1d
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(high_1d, low_1d, close_1d)
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align daily Ichimoku components to 6h timeframe
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_avg_20)
+    # Calculate Ichimoku on 6h data for entry signals
+    tenkan_6h, kijun_6h, _, _ = calculate_ichimoku(high, low, close)
+    
+    # Cloud top and bottom (Senkou Span A/B)
+    daily_cloud_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    daily_cloud_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(daily_cloud_top[i]) or np.isnan(daily_cloud_bottom[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below daily EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Determine daily trend from cloud color
+        # Green cloud (bullish): Senkou A > Senkou B
+        # Red cloud (bearish): Senkou A < Senkou B
+        bullish_cloud = senkou_a_1d_aligned[i] > senkou_b_1d_aligned[i]
+        bearish_cloud = senkou_a_1d_aligned[i] < senkou_b_1d_aligned[i]
         
-        # Entry logic: Camarilla breakout + volume + trend alignment
-        if close[i] > camarilla_h4_aligned[i] and vol_confirm[i] and uptrend and position != 1:
+        # 6h Tenkan-Kijun cross
+        tk_cross_bull = tenkan_6h[i] > kijun_6h[i]
+        tk_cross_bear = tenkan_6h[i] < kijun_6h[i]
+        
+        # Entry logic: Ichimoku signals aligned with daily cloud
+        if (close[i] > daily_cloud_top[i] and tk_cross_bull and bullish_cloud and position != 1):
+            # Strong bullish: price above cloud, TK cross bull, daily cloud bullish
             position = 1
             signals[i] = 0.25
-        elif close[i] < camarilla_l4_aligned[i] and vol_confirm[i] and downtrend and position != -1:
+        elif (close[i] < daily_cloud_bottom[i] and tk_cross_bear and bearish_cloud and position != -1):
+            # Strong bearish: price below cloud, TK cross bear, daily cloud bearish
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to previous day's close (pivot point)
-        elif position == 1 and close[i] < camarilla_h4_aligned[i] - 0.5 * range_1d[i]:  # midpoint toward L4
+        # Exit: TK cross reverses or price enters cloud
+        elif position == 1 and (tk_cross_bear or close[i] < daily_cloud_top[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > camarilla_l4_aligned[i] + 0.5 * range_1d[i]:  # midpoint toward H4
+        elif position == -1 and (tk_cross_bull or close[i] > daily_cloud_bottom[i]):
             position = 0
             signals[i] = 0.0
         else:
