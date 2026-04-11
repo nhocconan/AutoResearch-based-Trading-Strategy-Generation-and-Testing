@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 6h_12h_maen_reversion_v1
-# Strategy: 6h mean reversion using 12h Bollinger Bands and RSI
-# Timeframe: 6h
+# 4h_1d_camarilla_breakout_volume_v2
+# Strategy: 4h Camarilla pivot breakout with 1d volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: In ranging markets, price tends to revert to the mean from Bollinger Band extremes.
-# Using 12h Bollinger Bands (20, 2) and 6h RSI (14) to identify overextended conditions.
-# Works in both bull and bear markets by fading extremes during ranging periods.
-# Target: 20-50 trades/year.
+# Hypothesis: Camarilla pivot levels derived from prior 1d high-low-close act as strong support/resistance.
+# Breakouts above/below these levels with above-average 1d volume indicate institutional participation.
+# Works in bull (breakouts continue) and bear (breakdowns continue) markets.
+# Volume filter reduces false breakouts. Target: 20-50 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_mean_reversion_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,67 +25,91 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Bollinger Bands (20, 2)
-    close_12h = pd.Series(df_12h['close'])
-    sma_20 = close_12h.rolling(window=20, min_periods=20).mean()
-    std_20 = close_12h.rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
+    # Calculate 1d Camarilla levels from previous day
+    # HLC of previous 1d bar
+    ph = df_1d['high'].values
+    pl = df_1d['low'].values
+    pc = df_1d['close'].values
     
-    # Align Bollinger Bands to 6h
-    upper_bb_aligned = align_htf_to_ltf(prices, df_12h, upper_bb.values)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_12h, lower_bb.values)
-    sma_20_aligned = align_htf_to_ltf(prices, df_12h, sma_20.values)
+    # Camarilla levels: R4, R3, R2, R1, S1, S2, S3, S4
+    # R4 = Close + ((High - Low) * 1.1/2)
+    # R3 = Close + ((High - Low) * 1.1/4)
+    # R2 = Close + ((High - Low) * 1.1/6)
+    # R1 = Close + ((High - Low) * 1.1/12)
+    # S1 = Close - ((High - Low) * 1.1/12)
+    # S2 = Close - ((High - Low) * 1.1/6)
+    # S3 = Close - ((High - Low) * 1.1/4)
+    # S4 = Close - ((High - Low) * 1.1/2)
+    rng = ph - pl
+    r4 = pc + (rng * 1.1 / 2)
+    r3 = pc + (rng * 1.1 / 4)
+    r2 = pc + (rng * 1.1 / 6)
+    r1 = pc + (rng * 1.1 / 12)
+    s1 = pc - (rng * 1.1 / 12)
+    s2 = pc - (rng * 1.1 / 6)
+    s3 = pc - (rng * 1.1 / 4)
+    s4 = pc - (rng * 1.1 / 2)
     
-    # Calculate 6h RSI (14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 4h
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 1d volume average (20-period) for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(rsi[i])):
-            signals[i] = 0.0
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_avg_20_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion signals
-        price = close[i]
+        # Current 1d volume (aligned)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
+        vol_confirm = vol_1d_current > 1.5 * vol_avg_20_aligned[i]
         
-        # Long when price touches lower BB and RSI is oversold
-        long_signal = (price <= lower_bb_aligned[i]) and (rsi[i] < 30)
+        # Breakout conditions
+        # Long: close > R1 with volume confirmation
+        # Short: close < S1 with volume confirmation
+        long_breakout = close[i] > r1_aligned[i] and vol_confirm
+        short_breakout = close[i] < s1_aligned[i] and vol_confirm
         
-        # Short when price touches upper BB and RSI is overbought
-        short_signal = (price >= upper_bb_aligned[i]) and (rsi[i] > 70)
+        # Exit conditions: reverse breakout
+        long_exit = close[i] < s1_aligned[i]  # price breaks below S1
+        short_exit = close[i] > r1_aligned[i]  # price breaks above R1
         
-        # Exit when price returns to middle band
-        exit_long = (position == 1 and price >= sma_20_aligned[i])
-        exit_short = (position == -1 and price <= sma_20_aligned[i])
-        
-        # Track position
-        if i == 20:
-            position = 0
-        
-        if long_signal and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long or exit_short:
+        elif position == 1 and long_exit:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
