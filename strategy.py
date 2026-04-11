@@ -1,95 +1,126 @@
 #!/usr/bin/env python3
-"""
-Hypothesis: 6h timeframe with 1d pivot-based reversal and volume confirmation.
-Uses Woodie's pivot points from daily data to identify potential reversal zones.
-Enters long near S1/S2 support with bullish volume divergence, short near R1/R2 resistance with bearish volume divergence.
-Designed to work in both bull (buy dips) and bear (sell rallies) markets by fading extremes.
-Target: 20-40 trades/year (~80-160 total over 4 years) with disciplined risk.
-"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_woodie_pivot_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_volume_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_woodie_pivot(high, low, close):
-    """Calculate Woodie's pivot points: P = (H+L+2C)/4, R1 = 2P-L, S1 = 2P-H, etc."""
-    pivot = (high + low + 2 * close) / 4
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, s1, r2, s2
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 2:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Woodie's pivot points for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Camarilla pivot levels (based on previous day)
+    # Pivot = (H + L + C) / 3
+    # H1 = C + 1.1 * (H - L) / 12
+    # L1 = C - 1.1 * (H - L) / 12
+    # H2 = C + 1.1 * (H - L) / 6
+    # L2 = C - 1.1 * (H - L) / 6
+    # H3 = C + 1.1 * (H - L) / 4
+    # L3 = C - 1.1 * (H - L) / 4
+    # H4 = C + 1.1 * (H - L) / 2
+    # L4 = C - 1.1 * (H - L) / 2
     
-    pivot, r1, s1, r2, s2 = calculate_woodie_pivot(high_1d, low_1d, close_1d)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Calculate pivot and levels for each 12h bar
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Resistance levels
+    h1_12h = close_12h + 1.1 * range_12h / 12
+    h2_12h = close_12h + 1.1 * range_12h / 6
+    h3_12h = close_12h + 1.1 * range_12h / 4
+    h4_12h = close_12h + 1.1 * range_12h / 2
+    
+    # Support levels
+    l1_12h = close_12h - 1.1 * range_12h / 12
+    l2_12h = close_12h - 1.1 * range_12h / 6
+    l3_12h = close_12h - 1.1 * range_12h / 4
+    l4_12h = close_12h - 1.1 * range_12h / 2
+    
+    # Align 12h levels to 4h (use previous 12h bar's values to avoid look-ahead)
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
+    h1_aligned = align_htf_to_ltf(prices, df_12h, h1_12h)
+    h2_aligned = align_htf_to_ltf(prices, df_12h, h2_12h)
+    h3_aligned = align_htf_to_ltf(prices, df_12h, h3_12h)
+    h4_aligned = align_htf_to_ltf(prices, df_12h, h4_12h)
+    l1_aligned = align_htf_to_ltf(prices, df_12h, l1_12h)
+    l2_aligned = align_htf_to_ltf(prices, df_12h, l2_12h)
+    l3_aligned = align_htf_to_ltf(prices, df_12h, l3_12h)
+    l4_aligned = align_htf_to_ltf(prices, df_12h, l4_12h)
+    
+    # 12h volume confirmation: current volume > 20-period average
+    volume_12h = df_12h['volume'].values
+    vol_avg_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure volume MA is valid
+    # Start from index 20 to ensure sufficient data
     for i in range(20, n):
-        # Skip if pivot data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(pivot_aligned[i]) or np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
+            np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        # Current 12h volume (aligned)
+        vol_12h_current = align_htf_to_ltf(prices, df_12h, volume_12h)[i]
+        vol_confirm = vol_12h_current > vol_avg_20_aligned[i]
         
-        # Price position relative to pivot levels
-        price = close[i]
-        near_support = (price <= s1_aligned[i] * 1.005) and (price >= s2_aligned[i] * 0.995)
-        near_resistance = (price >= r1_aligned[i] * 0.995) and (price <= r2_aligned[i] * 1.005)
+        # Price levels for current bar
+        h1 = h1_aligned[i]
+        h2 = h2_aligned[i]
+        h3 = h3_aligned[i]
+        h4 = h4_aligned[i]
+        l1 = l1_aligned[i]
+        l2 = l2_aligned[i]
+        l3 = l3_aligned[i]
+        l4 = l4_aligned[i]
         
-        # Entry conditions
-        long_entry = near_support and vol_confirm
-        short_entry = near_resistance and vol_confirm
+        # Long conditions: bounce from support levels with volume
+        long_signal = vol_confirm and (
+            (close[i] > l1 and low[i] <= l1) or  # bounce from L1
+            (close[i] > l2 and low[i] <= l2) or  # bounce from L2
+            (close[i] > l3 and low[i] <= l3) or  # bounce from L3
+            (close[i] > l4 and low[i] <= l4)     # bounce from L4
+        )
         
-        # Exit conditions: return to pivot or opposite extreme
-        long_exit = price >= pivot_aligned[i] or price <= s2_aligned[i] * 0.99
-        short_exit = price <= pivot_aligned[i] or price >= r2_aligned[i] * 1.01
+        # Short conditions: rejection from resistance levels with volume
+        short_signal = vol_confirm and (
+            (close[i] < h1 and high[i] >= h1) or  # rejection from H1
+            (close[i] < h2 and high[i] >= h2) or  # rejection from H2
+            (close[i] < h3 and high[i] >= h3) or  # rejection from H3
+            (close[i] < h4 and high[i] >= h4)     # rejection from H4
+        )
         
-        if long_entry and position != 1:
+        # Exit conditions: price moves to opposite side of pivot
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
+        
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
