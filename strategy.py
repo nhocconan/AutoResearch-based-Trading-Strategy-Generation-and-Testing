@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,37 +21,48 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return signals
     
-    # Calculate daily Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h close for Camarilla levels
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Previous day's close, high, low
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # first value
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Calculate Camarilla levels for each 12h bar
+    camarilla_h4 = np.zeros_like(close_12h)
+    camarilla_l3 = np.zeros_like(close_12h)
+    camarilla_h3 = np.zeros_like(close_12h)
+    camarilla_l4 = np.zeros_like(close_12h)
     
-    # Camarilla levels calculation
-    range_ = prev_high - prev_low
-    camarilla_H4 = prev_close + 1.1 * range_ / 2  # resistance
-    camarilla_L4 = prev_close - 1.1 * range_ / 2  # support
+    for i in range(len(close_12h)):
+        if i < 1:
+            camarilla_h4[i] = np.nan
+            camarilla_l3[i] = np.nan
+            camarilla_h3[i] = np.nan
+            camarilla_l4[i] = np.nan
+        else:
+            # Use previous bar's high, low, close (already closed)
+            ph = high_12h[i-1]
+            pl = low_12h[i-1]
+            pc = close_12h[i-1]
+            camarilla_h4[i] = pc + 1.1 * (ph - pl) / 2
+            camarilla_l3[i] = pc - 1.1 * (ph - pl) / 6
+            camarilla_h3[i] = pc + 1.1 * (ph - pl) / 4
+            camarilla_l4[i] = pc - 1.1 * (ph - pl) / 6
     
-    # Align to 12h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
     
-    # Volume confirmation: volume > 1.3x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for stop loss and trend filter
+    # ATR for stop loss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -59,14 +70,11 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Trend filter: ATR > 0.7 * 50-period ATR average (avoid choppy markets)
-    atr_ma_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    trending_market = atr > 0.7 * atr_ma_50
-    
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
-            np.isnan(vol_ma_30[i]) or np.isnan(atr[i]) or np.isnan(trending_market[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -74,36 +82,36 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        H4 = camarilla_H4_aligned[i]
-        L4 = camarilla_L4_aligned[i]
+        h4 = camarilla_h4_aligned[i]
+        l3 = camarilla_l3_aligned[i]
+        h3 = camarilla_h3_aligned[i]
+        l4 = camarilla_l4_aligned[i]
         atr_val = atr[i]
-        trending = trending_market[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma_30[i]
+        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Entry signals - only in trending markets to avoid whipsaws
+        # Entry signals - Camarilla level breaks with volume
         long_signal = False
         short_signal = False
         
-        # Long: price breaks above Camarilla H4 with volume and trending
-        if price_high > H4 and volume_confirmed and trending:
+        # Long: price breaks above H4 with volume
+        if price_high > h4 and volume_confirmed:
             long_signal = True
         
-        # Short: price breaks below Camarilla L4 with volume and trending
-        if price_low < L4 and volume_confirmed and trending:
+        # Short: price breaks below L3 with volume
+        if price_low < l3 and volume_confirmed:
             short_signal = True
         
         # Exit conditions
-        # Stop loss conditions
-        stop_long = position == 1 and price_low < (entry_price - 1.5 * atr_val)
-        stop_short = position == -1 and price_high > (entry_price + 1.5 * atr_val)
+        # Exit long if price drops below H3
+        exit_long = position == 1 and price_close < h3
+        # Exit short if price rises above L4
+        exit_short = position == -1 and price_close > l4
         
-        # Exit when price returns to Camarilla pivot (close level)
-        camarilla_pivot = (prev_close[i] + prev_high[i] + prev_low[i]) / 3
-        camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)[i]
-        exit_long = position == 1 and price_close < camarilla_pivot_aligned
-        exit_short = position == -1 and price_close > camarilla_pivot_aligned
+        # Stop loss conditions (2x ATR)
+        stop_long = position == 1 and price_low < (entry_price - 2.0 * atr_val)
+        stop_short = position == -1 and price_high > (entry_price + 2.0 * atr_val)
         
         # Trading logic
         if long_signal and position != 1:
@@ -126,11 +134,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 12h Camarilla breakout strategy with volume confirmation and trend filter.
-# Enters long when price breaks above daily Camarilla H4 level with volume confirmation (>1.3x avg volume) in trending markets.
-# Enters short when price breaks below daily Camarilla L4 level with volume confirmation and trending.
-# Uses Camarilla levels from daily timeframe for institutional-grade support/resistance.
-# Volume confirmation ensures institutional participation, trend filter avoids whipsaws in sideways markets.
-# Exits when price returns to Camarilla pivot point or ATR stop loss (1.5x) is hit.
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in both bull and bear markets by trading breakouts in either direction with trend filter.
+# Hypothesis: 4h Camarilla breakout strategy with volume confirmation.
+# Enters long when price breaks above 12h Camarilla H4 level with volume confirmation (>1.5x avg volume).
+# Enters short when price breaks below 12h Camarilla L3 level with volume confirmation.
+# Uses Camarilla levels from higher timeframe (12h) for institutional-grade support/resistance.
+# Volume filter ensures institutional participation and reduces false breakouts.
+# Exits when price returns to opposite Camarilla level (H3 for longs, L4 for shorts) or ATR stop loss (2x) is hit.
+# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year).
+# Works in both bull and bear markets by trading institutional level breaks in either direction.
