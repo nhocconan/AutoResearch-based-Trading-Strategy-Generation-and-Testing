@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1d_kama_volume_regime_v1
-Strategy: 6h KAMA trend with volume confirmation and 1d volatility regime filter
-Timeframe: 6h
+4h_12h_camarilla_breakout_volume_v1
+Strategy: 4h Camarilla pivot breakout with volume confirmation and 12h trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: KAMA adapts to market noise, reducing whipsaws in chop. Combined with volume confirmation and low-volatility regime (using 1d Bollinger Band width percentile), it captures sustainable trends while avoiding false signals in high noise. Designed to work in both bull (trend following) and bear (mean reversion in low vol) markets by switching logic based on volatility regime.
+Hypothesis: Uses 4h Camarilla pivot levels (resistance/support) for breakout entries with volume confirmation (>1.5x average volume) and filtered by 12h EMA20 trend. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses 12h for direction and 4h for execution. Target: 80-160 total trades over 4 years (20-40/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_kama_volume_regime_v1"
-timeframe = "6h"
+name = "4h_12h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,87 +27,71 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) < 30:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 6h KAMA (adaptive moving average)
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close - close[10]|
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum of absolute changes
-    # Handle edge cases for convolution-like sum
-    volatility_padded = np.concatenate([np.zeros(9), volatility])
-    volatility_sum = np.convolve(volatility_padded, np.ones(10), mode='valid')
-    # Avoid division by zero
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
-    # Smoothing constants
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 4h EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 1d Bollinger Band width for volatility regime
-    close_1d = df_1d['close'].values
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_width = (bb_std * 2) / bb_middle  # Normalized width
-    # Percentile rank of BB width over 60 days
-    bb_width_series = pd.Series(bb_width)
-    bb_percentile = bb_width_series.rolling(window=60, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    # Align BB percentile to 6h
-    bb_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_percentile)
+    # 12h EMA20 for trend filter
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # Volume confirmation (20-period average)
+    # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
+    
+    # Calculate Camarilla levels from previous day's data (using 12h data as proxy for daily)
+    # Since we don't have 1d data in the loop, we'll use 12h data to approximate daily levels
+    # For 12h data, each bar represents half a day, so we use the previous 12h bar's high/low/close
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h_for_cama = df_12h['close'].values
+    
+    # Calculate Camarilla levels for each 12h bar (approximation of daily levels)
+    camarilla_H4 = close_12h_for_cama + 1.1 * (high_12h - low_12h) / 2
+    camarilla_L4 = close_12h_for_cama - 1.1 * (high_12h - low_12h) / 2
+    
+    # Align Camarilla levels to 4h timeframe (each 12h bar = 2x 4h bars)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(bb_percentile_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_20_12h_aligned[i]) or 
+            np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        kama_val = kama[i]
-        bb_percentile_val = bb_percentile_aligned[i]
+        
+        # Trend filter: price above/below 12h EMA20
+        uptrend_12h = price_close > ema_20_12h_aligned[i]
+        downtrend_12h = price_close < ema_20_12h_aligned[i]
+        
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > camarilla_H4_aligned[i]
+        breakout_down = price_close < camarilla_L4_aligned[i]
+        
+        # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Regime filter: low volatility (trending) vs high volatility (choppy)
-        # Low vol: BB percentile < 40% (narrow bands = trending)
-        # High vol: BB percentile > 60% (wide bands = choppy)
-        low_vol = bb_percentile_val < 0.4
-        high_vol = bb_percentile_val > 0.6
+        # Long: upward breakout with volume in uptrend (12h)
+        long_signal = breakout_up and vol_confirmed and uptrend_12h
         
-        # In low volatility regime: trend following with KAMA
-        # In high volatility regime: mean reversion (fade extreme moves)
-        if low_vol:
-            # Trend following: price > KAMA = long, price < KAMA = short
-            long_signal = price_close > kama_val and vol_confirmed
-            short_signal = price_close < kama_val and vol_confirmed
-        elif high_vol:
-            # Mean reversion: fade moves away from KAMA
-            # Long when price significantly below KAMA
-            # Short when price significantly above KAMA
-            deviation = (price_close - kama_val) / kama_val
-            long_signal = deviation < -0.015 and vol_confirmed  # >1.5% below KAMA
-            short_signal = deviation > 0.015 and vol_confirmed   # >1.5% above KAMA
-        else:
-            # Neutral regime: no trades
-            long_signal = False
-            short_signal = False
+        # Short: downward breakout with volume in downtrend (12h)
+        short_signal = breakout_down and vol_confirmed and downtrend_12h
         
-        # Exit conditions
-        exit_long = position == 1 and price_close < kama_val
-        exit_short = position == -1 and price_close > kama_val
+        # Exit when price returns to the EMA20 (4h) or opposite Camarilla level
+        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
+        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
