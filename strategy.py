@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_volume_v1
-# Strategy: 1d Camarilla pivot levels with weekly trend filter and volume confirmation
-# Timeframe: 1d
+# 6h_12h_pivot_reversal_v1
+# Strategy: 6h price rejection at 12h Camarilla pivot levels with volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels act as strong support/resistance. Long at L3/S1, short at H3/S4.
-# Weekly trend filter ensures trades align with higher timeframe momentum. Volume confirmation
-# filters out low-conviction moves. Designed for low trade frequency (~10-20/year) to minimize
-# fee drag and survive bear markets via selective short entries.
+# Hypothesis: In ranging markets, price often reverses at Camarilla S3/R3 levels.
+# In trending markets, breaks of S4/R4 with volume indicate continuation.
+# Works in bull/bear by adapting to regime: fade at S3/R3 in range, breakout at S4/R4 in trend.
+# Uses 12h Camarilla pivots calculated from prior 12h bar's OHLC.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "6h_12h_pivot_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,75 +27,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 10:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate 12h Camarilla pivot levels for each 12h bar
+    # Based on prior 12h bar's OHLC (standard Camarilla calculation)
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
     
-    # Calculate daily Camarilla pivot levels from previous day
-    # Pivot levels based on previous day's OHLC
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
+    # Pivot point and ranges
+    pp_12h = (h_12h + l_12h + c_12h) / 3.0
+    range_12h = h_12h - l_12h
     
-    # First day has no previous data
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Camarilla levels (standard multipliers)
+    r4_12h = pp_12h + range_12h * 1.1 / 2
+    r3_12h = pp_12h + range_12h * 1.1 / 4
+    s3_12h = pp_12h - range_12h * 1.1 / 4
+    s4_12h = pp_12h - range_12h * 1.1 / 2
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # Align 12h levels to 6h timeframe (wait for 12h bar to close)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # Camarilla levels
-    # L3 = pivot - (range * 1.1 / 4)
-    # H3 = pivot + (range * 1.1 / 4)
-    # L4 = pivot - (range * 1.1 / 2)
-    # H4 = pivot + (range * 1.1 / 2)
-    L3 = pivot - (range_val * 1.1 / 4)
-    H3 = pivot + (range_val * 1.1 / 4)
-    L4 = pivot - (range_val * 1.1 / 2)
-    H4 = pivot + (range_val * 1.1 / 2)
-    
-    # Align weekly trend to daily
-    weekly_uptrend = ema_20_1w_aligned > np.roll(ema_20_1w_aligned, 1)
-    weekly_uptrend[0] = False
+    # Volume confirmation: 6h volume > 1.5x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.5 * vol_avg_20
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):  # Start from 1 to have previous day data
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(L3[i]) or np.isnan(H3[i]) or \
-           np.isnan(L4[i]) or np.isnan(H4[i]):
+        if np.isnan(r4_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or \
+           np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        if i >= 20:
-            vol_avg_20 = np.mean(volume[i-20:i])
-            vol_confirm = volume[i] > 1.5 * vol_avg_20
-        else:
-            vol_confirm = False
+        # Price rejection at S3/R3 (fade in range) - long at S3, short at R3
+        # Price must touch or penetrate level and close back inside
+        touch_s3 = low[i] <= s3_12h_aligned[i] and close[i] > s3_12h_aligned[i]
+        touch_r3 = high[i] >= r3_12h_aligned[i] and close[i] < r3_12h_aligned[i]
         
-        # Entry conditions
-        # Long: Price <= L3 (strong support) AND weekly uptrend AND volume confirmation
-        if close[i] <= L3[i] and weekly_uptrend[i] and vol_confirm and position != 1:
+        # Breakout at S4/R4 with volume (trend continuation)
+        break_s4 = high[i] > s4_12h_aligned[i] and close[i] > s4_12h_aligned[i] and vol_confirm[i]
+        break_r4 = low[i] < r4_12h_aligned[i] and close[i] < r4_12h_aligned[i] and vol_confirm[i]
+        
+        # Entry logic
+        if touch_s3 and position != 1:
+            # Long rejection at S3
             position = 1
             signals[i] = 0.25
-        # Short: Price >= H3 (strong resistance) AND weekly downtrend AND volume confirmation
-        elif close[i] >= H3[i] and not weekly_uptrend[i] and vol_confirm and position != -1:
+        elif touch_r3 and position != -1:
+            # Short rejection at R3
             position = -1
             signals[i] = -0.25
-        # Exit: Price reaches opposite H4/L4 level (failed breakout/reversal)
-        elif position == 1 and close[i] >= H4[i]:
+        elif break_s4 and position != 1:
+            # Long breakout at S4 with volume
+            position = 1
+            signals[i] = 0.25
+        elif break_r4 and position != -1:
+            # Short breakout at R4 with volume
+            position = -1
+            signals[i] = -0.25
+        # Exit conditions
+        elif position == 1 and (touch_r3 or break_r4):
+            # Exit long on R3 rejection or R4 breakdown
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= L4[i]:
+        elif position == -1 and (touch_s3 or break_s4):
+            # Exit short on S3 rejection or S4 breakout
             position = 0
             signals[i] = 0.0
         else:
