@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_power_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,65 +19,110 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily high, low, close
+    # Calculate daily OHLC for Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily EMA(13) for Elder Ray
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Camarilla pivot calculation (previous day)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema_13
-    bear_power = low_1d - ema_13
+    # Resistance and support levels (previous day's data)
+    r4 = close_1d + range_1d * 1.500
+    r3 = close_1d + range_1d * 1.250
+    r2 = close_1d + range_1d * 1.166
+    r1 = close_1d + range_1d * 1.083
+    s1 = close_1d - range_1d * 1.083
+    s2 = close_1d - range_1d * 1.166
+    s3 = close_1d - range_1d * 1.250
+    s4 = close_1d - range_1d * 1.500
     
-    # Smooth the power signals with EMA(13) to reduce noise
-    bull_power_smooth = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Shift by 1 to use only completed daily bars (previous day's levels)
+    pivot = np.roll(pivot, 1)
+    r1 = np.roll(r1, 1)
+    r2 = np.roll(r2, 1)
+    r3 = np.roll(r3, 1)
+    r4 = np.roll(r4, 1)
+    s1 = np.roll(s1, 1)
+    s2 = np.roll(s2, 1)
+    s3 = np.roll(s3, 1)
+    s4 = np.roll(s4, 1)
+    pivot[0] = np.nan
+    r1[0] = np.nan
+    r2[0] = np.nan
+    r3[0] = np.nan
+    r4[0] = np.nan
+    s1[0] = np.nan
+    s2[0] = np.nan
+    s3[0] = np.nan
+    s4[0] = np.nan
     
-    # Align daily Elder Ray to 6h timeframe
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power_smooth)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power_smooth)
+    # Align daily Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # 6h ATR for volatility filter (14 period)
+    # 4h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 1.3x 20-period average
+    # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # 4h ADX for trend strength (14 period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr_dm = tr[1:]
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(150, n):
+    for i in range(200, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or
+            np.isnan(s1_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation (1.3x average)
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        # Volume confirmation (1.5x average)
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Long signal: Bull Power > 0 and increasing (momentum)
-        long_signal = volume_confirmed and (bull_power_6h[i] > 0) and (bull_power_6h[i] > bull_power_6h[i-1])
+        # Trend filter: ADX > 25 (strong trend filter to reduce trades)
+        trend_filter = adx[i] > 25
         
-        # Short signal: Bear Power < 0 and decreasing (momentum)
-        short_signal = volume_confirmed and (bear_power_6h[i] < 0) and (bear_power_6h[i] < bear_power_6h[i-1])
+        # Long conditions: price breaks above R3 with volume and trend
+        long_signal = volume_confirmed and trend_filter and (price_high > r3_4h[i])
         
-        # Exit when power crosses zero (mean reversion)
-        exit_long = position == 1 and bull_power_6h[i] <= 0
-        exit_short = position == -1 and bear_power_6h[i] >= 0
+        # Short conditions: price breaks below S3 with volume and trend
+        short_signal = volume_confirmed and trend_filter and (price_low < s3_4h[i])
+        
+        # Exit when price returns to the pivot (mean reversion)
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+        exit_long = position == 1 and price_close < pivot_4h[i]
+        exit_short = position == -1 and price_close > pivot_4h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -97,11 +142,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Elder Ray Power strategy on 6h timeframe using daily Bull/Bear Power.
-# Elder Ray measures the power of bulls (High - EMA13) and bears (Low - EMA13).
-# Goes long when Bull Power is positive and rising with volume confirmation.
-# Goes short when Bear Power is negative and falling with volume confirmation.
-# Exits when power crosses zero, indicating weakening momentum.
-# Daily timeframe provides stable trend context, 6h provides timely entries.
-# Works in both bull and bear markets by measuring actual bull/bear strength.
-# Volume confirmation filters out weak moves. Target: 60-100 trades over 4 years.
+# Hypothesis: Daily Camarilla pivot breakout strategy for 4h timeframe with volume confirmation (>1.5x average volume) and ADX filter (>25).
+# Enters long when 4h price breaks above daily R3 level (close + 1.166*range) with volume >1.5x average and ADX>25.
+# Enters short when price breaks below daily S3 level (close - 1.166*range) with same conditions.
+# Exits when price returns to the daily pivot level (mean reversion within the day's range).
+# Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
+# Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
+# Target: 20-30 trades per year to minimize fee drift while capturing strong daily trends.
+# Camarilla pivots work well in both bull and bear markets as they adapt to daily volatility ranges.
