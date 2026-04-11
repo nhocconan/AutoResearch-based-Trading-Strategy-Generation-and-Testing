@@ -1,122 +1,133 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_range_breakout
-Strategy: 12h breakout with 1-day range filter
-Timeframe: 12h
+1d_1w_kama_rsi_chop
+Strategy: 1-day KAMA trend + RSI momentum + Choppiness regime filter
+Timeframe: 1d
 Leverage: 1.0
-Hypothesis: Uses 1-day range compression (current range < 50% of 20-day average) to filter 12h Camarilla breakouts. Designed for low trade frequency (<25/year) to minimize fee drag while capturing momentum in both bull and bear markets via range contraction/expansion cycles. Target: 15-20 trades/year.
+Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) to identify trend direction,
+RSI for momentum confirmation, and Choppiness Index to filter ranging markets.
+Designed for low trade frequency (<25/year) to minimize fee decay while capturing
+trends in both bull and bear markets via adaptive trend strength.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_range_breakout"
-timeframe = "12h"
+name = "1d_1w_kama_rsi_chop"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 12h ATR for context
+    # === 1-day KAMA (trend direction) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0) if len(close) >= 11 else np.full(len(close)-10, np.nan)
+    # Full array handling
+    er = np.full_like(close, np.nan)
+    if len(change) > 0 and len(volatility) > 0:
+        er[10:] = change / np.where(volatility == 0, 1, volatility)
+    # Smoothing constants
+    sc = (er * 0.0645 + 0.0625) ** 2  # 2/(2+1) to 2/(30+1)
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    if len(close) > 10:
+        kama[10] = close[10]
+        for i in range(11, len(close)):
+            if not np.isnan(sc[i]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # === 1-day RSI (momentum) ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan] * 14, rsi])
+    
+    # === 1-day Choppiness Index (regime filter) ===
+    # True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h volume filter: volume > 1.5x 10-period average
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # === 1-day Range compression (filter: current range < 50% of 20-day average) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Chop calculation
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_atr / (hh - ll)) / np.log10(14)
+    chop = np.concatenate([[np.nan] * 13, chop])  # align with 14-period lookback
     
-    # 1-day range
-    range_1d = high_1d - low_1d
-    # 20-day average range
-    range_ma_20 = pd.Series(range_1d).rolling(window=20, min_periods=20).mean().values
-    range_ratio = range_1d / range_ma_20
-    range_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, range_ratio)
+    # === 1-week trend filter (optional bias) ===
+    close_1w = df_1w['close'].values
+    ema_8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # === 1-day Close (prior close for context) ===
-    close_1d_shifted = np.roll(close_1d, 1)
-    close_1d_shifted[0] = np.nan
-    close_1d_prior = align_htf_to_ltf(prices, df_1d, close_1d_shifted)
-    
-    # === 1-day Camarilla (entry levels from prior 1-day) ===
-    high_1d_shift = np.roll(high_1d, 1)
-    low_1d_shift = np.roll(low_1d, 1)
-    close_1d_shift = np.roll(close_1d, 1)
-    high_1d_shift[0] = np.nan
-    low_1d_shift[0] = np.nan
-    close_1d_shift[0] = np.nan
-    
-    pivot_1d = (high_1d_shift + low_1d_shift + close_1d_shift) / 3
-    range_1d_calc = high_1d_shift - low_1d_shift
-    r3_1d = close_1d_shift + range_1d_calc * 1.166
-    s3_1d = close_1d_shift - range_1d_calc * 1.166
-    
-    # Align 1-day Camarilla to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # Session filter: 08-20 UTC (major sessions)
+    # Session filter: 00-24 UTC (full day for daily timeframe)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = (hours >= 0) & (hours <= 23)  # always true for 1d, but keeps structure
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if any required data is invalid or outside session
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(close_1d_prior[i]) or np.isnan(range_ratio_1d_aligned[i]) or np.isnan(vol_ma_10[i]) or
+        # Skip if any required data is invalid
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
+            np.isnan(ema_8_1w_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or
             not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
-        price_open = open_price[i]
-        volume_current = volume[i]
-        vol_ma = vol_ma_10[i]
         
-        # Volume confirmation: 12h volume must be expanded (1.5x 10-period average)
-        volume_expanded = volume_current > 1.5 * vol_ma
+        # Trend direction: price relative to KAMA
+        above_kama = price_close > kama[i]
+        below_kama = price_close < kama[i]
         
-        # Range compression: current 1-day range < 50% of 20-day average
-        range_compressed = range_ratio_1d_aligned[i] < 0.5
+        # Momentum: RSI not extreme
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
         
-        # Strong candle: close > open for longs, close < open for shorts
-        strong_bullish = price_close > price_open
-        strong_bearish = price_close < price_open
+        # Regime: trending market (Chop < 61.8)
+        trending_market = chop[i] < 61.8
         
-        # Long conditions: 12h closes above prior 1-day's R3 with volume expansion + range compression + strong bullish candle
-        long_signal = volume_expanded and range_compressed and strong_bullish and (price_close > r3_1d_aligned[i])
+        # Weekly trend alignment (optional filter)
+        weekly_uptrend = ema_8_1w_aligned[i] > ema_21_1w_aligned[i]
+        weekly_downtrend = ema_8_1w_aligned[i] < ema_21_1w_aligned[i]
         
-        # Short conditions: 12h closes below prior 1-day's S3 with volume expansion + range compression + strong bearish candle
-        short_signal = volume_expanded and range_compressed and strong_bearish and (price_close < s3_1d_aligned[i])
+        # Long conditions: price above KAMA + RSI not overbought + trending market + weekly uptrend
+        long_signal = above_kama and rsi_not_overbought and trending_market and weekly_uptrend
         
-        # Exit when price returns to the 1-day pivot (mean reversion within prior 1-day's range)
-        exit_long = position == 1 and price_close < pivot_1d_aligned[i]
-        exit_short = position == -1 and price_close > pivot_1d_aligned[i]
+        # Short conditions: price below KAMA + RSI not oversold + trending market + weekly downtrend
+        short_signal = below_kama and rsi_not_oversold and trending_market and weekly_downtrend
+        
+        # Exit when price crosses KAMA in opposite direction
+        exit_long = position == 1 and price_close < kama[i]
+        exit_short = position == -1 and price_close > kama[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -136,4 +147,7 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Uses 1-day range compression (current range < 50% of 20-day average) to filter 12h Camarilla breakouts. Designed for low trade frequency (<25/year) to minimize fee drag while capturing momentum in both bull and bear markets via range contraction/expansion cycles. Target: 15-20 trades/year.
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) to identify trend direction,
+# RSI for momentum confirmation, and Choppiness Index to filter ranging markets.
+# Designed for low trade frequency (<25/year) to minimize fee decay while capturing
+# trends in both bull and bear markets via adaptive trend strength.
