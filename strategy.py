@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1d_ichimoku_cloud_v1
-# Strategy: 6h Ichimoku Cloud with 1d cloud filter and volume confirmation
-# Timeframe: 6h
+# 4h_1d_vwap_mean_reversion_v1
+# Strategy: 4h VWAP mean reversion with 1d trend filter and volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Ichimoku Cloud identifies strong support/resistance and trend direction.
-# The 1d cloud acts as a higher-timeframe filter to avoid counter-trend trades.
-# Volume > 1.3x 20-period average confirms institutional participation.
-# Designed for low trade frequency (~15-30/year) to minimize fee drift.
-# Works in bull markets via long entries above cloud and bear markets via short entries below cloud.
+# Hypothesis: Price reverts to VWAP during range-bound periods, with 1d trend filter to avoid counter-trend trades.
+# Volume > 1.5x 20-period average confirms institutional participation. Designed for low trade frequency (~20-40/year)
+# to minimize fee drag. Works in bull markets via long reversals and bear markets via short reversals.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ichimoku_cloud_v1"
-timeframe = "6h"
+name = "4h_1d_vwap_mean_reversion_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,102 +32,54 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 6h Tenkan-sen (Conversion Line): (9-period high + low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan_sen = ((high_9 + low_9) / 2).values
+    # 4h VWAP (typical price * volume) / volume
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
+    vwap = pd.Series(vwap_numerator).rolling(window=20, min_periods=20).sum().values / \
+           pd.Series(vwap_denominator).rolling(window=20, min_periods=20).sum().values
     
-    # 6h Kijun-sen (Base Line): (26-period high + low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun_sen = ((high_26 + low_26) / 2).values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 6h Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, plotted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # 6h Senkou Span B (Leading Span B): (52-period high + low)/2, plotted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # 1d Ichimoku for higher timeframe filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # 1d Tenkan-sen (9-period)
-    high_9_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max()
-    low_9_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min()
-    tenkan_sen_1d = ((high_9_1d + low_9_1d) / 2).values
-    
-    # 1d Kijun-sen (26-period)
-    high_26_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max()
-    low_26_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min()
-    kijun_sen_1d = ((high_26_1d + low_26_1d) / 2).values
-    
-    # 1d Senkou Span A
-    senkou_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2)
-    
-    # 1d Senkou Span B
-    high_52_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max()
-    low_52_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min()
-    senkou_b_1d = ((high_52_1d + low_52_1d) / 2)
-    
-    # Align 1d Ichimoku components to 6h timeframe
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # 6h volume average (20-period) for confirmation
+    # 4h volume average (20-period) for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after 52-period lookback
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(vol_avg_20[i])):
+        if np.isnan(vwap[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine 6h cloud boundaries (future values already aligned)
-        upper_cloud = max(senkou_a[i], senkou_b[i])
-        lower_cloud = min(senkou_a[i], senkou_b[i])
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Determine 1d cloud boundaries
-        upper_cloud_1d = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        lower_cloud_1d = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        # VWAP mean reversion signals
+        price_above_vwap = close[i] > vwap[i]
+        price_below_vwap = close[i] < vwap[i]
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
-        
-        # Ichimoku signals
-        tk_cross_bullish = tenkan_sen[i] > kijun_sen[i]
-        tk_cross_bearish = tenkan_sen[i] < kijun_sen[i]
-        
-        # Price position relative to cloud
-        price_above_cloud = close[i] > upper_cloud
-        price_below_cloud = close[i] < lower_cloud
-        
-        # Higher timeframe filter: price relative to 1d cloud
-        price_above_1d_cloud = close[i] > upper_cloud_1d
-        price_below_1d_cloud = close[i] < lower_cloud_1d
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: Price above 6h cloud AND TK bullish cross AND price above 1d cloud AND volume confirmation
-        if (price_above_cloud and tk_cross_bullish and price_above_1d_cloud and vol_confirm and position != 1):
+        # Long: Price below VWAP (oversold) AND bullish trend AND volume confirmation
+        if price_below_vwap and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price below 6h cloud AND TK bearish cross AND price below 1d cloud AND volume confirmation
-        elif (price_below_cloud and tk_cross_bearish and price_below_1d_cloud and vol_confirm and position != -1):
+        # Short: Price above VWAP (overbought) AND bearish trend AND volume confirmation
+        elif price_above_vwap and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Price crosses opposite cloud boundary (opposite color cloud)
-        elif position == 1 and price_below_cloud:
+        # Exit: Price crosses back to VWAP (mean reversion complete)
+        elif position == 1 and price_above_vwap:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and price_above_cloud:
+        elif position == -1 and price_below_vwap:
             position = 0
             signals[i] = 0.0
         else:
