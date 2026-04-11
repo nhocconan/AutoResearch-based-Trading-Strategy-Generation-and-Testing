@@ -1,10 +1,9 @@
-#%pip install numpy pandas
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v2"
+name = "4h_1d_camarilla_breakout_volume_trend_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,12 +33,12 @@ def generate_signals(prices):
     
     # Resistance and support levels (previous day's data)
     r4 = close_1d + range_1d * 1.500
-    r3 = close_1d + range_1d * 1.250
-    r2 = close_1d + range_1d * 1.166
+    r3 = close_1d + range_1d * 1.166
+    r2 = close_1d + range_1d * 1.083
     r1 = close_1d + range_1d * 1.083
     s1 = close_1d - range_1d * 1.083
-    s2 = close_1d - range_1d * 1.166
-    s3 = close_1d - range_1d * 1.250
+    s2 = close_1d - range_1d * 1.083
+    s3 = close_1d - range_1d * 1.166
     s4 = close_1d - range_1d * 1.500
     
     # Shift by 1 to use only completed daily bars (previous day's levels)
