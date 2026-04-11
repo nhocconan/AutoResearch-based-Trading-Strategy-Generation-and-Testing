@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Institutional Order Flow Detector using 1d Cumulative Delta and 1w Trend Filter
-# Long when 1d cumulative delta (buy pressure) exceeds threshold and 1w trend is up
-# Short when 1d cumulative delta (sell pressure) exceeds threshold and 1w trend is down
-# Uses volume-weighted price momentum to detect institutional accumulation/distribution
-# Designed for 20-40 trades/year on 6h timeframe with clear entry/exit rules
+# Hypothesis: 12h Institutional Flow Detector using 1d Volume Weighted Average Price (VWAP) deviation and 1w trend filter.
+# Long when price deviates below 1d VWAP by >1.5σ and 1w trend is up; short when price deviates above 1d VWAP by >1.5σ and 1w trend is down.
+# Uses volume-weighted price deviation to detect institutional accumulation/distribution.
+# 1w trend filter prevents counter-trend trading. Designed for 12-37 trades/year on 12h timeframe.
 
-name = "6h_1d_1w_cumulative_delta_trend_v1"
-timeframe = "6h"
+name = "12h_1d_1w_vwap_deviation_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,56 +29,58 @@ def generate_signals(prices):
     if len(df_1d) < 20 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d cumulative delta (buy volume - sell volume approximation)
-    # Using close price relative to high-low range as proxy for buying/selling pressure
-    close_position = (df_1d['close'] - df_1d['low']) / (df_1d['high'] - df_1d['low'])
-    close_position = close_position.fillna(0.5)  # Handle zero range
-    delta_approx = (2 * close_position - 1) * df_1d['volume']  # -1 to +1 scaled by volume
-    cumulative_delta = delta_approx.cumsum().values
+    # Calculate 1d VWAP (typical price * volume) / volume
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
     
-    # Normalize cumulative delta by 20-period volatility for signal generation
-    cum_delta_series = pd.Series(cumulative_delta)
-    cum_delta_mean = cum_delta_series.rolling(window=20, min_periods=20).mean().values
-    cum_delta_std = cum_delta_series.rolling(window=20, min_periods=20).std().values
-    cum_delta_normalized = (cum_delta - cum_delta_mean) / cum_delta_std
-    cum_delta_normalized = np.nan_to_num(cum_delta_normalized, nan=0.0)
+    # Align 1d VWAP to 12h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
     
-    # Align normalized cumulative delta to 6h timeframe
-    cum_delta_norm_aligned = align_htf_to_ltf(prices, df_1d, cum_delta_normalized)
+    # Calculate 1d VWAP standard deviation (20-period)
+    typical_price_1d_series = pd.Series(typical_price_1d.values)
+    volume_1d_series = pd.Series(df_1d['volume'].values)
+    vwap_deviation = typical_price_1d_series - vwap_1d
+    vwap_std_20 = vwap_deviation.rolling(window=20, min_periods=20).std().values
+    vwap_std_20_aligned = align_htf_to_ltf(prices, df_1d, vwap_std_20)
     
-    # Calculate 1w EMA(21) for trend filter
+    # Calculate 1w EMA(20) for trend filter
     close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after normalization period
+    for i in range(20, n):  # Start after VWAP std period
         # Skip if any required data is invalid
-        if (np.isnan(cum_delta_norm_aligned[i]) or np.isnan(ema_21_1w_aligned[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_std_20_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Price deviation from 1d VWAP in standard deviations
+        price_dev = (close[i] - vwap_1d_aligned[i]) / vwap_std_20_aligned[i] if vwap_std_20_aligned[i] > 0 else 0
+        
         # Determine 1w trend direction
-        is_uptrend = close[i] > ema_21_1w_aligned[i]
-        is_downtrend = close[i] < ema_21_1w_aligned[i]
+        is_uptrend = close[i] > ema_20_1w_aligned[i]
+        is_downtrend = close[i] < ema_20_1w_aligned[i]
         
-        # Entry conditions: significant cumulative delta with trend alignment
-        # Long when buying pressure is strong and 1w trend up
-        # Short when selling pressure is strong and 1w trend down
-        cum_delta_long = cum_delta_norm_aligned[i] > 1.0 and is_uptrend
-        cum_delta_short = cum_delta_norm_aligned[i] < -1.0 and is_downtrend
+        # Entry conditions: significant deviation from VWAP with trend alignment
+        # Long when price is significantly below VWAP (accumulation) and 1w trend up
+        # Short when price is significantly above VWAP (distribution) and 1w trend down
+        vwap_long_signal = price_dev < -1.5 and is_uptrend
+        vwap_short_signal = price_dev > 1.5 and is_downtrend
         
-        # Exit conditions: pressure normalizes
-        exit_long = cum_delta_norm_aligned[i] < 0.0  # Return to neutral
-        exit_short = cum_delta_norm_aligned[i] > 0.0  # Return to neutral
+        # Exit conditions: price returns toward VWAP
+        exit_long = price_dev > -0.5  # Return to within 0.5σ of VWAP
+        exit_short = price_dev < 0.5   # Return to within 0.5σ of VWAP
         
         # Priority: entry > exit > hold
-        if cum_delta_long and position != 1:
+        if vwap_long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif cum_delta_short and position != -1:
+        elif vwap_short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
