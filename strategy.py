@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v3
-# Strategy: 4h Camarilla breakout with 1d volume confirmation and ADX trend filter
+# 4h_1d_ema_volume_breakout_v1
+# Strategy: 4h EMA20 breakout with 1d volume confirmation and ADX trend filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Breakouts above Camarilla H4 (resistance) or below L4 (support) levels
-# calculated from prior 1-day OHLC, with above-average daily volume and strong trend (ADX > 25).
-# Works in bull markets (breakout longs) and bear markets (breakdown shorts) by capturing
-# momentum after consolidation. Uses Camarilla levels for precise entry points and volume/ADX
-# for confirmation to reduce false signals. Target: 20-40 trades/year to avoid overtrading.
+# Hypothesis: Breakouts above EMA20 (calculated on 1d close) with above-average daily volume
+# and strong trend (ADX > 25) capture momentum in both bull and bear markets.
+# Uses EMA20 for dynamic support/resistance and volume/ADX for confirmation to reduce false signals.
+# Target: 20-40 trades/year to avoid overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v3"
+name = "4h_1d_ema_volume_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -100,15 +99,9 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # Calculate Camarilla levels from prior 1-day OHLC
-    # Typical Camarilla: H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
-    # Where C = close, H = high, L = low of prior day
-    camarilla_h4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_l4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    
-    # Align Camarilla levels to 4h
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Calculate EMA20 on 1d close
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -116,7 +109,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is invalid
         if (np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
+            np.isnan(ema20_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -127,16 +120,16 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 indicates strong trend
         trend_filter = adx_aligned[i] > 25
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = close[i] > camarilla_h4_aligned[i-1]  # break above prior H4
-        breakout_down = close[i] < camarilla_l4_aligned[i-1]  # break below prior L4
+        # Breakout conditions using EMA20
+        breakout_up = close[i] > ema20_aligned[i-1]  # break above prior EMA20
+        breakout_down = close[i] < ema20_aligned[i-1]  # break below prior EMA20
         
         long_signal = breakout_up and vol_confirm and trend_filter
         short_signal = breakout_down and vol_confirm and trend_filter
         
         # Exit conditions: opposite breakout or trend weakening
-        long_exit = close[i] < camarilla_l4_aligned[i-1] or adx_aligned[i] < 20
-        short_exit = close[i] > camarilla_h4_aligned[i-1] or adx_aligned[i] < 20
+        long_exit = close[i] < ema20_aligned[i-1] or adx_aligned[i] < 20
+        short_exit = close[i] > ema20_aligned[i-1] or adx_aligned[i] < 20
         
         if long_signal and position != 1:
             position = 1
