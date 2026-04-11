@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 1-day Williams Fractal breakouts + volume confirmation.
-# Uses daily Williams Fractals (bearish/bullish) from previous completed day to identify
-# structural breakout points. Long when price breaks above bearish fractal with volume
-# > 1.5x average, short when breaks below bullish fractal. Designed for low trade
-# frequency (~15-35/year) to minimize fee decay while capturing structural breaks.
-# Works in bull/bear markets by trading breakouts of key daily support/resistance levels.
+# Hypothesis: 4h timeframe with 1-week Donchian breakout + 1-day ATR filter + volume confirmation.
+# Uses weekly Donchian channels (20-period) for trend direction and daily ATR for volatility filtering.
+# Long when price breaks above weekly Donchian high with volume > 1.5x daily average and ATR > daily ATR average.
+# Short when price breaks below weekly Donchian low with same conditions.
+# Designed for low trade frequency (~20-40/year) to minimize fee decay while capturing major trends.
+# Works in bull markets by catching breakouts and in bear markets by avoiding false signals through volatility filter.
 
-name = "6h_1d_williams_fractal_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1w_donchian_atr_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -25,64 +25,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily Williams Fractals
+    # Load daily data for ATR and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    
+    # Daily ATR (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Williams Fractal: bearish = high[n-2] < high[n-1] > high[n] > high[n+1] > high[n+2]
-    #               bullish  = low[n-2] > low[n-1] < low[n] < low[n+1] < low[n+2]
-    n1d = len(high_1d)
-    bearish_fractal = np.full(n1d, np.nan)
-    bullish_fractal = np.full(n1d, np.nan)
-    
-    for i in range(2, n1d - 2):
-        if (high_1d[i-2] < high_1d[i-1] and 
-            high_1d[i] > high_1d[i-1] and 
-            high_1d[i] > high_1d[i+1] and 
-            high_1d[i+1] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        
-        if (low_1d[i-2] > low_1d[i-1] and 
-            low_1d[i] < low_1d[i-1] and 
-            low_1d[i] < low_1d[i+1] and 
-            low_1d[i+1] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
-    
-    # Align daily fractal levels to 6h timeframe with 2-bar delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    
-    # Calculate daily average volume (for confirmation)
+    # Daily average volume (20-period)
     volume_1d = df_1d['volume'].values
-    vol_avg_10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10_1d)
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align weekly and daily data to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 10 to ensure volume average is valid
-    for i in range(10, n):
+    # Start from index 20 to ensure Donchian channels are valid
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume filter: current volume > 1.5 * daily average volume
         vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Entry conditions: price breaks fractal levels with volume
-        long_entry = (high[i] > bearish_fractal_aligned[i]) and vol_filter
-        short_entry = (low[i] < bullish_fractal_aligned[i]) and vol_filter
+        # ATR filter: current ATR > daily ATR average (avoid low volatility periods)
+        atr_filter = atr_1d_aligned[i] > np.nanmean(atr_1d_aligned[max(0, i-50):i+1]) if i >= 50 else True
         
-        # Exit conditions: price returns to opposite fractal level
-        exit_long = low[i] < bullish_fractal_aligned[i] if not np.isnan(bullish_fractal_aligned[i]) else False
-        exit_short = high[i] > bearish_fractal_aligned[i] if not np.isnan(bearish_fractal_aligned[i]) else False
+        # Entry conditions: price breaks Donchian levels with volume and ATR confirmation
+        long_breakout = high[i] > donchian_high_aligned[i]
+        short_breakout = low[i] < donchian_low_aligned[i]
+        
+        long_entry = long_breakout and vol_filter and atr_filter
+        short_entry = short_breakout and vol_filter and atr_filter
+        
+        # Exit conditions: price returns to opposite Donchian level
+        exit_long = low[i] < donchian_low_aligned[i] if not np.isnan(donchian_low_aligned[i]) else False
+        exit_short = high[i] > donchian_high_aligned[i] if not np.isnan(donchian_high_aligned[i]) else False
         
         if long_entry and position != 1:
             position = 1
