@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume spike
-# Works in bull by catching breakouts, in bear by avoiding false breakouts via trend filter
-# Target: 20-40 trades/year (~80-160 total over 4 years) to avoid fee drag
-name = "4h_1d_donchian_trend_volume_v1"
-timeframe = "4h"
+# Hypothesis: 12h timeframe with 1-day Camarilla pivot breakout + volume surge + volatility filter.
+# Uses tight entry conditions (volatility > 1.5x median, volume > 2.0x average) to limit trades to ~20-40/year.
+# Works in bull/bear markets by capturing breakouts with institutional volume confirmation.
+# Designed for low trade frequency to minimize fee drag while maintaining edge in ranging/trending regimes.
+
+name = "12h_1d_camarilla_volatility_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -23,67 +25,64 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate Camarilla pivot levels (H4, L4) from 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 20-period Donchian channels on 4h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    h4 = close_1d + range_1d * 1.1 / 2
+    l4 = close_1d - range_1d * 1.1 / 2
     
-    # Calculate 4h ATR(14) for volatility filter and position sizing
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
+    # Align H4 and L4 to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    
+    # Calculate 1d volatility (ATR-like: average true range over 10 days)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first period
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_10_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_10_1d)
     
-    # Calculate 20-period average volume on 4h
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d volume average (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    # Start from index 20 to ensure volatility and volume averages are valid
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(atr_14[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Session filter: 08-20 UTC (more active hours)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
+        # Volatility filter: current 1d volatility > 1.5 * median of last 30 periods
+        vol_filter = atr_aligned[i] > 1.5 * np.nanmedian(atr_aligned[max(0, i-30):i])
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Volume filter: current volume > 2.0 * 1d average volume (higher threshold for fewer trades)
+        vol_surge = volume[i] > 2.0 * vol_avg_aligned[i]
         
-        # Volatility filter: current ATR > 0.5 * ATR average of last 20 periods
-        atr_avg_20 = np.nanmean(atr_14[max(0, i-20):i]) if i >= 20 else atr_14[i]
-        vol_filter = atr_14[i] > 0.5 * atr_avg_20
+        # Entry conditions: price breaks through Camarilla H4/L4 with volatility and volume surge
+        long_entry = (high[i] > h4_aligned[i] and vol_filter and vol_surge)
+        short_entry = (low[i] < l4_aligned[i] and vol_filter and vol_surge)
         
-        # Volume filter: current volume > 1.5 * 20-period average volume
-        vol_surge = volume[i] > 1.5 * vol_avg_20[i]
-        
-        # Breakout conditions
-        long_breakout = high[i] > highest_20[i-1]  # Break above 20-period high
-        short_breakout = low[i] < lowest_20[i-1]   # Break below 20-period low
-        
-        # Entry: breakout + trend alignment + volatility + volume + session
-        long_entry = long_breakout and uptrend and vol_filter and vol_surge and in_session
-        short_entry = short_breakout and downtrend and vol_filter and vol_surge and in_session
-        
-        # Exit: opposite Donchian breakout or ATR-based stop
-        exit_long = low[i] < lowest_20[i-1]  # Break below 20-period low
-        exit_short = high[i] > highest_20[i-1]  # Break above 20-period high
+        # Exit conditions: price returns to pivot level
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        exit_low = low[i] < pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else False
+        exit_high = high[i] > pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else False
         
         if long_entry and position != 1:
             position = 1
@@ -91,10 +90,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        elif position == 1 and exit_low:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and exit_high:
             position = 0
             signals[i] = 0.0
         else:
