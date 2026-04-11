@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volume_v1
-Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter
-Timeframe: 4h
+12h_1d_1w_camarilla_pivot_volume_v1
+Strategy: 12h Camarilla pivot level reversal with volume confirmation and 1d trend filter
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses 4h Camarilla pivot levels (calculated from previous 1d OHLC) for breakout signals confirmed by volume spike (>1.5x average volume) and filtered by 1d EMA50 trend direction. Camarilla levels provide precise support/resistance levels that work well in both trending and ranging markets. The trend filter ensures we only take trades in the direction of the higher timeframe trend, reducing false breakouts. Target: 50-150 total trades over 4 years.
+Hypothesis: Uses daily Camarilla pivot levels (calculated from previous day's high-low-close) as support/resistance zones. Enters long when price bounces off S3/S4 with volume confirmation in a 1d uptrend, and short when price bounces off R3/R4 with volume confirmation in a 1d downtrend. Exits when price reaches the opposite pivot level or mean (P). Designed to capture mean-reversion bounces at strong intraday levels while avoiding false signals in strong trends. Works in both bull and bear markets by using 1d trend filter to align with higher timeframe momentum. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,25 +32,50 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d OHLC for Camarilla calculation
+    # Calculate Camarilla pivot levels for each day
+    # Based on previous day's H, L, C
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
-    # Camarilla levels: H4 = Close + 1.5*(High-Low), L4 = Close - 1.5*(High-Low)
-    # We'll use H3/L3 and H4/L4 for breakout signals
-    high_low = high_1d - low_1d
-    camarilla_h4 = close_1d + 1.5 * high_low
-    camarilla_l4 = close_1d - 1.5 * high_low
-    camarilla_h3 = close_1d + 1.125 * high_low
-    camarilla_l3 = close_1d - 1.125 * high_low
+    # Previous day's values (shift by 1 to avoid look-ahead)
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Calculate pivot and Camarilla levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    
+    # Camarilla levels: S1, S2, S3, S4 and R1, R2, R3, R4
+    # S4 = Close - ((High - Low) * 1.500)
+    # S3 = Close - ((High - Low) * 1.250)
+    # S2 = Close - ((High - Low) * 1.166)
+    # S1 = Close - ((High - Low) * 1.083)
+    # R1 = Close + ((High - Low) * 1.083)
+    # R2 = Close + ((High - Low) * 1.166)
+    # R3 = Close + ((High - Low) * 1.250)
+    # R4 = Close + ((High - Low) * 1.500)
+    
+    s4 = prev_close - (range_hl * 1.500)
+    s3 = prev_close - (range_hl * 1.250)
+    s2 = prev_close - (range_hl * 1.166)
+    s1 = prev_close - (range_hl * 1.083)
+    r1 = prev_close + (range_hl * 1.083)
+    r2 = prev_close + (range_hl * 1.166)
+    r3 = prev_close + (range_hl * 1.250)
+    r4 = prev_close + (range_hl * 1.500)
+    
+    # Align all levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -63,11 +88,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -77,22 +102,30 @@ def generate_signals(prices):
         uptrend_1d = price_close > ema_50_1d_aligned[i]
         downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions - using H4/L4 for breakout, H3/L3 for pullback entries
-        breakout_up = price_close > camarilla_h4_aligned[i-1]  # Break above H4
-        breakout_down = price_close < camarilla_l4_aligned[i-1]  # Break below L4
-        
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: upward breakout with volume in uptrend
-        long_signal = breakout_up and vol_confirmed and uptrend_1d
+        # Long: price near S3/S4 with volume in uptrend
+        long_signal = vol_confirmed and uptrend_1d and (
+            (price_close <= s3_aligned[i] * 1.005 and price_close >= s4_aligned[i] * 0.995) or
+            (price_close <= s4_aligned[i] * 1.005 and price_close >= s4_aligned[i] * 0.995)
+        )
         
-        # Short: downward breakout with volume in downtrend
-        short_signal = breakout_down and vol_confirmed and downtrend_1d
+        # Short: price near R3/R4 with volume in downtrend
+        short_signal = vol_confirmed and downtrend_1d and (
+            (price_close >= r3_aligned[i] * 0.995 and price_close <= r4_aligned[i] * 1.005) or
+            (price_close >= r4_aligned[i] * 0.995 and price_close <= r4_aligned[i] * 1.005)
+        )
         
-        # Exit when price returns to H3/L3 levels (taking profit)
-        exit_long = position == 1 and price_close < camarilla_h3_aligned[i]
-        exit_short = position == -1 and price_close > camarilla_l3_aligned[i]
+        # Exit when price reaches opposite level or pivot
+        exit_long = position == 1 and (
+            price_close >= pivot_aligned[i] * 0.995 or  # Reached pivot
+            price_close >= r1_aligned[i] * 0.995        # Reached R1
+        )
+        exit_short = position == -1 and (
+            price_close <= pivot_aligned[i] * 1.005 or  # Reached pivot
+            price_close <= s1_aligned[i] * 1.005        # Reached S1
+        )
         
         # Trading logic
         if long_signal and position != 1:
