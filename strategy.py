@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1d_fib_retracement_volume_trend_v1
-Strategy: 6h Fibonacci retracement with volume confirmation and 1d trend filter
-Timeframe: 6h
+12h_1w_donchian_breakout_volume_trend_v1
+Strategy: 12h Donchian breakout with volume confirmation and 1w EMA trend filter
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses 6h Fibonacci retracement levels (38.2%, 61.8%) from the previous 1d swing for entry, with volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend alignment. Designed to capture pullbacks in trending markets while avoiding false signals in chop. Uses 1d for trend direction and 6h only for timing. Target: 50-150 total trades over 4 years.
+Hypothesis: Uses 12h Donchian channel breakouts (20-period) for entries, filtered by 1w EMA50 trend direction and confirmed by volume spikes (>2x average volume). Designed to capture strong trending moves while avoiding choppy markets. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_fib_retracement_volume_trend_v1"
-timeframe = "6h"
+name = "12h_1w_donchian_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,75 +27,73 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d swing high/low for Fibonacci levels
+    # 12h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
+    tr = np.concatenate([[np.nan], tr2])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate Fibonacci retracement levels from previous day's swing
-    # For uptrend: retracement from low to high
-    # For downtrend: retracement from high to low
-    swing_range = high_1d - low_1d
-    fib_382 = low_1d + 0.382 * swing_range
-    fib_618 = low_1d + 0.618 * swing_range
-    
-    # Align Fibonacci levels to 6h timeframe
-    fib_382_aligned = align_htf_to_ltf(prices, df_1d, fib_382)
-    fib_618_aligned = align_htf_to_ltf(prices, df_1d, fib_618)
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume average (20-period)
+    # Volume average (20-period) and spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (2.0 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or
-            np.isnan(fib_382_aligned[i]) or np.isnan(fib_618_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend_1d = price_close > ema_50_1d_aligned[i]
-        downtrend_1d = price_close < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 1w EMA50
+        uptrend_1w = price_close > ema_50_1w_aligned[i]
+        downtrend_1w = price_close < ema_50_1w_aligned[i]
         
-        # Retracement conditions: price at Fibonacci levels with tolerance
-        # Tolerance: 0.5% of price
-        tolerance = price_close * 0.005
-        at_fib_382 = abs(price_close - fib_382_aligned[i]) <= tolerance
-        at_fib_618 = abs(price_close - fib_618_aligned[i]) <= tolerance
+        # Donchian breakout conditions
+        breakout_up = price_close > donchian_high[i]
+        breakout_down = price_close < donchian_low[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: price at 38.2% or 61.8% retracement in uptrend with volume
-        long_signal = (at_fib_382 or at_fib_618) and vol_confirmed and uptrend_1d
+        # Volatility filter: avoid extremely low volatility periods
+        vol_filter = not np.isnan(atr_14_1d_aligned[i]) and atr_14_1d_aligned[i] > 0
         
-        # Short: price at 38.2% or 61.8% retracement in downtrend with volume
-        short_signal = (at_fib_382 or at_fib_618) and vol_confirmed and downtrend_1d
+        # Long: upward breakout with volume in uptrend
+        long_signal = breakout_up and vol_confirmed and uptrend_1w and vol_filter
         
-        # Exit when price moves 1% away from Fibonacci level or opposite signal
-        exit_long = position == 1 and (
-            price_close < fib_382_aligned[i] - tolerance or 
-            price_close > fib_618_aligned[i] + tolerance
-        )
-        exit_short = position == -1 and (
-            price_close > fib_382_aligned[i] + tolerance or 
-            price_close < fib_618_aligned[i] - tolerance
-        )
+        # Short: downward breakout with volume in downtrend
+        short_signal = breakout_down and vol_confirmed and downtrend_1w and vol_filter
+        
+        # Exit when price returns to the opposite Donchian level or trailing stop
+        exit_long = position == 1 and (price_close < donchian_low[i] or 
+                                       price_close < (high[i] - 2.0 * atr_14_1d_aligned[i]))
+        exit_short = position == -1 and (price_close > donchian_high[i] or 
+                                         price_close > (low[i] + 2.0 * atr_14_1d_aligned[i]))
         
         # Trading logic
         if long_signal and position != 1:
