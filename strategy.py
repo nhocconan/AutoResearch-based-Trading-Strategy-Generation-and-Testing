@@ -1,19 +1,78 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_v2
-# Strategy: 4h Camarilla pivot breakout with volume confirmation and daily volatility filter
-# Timeframe: 4h
+# 6h_1d_supertrend_volume_v1
+# Strategy: 6h Supertrend with 1d trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels from daily chart act as key support/resistance. Breakouts with volume capture institutional flow.
-# Daily volatility filter avoids choppy markets. Designed for ~20-40 trades/year to minimize fee drag.
-# Works in bull markets via long breakouts above H4 and in bear markets via short breakdowns below L4.
+# Hypothesis: Supertrend captures trend direction with dynamic ATR-based bands.
+# 1d Supertrend confirms higher timeframe trend to avoid counter-trend trades.
+# Volume > 1.3x 20-period average confirms institutional participation.
+# Designed for low trade frequency (~15-30/year) to minimize fee drag.
+# Works in bull markets via long entries and bear markets via short entries.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "6h_1d_supertrend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator."""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value has no previous close
+    
+    # Average True Range
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + multiplier * atr
+    basic_lb = (high + low) / 2 - multiplier * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close)
+    final_lb = np.zeros_like(close)
+    
+    for i in range(len(close)):
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+                final_ub[i] = basic_ub[i]
+            else:
+                final_ub[i] = final_ub[i-1]
+                
+            if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+                final_lb[i] = basic_lb[i]
+            else:
+                final_lb[i] = final_lb[i-1]
+    
+    # Supertrend
+    supertrend_val = np.zeros_like(close)
+    for i in range(len(close)):
+        if i == 0:
+            supertrend_val[i] = final_lb[i]
+        else:
+            if supertrend_val[i-1] == final_ub[i-1]:
+                if close[i] <= final_ub[i]:
+                    supertrend_val[i] = final_ub[i]
+                else:
+                    supertrend_val[i] = final_lb[i]
+            else:
+                if close[i] >= final_lb[i]:
+                    supertrend_val[i] = final_lb[i]
+                else:
+                    supertrend_val[i] = final_ub[i]
+    
+    # Trend direction: 1 for uptrend, -1 for downtrend
+    trend = np.where(close > supertrend_val, 1, -1)
+    
+    return supertrend_val, trend, atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,78 +88,51 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Formula: H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
-    # Using previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # 6h Supertrend (10, 3.0)
+    st_6h, trend_6h, atr_6h = supertrend(high, low, close, period=10, multiplier=3.0)
     
-    # Avoid division by zero in range calculation
-    prev_range = prev_high - prev_low
-    # Where range is zero, use a small epsilon to avoid invalid levels
-    prev_range = np.where(prev_range == 0, 0.0001, prev_range)
+    # 1d Supertrend for trend filter
+    st_1d, trend_1d, atr_1d = supertrend(
+        df_1d['high'].values, 
+        df_1d['low'].values, 
+        df_1d['close'].values, 
+        period=10, 
+        multiplier=3.0
+    )
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    H4 = prev_close + prev_range * 1.1 / 2
-    L4 = prev_close - prev_range * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Daily volatility filter: use ATR(10) to avoid ranging markets
-    # Calculate ATR on 1d timeframe
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_10 = tr.rolling(window=10, min_periods=10).mean().values
-    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
-    
-    # 4h volume average (20-period) for confirmation
+    # 6h volume average (20-period) for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or np.isnan(atr_10_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(trend_6h[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.3x 20-period average
         vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
         
-        # Volatility filter: avoid trading when ATR is too low (choppy market)
-        # Use 50-period average of ATR as threshold
-        if i >= 50:
-            atr_avg_50 = np.nanmean(atr_10_aligned[i-50:i]) if not np.isnan(np.nanmean(atr_10_aligned[i-50:i])) else 0
-            vol_filter = atr_10_aligned[i] > 0.5 * atr_avg_50  # Only trade when volatility is above half of recent average
-        else:
-            vol_filter = True  # Not enough data, allow trade
-        
-        # Breakout signals
-        breakout_up = high[i] > H4_aligned[i]
-        breakdown_down = low[i] < L4_aligned[i]
-        
         # Entry conditions
-        # Long: Breakout above H4 with volume confirmation and volatility filter
-        if breakout_up and vol_confirm and vol_filter and position != 1:
+        # Long: 6h uptrend AND 1d uptrend AND volume confirmation
+        if trend_6h[i] == 1 and trend_1d_aligned[i] == 1 and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Breakdown below L4 with volume confirmation and volatility filter
-        elif breakdown_down and vol_confirm and vol_filter and position != -1:
+        # Short: 6h downtrend AND 1d downtrend AND volume confirmation
+        elif trend_6h[i] == -1 and trend_1d_aligned[i] == -1 and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite breakout (breakdown for long, breakout for short)
-        elif position == 1 and breakdown_down:
+        # Exit: Opposite 6h Supertrend signal
+        elif position == 1 and trend_6h[i] == -1:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and breakout_up:
+        elif position == -1 and trend_6h[i] == 1:
             position = 0
             signals[i] = 0.0
         else:
