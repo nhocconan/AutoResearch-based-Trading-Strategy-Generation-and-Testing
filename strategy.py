@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with daily Donchian breakout + volume confirmation + chop regime filter.
-# Uses daily Donchian channels (20-period) to identify breakouts, volume > 1.5x average for confirmation,
-# and Choppiness Index < 38.2 to ensure trending market. Designed for low trade frequency
-# (~15-25/year) to minimize fee decay while capturing strong momentum in both bull and bear markets.
-# Works in bull markets by buying breakouts above upper band, in bear markets by selling breakdowns below lower band.
+# Hypothesis: 4h timeframe with 1-day pivot bounce + volume confirmation.
+# Uses daily pivot points (S1/S2/R1/R2) from previous day to capture mean-reversion bounces.
+# Long when price bounces above S1 with volume > 1.3x average, short when rejects at R1.
+# Designed for low trade frequency (~20-40/year) to minimize fee decay while capturing intraday swings.
+# Works in bull/bear markets by fading extremes at key daily support/resistance levels.
 
-name = "12h_1d_donchian_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_pivot_bounce_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price arrays
@@ -26,66 +26,59 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate daily pivot points (using previous day's data)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    close_1d = df_1d['close'].values
     
-    # Align daily Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Daily pivot calculation (standard floor trader pivots)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = 2 * pivot_1d - low_1d
+    s1 = 2 * pivot_1d - high_1d
+    r2 = pivot_1d + range_1d
+    s2 = pivot_1d - range_1d
+    
+    # Align daily pivot levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Calculate daily average volume (for confirmation)
     volume_1d = df_1d['volume'].values
     vol_avg_10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
     vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10_1d)
     
-    # Calculate Choppiness Index on daily timeframe (14-period)
-    # CHOP = 100 * log10(sum(TR over n) / (max(HH,n) - min(LL,n))) / log10(n)
-    close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    chop[hh - ll == 0] = 100  # Avoid division by zero
-    
-    # Align Choppiness Index to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure Donchian channels are valid
-    for i in range(20, n):
+    # Start from index 10 to ensure volume average is valid
+    for i in range(10, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_avg_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * daily average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.3 * daily average volume
+        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
         
-        # Chop filter: Choppiness Index < 38.2 (trending market)
-        chop_filter = chop_aligned[i] < 38.2
+        # Entry conditions: price bounces off S1/S2 or rejects at R1/R2 with volume
+        long_entry = ((low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]) or 
+                     (low[i] <= s2_aligned[i] and close[i] > s2_aligned[i])) and vol_filter
+        short_entry = ((high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]) or 
+                      (high[i] >= r2_aligned[i] and close[i] < r2_aligned[i])) and vol_filter
         
-        # Entry conditions: price breaks through daily Donchian levels with volume and chop confirmation
-        long_entry = (high[i] > donchian_high_aligned[i] and vol_filter and chop_filter)
-        short_entry = (low[i] < donchian_low_aligned[i] and vol_filter and chop_filter)
-        
-        # Exit conditions: price returns to opposite Donchian level
-        exit_long = low[i] < donchian_low_aligned[i]
-        exit_short = high[i] > donchian_high_aligned[i]
+        # Exit conditions: price reaches opposite pivot level
+        r1_exit = align_htf_to_ltf(prices, df_1d, r1)
+        s1_exit = align_htf_to_ltf(prices, df_1d, s1)
+        exit_long = high[i] >= r1_exit[i] if not np.isnan(r1_exit[i]) else False
+        exit_short = low[i] <= s1_exit[i] if not np.isnan(s1_exit[i]) else False
         
         if long_entry and position != 1:
             position = 1
