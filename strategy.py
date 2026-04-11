@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_v1
-# Strategy: 4h Camarilla pivot with 1d EMA trend filter and volume confirmation
+# 4h_1d_camarilla_breakout_v2
+# Strategy: 4h Camarilla H3/L3 breakout with 1d trend filter, volume confirmation, and dynamic exit
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance. In trending markets (1d EMA filter), price reacts strongly at these levels. Volume confirmation ensures institutional participation. Works in both bull/bear by trading breakouts in trend direction, avoiding false signals in chop.
+# Hypothesis: Camarilla H3/L3 levels act as institutional support/resistance. 
+# In trending markets (identified by 1d EMA(50)), price breaks through these levels with momentum.
+# Volume confirmation filters for institutional participation. Exits on trend reversal or reversion to pivot.
+# Designed for fewer, higher-quality trades to avoid fee drag while capturing trend moves in both bull/bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -48,7 +51,7 @@ def generate_signals(prices):
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average (stricter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_ratio = pd.Series(volume) / vol_ma
     
@@ -59,11 +62,11 @@ def generate_signals(prices):
         # Skip if any required data is invalid
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
             np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ratio.iloc[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = vol_ratio.iloc[i] > 1.5
+        # Volume confirmation: current volume > 1.8x average (stricter filter)
+        vol_confirmed = vol_ratio.iloc[i] > 1.8
         
         # Entry conditions
         # Long: Price breaks above H3 + above 1d EMA50 (uptrend) + volume confirmation
@@ -74,11 +77,11 @@ def generate_signals(prices):
         elif vol_confirmed and close[i] < camarilla_l3_aligned[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to midpoint or trend reversal
-        elif position == 1 and (close[i] < (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2 or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: trend reversal OR price returns to midpoint (more aggressive exit)
+        elif position == 1 and (close[i] < ema_50_1d_aligned[i] or close[i] < (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2 or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > ema_50_1d_aligned[i] or close[i] > (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2):
             position = 0
             signals[i] = 0.0
         else:
