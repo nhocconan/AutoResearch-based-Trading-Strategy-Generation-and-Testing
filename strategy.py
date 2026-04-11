@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index (Bull Power/Bear Power) with 12h trend filter and volume confirmation
-# - Bull Power = High - EMA13, Bear Power = Low - EMA13
-# - Long: Bull Power > 0 AND Bear Power rising (improving) AND price > 12h EMA50 AND volume > 1.5x 20-period avg
-# - Short: Bear Power < 0 AND Bull Power falling (weakening) AND price < 12h EMA50 AND volume > 1.5x 20-period avg
-# - Exit: Opposite signal appears or ATR-based stop (2.5 ATR)
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Elder Ray measures bull/bear strength relative to trend (EMA)
-# - 12h EMA50 filter ensures we trade with higher timeframe trend
-# - Volume confirmation avoids low-participation false signals
+# Hypothesis: 4h Williams %R reversal with 1d volume spike and 1d ADX trend filter
+# - Long: Williams %R(14) crosses above -80 (oversold reversal), volume > 1.8x 20-period avg, 1d ADX(14) > 25
+# - Short: Williams %R(14) crosses below -20 (overbought reversal), volume > 1.8x 20-period avg, 1d ADX(14) > 25
+# - Exit: Williams %R returns to -50 level or ATR-based stop (2.5 ATR)
+# - Uses discrete position sizing: ±0.28 to balance return and drawdown
+# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
+# - Williams %R captures momentum reversals effectively in ranging and trending markets
+# - Volume spike confirms institutional participation
+# - 1d ADX > 25 ensures we only trade when there is sufficient trend strength to avoid whipsaw
+# - Higher ATR multiplier (2.5) reduces premature stops in volatile markets
 
-name = "6h_12h_elder_ray_volume_v1"
-timeframe = "6h"
+name = "4h_1d_williamsr_adx_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,45 +32,75 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for Williams %R, volume, and ADX
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Pre-compute 1d Williams %R(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute Elder Ray components (6h timeframe)
-    # EMA13 for Elder Ray calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
+    # Align 1d Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    # Pre-compute 1d Williams %R previous value for crossover detection
+    williams_r_prev = np.roll(williams_r_aligned, 1)
+    williams_r_prev[0] = williams_r_aligned[0]  # first value
     
-    # Pre-compute previous values for crossover/change detection
-    bull_power_prev = np.roll(bull_power, 1)
-    bear_power_prev = np.roll(bear_power, 1)
-    bull_power_prev[0] = bull_power[0]
-    bear_power_prev[0] = bear_power[0]
+    # Pre-compute 1d volume confirmation (20-period average)
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute volume confirmation (20-period average)
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Pre-compute 1d ADX(14) for trend filter
+    high_1d_adx = df_1d['high'].values
+    low_1d_adx = df_1d['low'].values
+    close_1d_adx = df_1d['close'].values
     
-    # Pre-compute ATR for stoploss (6h timeframe)
+    # True Range
+    tr_1d = np.maximum(high_1d_adx - low_1d_adx, np.maximum(np.abs(high_1d_adx - np.roll(close_1d_adx, 1)), np.abs(low_1d_adx - np.roll(close_1d_adx, 1))))
+    tr_1d[0] = high_1d_adx[0] - low_1d_adx[0]
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d_adx - np.roll(high_1d_adx, 1)) > (np.roll(low_1d_adx, 1) - low_1d_adx), np.maximum(high_1d_adx - np.roll(high_1d_adx, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d_adx, 1) - low_1d_adx) > (high_1d_adx - np.roll(high_1d_adx, 1)), np.maximum(np.roll(low_1d_adx, 1) - low_1d_adx, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    tr_14 = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute ATR for stoploss (4h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(bull_power_prev[i]) or
-            np.isnan(bear_power_prev[i]) or np.isnan(volume_sma_20[i]) or np.isnan(atr_20[i]) or
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(williams_r_prev[i]) or np.isnan(volume_sma_20_aligned[i]) or
+            np.isnan(atr_14[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -78,35 +108,26 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Elder Ray values
-        bull_current = bull_power[i]
-        bear_current = bear_power[i]
-        bull_previous = bull_power_prev[i]
-        bear_previous = bear_power_prev[i]
+        # Williams %R values
+        wr_current = williams_r_aligned[i]
+        wr_previous = williams_r_prev[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.8x 20-period average
+        vol_confirm = volume_current > 1.8 * volume_sma_20_aligned[i]
         
-        # Trend filter: price vs 12h EMA50
-        price_above_12h_ema = close_price > ema50_12h_aligned[i]
-        price_below_12h_ema = close_price < ema50_12h_aligned[i]
-        
-        # Elder Ray momentum: improving/declining
-        bull_rising = bull_current > bull_previous
-        bull_falling = bull_current < bull_previous
-        bear_rising = bear_current > bear_previous  # less negative = improving
-        bear_falling = bear_current < bear_previous  # more negative = worsening
+        # Trend filter: 1d ADX > 25 (indicates sufficient trend strength)
+        adx_trend = adx_aligned[i] > 25
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Bull Power positive AND rising AND price above 12h EMA50 AND volume confirmation
-        if bull_current > 0 and bull_rising and price_above_12h_ema and vol_confirm:
+        # Long reversal: Williams %R crosses above -80 (oversold bounce)
+        if wr_previous <= -80 and wr_current > -80 and vol_confirm and adx_trend:
             enter_long = True
         
-        # Short: Bear Power negative AND falling (more negative) AND price below 12h EMA50 AND volume confirmation
-        if bear_current < 0 and bear_falling and price_below_12h_ema and vol_confirm:
+        # Short reversal: Williams %R crosses below -20 (overbought rejection)
+        if wr_previous >= -20 and wr_current < -20 and vol_confirm and adx_trend:
             enter_short = True
         
         # Exit conditions
@@ -114,11 +135,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if Bear Power turns positive (bulls losing) OR ATR stop
-            exit_long = (bear_current >= 0) or (close_price <= entry_price - 2.5 * atr_20[i])
+            # Exit long if Williams %R returns to -50 or ATR-based stop
+            exit_long = (wr_current >= -50) or (close_price <= entry_price - 2.5 * atr_14[i])
         elif position == -1:
-            # Exit short if Bull Power turns negative (bears losing) OR ATR stop
-            exit_short = (bull_current <= 0) or (close_price >= entry_price + 2.5 * atr_20[i])
+            # Exit short if Williams %R returns to -50 or ATR-based stop
+            exit_short = (wr_current <= -50) or (close_price >= entry_price + 2.5 * atr_14[i])
         
         # Track entry price for stoploss calculation
         if enter_long or enter_short:
@@ -127,10 +148,10 @@ def generate_signals(prices):
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.28
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.28
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -139,6 +160,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.28 if position == 1 else (-0.28 if position == -1 else 0.0)
     
     return signals
