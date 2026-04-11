@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v1"
+name = "4h_1d_camarilla_breakout_volume_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -49,7 +49,7 @@ def generate_signals(prices):
     H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average (stricter filter)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Trend filter: ADX > 25 for trending market
@@ -96,7 +96,7 @@ def generate_signals(prices):
         trending = trending_market[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma_20[i]
+        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
         # Entry signals - only in trending markets
         long_signal = False
@@ -144,11 +144,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla breakout strategy with volume confirmation and ADX trend filter.
-# Enters long when price breaks above daily Camarilla H4 level with volume confirmation (>1.3x avg volume) in trending markets (ADX > 25).
+# Hypothesis: Camarilla breakout strategy with stricter volume confirmation and ADX trend filter.
+# Enters long when price breaks above daily Camarilla H4 level with volume confirmation (>1.5x avg volume) in trending markets (ADX > 25).
 # Enters short when price breaks below daily Camarilla L4 level with volume confirmation and ADX > 25.
 # Uses previous day's data to calculate Camarilla levels to avoid look-ahead.
 # Volume confirmation ensures institutional participation, ADX filter avoids whipsaws in sideways markets.
 # Exits when price returns to previous day's close or ATR stop loss (1.5x) is hit.
-# Designed for 4h timeframe with tight entry conditions to target 75-200 total trades over 4 years.
+# Designed for 4h timeframe with tighter entry conditions to target 75-200 total trades over 4 years.
 # Works in both bull and bear markets by trading breakouts in either direction with trend filter.
