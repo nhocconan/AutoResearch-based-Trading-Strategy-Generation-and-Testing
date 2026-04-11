@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_funding_reversion
-Strategy: 1-day mean reversion on funding rate extremes with 1-week trend filter
-Timeframe: 1d
+6h_12h_1d_price_action_momentum_v1
+Strategy: 6h price action momentum with 12h trend filter and 1-day volatility regime
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Funding rate extremes predict mean reversion in BTC/ETH. Long when funding is extremely negative (shorts overcrowded), short when extremely positive (longs overcrowded). Uses 1-week price trend as filter to avoid counter-trend trades in strong trends. Designed for low trade frequency (<20/year) to minimize fee drag while capturing persistent funding rate mean reversion observed in BTC/ETH markets.
+Hypothesis: Combines 6h price action (close > open for momentum) with 12h EMA trend filter and 1-day low volatility regime (ATR ratio < 0.6) to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_funding_reversion"
-timeframe = "1d"
+name = "6h_12h_1d_price_action_momentum_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,52 +21,88 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    
-    # Load funding rate data (assumed available as column)
-    if 'funding_rate' not in prices.columns:
-        return np.zeros(n)
-    funding = prices['funding_rate'].values
+    volume = prices['volume'].values
+    open_price = prices['open'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1-week EMA for trend filter (50-period)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 6h EMA for momentum (fast)
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
     
-    # Funding rate z-score (30-day window)
-    funding_mean = pd.Series(funding).rolling(window=30, min_periods=30).mean().values
-    funding_std = pd.Series(funding).rolling(window=30, min_periods=30).std().values
-    funding_z = (funding - funding_mean) / funding_std
-    funding_z = np.where(funding_std == 0, 0, funding_z)  # avoid division by zero
+    # 6h EMA for trend (slow)
+    ema_slow = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
+    
+    # 12h EMA trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # 1-day ATR for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1-day ATR
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 1-day ATR ratio: current ATR / 50-period average ATR
+    atr_ma_50_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_1d / atr_ma_50_1d
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Session filter: 00-24 UTC (all hours for 6h timeframe)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 0) & (hours <= 23)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # start after funding z-score warmup
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(funding_z[i]) or
-            np.isnan(close[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
+            not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        price_close = close[i]
-        ema_1w = ema_50_1w_aligned[i]
-        fz = funding_z[i]
+        # Trend condition: 12h EMA slope (using 3-bar change)
+        ema_12h_slope = ema_12h_aligned[i] - ema_12h_aligned[i-3]
+        uptrend = ema_12h_slope > 0
+        downtrend = ema_12h_slope < 0
         
-        # Long when funding extremely negative AND price above weekly EMA (avoid strong downtrend)
-        long_signal = (fz < -2.0) and (price_close > ema_1w)
+        # Momentum condition: 6h fast EMA > slow EMA
+        bullish_momentum = ema_fast[i] > ema_slow[i]
+        bearish_momentum = ema_fast[i] < ema_slow[i]
         
-        # Short when funding extremely positive AND price below weekly EMA (avoid strong uptrend)
-        short_signal = (fz > 2.0) and (price_close < ema_1w)
+        # Price action: strong candle (close > open for bullish, close < open for bearish)
+        strong_bullish = close[i] > open_price[i]
+        strong_bearish = close[i] < open_price[i]
         
-        # Exit when funding returns to neutral zone
-        exit_long = position == 1 and fz > -0.5
-        exit_short = position == -1 and fz < 0.5
+        # Volatility filter: low volatility regime (ATR ratio < 0.6)
+        low_volatility = atr_ratio_1d_aligned[i] < 0.6
+        
+        # Long conditions: uptrend + bullish momentum + strong bullish candle + low volatility
+        long_signal = uptrend and bullish_momentum and strong_bullish and low_volatility
+        
+        # Short conditions: downtrend + bearish momentum + strong bearish candle + low volatility
+        short_signal = downtrend and bearish_momentum and strong_bearish and low_volatility
+        
+        # Exit conditions: momentum reversal or volatility expansion
+        exit_long = position == 1 and (not bullish_momentum or not low_volatility)
+        exit_short = position == -1 and (not bearish_momentum or not low_volatility)
         
         # Trading logic
         if long_signal and position != 1:
@@ -86,6 +122,464 @@ def generate_signals(prices):
     
     return signals
 
-# Note: This strategy assumes funding_rate column is available in prices DataFrame.
-# If not available, it will return zero signals. In actual implementation,
-# funding rate data should be merged from external sources.
+# Hypothesis: Combines 6h price action momentum with 12h EMA trend filter and 1-day low volatility regime to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+EOF
+#!/usr/bin/env python3
+"""
+6h_12h_1d_price_action_momentum_v1
+Strategy: 6h price action momentum with 12h trend filter and 1-day volatility regime
+Timeframe: 6h
+Leverage: 1.0
+Hypothesis: Combines 6h price action (close > open for momentum) with 12h EMA trend filter and 1-day low volatility regime (ATR ratio < 0.6) to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_12h_1d_price_action_momentum_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    open_price = prices['open'].values
+    
+    # Load higher timeframe data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 50 or len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # 6h EMA for momentum (fast)
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
+    
+    # 6h EMA for trend (slow)
+    ema_slow = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
+    
+    # 12h EMA trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # 1-day ATR for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1-day ATR
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 1-day ATR ratio: current ATR / 50-period average ATR
+    atr_ma_50_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_1d / atr_ma_50_1d
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Session filter: 00-24 UTC (all hours for 6h timeframe)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 0) & (hours <= 23)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(100, n):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
+            not in_session[i]):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+        
+        # Trend condition: 12h EMA slope (using 3-bar change)
+        ema_12h_slope = ema_12h_aligned[i] - ema_12h_aligned[i-3]
+        uptrend = ema_12h_slope > 0
+        downtrend = ema_12h_slope < 0
+        
+        # Momentum condition: 6h fast EMA > slow EMA
+        bullish_momentum = ema_fast[i] > ema_slow[i]
+        bearish_momentum = ema_fast[i] < ema_slow[i]
+        
+        # Price action: strong candle (close > open for bullish, close < open for bearish)
+        strong_bullish = close[i] > open_price[i]
+        strong_bearish = close[i] < open_price[i]
+        
+        # Volatility filter: low volatility regime (ATR ratio < 0.6)
+        low_volatility = atr_ratio_1d_aligned[i] < 0.6
+        
+        # Long conditions: uptrend + bullish momentum + strong bullish candle + low volatility
+        long_signal = uptrend and bullish_momentum and strong_bullish and low_volatility
+        
+        # Short conditions: downtrend + bearish momentum + strong bearish candle + low volatility
+        short_signal = downtrend and bearish_momentum and strong_bearish and low_volatility
+        
+        # Exit conditions: momentum reversal or volatility expansion
+        exit_long = position == 1 and (not bullish_momentum or not low_volatility)
+        exit_short = position == -1 and (not bearish_momentum or not low_volatility)
+        
+        # Trading logic
+        if long_signal and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_signal and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
+            position = 0
+            signals[i] = 0.0
+        else:
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+    
+    return signals
+
+# Hypothesis: Combines 6h price action momentum with 12h EMA trend filter and 1-day low volatility regime to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+EOF
+#!/usr/bin/env python3
+"""
+6h_12h_1d_price_action_momentum_v1
+Strategy: 6h price action momentum with 12h trend filter and 1-day volatility regime
+Timeframe: 6h
+Leverage: 1.0
+Hypothesis: Combines 6h price action (close > open for momentum) with 12h EMA trend filter and 1-day low volatility regime (ATR ratio < 0.6) to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_12h_1d_price_action_momentum_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    open_price = prices['open'].values
+    
+    # Load higher timeframe data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 50 or len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # 6h EMA for momentum (fast)
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
+    
+    # 6h EMA for trend (slow)
+    ema_slow = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
+    
+    # 12h EMA trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # 1-day ATR for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1-day ATR
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 1-day ATR ratio: current ATR / 50-period average ATR
+    atr_ma_50_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_1d / atr_ma_50_1d
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Session filter: 00-24 UTC (all hours for 6h timeframe)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 0) & (hours <= 23)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(100, n):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
+            not in_session[i]):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+        
+        # Trend condition: 12h EMA slope (using 3-bar change)
+        ema_12h_slope = ema_12h_aligned[i] - ema_12h_aligned[i-3]
+        uptrend = ema_12h_slope > 0
+        downtrend = ema_12h_slope < 0
+        
+        # Momentum condition: 6h fast EMA > slow EMA
+        bullish_momentum = ema_fast[i] > ema_slow[i]
+        bearish_momentum = ema_fast[i] < ema_slow[i]
+        
+        # Price action: strong candle (close > open for bullish, close < open for bearish)
+        strong_bullish = close[i] > open_price[i]
+        strong_bearish = close[i] < open_price[i]
+        
+        # Volatility filter: low volatility regime (ATR ratio < 0.6)
+        low_volatility = atr_ratio_1d_aligned[i] < 0.6
+        
+        # Long conditions: uptrend + bullish momentum + strong bullish candle + low volatility
+        long_signal = uptrend and bullish_momentum and strong_bullish and low_volatility
+        
+        # Short conditions: downtrend + bearish momentum + strong bearish candle + low volatility
+        short_signal = downtrend and bearish_momentum and strong_bearish and low_volatility
+        
+        # Exit conditions: momentum reversal or volatility expansion
+        exit_long = position == 1 and (not bullish_momentum or not low_volatility)
+        exit_short = position == -1 and (not bearish_momentum or not low_volatility)
+        
+        # Trading logic
+        if long_signal and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_signal and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
+            position = 0
+            signals[i] = 0.0
+        else:
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+    
+    return signals
+
+# Hypothesis: Combines 6h price action momentum with 12h EMA trend filter and 1-day low volatility regime to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+EOF
+#!/usr/bin/env python3
+"""
+6h_12h_1d_price_action_momentum_v1
+Strategy: 6h price action momentum with 12h trend filter and 1-day volatility regime
+Timeframe: 6h
+Leverage: 1.0
+Hypothesis: Combines 6h price action (close > open for momentum) with 12h EMA trend filter and 1-day low volatility regime (ATR ratio < 0.6) to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_12h_1d_price_action_momentum_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    open_price = prices['open'].values
+    
+    # Load higher timeframe data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 50 or len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # 6h EMA for momentum (fast)
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
+    
+    # 6h EMA for trend (slow)
+    ema_slow = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
+    
+    # 12h EMA trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # 1-day ATR for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1-day ATR
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 1-day ATR ratio: current ATR / 50-period average ATR
+    atr_ma_50_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_1d / atr_ma_50_1d
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Session filter: 00-24 UTC (all hours for 6h timeframe)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 0) & (hours <= 23)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(100, n):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
+            not in_session[i]):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+        
+        # Trend condition: 12h EMA slope (using 3-bar change)
+        ema_12h_slope = ema_12h_aligned[i] - ema_12h_aligned[i-3]
+        uptrend = ema_12h_slope > 0
+        downtrend = ema_12h_slope < 0
+        
+        # Momentum condition: 6h fast EMA > slow EMA
+        bullish_momentum = ema_fast[i] > ema_slow[i]
+        bearish_momentum = ema_fast[i] < ema_slow[i]
+        
+        # Price action: strong candle (close > open for bullish, close < open for bearish)
+        strong_bullish = close[i] > open_price[i]
+        strong_bearish = close[i] < open_price[i]
+        
+        # Volatility filter: low volatility regime (ATR ratio < 0.6)
+        low_volatility = atr_ratio_1d_aligned[i] < 0.6
+        
+        # Long conditions: uptrend + bullish momentum + strong bullish candle + low volatility
+        long_signal = uptrend and bullish_momentum and strong_bullish and low_volatility
+        
+        # Short conditions: downtrend + bearish momentum + strong bearish candle + low volatility
+        short_signal = downtrend and bearish_momentum and strong_bearish and low_volatility
+        
+        # Exit conditions: momentum reversal or volatility expansion
+        exit_long = position == 1 and (not bullish_momentum or not low_volatility)
+        exit_short = position == -1 and (not bearish_momentum or not low_volatility)
+        
+        # Trading logic
+        if long_signal and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_signal and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
+            position = 0
+            signals[i] = 0.0
+        else:
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+    
+    return signals
+
+# Hypothesis: Combines 6h price action momentum with 12h EMA trend filter and 1-day low volatility regime to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+EOF
+#!/usr/bin/env python3
+"""
+6h_12h_1d_price_action_momentum_v1
+Strategy: 6h price action momentum with 12h trend filter and 1-day volatility regime
+Timeframe: 6h
+Leverage: 1.0
+Hypothesis: Combines 6h price action (close > open for momentum) with 12h EMA trend filter and 1-day low volatility regime (ATR ratio < 0.6) to capture momentum moves in both bull and bear markets. Low volatility regime reduces false breakouts during choppy periods, while EMA filter ensures trades align with higher timeframe trend. Designed for moderate trade frequency (20-40/year) to balance opportunity and fee drag.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_12h_1d_price_action_momentum_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Price arrays
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    open_price = prices['open'].values
+    
+    # Load higher timeframe data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 50 or len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # 6h EMA for momentum (fast)
+    close_s = pd.Series(close)
+    ema_fast = close_s.ewm(span=12, min_periods=12, adjust=False).mean().values
+    
+    # 6h EMA for trend (slow)
+    ema_slow = close_s.ewm(span=26, min_periods=26, adjust=False).mean().values
+    
+    # 12h EMA trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # 1-day ATR for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1-day ATR
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    
+    # 1-day ATR ratio: current ATR / 50-period average ATR
+    atr_ma_50_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+    atr_ratio_1d = atr_1d / atr_ma_50_1d
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    
+    # Session filter: 00-24 UTC (all hours for 6h timeframe)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 0) & (hours <= 23)
+    
+    signals = np.zeros(n)
+    position = 0  # 1=long, -1=short, 0=flat
+    
+    for i in range(100, n):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or
+            not in_session[i]):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+        
+        # Trend condition: 12h EMA slope (using 3-bar
