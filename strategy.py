@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_trix_volume_regime_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,37 +23,18 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d TRIX (15-period)
-    close_1d = df_1d['close'].values
-    # EMA1
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # EMA2
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # EMA3
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
-    trix_raw = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
-    trix_raw[0] = 0  # First value
-    
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Calculate 1d average volume (20-period)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 1d ADX (14-period) for trend strength
+    # Calculate 1d Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # True Range
+    # Calculate 1d ADX (14-period) for trend strength
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
     dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
                        np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
     dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
@@ -61,24 +42,24 @@ def generate_signals(prices):
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
-    # Smoothed values
     tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
     dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # DI+ and DI-
     di_plus = 100 * dm_plus14 / tr14
     di_minus = 100 * dm_minus14 / tr14
-    
-    # DX and ADX
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align all 1d indicators to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Calculate 1d average volume (20-period)
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all 1d indicators to 4h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -86,8 +67,8 @@ def generate_signals(prices):
     # Start from index 30 to ensure sufficient data
     for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_signal_aligned[i]) or
-            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -95,21 +76,20 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
         vol_surge = vol_1d_current > 1.3 * vol_avg_20_1d_aligned[i]  # 30% above average
         
-        # Strong trend filter: ADX > 20
-        strong_trend = adx_aligned[i] > 20
+        # Strong trend filter: ADX > 25
+        strong_trend = adx_aligned[i] > 25
         
-        # Long when TRIX crosses above signal with volume surge and strong trend
-        long_signal = (trix_aligned[i] > trix_signal_aligned[i] and 
-                      trix_aligned[i-1] <= trix_signal_aligned[i-1] and
+        # Long when price breaks above Donchian high with volume surge and strong trend
+        long_signal = (close[i] > donchian_high_aligned[i] and 
                       vol_surge and strong_trend)
-        # Short when TRIX crosses below signal with volume surge and strong trend
-        short_signal = (trix_aligned[i] < trix_signal_aligned[i] and 
-                       trix_aligned[i-1] >= trix_signal_aligned[i-1] and
+        # Short when price breaks below Donchian low with volume surge and strong trend
+        short_signal = (close[i] < donchian_low_aligned[i] and 
                        vol_surge and strong_trend)
         
-        # Exit when TRIX crosses back (mean reversion)
-        exit_long = trix_aligned[i] < trix_signal_aligned[i]
-        exit_short = trix_aligned[i] > trix_signal_aligned[i]
+        # Exit when price returns to Donchian midpoint (mean reversion)
+        donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
+        exit_long = close[i] < donchian_mid
+        exit_short = close[i] > donchian_mid
         
         if long_signal and position != 1:
             position = 1
