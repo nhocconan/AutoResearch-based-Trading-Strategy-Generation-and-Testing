@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v2"
+name = "12h_1w_camarilla_breakout_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 100:
         return np.zeros(n)
     
@@ -20,43 +20,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return signals
     
-    # Calculate Camarilla pivot levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly ATR for volatility filter
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
-    daily_range = high_1d - low_1d
+    # Calculate weekly high/low for breakout levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Key levels for breakout: R4 (resistance) and S4 (support)
-    r4 = close_1d + (daily_range * 1.1 / 2)
-    s4 = close_1d - (daily_range * 1.1 / 2)
+    # Align weekly levels to 12h timeframe
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Exit levels: R3 and S3
-    r3 = close_1d + (daily_range * 1.1 / 4)
-    s3 = close_1d - (daily_range * 1.1 / 4)
-    
-    # Volume confirmation: 12h volume > 1.5x 50-period average (adjusted for fewer trades)
+    # Volume confirmation: 12h volume > 2.0x 50-period average
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    
-    # Align daily levels to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_50[i])):
+        if (np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]) or
+            np.isnan(atr_1w_aligned[i]) or np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
         
@@ -64,35 +55,35 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 1.5 * vol_ma_50[i]
+        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above R4
-        breakout_down = price_close < s4_aligned[i]  # Break below S4
+        # Breakout conditions using weekly high/low
+        breakout_up = price_close > high_1w_aligned[i]  # Break above weekly high
+        breakout_down = price_close < low_1w_aligned[i]  # Break below weekly low
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Break above R4 with volume confirmation
+        # Long: Break above weekly high with volume confirmation
         if breakout_up and vol_confirm:
             enter_long = True
         
-        # Short: Break below S4 with volume confirmation
+        # Short: Break below weekly low with volume confirmation
         if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: return to opposite S3/R3 levels
-        exit_long = price_close < s3_aligned[i]  # Return to S3 level
-        exit_short = price_close > r3_aligned[i]  # Return to R3 level
+        # Exit conditions: return to opposite weekly level
+        exit_long = price_close < low_1w_aligned[i]  # Return to weekly low
+        exit_short = price_close > high_1w_aligned[i]  # Return to weekly high
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -101,17 +92,17 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 1.5x 50-period average.
-# Enters short when price breaks below S4 with volume > 1.5x 50-period average.
-# Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (1.5x) and shorter MA (50) to reduce trade frequency.
-# Position size set to 0.25 to manage risk in volatile markets.
-# Target: 12-25 trades per year (48-100 total over 4 years) to minimize fee drag.
+# Hypothesis: 12h weekly breakout strategy using actual weekly high/low levels with volume confirmation.
+# Enters long when price breaks above weekly high with volume > 2.0x 50-period average.
+# Enters short when price breaks below weekly low with volume > 2.0x 50-period average.
+# Exits when price returns to the opposite weekly level.
+# Uses higher volume threshold (2.0x) and longer MA (50) to reduce trade frequency.
+# Position size set to 0.30 to capture trend moves while managing risk.
+# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
-# 12h timeframe provides good balance between signal quality and low trade frequency.
-# Uses 1d timeframe for pivot levels to capture longer-term structure.
+# 12h timeframe provides good balance between signal quality and trade frequency.
+# Weekly timeframe filter ensures we only trade significant breakouts.
