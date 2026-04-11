@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 4h_12h_camarilla_volume_reversal_v1
-# Strategy: 4h reversal at 12h Camarilla pivot levels with volume confirmation
-# Timeframe: 4h
+# 1d_1w_kama_trend_v1
+# Strategy: 1d KAMA trend with 1w trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels from 12h timeframe act as strong support/resistance.
-# Price reversals at these levels with above-average volume capture mean-reversion moves.
-# Works in both bull and bear markets as it fades extremes rather than following trends.
-# Low trade frequency (~25/year) minimizes fee drag.
+# Hypothesis: KAMA adapts to market noise, providing reliable trend signals. Combined with
+# 1w EMA trend filter and volume confirmation, it captures sustained moves while avoiding
+# whipsaws in ranging markets. Designed for low trade frequency (<20/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume_reversal_v1"
-timeframe = "4h"
+name = "1d_1w_kama_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,62 +26,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_12h) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for 12h timeframe
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 1d KAMA calculation
+    change = np.abs(close - np.roll(close, 10))
+    change[0:10] = np.abs(close[0:10] - close[0])  # First 10 values
     
-    # Camarilla formula: based on previous day's range
-    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, etc.
-    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, etc.
-    # We'll use S3 and R3 as primary levels (more significant)
-    # S3 = C - (H-L)*1.1/4, R3 = C + (H-L)*1.1/4
-    camarilla_s3 = close_12h - (high_12h - low_12h) * 1.1 / 4
-    camarilla_r3 = close_12h + (high_12h - low_12h) * 1.1 / 4
+    vol = np.abs(np.diff(close, prepend=close[0]))
+    er = np.zeros_like(change)
+    for i in range(len(change)):
+        if i < 10:
+            er[i] = np.nan
+        else:
+            sum_vol = np.sum(vol[i-9:i+1]) if i >= 9 else np.sum(vol[0:i+1])
+            er[i] = change[i] / sum_vol if sum_vol != 0 else 0
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    sc = (er * 0.294 + (1 - er) * 0.01) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume confirmation: 4h volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # 1w volume average (20-period) for confirmation
+    volume_1w = df_1w['volume'].values
+    vol_avg_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20_1w)
+    
+    # Align raw 1w volume for confirmation
+    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20_1w_aligned[i]) or np.isnan(vol_1w_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        # Trend filter: price vs 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Price near Camarilla levels (within 0.2% tolerance)
-        near_s3 = abs(close[i] - camarilla_s3_aligned[i]) / close[i] < 0.002
-        near_r3 = abs(close[i] - camarilla_r3_aligned[i]) / close[i] < 0.002
+        # KAMA direction: price above/below KAMA
+        above_kama = close[i] > kama[i]
+        below_kama = close[i] < kama[i]
         
-        # Reversal conditions
-        # Long: Price near S3 support AND volume confirmation AND showing rejection (close > open)
-        if near_s3 and vol_confirm and close[i] > prices['open'].iloc[i] and position != 1:
+        # Volume confirmation: current 1w volume > 1.3x 20-period average
+        vol_confirm = vol_1w_aligned[i] > 1.3 * vol_avg_20_1w_aligned[i]
+        
+        # Entry conditions
+        # Long: Price above KAMA AND uptrend AND volume confirmation
+        if above_kama and uptrend and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price near R3 resistance AND volume confirmation AND showing rejection (close < open)
-        elif near_r3 and vol_confirm and close[i] < prices['open'].iloc[i] and position != -1:
+        # Short: Price below KAMA AND downtrend AND volume confirmation
+        elif below_kama and downtrend and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Price moves back toward middle (opposite Camarilla level) or opposite signal
-        elif position == 1 and (close[i] > camarilla_r3_aligned[i] or close[i] < camarilla_s3_aligned[i]):
+        # Exit: Price crosses back through KAMA (mean reversion signal)
+        elif position == 1 and below_kama:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] < camarilla_s3_aligned[i] or close[i] > camarilla_r3_aligned[i]):
+        elif position == -1 and above_kama:
             position = 0
             signals[i] = 0.0
         else:
