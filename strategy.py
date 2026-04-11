@@ -3,67 +3,102 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversals with 1d trend filter
-# - Camarilla levels from 1d: R3/S3 for mean reversion, R4/S4 for breakout confirmation
-# - Long when price rejects S3 (close > S3 after touching <= S3) with 1d uptrend (close > EMA50)
-# - Short when price rejects R3 (close < R3 after touching >= R3) with 1d downtrend (close < EMA50)
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within 6h fee limits
-# - Works in bull (R3 rejections in uptrend) and bear (S3 rejections in downtrend) markets
-# - 1d EMA50 filter ensures we only take reversals in the direction of higher timeframe trend
+# Hypothesis: 12h Camarilla pivot reversal with 1d volume confirmation and ADX trend filter
+# - Camarilla levels from 1d: L3/H3 act as strong intraday support/resistance
+# - Long when price closes back above L3 after touching it (mean reversion in trend)
+# - Short when price closes back below H3 after touching it
+# - Volume confirmation: current volume > 1.5x 24-period average (institutional participation)
+# - ADX filter: only trade when ADX > 25 to avoid ranging markets and false reversals
+# - Discrete position sizing: ±0.25 to control drawdown and minimize fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee limits for 12h
+# - Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets
 
-name = "6h_1d_camarilla_reversal_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla calculation and trend filter
+    # Load 1d data ONCE before loop for Camarilla, volume and ADX
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
-    # Calculate 1d Camarilla levels (based on previous day's range)
-    # Using previous day's high, low, close to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Extract 1d arrays
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Calculate previous day's Camarilla levels (using prior day's OHLC)
+    # Shift by 1 to use completed day's data only
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan  # First day has no previous
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Camarilla levels
-    r3 = pivot + (range_val * 1.1 / 2.0)  # Level where reversal often occurs
-    s3 = pivot - (range_val * 1.1 / 2.0)
-    r4 = pivot + (range_val * 1.1)        # Breakout level
-    s4 = pivot - (range_val * 1.1)
+    # Camarilla calculations
+    range_1d = prev_high - prev_low
+    camarilla_h3 = prev_close + range_1d * 1.1 / 6
+    camarilla_l3 = prev_close - range_1d * 1.1 / 6
+    camarilla_h4 = prev_close + range_1d * 1.1 / 2
+    camarilla_l4 = prev_close - range_1d * 1.1 / 2
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d volume SMA (24-period)
+    volume_series = pd.Series(volume_1d)
+    volume_sma_24_1d = volume_series.rolling(window=24, min_periods=24).mean().values
     
-    # Align 1d indicators to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d ADX calculation (14-period)
+    # True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    for i in range(50, n):  # Start after 50-bar warmup
+    # Directional Movement
+    dm_plus = pd.Series(high_1d).diff()
+    dm_minus = -pd.Series(low_1d).diff()
+    dm_plus = np.where((dm_plus > dm_minus) & (dm_plus > 0), dm_plus, 0)
+    dm_minus = np.where((dm_minus > dm_plus) & (dm_minus > 0), dm_minus, 0)
+    
+    # Smoothed values
+    atr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / np.where(atr_14 == 0, 1, atr_14)
+    di_minus = 100 * dm_minus_smooth / np.where(atr_14 == 0, 1, atr_14)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d indicators to 12h timeframe
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    volume_sma_24_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_24_1d)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema50_aligned[i])):
+        if (np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
+            np.isnan(volume_sma_24_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,40 +106,44 @@ def generate_signals(prices):
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
+        volume_current = volume[i]
         
-        # Rejection conditions: price touches level then reverses
-        touched_s3 = price_low <= s3_aligned[i]
-        rejected_s3 = price_close > s3_aligned[i] and touched_s3
+        # Camarilla touch conditions (using wicks for touch detection)
+        touched_l3 = price_low <= camarilla_l3_aligned[i]
+        touched_h3 = price_high >= camarilla_h3_aligned[i]
         
-        touched_r3 = price_high >= r3_aligned[i]
-        rejected_r3 = price_close < r3_aligned[i] and touched_r3
+        # Reversal conditions: price closes back inside the level after touching
+        reversed_long = touched_l3 and price_close > camarilla_l3_aligned[i]
+        reversed_short = touched_h3 and price_close < camarilla_h3_aligned[i]
         
-        # Trend filter from 1d EMA50
-        uptrend = price_close > ema50_aligned[i]
-        downtrend = price_close < ema50_aligned[i]
+        # Volume confirmation: current volume > 1.5x 24-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_24_aligned[i]
+        
+        # ADX trend filter: only trade in trending markets (ADX > 25)
+        trend_filter = adx_aligned[i] > 25
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: S3 rejection in uptrend (mean reversion)
-        if rejected_s3 and uptrend:
+        # Long: L3 touch and reversal + volume + trend
+        if reversed_long and vol_confirm and trend_filter:
             enter_long = True
         
-        # Short: R3 rejection in downtrend (mean reversion)
-        if rejected_r3 and downtrend:
+        # Short: H3 touch and reversal + volume + trend
+        if reversed_short and vol_confirm and trend_filter:
             enter_short = True
         
-        # Exit conditions: opposite rejection or breakout beyond R4/S4
+        # Exit conditions: opposite Camarilla level break or volatility collapse
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long on R3 rejection in downtrend or break above R4
-            exit_long = (rejected_r3 and downtrend) or (price_close > r4_aligned[i])
+            # Exit long if price breaks below L4 (stronger support break)
+            exit_long = price_close < camarilla_l4_aligned[i]
         elif position == -1:
-            # Exit short on S3 rejection in uptrend or break below S4
-            exit_short = (rejected_s3 and uptrend) or (price_close < s4_aligned[i])
+            # Exit short if price breaks above H4 (stronger resistance break)
+            exit_short = price_close > camarilla_h4_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
