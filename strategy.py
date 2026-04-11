@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d: fade at R3/S3 with volume confirmation and chop filter
+# Hypothesis: 12h Camarilla pivot levels from 1w: fade at R3/S3 with volume confirmation and chop filter
 # - Long: price < S3, volume > 1.5x 20-period avg, CHOP(14) > 61.8 (range), closes above S3
 # - Short: price > R3, volume > 1.5x 20-period avg, CHOP(14) > 61.8 (range), closes below R3
 # - Exit: price returns to opposite Camarilla level (R3 for long exit, S3 for short exit)
-# - Uses 1d Camarilla levels calculated from prior 1d OHLC, aligned to 12h
+# - Uses 1w Camarilla levels calculated from prior 1w OHLC, aligned to 12h
 # - Works in ranging markets (chop > 61.8) by fading extremes at Camarilla levels
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
 
-name = "12h_1d_camarilla_fade_chop_v1"
+name = "12h_1w_camarilla_fade_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -28,32 +28,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla levels (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 1w data ONCE before loop for Camarilla levels (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return signals
     
-    # Pre-compute 1d Camarilla levels (based on prior 1d OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Pre-compute 1w Camarilla levels (based on prior 1w OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Camarilla levels: based on previous period's range
     # R4 = close + 1.1*(high-low)*1.1/2
     # R3 = close + 1.1*(high-low)*1.1/4
     # S3 = close - 1.1*(high-low)*1.1/4
     # S4 = close - 1.1*(high-low)*1.1/2
-    range_1d = high_1d - low_1d
-    camarilla_r4 = close_1d + 1.1 * range_1d * 1.1 / 2
-    camarilla_r3 = close_1d + 1.1 * range_1d * 1.1 / 4
-    camarilla_s3 = close_1d - 1.1 * range_1d * 1.1 / 4
-    camarilla_s4 = close_1d - 1.1 * range_1d * 1.1 / 2
+    range_1w = high_1w - low_1w
+    camarilla_r4 = close_1w + 1.1 * range_1w * 1.1 / 2
+    camarilla_r3 = close_1w + 1.1 * range_1w * 1.1 / 4
+    camarilla_s3 = close_1w - 1.1 * range_1w * 1.1 / 4
+    camarilla_s4 = close_1w - 1.1 * range_1w * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (use prior 1d period's levels for current 12h bar)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align Camarilla levels to 12h timeframe (use prior 1w period's levels for current 12h bar)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
     # Pre-compute 12h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
