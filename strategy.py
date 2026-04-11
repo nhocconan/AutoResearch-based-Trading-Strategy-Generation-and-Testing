@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 6h_1d_elder_ray_v2
-# Strategy: 6h Elder Ray (Bull/Bear Power) with 1d EMA trend filter and volume confirmation
-# Timeframe: 6h
+# 4h_1d_ichimoku_cloud_breakout_v1
+# Strategy: 4h Ichimoku Cloud Breakout with 1d Trend Filter and Volume Confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Elder Ray captures institutional buying/selling pressure. Combined with 1d EMA trend filter and volume confirmation, it works in both bull and bear markets by identifying strong momentum with institutional confirmation while avoiding false signals in choppy markets.
+# Hypothesis: Ichimoku Cloud (Kumo) acts as dynamic support/resistance. Price breaking above/below the cloud with 1d trend alignment and volume surge captures strong momentum moves. Works in bull markets (breakouts above cloud) and bear markets (breakdowns below cloud) by filtering with higher timeframe trend and avoiding false signals in choppy conditions via volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_v2"
-timeframe = "6h"
+name = "4h_1d_ichimoku_cloud_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,7 +27,7 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
     # 1d EMA(50) for trend filter
@@ -35,42 +35,60 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Elder Ray components (13-period EMA for power calculation)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    # Ichimoku Cloud components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = (high_9 + low_9) / 2
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = ((tenkan + kijun) / 2).shift(26)  # Shifted 26 periods ahead
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = ((high_52 + low_52) / 2).shift(26)  # Shifted 26 periods ahead
+    
+    # Current Kumo (Cloud) boundaries: use previously shifted values
+    upper_cloud = np.maximum(senkou_a, senkou_b)
+    lower_cloud = np.minimum(senkou_a, senkou_b)
+    
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_ratio = pd.Series(volume) / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(52, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ratio.iloc[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_cloud[i]) or 
+            np.isnan(lower_cloud[i]) or np.isnan(vol_ratio.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = vol_ratio.iloc[i] > 1.5
+        # Volume confirmation: current volume > 2x average
+        vol_confirmed = vol_ratio.iloc[i] > 2.0
         
         # Entry conditions
-        # Long: Bull Power > 0 (buying pressure) + price above 1d EMA50 (uptrend) + volume confirmation
-        if vol_confirmed and bull_power[i] > 0 and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Long: Price breaks above upper cloud + price above 1d EMA50 (uptrend) + volume confirmation
+        if vol_confirmed and close[i] > upper_cloud[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Bear Power < 0 (selling pressure) + price below 1d EMA50 (downtrend) + volume confirmation
-        elif vol_confirmed and bear_power[i] < 0 and close[i] < ema_50_1d_aligned[i] and position != -1:
+        # Short: Price breaks below lower cloud + price below 1d EMA50 (downtrend) + volume confirmation
+        elif vol_confirmed and close[i] < lower_cloud[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: loss of institutional pressure or trend reversal
-        elif position == 1 and (bull_power[i] <= 0 or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: price re-enters the cloud or trend reversal
+        elif position == 1 and (close[i] < upper_cloud[i] or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (bear_power[i] >= 0 or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > lower_cloud[i] or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
