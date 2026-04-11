@@ -1,111 +1,95 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Strategy: 4h Camarilla pivot breakout with 1d volume confirmation and volatility filter
-# Timeframe: 4h
+# 12h_1d_trix_volume_reversal_v1
+# Strategy: 12h TRIX momentum with 1d volume spike and 1d/1w trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (L3, H3) act as strong support/resistance. A break above H3 or below L3 with increased volume signals institutional participation. Volatility filter (ATR ratio) avoids choppy markets. Designed for low trade frequency (~20-40/year) to minimize fee drift. Works in bull markets via breakout continuation and bear markets via breakdown continuation.
+# Hypothesis: TRIX (TRIple Exponential Average) detects momentum shifts. 
+# Volume spike confirms institutional participation. 1d/1w trend filter avoids counter-trend trades.
+# Designed for low trade frequency (<30/year) to minimize fee drag. Works in bull/bear via
+# momentum reversals aligned with higher timeframe trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_trix_volume_reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 50 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels
-    # Based on previous day's OHLC
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 12h TRIX (15,9,9) - smoother momentum oscillator
+    # TRIX = EMA(EMA(EMA(close, 15), 9), 9)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix = 100 * (ema3 / ema3.shift(1) - 1)
+    trix = trix.fillna(0).values
     
-    # Typical price for pivot calculation
-    typical_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Camarilla levels: H4, H3, L3, L4
-    # H3 = close + 1.1 * range / 2
-    # L3 = close - 1.1 * range / 2
-    camarilla_h3 = close_1d + 1.1 * range_1d / 2
-    camarilla_l3 = close_1d - 1.1 * range_1d / 2
+    # 1w EMA50 for higher timeframe trend
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # 1d volume average (20-period) for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # 1d volume spike detection (current volume > 2x 20-period average)
+    vol_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    
-    # Align raw 1d volume for confirmation
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    
-    # 4h ATR(14) for volatility filter
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    # ATR ratio: current ATR / 50-period average ATR (volatility regime filter)
-    atr_avg_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / (atr_avg_50 + 1e-10)
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+    vol_spike = vol_1d_aligned > 2.0 * vol_avg_20_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or \
-           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]) or \
-           np.isnan(atr_ratio[i]):
+        if np.isnan(trix[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or \
+           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.3 * vol_avg_20_1d_aligned[i]
+        # TRIX momentum signals: zero-line cross
+        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
+        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
         
-        # Volatility filter: avoid extreme volatility (ratio > 3.0) and too low volatility (ratio < 0.5)
-        vol_filter = (atr_ratio[i] >= 0.5) and (atr_ratio[i] <= 3.0)
+        # Trend filter: price above/below EMA50 on both 1d and 1w
+        price = close[i]
+        uptrend_1d = price > ema50_1d_aligned[i]
+        uptrend_1w = price > ema50_1w_aligned[i]
+        downtrend_1d = price < ema50_1d_aligned[i]
+        downtrend_1w = price < ema50_1w_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > camarilla_h3_aligned[i]
-        breakout_down = close[i] < camarilla_l3_aligned[i]
-        
-        # Entry conditions
-        # Long: Break above H3 with volume confirmation and volatility filter
-        if breakout_up and vol_confirm and vol_filter and position != 1:
+        # Entry conditions with volume confirmation
+        # Long: TRIX crosses up AND uptrend on both timeframes AND volume spike
+        if trix_cross_up and uptrend_1d and uptrend_1w and vol_spike[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Break below L3 with volume confirmation and volatility filter
-        elif breakout_down and vol_confirm and vol_filter and position != -1:
+        # Short: TRIX crosses down AND downtrend on both timeframes AND volume spike
+        elif trix_cross_down and downtrend_1d and downtrend_1w and vol_spike[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Price returns to pivot level (mean reversion)
-        elif position == 1 and close[i] <= camarilla_h3_aligned[i] * 0.995:  # Slight buffer
+        # Exit: Opposite TRIX cross (momentum shift)
+        elif position == 1 and trix_cross_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= camarilla_l3_aligned[i] * 1.005:  # Slight buffer
+        elif position == -1 and trix_cross_up:
             position = 0
             signals[i] = 0.0
         else:
