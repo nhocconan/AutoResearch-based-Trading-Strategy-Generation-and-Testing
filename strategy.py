@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "12h_1d_cci_pivot_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,60 +25,26 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return signals
     
-    # Calculate Camarilla levels from previous day
-    close_1d = df_1d['close'].values
+    # Calculate 20-period CCI on daily
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels (based on previous day's range)
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H3 = Close + 1.1 * (High - Low)
-    # L3 = Close - 1.1 * (High - Low)
-    # H2 = Close + 0.55 * (High - Low)
-    # L2 = Close - 0.55 * (High - Low)
-    range_1d = high_1d - low_1d
-    h4 = close_1d + 1.5 * range_1d
-    l4 = close_1d - 1.5 * range_1d
-    h3 = close_1d + 1.1 * range_1d
-    l3 = close_1d - 1.1 * range_1d
-    h2 = close_1d + 0.55 * range_1d
-    l2 = close_1d - 0.55 * range_1d
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    sma_20 = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad_20 = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci_20 = (tp_1d - sma_20) / (0.015 * mad_20)
     
-    # Shift by 1 to use only completed day's levels (previous day)
-    h4 = np.roll(h4, 1)
-    l4 = np.roll(l4, 1)
-    h3 = np.roll(h3, 1)
-    l3 = np.roll(l3, 1)
-    h2 = np.roll(h2, 1)
-    l2 = np.roll(l2, 1)
-    h4[0] = np.nan
-    l4[0] = np.nan
-    h3[0] = np.nan
-    l3[0] = np.nan
-    h2[0] = np.nan
-    l2[0] = np.nan
-    
-    # Align to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h2_aligned = align_htf_to_ltf(prices, df_1d, h2)
-    l2_aligned = align_htf_to_ltf(prices, df_1d, l2)
-    
-    # Volume filter: volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Trend filter: 4h EMA50
+    # Calculate 12h EMA50 for trend filter
     ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(50, n):
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(50, n):  # Start after EMA50 and CCI warmup
         # Skip if any required data is invalid
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h2_aligned[i]) or np.isnan(l2_aligned[i]) or
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
+        if (np.isnan(cci_20[i]) or np.isnan(sma_20[i]) or np.isnan(mad_20[i]) or
+            np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -89,17 +55,28 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.8 * vol_ma
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Long breakout above H3 with volume
-        long_signal = volume_confirmed and (price_close > h3_aligned[i]) and (price_close > ema_50[i])
+        # Daily pivot points (using previous day's data)
+        if i > 0:
+            prev_high = high_1d[i-1] if i-1 < len(high_1d) else high_1d[-1]
+            prev_low = low_1d[i-1] if i-1 < len(low_1d) else low_1d[-1]
+            prev_close = close_1d[i-1] if i-1 < len(close_1d) else close_1d[-1]
+            pivot = (prev_high + prev_low + prev_close) / 3.0
+            r1 = 2 * pivot - prev_low
+            s1 = 2 * pivot - prev_high
+        else:
+            pivot = r1 = s1 = 0
         
-        # Short breakdown below L3 with volume
-        short_signal = volume_confirmed and (price_close < l3_aligned[i]) and (price_close < ema_50[i])
+        # Long conditions: CCI > 100 AND price > pivot R1 with volume
+        long_signal = volume_confirmed and (cci_20[i] > 100) and (price_close > r1)
         
-        # Exit when price returns to H2/L2 or reverses trend
-        exit_long = position == 1 and (price_close < h2_aligned[i] or price_close < ema_50[i])
-        exit_short = position == -1 and (price_close > l2_aligned[i] or price_close > ema_50[i])
+        # Short conditions: CCI < -100 AND price < pivot S1 with volume
+        short_signal = volume_confirmed and (cci_20[i] < -100) and (price_close < s1)
+        
+        # Exit when CCI crosses zero
+        exit_long = position == 1 and cci_20[i] <= 0
+        exit_short = position == -1 and cci_20[i] >= 0
         
         # Trading logic
         if long_signal and position != 1:
@@ -120,11 +97,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla breakout strategy on 4h with volume confirmation and EMA50 trend filter.
-# Uses Camarilla levels (H3, L3, H2, L2) calculated from previous day's range.
-# Enters long when price breaks above H3 with volume >1.8x 20-period average and price above EMA50.
-# Enters short when price breaks below L3 with volume confirmation and price below EMA50.
-# Exits when price returns to H2/L2 or crosses EMA50 in opposite direction.
-# This strategy aims for 20-50 trades per year on 4h timeframe, targeting 80-200 total trades over 4 years.
-# The combination of price level breakout, volume confirmation, and trend filter reduces false signals
-# and works in both bull and bear markets by following the intraday trend aligned with daily levels.
+# Hypothesis: 12h CCI(20) breakout with daily pivot levels and volume confirmation.
+# Uses daily CCI to identify overbought/oversold conditions (>100/<-100).
+# Enters long when CCI > 100 and price breaks above daily R1 pivot with volume confirmation.
+# Enters short when CCI < -100 and price breaks below daily S1 pivot with volume confirmation.
+# Exits when CCI crosses zero. Works in both bull and bear markets by capturing
+# momentum extremes. Daily pivot levels provide structural support/resistance.
+# Volume confirmation ensures institutional participation. Target: 50-150 total trades
+# over 4 years to minimize fee drag on 12h timeframe. CCI(20) is effective for
+# identifying trend exhaustion and continuation patterns in crypto markets.
