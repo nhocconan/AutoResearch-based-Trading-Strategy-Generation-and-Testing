@@ -1,14 +1,15 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
+# 4h_1d_camarilla_trend_volume_v1
 # Hypothesis: 4h Camarilla pivot reversal with 1d trend filter and volume spike
 # Uses 1d ADX to filter for trending markets only (avoid chop)
 # Long at L3 support in uptrend, short at H3 resistance in downtrend
 # Volume spike confirms institutional interest at pivot levels
 # Target: 20-50 total trades over 4 years (5-12/year) to minimize fee drag
 # Works in bull/bear by only trading with 1d trend direction
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
 name = "4h_1d_camarilla_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
