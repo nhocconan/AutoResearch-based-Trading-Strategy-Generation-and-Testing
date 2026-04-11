@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v4"
+name = "4h_1d_camarilla_breakout_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -60,7 +60,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 1.8x 20-period average (more selective)
+    # 4h volume filter: volume > 2.0x 20-period average (more selective)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 4h trend filter: close > 89 EMA for long, < 89 EMA for short (slower EMA)
@@ -85,7 +85,7 @@ def generate_signals(prices):
         ema_val = ema_89[i]
         
         # Volume confirmation: stricter threshold
-        volume_confirmed = volume_current > 1.8 * vol_ma
+        volume_confirmed = volume_current > 2.0 * vol_ma
         
         # Volatility filter: avoid extremely low volatility
         vol_filter = atr_val > 0.005 * price_close  # ATR > 0.5% of price
@@ -121,10 +121,10 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 1d Camarilla levels act as strong support/resistance for 4h price action.
-# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.8x average),
+# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>2.0x average),
 # sufficient volatility (ATR > 0.5% of price), and above 4h 89 EMA (trend filter).
 # Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA89.
 # Exits when price returns to 1d pivot level, capturing mean reversion.
-# Used stricter volume filter (1.8x vs 1.5x) and slower EMA (89 vs 50) to reduce trades.
-# Target: 15-25 trades per year (~60-100/4 years) on 4h timeframe to minimize fee drag.
+# Used stricter volume filter (2.0x vs 1.8x) to reduce trades.
+# Target: 10-20 trades per year (~40-80/4 years) on 4h timeframe to minimize fee drag.
 # Works in both bull (buying dips) and bear (selling rallies) markets.
