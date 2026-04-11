@@ -1,22 +1,24 @@
-# US patent 7,484,295 B2 - Novelty and usefulness established
-# 6h timeframe with 1d and 1w filters for BTC/ETH
-# Uses 1d Donchian breakout with 1w trend filter and volume confirmation
-# Designed for 20-50 trades/year (~80-200 total over 4 years)
-# Works in both bull and bear markets via trend filter
-
 #!/usr/bin/env python3
+"""
+12h_1w_1d_camarilla_breakout_v1
+- Timeframe: 12h
+- Hypothesis: Camarilla pivot levels on 1d provide strong support/resistance.
+  Breakout of these levels with volume confirmation and 1w trend filter
+  works in both bull and bear markets by filtering with higher timeframe trend.
+  Target: 20-50 trades per year (~80-200 total over 4 years).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_donchian_trend_v1"
-timeframe = "6h"
+name = "12h_1w_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
@@ -31,25 +33,56 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Load 1d data for Donchian (20-period)
+    # Load 1d data for Camarilla pivot calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    # Upper band = highest high of last 20 days
-    # Lower band = lowest low of last 20 days
-    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for previous day (to avoid look-ahead)
+    # H = high, L = low, C = close
+    H = high_1d
+    L = low_1d
+    C = close_1d
     
-    # Align 1d Donchian to 6h (use previous day's values to avoid look-ahead)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
+    # Camarilla levels
+    # Resistance levels
+    R4 = C + ((H - L) * 1.5000)
+    R3 = C + ((H - L) * 1.2500)
+    R2 = C + ((H - L) * 1.1666)
+    R1 = C + ((H - L) * 1.0833)
+    # Support levels
+    S1 = C - ((H - L) * 1.0833)
+    S2 = C - ((H - L) * 1.1666)
+    S3 = C - ((H - L) * 1.2500)
+    S4 = C - ((H - L) * 1.5000)
     
-    # 1d volume confirmation: current volume > 20-day average
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Pivot point
+    PP = (H + L + C) / 3
+    
+    # Arrays for each level
+    r4 = R4
+    r3 = R3
+    r2 = R2
+    r1 = R1
+    pp = PP
+    s1 = S1
+    s2 = S2
+    s3 = S3
+    s4 = S4
+    
+    # Align to 12h timeframe (use previous day's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: current volume > 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Load 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -65,34 +98,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 50 to ensure sufficient data
-    for i in range(50, n):
+    # Start from index 60 to ensure sufficient data
+    for i in range(60, n):
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current 1d data (aligned) - use precomputed arrays
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirm = vol_1d_current > vol_avg_20_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > vol_ma_20[i]
         
         # Trend filter: price above/below 1w EMA50
         price_above_ema = close[i] > ema_50_1w_aligned[i]
         price_below_ema = close[i] < ema_50_1w_aligned[i]
         
-        # Breakout conditions using 1d Donchian (use previous day's levels)
-        breakout_up = close[i] > donch_high_aligned[i-1]
-        breakout_down = close[i] < donch_low_aligned[i-1]
+        # Breakout conditions using Camarilla levels (using previous bar's aligned values)
+        # Long: break above R3 with volume and uptrend
+        long_breakout = close[i] > r3_aligned[i-1]
+        # Short: break below S3 with volume and downtrend
+        short_breakout = close[i] < s3_aligned[i-1]
         
-        # Long: breakout above Donchian high + volume + uptrend
-        long_signal = breakout_up and vol_confirm and price_above_ema
-        # Short: breakout below Donchian low + volume + downtrend
-        short_signal = breakout_down and vol_confirm and price_below_ema
+        # Long: breakout above R3 + volume + uptrend
+        long_signal = long_breakout and vol_confirm and price_above_ema
+        # Short: breakout below S3 + volume + downtrend
+        short_signal = short_breakout and vol_confirm and price_below_ema
         
         # Exit conditions
-        long_exit = close[i] < donch_low_aligned[i-1] or not vol_confirm or close[i] < ema_50_1w_aligned[i]
-        short_exit = close[i] > donch_high_aligned[i-1] or not vol_confirm or close[i] > ema_50_1w_aligned[i]
+        # Exit long if price breaks below S3 or trend changes or volume fails
+        long_exit = (close[i] < s3_aligned[i-1]) or (not vol_confirm) or (close[i] < ema_50_1w_aligned[i])
+        # Exit short if price breaks above R3 or trend changes or volume fails
+        short_exit = (close[i] > r3_aligned[i-1]) or (not vol_confirm) or (close[i] > ema_50_1w_aligned[i])
         
         if long_signal and position != 1:
             position = 1
