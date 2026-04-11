@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Bollinger Band squeeze breakout with 1d volume confirmation and 1w regime filter
-# - Long: Price breaks above upper BB(20,2) after low BB width (<20th percentile) + volume > 1.5x 20d avg + 1w ADX > 25
-# - Short: Price breaks below lower BB(20,2) after low BB width + volume confirmation + 1w ADX > 25
-# - Exit: Price returns to BB middle (20 SMA) or ATR stop (2.0 ATR)
+# Hypothesis: 4h Donchian(20) breakout + volume confirmation + ATR trailing stop
+# - Long: Price breaks above Donchian upper channel (20-bar high) with volume > 1.5x 20-bar average volume
+# - Short: Price breaks below Donchian lower channel (20-bar low) with volume > 1.5x 20-bar average volume
+# - Exit: ATR trailing stop (2.5 * ATR from highest high/lowest low since entry)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Bollinger squeeze identifies low volatility periods primed for breakout
+# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
+# - Donchian channels capture breakouts from consolidation with clear structure
 # - Volume confirmation ensures institutional participation
-# - 1w ADX > 25 filters for strong trending environments to avoid whipsaw
+# - ATR trailing stop adapts to volatility and locks in profits
 
-name = "12h_1d_1w_bb_squeeze_breakout_v1"
-timeframe = "12h"
+name = "4h_donchian_volume_atrstop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,83 +30,25 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
+    highest_since_entry = 0.0  # for long trailing stop
+    lowest_since_entry = 0.0   # for short trailing stop
     
-    # Load 1w data ONCE before loop for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return signals
+    # Pre-compute Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute 1w ADX(14) for regime filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Pre-compute volume confirmation (20-period average)
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # True Range
-    tr_1w = np.maximum(high_1w - low_1w, np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), np.abs(low_1w - np.roll(close_1w, 1))))
-    tr_1w[0] = high_1w[0] - low_1w[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w), np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)), np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    tr_14 = pd.Series(tr_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1w ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Load 1d data ONCE before loop for Bollinger Bands and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return signals
-    
-    # Pre-compute 1d Bollinger Bands (20,2)
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
-    
-    # BB width percentile (20-period lookback) for squeeze detection
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) > 0 else 50, raw=False
-    ).values
-    
-    # Align Bollinger Bands and width percentile to 12h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
-    
-    # Pre-compute 1d volume confirmation (20-period average)
-    volume_1d = df_1d['volume'].values
-    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
-    
-    # Pre-compute ATR for stoploss (12h timeframe)
+    # Pre-compute ATR for trailing stop (14-period)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or np.isnan(sma_20_aligned[i]) or
-            np.isnan(bb_width_percentile_aligned[i]) or np.isnan(volume_sma_20_aligned[i]) or
-            np.isnan(atr_14[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -114,50 +56,62 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Bollinger Band conditions
-        bb_squeeze = bb_width_percentile_aligned[i] < 20  # Low volatility squeeze
-        breakout_up = close_price > upper_bb_aligned[i]   # Break above upper band
-        breakout_down = close_price < lower_bb_aligned[i] # Break below lower band
-        
         # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Regime filter: 1w ADX > 25 (strong trending environment)
-        strong_trend = adx_aligned[i] > 25
+        # Donchian breakout conditions
+        breakout_up = close_price > highest_high[i]
+        breakout_down = close_price < lowest_low[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price breaks above upper BB after squeeze + volume + trend
-        if bb_squeeze and breakout_up and vol_confirm and strong_trend:
+        # Long breakout: price breaks above upper channel with volume confirmation
+        if breakout_up and vol_confirm and position != 1:
             enter_long = True
         
-        # Short breakout: price breaks below lower BB after squeeze + volume + trend
-        if bb_squeeze and breakout_down and vol_confirm and strong_trend:
+        # Short breakout: price breaks below lower channel with volume confirmation
+        if breakout_down and vol_confirm and position != -1:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: ATR trailing stop
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to middle BB or ATR stop
-            exit_long = (close_price <= sma_20_aligned[i]) or (close_price <= entry_price - 2.0 * atr_14[i])
+            # Update highest high since entry
+            if i == 50 or position == 0:  # reset on new position
+                highest_since_entry = close_price
+            else:
+                highest_since_entry = max(highest_since_entry, close_price)
+            
+            # Exit long if price drops 2.5 * ATR from highest high since entry
+            exit_long = close_price <= highest_since_entry - 2.5 * atr_14[i]
         elif position == -1:
-            # Exit short if price returns to middle BB or ATR stop
-            exit_short = (close_price >= sma_20_aligned[i]) or (close_price >= entry_price + 2.0 * atr_14[i])
+            # Update lowest low since entry
+            if i == 50 or position == 0:  # reset on new position
+                lowest_since_entry = close_price
+            else:
+                lowest_since_entry = min(lowest_since_entry, close_price)
+            
+            # Exit short if price rises 2.5 * ATR from lowest low since entry
+            exit_short = close_price >= lowest_since_entry + 2.5 * atr_14[i]
         
-        # Track entry price for stoploss calculation
+        # Track entry price for reference
         if enter_long or enter_short:
             entry_price = close_price
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
+            highest_since_entry = close_price
+            lowest_since_entry = close_price
             signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
+            highest_since_entry = close_price
+            lowest_since_entry = close_price
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
