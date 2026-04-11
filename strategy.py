@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-12h_1w_KAMA_RSI_Trend_Momentum_v3
-Hypothesis: Uses weekly KAMA direction with RSI momentum on 12h timeframe. Designed for low trade frequency (12-37/year) with trend-following in bull markets and mean-reversion in bear markets. Uses RSI extremes only when aligned with weekly KAMA trend to avoid whipsaws. Targets 20-40 total trades over 4 years per symbol.
+4h_1d_Camarilla_Pivot_Breakout_Momentum_v1
+Hypothesis: Combines daily Camarilla pivot breakouts with 4-hour momentum confirmation (RSI divergence) and volume filtering.
+Designed for low trade frequency (<25/year) with high-probability setups in both bull and bear markets by requiring
+confluence of price action, momentum, and volume. Uses discrete position sizing to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_KAMA_RSI_Trend_Momentum_v3"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_Momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -23,95 +25,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA on weekly data (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Efficiency Ratio and KAMA for weekly
-    close_1w = df_1w['close'].values
-    change = np.abs(np.diff(close_1w, k=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1w, k=1)), axis=0)  # 1-period volatility sum
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(1, np.nan), volatility])  # Simplified
-    
-    # Avoid division by zero
-    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
-    # Smoothing constants
-    sc = (er * 0.28 + 0.06) ** 2  # 2 = fast SC, 30 = slow SC
-    
-    # Calculate KAMA
-    kama = np.full_like(close_1w, np.nan)
-    if len(kama) > 0:
-        kama[0] = close_1w[0]
-        for i in range(1, len(kama)):
-            if np.isnan(sc[i]):
-                kama[i] = kama[i-1]
-            else:
-                kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    
-    # Align KAMA to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
-    
-    # Calculate RSI on 12h data (momentum)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # First average gain/loss
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    # Wilder smoothing
-    for i in range(15, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_lost, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    # Calculate 4h RSI for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Volume filter: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Camarilla levels from daily data
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Camarilla levels: R4 = close + 1.5*(high-low), S4 = close - 1.5*(high-low)
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(close[i]) or np.isnan(low[i]) or np.isnan(high[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(rsi_values[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
             continue
         
-        # Weekly trend direction
-        weekly_uptrend = close[i] > kama_aligned[i]
-        weekly_downtrend = close[i] < kama_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
         
-        # RSI conditions: extreme values for mean reversion in ranging markets
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Momentum confirmation: RSI not overextended
+        rsi_not_overbought = rsi_values[i] < 70
+        rsi_not_oversold = rsi_values[i] > 30
         
-        # Entry conditions: trend following in strong trends, mean reversion in ranges
-        # Only take counter-trend RSI signals when price is far from KAMA (strong trend)
-        kama_distance = np.abs(close[i] - kama_aligned[i]) / kama_aligned[i]
-        strong_trend = kama_distance > 0.05  # 5% deviation from KAMA
+        # Breakout conditions using Camarilla R4/S4 levels
+        breakout_up = close[i] > camarilla_r4_aligned[i]  # Break above R4
+        breakdown_down = close[i] < camarilla_s4_aligned[i]  # Break below S4
         
-        long_entry = (weekly_uptrend and rsi[i] > 50 and rsi[i] < 60) or \
-                     (not strong_trend and rsi_oversold)
-        short_entry = (weekly_downtrend and rsi[i] < 50 and rsi[i] > 40) or \
-                      (not strong_trend and rsi_overbought)
+        # Entry conditions: require volume and momentum confirmation
+        long_entry = breakout_up and volume_filter and rsi_not_overbought
+        short_entry = breakdown_down and volume_filter and rsi_not_oversold
         
-        # Exit conditions: opposite RSI extreme or trend change
-        long_exit = rsi[i] > 70 or not weekly_uptrend
-        short_exit = rsi[i] < 30 or not weekly_downtrend
+        # Exit conditions: return to opposite Camarilla level or momentum divergence
+        long_exit = (close[i] < camarilla_s4_aligned[i]) or (rsi_values[i] > 75)
+        short_exit = (close[i] > camarilla_r4_aligned[i]) or (rsi_values[i] < 25)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -120,6 +100,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
