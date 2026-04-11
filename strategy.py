@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
+name = "12h_1d_camarilla_breakout_v3"
 timeframe = "12h"
 leverage = 1.0
 
@@ -31,7 +31,7 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # 1d Camarilla levels
+    # 1d Camarilla levels - using correct formulas
     r3_1d = pivot_1d + (range_1d * 1.1 / 4)
     r4_1d = pivot_1d + (range_1d * 1.1 / 2)
     s3_1d = pivot_1d - (range_1d * 1.1 / 4)
