@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,40 +20,54 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return signals
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate 12h ATR for volatility filter (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_prev = high_prev - low_prev
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_14_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
     
-    # Camarilla levels
-    h3 = pivot + (range_prev * 1.1 / 4)  # Resistance 3
-    l3 = pivot - (range_prev * 1.1 / 4)  # Support 3
-    h4 = pivot + (range_prev * 1.1 / 2)  # Resistance 4
-    l4 = pivot - (range_prev * 1.1 / 2)  # Support 4
+    # Calculate 12h ATR MA (20-period) for volatility regime filter
+    atr_ma_20_12h = pd.Series(atr_14_12h_aligned).rolling(window=20, min_periods=20).mean().values
     
-    # Align to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Calculate 12h ATR ratio (current / MA) for regime detection
+    atr_ratio_12h = np.where(atr_ma_20_12h > 0, atr_14_12h_aligned / atr_ma_20_12h, 1.0)
     
-    # Volume confirmation: 20-period average on 12h
+    # Calculate Camarilla levels on 12h data (using previous 12h bar's range)
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    # where H,L,C are high, low, close of previous period
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h[0] = np.nan
+    prev_low_12h[0] = np.nan
+    prev_close_12h[0] = np.nan
+    
+    camarilla_H4 = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 2
+    camarilla_L4 = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L4)
+    
+    # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -63,28 +77,35 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
+        # Volatility regime filter: trade only when volatility is elevated (ATR ratio > 0.8)
+        vol_regime = atr_ratio_12h[i] > 0.8
+        
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above H3 with volume confirmation
-        if price_close > h3_aligned[i] and vol_confirm:
+        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime
+        if price_close > camarilla_H4_aligned[i] and vol_confirm and vol_regime:
             enter_long = True
         
-        # Short: Price breaks below L3 with volume confirmation
-        if price_close < l3_aligned[i] and vol_confirm:
+        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime
+        if price_close < camarilla_L4_aligned[i] and vol_confirm and vol_regime:
             enter_short = True
         
-        # Exit conditions: price reaches opposite H4/L4 levels
+        # Exit conditions: price crosses back through the Camarilla mid-point (C level)
         exit_long = False
         exit_short = False
         
+        # Calculate Camarilla C level (close of previous 12h bar)
+        camarilla_C = prev_close_12h
+        camarilla_C_aligned = align_htf_to_ltf(prices, df_12h, camarilla_C)
+        
         if position == 1:
-            # Exit long if price reaches H4 (strong resistance)
-            exit_long = price_close >= h4_aligned[i]
+            # Exit long if price crosses below Camarilla C level
+            exit_long = price_close < camarilla_C_aligned[i]
         elif position == -1:
-            # Exit short if price reaches L4 (strong support)
-            exit_short = price_close <= l4_aligned[i]
+            # Exit short if price crosses above Camarilla C level
+            exit_short = price_close > camarilla_C_aligned[i]
         
         # Trading logic
         if enter_long and position != 1:
