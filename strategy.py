@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_breakout_volume"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,35 +18,55 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     signals = np.zeros(n)
-    position = 0  # 1=long, -1=short, 0=flat
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return signals
     
-    # Calculate Donchian channels on daily timeframe
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use only completed daily bars (avoid look-ahead)
-    donchian_high = np.roll(donchian_high, 1)
-    donchian_low = np.roll(donchian_low, 1)
-    donchian_high[0] = np.nan
-    donchian_low[0] = np.nan
+    range_1d = high_1d - low_1d
+    # Camarilla levels based on previous day's range
+    H5 = close_1d + range_1d * 1.1/2
+    H4 = close_1d + range_1d * 1.1/4
+    H3 = close_1d + range_1d * 1.1/6
+    L3 = close_1d - range_1d * 1.1/6
+    L4 = close_1d - range_1d * 1.1/4
+    L5 = close_1d - range_1d * 1.1/2
     
-    # Align daily Donchian channels to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Shift by 1 to use only completed daily bars
+    H5 = np.roll(H5, 1)
+    H4 = np.roll(H4, 1)
+    H3 = np.roll(H3, 1)
+    L3 = np.roll(L3, 1)
+    L4 = np.roll(L4, 1)
+    L5 = np.roll(L5, 1)
+    H5[0] = np.nan
+    H4[0] = np.nan
+    H3[0] = np.nan
+    L3[0] = np.nan
+    L4[0] = np.nan
+    L5[0] = np.nan
     
-    # Volume filter: volume > 1.5x 20-period average on 6h
+    # Align daily levels to 4h timeframe
+    H5_4h = align_htf_to_ltf(prices, df_1d, H5)
+    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
+    H3_4h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_4h = align_htf_to_ltf(prices, df_1d, L3)
+    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
+    L5_4h = align_htf_to_ltf(prices, df_1d, L5)
+    
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(H5_4h[i]) or np.isnan(H4_4h[i]) or np.isnan(H3_4h[i]) or
+            np.isnan(L3_4h[i]) or np.isnan(L4_4h[i]) or np.isnan(L5_4h[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -58,17 +78,20 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Long condition: price breaks above daily Donchian high with volume
-        long_signal = volume_confirmed and (price_high > donchian_high_aligned[i])
+        # Long when price breaks above H4 with volume
+        long_signal = volume_confirmed and (price_high > H4_4h[i])
+        # Short when price breaks below L4 with volume
+        short_signal = volume_confirmed and (price_low < L4_4h[i])
         
-        # Short condition: price breaks below daily Donchian low with volume
-        short_signal = volume_confirmed and (price_low < donchian_low_aligned[i])
+        # Exit when price returns to H3/L3 levels
+        exit_long = price_low < H3_4h[i]
+        exit_short = price_high > L3_4h[i]
         
-        # Exit when price returns to the opposite Donchian level
-        exit_long = position == 1 and (price_low < donchian_low_aligned[i])
-        exit_short = position == -1 and (price_high > donchian_high_aligned[i])
+        # Track position state
+        if i == 20:
+            position = 0
         
         # Trading logic
         if long_signal and position != 1:
@@ -89,14 +112,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Donchian breakout with volume confirmation on 6h timeframe.
-# Uses 20-period Donchian channels on daily timeframe to establish structural
-# support/resistance levels. Enters long when 6h price breaks above daily Donchian
-# high with volume confirmation (>1.5x average volume), short when breaks below
-# daily Donchian low with volume. Exits when price returns to the opposite
-# Donchian level. Works in both bull and bear markets by capturing breakouts
-# from established ranges. Volume confirmation ensures breakouts are supported
-# by market participation, reducing false signals. Target: 50-150 total trades
-# over 4 years (12-37/year) to minimize fee drag on 6h timeframe. Donchian
-# breakouts capture momentum while volume filter ensures quality signals.
-# This approach has shown promise on higher timeframes and adapts well to 6h.
+# Hypothesis: Camarilla breakout strategy on 4h using daily pivot levels.
+# Enters long when price breaks above H4 (1.1/4) level with volume confirmation (>1.8x average).
+# Enters short when price breaks below L4 level with volume confirmation.
+# Exits when price returns to H3/L3 levels, capturing mean reversion within the day's range.
+# Uses volume filter to avoid false breakouts. Designed for 75-200 trades over 4 years
+# (19-50/year) to minimize fee drag. Works in both bull and bear markets by capturing
+# intraday momentum within the daily range structure. Camarilla levels provide
+# mathematically derived support/resistance based on previous day's range.
