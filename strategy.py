@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 6h_1w_donchian_20_breakout_volume_v1
-# Strategy: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
-# Timeframe: 6h
+# 4h_1w_maxima_minima_v1
+# Strategy: 4h maxima/minima breakout with weekly trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture institutional breakout moves. Weekly trend filter ensures alignment with major trend, reducing false breakouts. Volume confirms breakout sincerity. Designed for low trade frequency to minimize fee drag in 2025 bear market.
+# Hypothesis: Weekly price extremes act as strong support/resistance. In bull markets, price breaks above weekly high with volume, indicating continuation. In bear markets, price breaks below weekly low with volume, indicating continuation. Weekly trend filter ensures alignment with higher timeframe momentum. Low trade frequency (~20-40/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_20_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1w_maxima_minima_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,26 +24,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for trend filter
+    # Load weekly data ONCE before loop for trend and level reference
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Weekly close for trend filter (no indicator needed, just price trend)
-    close_1w = df_1w['close'].values
-    # Weekly trend: price above/below prior weekly close (simple trend)
-    weekly_trend_up = np.zeros(len(close_1w), dtype=bool)
-    weekly_trend_down = np.zeros(len(close_1w), dtype=bool)
-    for i in range(1, len(close_1w)):
-        weekly_trend_up[i] = close_1w[i] > close_1w[i-1]
-        weekly_trend_down[i] = close_1w[i] < close_1w[i-1]
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
+    # Weekly high and low (for support/resistance levels)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # 6h Donchian Channel (20)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -55,23 +51,27 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry logic: Donchian breakout + volume + weekly trend alignment
-        if close[i] > highest_high[i] and vol_confirm[i] and weekly_trend_up_aligned[i] and position != 1:
+        # Trend filter: price above/below weekly EMA20
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
+        
+        # Entry logic: weekly high/low breakout + volume + trend alignment
+        if close[i] > weekly_high_aligned[i] and vol_confirm[i] and uptrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif close[i] < lowest_low[i] and vol_confirm[i] and weekly_trend_down_aligned[i] and position != -1:
+        elif close[i] < weekly_low_aligned[i] and vol_confirm[i] and downtrend and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: opposite Donchian breakout (reversal signal)
-        elif position == 1 and close[i] < lowest_low[i]:
+        # Exit: price returns to weekly EMA20 (trend reversal signal)
+        elif position == 1 and close[i] < ema_20_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > highest_high[i]:
+        elif position == -1 and close[i] > ema_20_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
