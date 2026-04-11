@@ -3,86 +3,93 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout (20-day high/low) with 1w trend filter and volume confirmation.
-# Enter long when price breaks above 20-day high, volume > 1.5x 20-day average, and 1w EMA(21) uptrend.
-# Enter short when price breaks below 20-day low, volume > 1.5x 20-day average, and 1w EMA(21) downtrend.
-# Exit on opposite breakout or when price crosses 20-day EMA.
-# Designed for 15-25 trades/year on 1d timeframe with focus on major trend moves.
-# Volume filter ensures breakouts have conviction, reducing false signals.
-# 1w trend filter prevents counter-trend trading in choppy markets.
+# Hypothesis: 6h Bollinger Bands width regime + mean reversion with volume confirmation.
+# Uses daily Bollinger Band width percentile to filter regimes:
+# - When BB width < 20th percentile (low volatility squeeze): mean reversion at ±1.5σ
+# - When BB width > 80th percentile (high volatility expansion): trend following with breakout
+# Volume filter ensures institutional participation. Designed for 15-35 trades/year on 6h.
+# Works in both bull/bear markets by adapting to volatility regimes.
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_bb_width_regime_meanrev_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:  # Need enough data for 20-day high/low and EMA
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1w EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate 1d Bollinger Bands (20, 2)
+    close_1d = df_1d['close'].values
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
     
-    # Align 1w EMA to 1d timeframe
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 20-period percentile rank of BB width (using expanding window for no look-ahead)
+    bb_width_percentile = np.full_like(bb_width, np.nan)
+    for i in range(20, len(bb_width)):
+        bb_width_percentile[i] = (bb_width[:i+1] <= bb_width[i]).mean() * 100
     
-    # Calculate 20-day Donchian channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align BB width percentile to 6h timeframe
+    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
     
-    # Calculate 20-day volume average for filter
+    # Calculate 6h Bollinger Bands for entry signals
+    sma_20_6h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20_6h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb_6h = sma_20_6h + 2 * std_20_6h
+    lower_bb_6h = sma_20_6h - 2 * std_20_6h
+    
+    # Calculate 6h volume moving average (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate 20-day EMA for exit
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after 20-period lookback
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(ema_20[i])):
+        if (np.isnan(bb_width_percentile_aligned[i]) or 
+            np.isnan(sma_20_6h[i]) or np.isnan(std_20_6h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * 20-day average volume
+        # Volume filter: current volume > 1.5 * 20-period average volume
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Determine 1w trend direction
-        is_uptrend = close[i] > ema_21_1w_aligned[i]
-        is_downtrend = close[i] < ema_21_1w_aligned[i]
+        # Regime determination based on daily BB width percentile
+        is_low_vol = bb_width_percentile_aligned[i] < 20  # Squeeze regime
+        is_high_vol = bb_width_percentile_aligned[i] > 80  # Expansion regime
         
-        # Breakout conditions
-        breakout_high = high[i] > high_20[i-1]  # Break above previous 20-day high
-        breakout_low = low[i] < low_20[i-1]     # Break below previous 20-day low
+        # Mean reversion signals (in low volatility squeeze)
+        mean_rev_long = (close[i] <= lower_bb_6h[i]) and vol_filter and is_low_vol
+        mean_rev_short = (close[i] >= upper_bb_6h[i]) and vol_filter and is_low_vol
         
-        # Entry conditions
-        bullish_entry = breakout_high and vol_filter and is_uptrend
-        bearish_entry = breakout_low and vol_filter and is_downtrend
+        # Trend following signals (in high volatility expansion)
+        trend_long = (close[i] > upper_bb_6h[i]) and vol_filter and is_high_vol
+        trend_short = (close[i] < lower_bb_6h[i]) and vol_filter and is_high_vol
         
-        # Exit conditions: opposite breakout or EMA cross
-        exit_long = (low[i] < low_20[i-1]) or (close[i] < ema_20[i])
-        exit_short = (high[i] > high_20[i-1]) or (close[i] > ema_20[i])
+        # Exit conditions: opposite signal or volatility regime change
+        exit_long = (close[i] >= sma_20_6h[i]) or (is_low_vol and position == 1) or (is_high_vol and position == 1 and close[i] < sma_20_6h[i])
+        exit_short = (close[i] <= sma_20_6h[i]) or (is_low_vol and position == -1) or (is_high_vol and position == -1 and close[i] > sma_20_6h[i])
         
         # Priority: entry > exit > hold
-        if bullish_entry and position != 1:
+        if (mean_rev_long or trend_long) and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_entry and position != -1:
+        elif (mean_rev_short or trend_short) and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
