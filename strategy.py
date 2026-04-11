@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_v1"
+name = "4h_12h_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,6 +52,7 @@ def generate_signals(prices):
     r4_4h = align_htf_to_ltf(prices, df_12h, r4_12h)
     s3_4h = align_htf_to_ltf(prices, df_12h, s3_12h)
     s4_4h = align_htf_to_ltf(prices, df_12h, s4_12h)
+    pivot_4h = align_htf_to_ltf(prices, df_12h, pivot_12h)
     
     # 4h ATR for volatility filter
     tr1 = high[1:] - low[1:]
@@ -60,7 +61,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 1.5x 20-period average (selective)
+    # 4h volume filter: volume > 1.3x 20-period average (balanced)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -69,7 +70,7 @@ def generate_signals(prices):
     for i in range(300, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(pivot_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -80,11 +81,11 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
         
-        # Volume confirmation: selective threshold
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        # Volume confirmation: balanced threshold
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
         # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_val > 0.005 * price_close  # ATR > 0.5% of price
+        vol_filter = atr_val > 0.004 * price_close  # ATR > 0.4% of price
         
         # Long conditions: price breaks below S3 (oversold) with volume and vol filter
         long_signal = volume_confirmed and vol_filter and (price_low < s3_4h[i])
@@ -93,7 +94,6 @@ def generate_signals(prices):
         short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i])
         
         # Exit when price returns to 12h pivot level
-        pivot_4h = align_htf_to_ltf(prices, df_12h, pivot_12h)
         exit_long = position == 1 and price_close > pivot_4h[i]
         exit_short = position == -1 and price_close < pivot_4h[i]
         
@@ -117,9 +117,9 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 12h Camarilla levels act as strong support/resistance for 4h price action.
-# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.5x average),
-# and sufficient volatility (ATR > 0.5% of price).
+# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.3x average),
+# and sufficient volatility (ATR > 0.4% of price).
 # Enters short when price breaks above R3 (overbought rejection) with same conditions.
 # Exits when price returns to 12h pivot level, capturing mean reversion.
-# Uses selective volume filter (1.5x) and volatility filter to reduce trades to ~15-25/year.
+# Uses balanced volume filter (1.3x) and volatility filter to reduce trades to ~20-30/year.
 # Works in both bull (buying dips) and bear (selling rallies) markets by fading extremes.
