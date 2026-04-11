@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ATR regime filter
-# - Donchian levels from 4h: upper/lower bands act as dynamic support/resistance
-# - Long when price breaks above upper band with volume > 2.0x 20-period average (strong conviction)
-# - Short when price breaks below lower band with volume > 2.0x 20-period average
-# - ATR regime filter: only trade when ATR(14) > 1.5 * ATR(50) to avoid low volatility chop and false breakouts
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + volatility regime filter
+# - Long when price breaks above 4h Donchian upper band with 1d volume > 2.0x 20-period average
+# - Short when price breaks below 4h Donchian lower band with 1d volume > 2.0x 20-period average
+# - Volatility regime filter: only trade when ATR(14) > 1.2 * ATR(50) to avoid low volatility chop and false breakouts
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
 # - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits for 4h
-# - Volume spike requirement (>2.0x average) ensures we only trade high-conviction breakouts
+# - Volume spike requirement ensures we only trade high-conviction breakouts
 # - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
 # - 1d HTF provides reliable volume confirmation, reducing false signals from lower timeframe noise
 
@@ -85,19 +84,19 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 2.0x 20-period average (using 1d aligned volume)
         vol_confirm = volume_current > 2.0 * volume_sma_20_aligned[i]
         
-        # ATR regime filter: trade only when short-term ATR > 1.5 * long-term ATR (avoid low volatility chop)
-        atr_filter = atr_14_aligned[i] > 1.5 * atr_50_aligned[i]
+        # Volatility regime filter: trade only when short-term ATR > 1.2 * long-term ATR (avoid low volatility chop)
+        vol_filter = atr_14_aligned[i] > 1.2 * atr_50_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Donchian upper breakout + volume confirmation + ATR filter
-        if breakout_long and vol_confirm and atr_filter:
+        # Long: Donchian upper breakout + volume confirmation + volatility filter
+        if breakout_long and vol_confirm and vol_filter:
             enter_long = True
         
-        # Short: Donchian lower breakdown + volume confirmation + ATR filter
-        if breakout_short and vol_confirm and atr_filter:
+        # Short: Donchian lower breakdown + volume confirmation + volatility filter
+        if breakout_short and vol_confirm and vol_filter:
             enter_short = True
         
         # Exit conditions: opposite Donchian breakout or volatility collapse
@@ -106,10 +105,10 @@ def generate_signals(prices):
         
         if position == 1:
             # Exit long if price breaks below lower band OR volatility collapses
-            exit_long = (price_close < donchian_lower[i-1]) or (not atr_filter)
+            exit_long = (price_close < donchian_lower[i-1]) or (not vol_filter)
         elif position == -1:
             # Exit short if price breaks above upper band OR volatility collapses
-            exit_short = (price_close > donchian_upper[i-1]) or (not atr_filter)
+            exit_short = (price_close > donchian_upper[i-1]) or (not vol_filter)
         
         # Trading logic
         if enter_long and position != 1:
