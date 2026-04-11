@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Camarilla pivot breakout with volume confirmation and weekly trend filter
-# - Long: price breaks above H3 level, volume > 1.5x 20-day avg, price > weekly EMA(20)
-# - Short: price breaks below L3 level, volume > 1.5x 20-day avg, price < weekly EMA(20)
-# - Exit: price returns to pivot point (PP) or opposite Camarilla level (L3/H3)
-# - Uses 1w EMA(20) for trend filter to avoid counter-trend trades
-# - Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
-# - Camarilla levels provide institutional support/resistance that work in ranging and trending markets
+# Hypothesis: 6h Elder Ray Index with 1d regime filter
+# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+# - Bull regime: 1d EMA(50) rising (today's EMA > yesterday's EMA)
+# - Bear regime: 1d EMA(50) falling (today's EMA < yesterday's EMA)
+# - Long in bull regime when Bull Power > 0 and rising (current > previous)
+# - Short in bear regime when Bear Power < 0 and falling (current < previous)
+# - Exit when power crosses zero or regime changes
+# - Uses discrete position sizing (0.25) to minimize fee churn
+# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within limits
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_regime_v3"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,77 +22,61 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop for EMA regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute weekly EMA(20) for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Pre-compute 1d EMA(50) for regime detection
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute daily Camarilla pivot levels from previous day
-    # PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1/2, R3 = PP + (H - L) * 1.1/4, R2 = PP + (H - L) * 1.1/6, R1 = PP + (H - L) * 1.1/12
-    # S1 = PP - (H - L) * 1.1/12, S2 = PP - (H - L) * 1.1/6, S3 = PP - (H - L) * 1.1/4, S4 = PP - (H - L) * 1.1/2
-    # Camarilla uses H3 = R3 and L3 = S3 for trading
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # First bar: use current values
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Pre-compute 6h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    pp = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    h3 = pp + range_hl * 1.1 / 4  # R3
-    l3 = pp - range_hl * 1.1 / 4  # S3
-    
-    # Pre-compute daily volume confirmation (20-period average)
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Pre-compute Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA(13)
+    bear_power = low - ema_13   # Bear Power = Low - EMA(13)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Current price data
-        close_price = close[i]
-        volume_current = volume[i]
+        # Current values
+        bull_current = bull_power[i]
+        bear_current = bear_power[i]
+        ema_1d_current = ema_50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Previous values (for change detection)
+        bull_previous = bull_power[i-1]
+        bear_previous = bear_power[i-1]
+        ema_1d_previous = ema_50_1d_aligned[i-1]
         
-        # Weekly trend filter
-        weekly_uptrend = close_price > ema_20_1w_aligned[i]
-        weekly_downtrend = close_price < ema_20_1w_aligned[i]
+        # 1d EMA regime: rising = bull regime, falling = bear regime
+        ema_rising = ema_1d_current > ema_1d_previous
+        ema_falling = ema_1d_current < ema_1d_previous
         
-        # Camarilla levels
-        h3_level = h3[i]
-        l3_level = l3[i]
-        pp_level = pp[i]
-        
-        # Entry conditions
+        # Elder Ray signals with regime filter
         enter_long = False
         enter_short = False
         
-        # Long breakout: price closes above H3, volume confirmation, weekly uptrend
-        if close_price > h3_level and vol_confirm and weekly_uptrend:
+        # Long: bull regime + Bull Power > 0 and rising
+        if ema_rising and bull_current > 0 and bull_current > bull_previous:
             enter_long = True
         
-        # Short breakout: price closes below L3, volume confirmation, weekly downtrend
-        if close_price < l3_level and vol_confirm and weekly_downtrend:
+        # Short: bear regime + Bear Power < 0 and falling
+        if ema_falling and bear_current < 0 and bear_current < bear_previous:
             enter_short = True
         
         # Exit conditions
@@ -98,13 +84,13 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to pivot point or below L3
-            exit_long = close_price <= pp_level
+            # Exit long if Bull Power <= 0 or regime turns bearish
+            exit_long = bull_current <= 0 or ema_falling
         elif position == -1:
-            # Exit short if price returns to pivot point or above H3
-            exit_short = close_price >= pp_level
+            # Exit short if Bear Power >= 0 or regime turns bullish
+            exit_short = bear_current >= 0 or ema_rising
         
-        # Trading logic
+        # Trading logic with discrete position sizing
         if enter_long and position != 1:
             position = 1
             signals[i] = 0.25
