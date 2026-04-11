@@ -1,9 +1,15 @@
+# USES: 4h primary, 1d HTF - Camarilla pivot + volume spike + ADX trend filter + ATR stop
+# Hypothesis: Price action at key institutional levels (Camarilla) with volume confirmation
+# and trend alignment (ADX) captures institutional breakouts while avoiding false moves.
+# Works in bull/bear by filtering for trending conditions (ADX > 25).
+# Target: 20-40 trades/year per symbol for low friction and high edge.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
+name = "4h_1d_camarilla_adx_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,31 +35,73 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels (based on previous day's range)
-    # R4 = Close + ((High - Low) * 1.1 / 2)
-    # R3 = Close + ((High - Low) * 1.1 / 4)
-    # S3 = Close - ((High - Low) * 1.1 / 4)
-    # S4 = Close - ((High - Low) * 1.1 / 2)
     range_1d = high_1d - low_1d
     camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
     camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
+    camarilla_pivot = close_1d  # Previous day's close
     
     # Calculate 1d average volume (20-period) for volume filter
     volume_1d = df_1d['volume'].values
     vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
+    # Calculate ADX on 1d for trend strength filter
+    # ADX requires TR, +DM, -DM
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no prior close
+    tr2[0] = tr1[0]  # Use only high-low for first period
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: smoothed = (prev_smoothed * (period-1) + current) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_period = 14
+    tr_smoothed = wilders_smoothing(tr, atr_period)
+    plus_dm_smoothed = wilders_smoothing(plus_dm, atr_period)
+    minus_dm_smoothed = wilders_smoothing(minus_dm, atr_period)
+    
+    # Avoid division by zero
+    plus_di = np.where(tr_smoothed != 0, plus_dm_smoothed / tr_smoothed * 100, 0)
+    minus_di = np.where(tr_smoothed != 0, minus_dm_smoothed / tr_smoothed * 100, 0)
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = wilders_smoothing(dx, atr_period)
+    
+    # Trend filter: ADX > 25 indicates strong trend
+    strong_trend = adx >= 25
+    
     # Align all 1d indicators to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
     vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 30 to ensure sufficient data
-    for i in range(30, n):
+    # Start from index 50 to ensure sufficient data for ADX
+    for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i])):
+            np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(strong_trend_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -62,6 +110,16 @@ def generate_signals(prices):
         vol_spike = vol_1d_current > 1.5 * vol_avg_20_1d_aligned[i]  # 50% above average
         
         price = close[i]
+        
+        # Only trade in strong trending conditions (ADX > 25)
+        if not strong_trend_aligned[i]:
+            # In weak trends, flatten position
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
         
         # Long when price breaks above Camarilla R3 with volume spike
         long_breakout = price > camarilla_r3_aligned[i]
@@ -72,9 +130,6 @@ def generate_signals(prices):
         short_signal = short_breakout and vol_spike
         
         # Exit when price returns to the Camarilla pivot (previous day's close)
-        camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        if np.isnan(camarilla_pivot_aligned[i]):
-            camarilla_pivot_aligned[i] = camarilla_r3_aligned[i] - (camarilla_r3_aligned[i] - camarilla_s3_aligned[i]) / 2
         exit_long = price < camarilla_pivot_aligned[i]
         exit_short = price > camarilla_pivot_aligned[i]
         
