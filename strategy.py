@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_vortex_volume_v1
-# Strategy: 4h Vortex indicator breakout with 1d volume and ADX trend filter
+# 4h_1d_donchian_volume_cross_v1
+# Strategy: 4h Donchian channel breakout with 1d volume confirmation and trend filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Vortex identifies trend initiation. When VI+ crosses above VI- with above-average
-# 1d volume and ADX > 25, it signals strong trend initiation. Works in bull (VI+ > VI-) and
-# bear (VI- > VI+) markets. Volume and trend filters reduce false signals. Target: 20-50 trades/year.
+# Hypothesis: Donchian breakouts capture strong momentum. When price breaks above/below
+# 20-period Donchian channel with above-average 1d volume and ADX > 25, it signals
+# trend continuation. Works in both bull and bear markets by taking breakouts in
+# either direction. Volume and trend filters reduce false breakouts. Target: 25-50 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_vortex_volume_v1"
+name = "4h_1d_donchian_volume_cross_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,7 +33,7 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Vortex indicator
+    # Calculate 1d ADX for trend strength
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -43,13 +44,15 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Vortex Indicator components
-    vm_plus = np.abs(high_1d - np.concatenate([[low_1d[0]], low_1d[:-1]]))
-    vm_minus = np.abs(low_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]))
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
     
-    # Smoothing periods (typically 14)
-    period = 14
-    
+    # Wilder's smoothing
     def wilders_smooth(data, period):
         result = np.zeros_like(data)
         if len(data) < period:
@@ -59,23 +62,8 @@ def generate_signals(prices):
             result[i] = result[i-1] - (result[i-1] / period) + data[i]
         return result
     
+    period = 14
     tr14 = wilders_smooth(tr, period)
-    vm_plus_14 = wilders_smooth(vm_plus, period)
-    vm_minus_14 = wilders_smooth(vm_minus, period)
-    
-    # VI+ and VI-
-    vi_plus = np.where(tr14 != 0, vm_plus_14 / tr14, 0)
-    vi_minus = np.where(tr14 != 0, vm_minus_14 / tr14, 0)
-    
-    # Calculate ADX on 1d for trend strength
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
-                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
-                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
-    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
-                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
-                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
-    
     dm_plus_14 = wilders_smooth(dm_plus, period)
     dm_minus_14 = wilders_smooth(dm_minus, period)
     
@@ -88,9 +76,7 @@ def generate_signals(prices):
                   100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilders_smooth(dx, period)
     
-    # Align indicators to 4h
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
+    # Align ADX to 4h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # 1d volume average (20-period) for confirmation
@@ -98,13 +84,17 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
+    # 4h Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -115,29 +105,18 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 indicates strong trend
         trend_filter = adx_aligned[i] > 25
         
-        # Vortex crossover conditions with volume and trend confirmation
-        # Long: VI+ crosses above VI- (VI+ > VI- and previous VI+ <= previous VI-)
-        # Short: VI- crosses above VI+ (VI- > VI+ and previous VI- <= previous VI+)
-        if i > 0:
-            vi_plus_cross_above = vi_plus_aligned[i] > vi_minus_aligned[i] and vi_plus_aligned[i-1] <= vi_minus_aligned[i-1]
-            vi_minus_cross_above = vi_minus_aligned[i] > vi_plus_aligned[i] and vi_minus_aligned[i-1] <= vi_plus_aligned[i-1]
-        else:
-            vi_plus_cross_above = False
-            vi_minus_cross_above = False
+        # Donchian breakout conditions with volume and trend confirmation
+        # Long: price breaks above Donchian high
+        # Short: price breaks below Donchian low
+        long_breakout = close[i] > donchian_high[i-1]  # break above previous high
+        short_breakout = close[i] < donchian_low[i-1]  # break below previous low
         
-        long_signal = vi_plus_cross_above and vol_confirm and trend_filter
-        short_signal = vi_minus_cross_above and vol_confirm and trend_filter
+        long_signal = long_breakout and vol_confirm and trend_filter
+        short_signal = short_breakout and vol_confirm and trend_filter
         
-        # Exit conditions: reverse Vortex crossover OR trend weakening
-        if i > 0:
-            vi_minus_cross_above_vi_plus = vi_minus_aligned[i] > vi_plus_aligned[i] and vi_minus_aligned[i-1] <= vi_plus_aligned[i-1]
-            vi_plus_cross_above_vi_minus = vi_plus_aligned[i] > vi_minus_aligned[i] and vi_plus_aligned[i-1] <= vi_minus_aligned[i-1]
-        else:
-            vi_minus_cross_above_vi_plus = False
-            vi_plus_cross_above_vi_minus = False
-        
-        long_exit = vi_minus_cross_above_vi_plus or (adx_aligned[i] < 20)
-        short_exit = vi_plus_cross_above_vi_minus or (adx_aligned[i] < 20)
+        # Exit conditions: opposite Donchian breakout OR trend weakening
+        long_exit = (close[i] < donchian_low[i-1]) or (adx_aligned[i] < 20)
+        short_exit = (close[i] > donchian_high[i-1]) or (adx_aligned[i] < 20)
         
         if long_signal and position != 1:
             position = 1
