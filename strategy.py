@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h timeframe with 1d Bollinger Band squeeze + Donchian breakout + volume confirmation.
-# Long when price breaks above Donchian upper band during low volatility (BBW < 20th percentile) with volume > 1.5x average.
-# Short when price breaks below Donchian lower band during low volatility with volume > 1.5x average.
-# Exits when price returns to Donchian middle or volatility expands (BBW > 80th percentile).
-# Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing volatility breakouts.
-# Works in both bull/bear markets by only trading breakouts during low volatility regimes.
+# Hypothesis: 4h Donchian breakout with 1d ATR filter and volume confirmation.
+# Long when price breaks above Donchian(20) high with volume > 1.3x 1d average and ATR(14) > 1d ATR(14) EMA.
+# Short when price breaks below Donchian(20) low with same conditions.
+# Uses 1d ATR regime filter to avoid low-volatility chop. Designed for 20-40 trades/year.
+# Works in bull/bear markets by filtering breakouts with volatility regime.
 
-name = "4h_1d_bb_squeeze_donchian_breakout_v1"
+name = "4h_1d_donchian_atr_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,64 +26,60 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Bollinger Bands (20, 2)
+    # Calculate Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate daily ATR(14) and its EMA for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized bandwidth
     
-    # Calculate Bollinger Band width percentile (20-day lookback)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
+    # True Range components
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily Bollinger Band width percentile to 4h timeframe
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    # EMA of ATR for regime filter
+    atr_ema_1d = pd.Series(atr_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (high_max_20 + low_min_20) / 2
+    # Daily average volume for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 4h average volume (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all daily indicators to 4h timeframe
+    atr_ema_aligned = align_htf_to_ltf(prices, df_1d, atr_ema_1d)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure indicators are valid
+    # Start from index 20 to ensure Donchian is valid
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(bb_width_percentile_aligned[i]) or 
-            np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(atr_ema_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility regime: low volatility (BBW < 20th percentile)
-        low_vol = bb_width_percentile_aligned[i] < 20
+        # Volatility filter: current 1d ATR EMA > 0 (always true if calculated) 
+        # Volume filter: current volume > 1.3x 20-day average volume
+        vol_filter = volume[i] > 1.3 * vol_avg_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_20[i]
+        # Entry conditions: price breaks Donchian bands with volume confirmation
+        long_entry = (high[i] > high_max[i] and vol_filter)
+        short_entry = (low[i] < low_min[i] and vol_filter)
         
-        # Entry conditions: Donchian breakout during low volatility with volume confirmation
-        long_entry = (high[i] > high_max_20[i] and low_vol and vol_filter)
-        short_entry = (low[i] < low_min_20[i] and low_vol and vol_filter)
-        
-        # Exit conditions: 
-        # 1. Price returns to Donchian middle
-        # 2. Volatility expands (BBW > 80th percentile)
-        vol_expand = bb_width_percentile_aligned[i] > 80
-        return_to_middle = (
-            (position == 1 and low[i] < donchian_middle[i]) or
-            (position == -1 and high[i] > donchian_middle[i])
-        )
+        # Exit conditions: price returns to opposite Donchian band (trailing exit)
+        exit_long = low[i] < low_min[i]  # Exit long if price breaks lower band
+        exit_short = high[i] > high_max[i]  # Exit short if price breaks upper band
         
         if long_entry and position != 1:
             position = 1
@@ -92,10 +87,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (return_to_middle or vol_expand):
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (return_to_middle or vol_expand):
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
