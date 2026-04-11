@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 6h_1d_cci_trend_v1
-# Strategy: 6h CCI with 1d EMA trend filter and volume confirmation
-# Timeframe: 6h
+# 4h_1d_4week_donchian_breakout_v1
+# Strategy: 4h Donchian(20) breakout with 1d trend filter and 4-week volatility regime filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: CCI identifies overbought/oversold conditions. Combined with 1d EMA trend filter and volume confirmation, it captures mean-reversion in trending markets while avoiding false signals in choppy periods.
+# Hypothesis: Donchian breakouts capture momentum with clear structure. Combined with 1d EMA trend filter to avoid counter-trend trades and 4-week ATR percentile to filter low-volatility environments, this strategy works in both bull and bear markets by focusing on high-probability breakouts with volume confirmation.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_cci_trend_v1"
-timeframe = "6h"
+name = "4h_1d_4week_donchian_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,13 +35,37 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # CCI(20) calculation
-    tp = (high + low + close) / 3.0  # Typical Price
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp - sma_tp) / (0.015 * mad)
+    # Load weekly data for 4-week ATR calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 4:
+        high_1w = df_1w['high'].values
+        low_1w = df_1w['low'].values
+        close_1w = df_1w['close'].values
+        
+        # True Range for weekly
+        tr1 = high_1w - low_1w
+        tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+        tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+        tr1[0] = 0  # First value has no previous close
+        tr2[0] = 0
+        tr3[0] = 0
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr_4w = pd.Series(tr).rolling(window=4, min_periods=4).mean().values
+        
+        # Percentile rank of current ATR over 52 weeks (1 year)
+        atr_percentile = pd.Series(atr_4w).rolling(window=52, min_periods=10).apply(
+            lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+        ).values
+        atr_percentile_aligned = align_htf_to_ltf(prices, df_1w, atr_percentile, additional_delay_bars=0)
+    else:
+        # Fallback if insufficient weekly data
+        atr_percentile_aligned = np.full(n, 0.5)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_ratio = pd.Series(volume) / vol_ma
     
@@ -50,28 +74,38 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cci[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(atr_percentile_aligned[i]) or 
             np.isnan(vol_ratio.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = vol_ratio.iloc[i] > 1.5
+        # Volatility filter: only trade when ATR percentile > 0.3 (avoid low volatility)
+        vol_filter = atr_percentile_aligned[i] > 0.3
+        
+        # Volume confirmation
+        vol_confirmed = vol_ratio.iloc[i] > 1.3
         
         # Entry conditions
-        # Long: CCI < -100 (oversold) + price above 1d EMA50 (uptrend) + volume confirmation
-        if vol_confirmed and cci[i] < -100 and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Long: Price breaks above Donchian upper + uptrend (price > 1d EMA50) + vol filter + volume
+        if (vol_filter and vol_confirmed and 
+            close[i] > highest_20[i] and 
+            close[i] > ema_50_1d_aligned[i] and 
+            position != 1):
             position = 1
             signals[i] = 0.25
-        # Short: CCI > 100 (overbought) + price below 1d EMA50 (downtrend) + volume confirmation
-        elif vol_confirmed and cci[i] > 100 and close[i] < ema_50_1d_aligned[i] and position != -1:
+        # Short: Price breaks below Donchian lower + downtrend (price < 1d EMA50) + vol filter + volume
+        elif (vol_filter and vol_confirmed and 
+              close[i] < lowest_20[i] and 
+              close[i] < ema_50_1d_aligned[i] and 
+              position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions: CCI returns to neutral range or trend reversal
-        elif position == 1 and (cci[i] > -50 or close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: price reverts to middle of Donchian channel or trend reversal
+        elif position == 1 and (close[i] < (highest_20[i] + lowest_20[i]) / 2 or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (cci[i] < 50 or close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (close[i] > (highest_20[i] + lowest_20[i]) / 2 or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
