@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# 6h_1w_donchian_volume_breakout_v1
-# Strategy: 6h Donchian breakout with weekly trend filter and volume confirmation
-# Timeframe: 6h
+# 12h_1d_donchian_volume_trend_v1
+# Strategy: 12h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Weekly trend filters out false breakouts, volume confirms institutional participation.
-# Works in bull markets via long breakouts above weekly trend, bear markets via short breakdowns below weekly trend.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 12h Donchian breakouts capture medium-term trends. 1d EMA confirms higher timeframe trend direction.
+# Volume > 1.5x 20-period average confirms institutional participation. Designed for low trade frequency (~15-25/year)
+# to minimize fee drag. Works in bull markets via long breakouts and bear markets via short breakdowns.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_volume_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,21 +26,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 6h Donchian channels (20-period)
+    # 12h Donchian channels (20-period)
     high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 6h volume average (20-period) for confirmation
+    # 12h volume average (20-period) for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -48,7 +48,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -59,16 +59,16 @@ def generate_signals(prices):
         breakout_up = high[i] > high_max_20[i-1]
         breakdown_down = low[i] < low_min_20[i-1]
         
-        # Weekly EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_50_1w_aligned[i]
-        trend_bearish = close[i] < ema_50_1w_aligned[i]
+        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_50_1d_aligned[i]
+        trend_bearish = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        # Long: Donchian breakout up AND bullish weekly trend AND volume confirmation
+        # Long: Donchian breakout up AND bullish trend AND volume confirmation
         if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Donchian breakdown down AND bearish weekly trend AND volume confirmation
+        # Short: Donchian breakdown down AND bearish trend AND volume confirmation
         elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
