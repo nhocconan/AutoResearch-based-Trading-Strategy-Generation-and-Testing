@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -20,23 +20,19 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate daily OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    open_1d = df_1d['open'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla levels (based on previous day)
-    # Typical price
     typical_price = (high_1d + low_1d + close_1d) / 3.0
-    # Previous day's range
     range_1d = high_1d - low_1d
     
-    # Camarilla levels for current day (based on previous day's data)
     # Resistance levels
     r4 = close_1d + range_1d * 1.1 / 2
     r3 = close_1d + range_1d * 1.1 / 4
@@ -71,7 +67,6 @@ def generate_signals(prices):
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate 4-day average volume for confirmation
-    volume_1d = df_1d['volume'].values
     vol_avg_4 = pd.Series(volume_1d).rolling(window=4, min_periods=4).mean().values
     vol_avg_4_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_4)
     
@@ -87,13 +82,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 50 to ensure sufficient data
-    for i in range(50, n):
+    # Start from index 30 to ensure sufficient data
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_avg_4_aligned[i]) or
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_avg_4_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -110,10 +103,10 @@ def generate_signals(prices):
         short_breakout = (price < s3_aligned[i]) and vol_confirm
         
         # Volatility filter: avoid trading in extremely low volatility
-        # Only trade when ATR is above 50% of its 20-period average
+        # Only trade when ATR is above 40% of its 20-period average
         atr_ma_20 = pd.Series(atr_1d_aligned).rolling(window=20, min_periods=20).mean()
         atr_ma_20_val = atr_ma_20.iloc[i] if hasattr(atr_ma_20, 'iloc') else atr_ma_20[i] if i < len(atr_ma_20) else np.nan
-        vol_filter = not np.isnan(atr_ma_20_val) and atr_1d_aligned[i] > (0.5 * atr_ma_20_val)
+        vol_filter = not np.isnan(atr_ma_20_val) and atr_1d_aligned[i] > (0.4 * atr_ma_20_val)
         
         if long_breakout and vol_filter and position != 1:
             position = 1
