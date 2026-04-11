@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_ma_cross_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,45 +22,35 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate 1d Elder Ray and 13-period EMA
-    close_1d = df_1d['close'].values
+    # Calculate daily Donchian channels (20-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 13-period EMA of close
-    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Upper band: highest high of last 20 days
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 days
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Bull Power = High - EMA13
-    bull_power = high_1d - ema_13
-    # Bear Power = Low - EMA13
-    bear_power = low_1d - ema_13
+    # Shift by 1 to use only completed daily bars
+    upper_20 = np.roll(upper_20, 1)
+    lower_20 = np.roll(lower_20, 1)
+    upper_20[0] = np.nan
+    lower_20[0] = np.nan
     
-    # Shift by 1 to use only completed 1d bars
-    bull_power = np.roll(bull_power, 1)
-    bear_power = np.roll(bear_power, 1)
-    ema_13 = np.roll(ema_13, 1)
-    bull_power[0] = np.nan
-    bear_power[0] = np.nan
-    ema_13[0] = np.nan
+    # Align daily Donchian to 4h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    # Align 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
-    
-    # Calculate 6h EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.3x 20-period average on 4h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(60, n):  # Start after EMA50 warmup
+    for i in range(40, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema_13_aligned[i]) or np.isnan(ema_50[i]) or
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -72,17 +62,17 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
-        # Long conditions: Bull Power > 0 AND price > EMA50 (uptrend) with volume
-        long_signal = volume_confirmed and (bull_power_aligned[i] > 0) and (price_close > ema_50[i])
+        # Long when price breaks above daily upper band with volume
+        long_signal = volume_confirmed and (price_high > upper_20_aligned[i])
         
-        # Short conditions: Bear Power < 0 AND price < EMA50 (downtrend) with volume
-        short_signal = volume_confirmed and (bear_power_aligned[i] < 0) and (price_close < ema_50[i])
+        # Short when price breaks below daily lower band with volume
+        short_signal = volume_confirmed and (price_low < lower_20_aligned[i])
         
-        # Exit when Elder Power reverses
-        exit_long = position == 1 and bull_power_aligned[i] <= 0
-        exit_short = position == -1 and bear_power_aligned[i] >= 0
+        # Exit when price returns to the opposite band (mean reversion)
+        exit_long = position == 1 and (price_low < lower_20_aligned[i])
+        exit_short = position == -1 and (price_high > upper_20_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
@@ -103,13 +93,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Elder Ray + EMA50 trend filter on 6h with volume confirmation.
-# Uses 1d Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) to measure
-# bull/bear strength relative to the 13-day EMA. Enters long when Bull Power > 0
-# and price above 6h EMA50 with volume confirmation (>1.5x average). Enters short
-# when Bear Power < 0 and price below 6h EMA50 with volume confirmation.
-# Exits when the respective power crosses zero. Works in both bull and bear markets
-# by aligning with the dominant trend on higher timeframe. Target: 50-150 total trades
-# over 4 years (12-37/year) to minimize fee drag on 6h timeframe. Elder Ray captures
-# the underlying power behind price moves, reducing false signals. Volume confirmation
-# ensures participation from market actors. EMA50 filter prevents counter-trend trades.
+# Hypothesis: Daily Donchian breakout with volume confirmation on 4h timeframe.
+# Uses 20-day Donchian channels (highest high/lowest low) from completed daily bars.
+# Enters long when 4h price breaks above the daily upper band with volume >1.3x average.
+# Enters short when 4h price breaks below the daily lower band with volume confirmation.
+# Exits when price returns to the opposite band, capturing mean reversion after breakouts.
+# Works in both bull and bear markets by trading breakouts in the direction of the trend.
+# Volume confirmation ensures breakouts are supported by participation, reducing false signals.
+# Target: 20-40 trades per year to minimize fee drag on 4h timeframe.
