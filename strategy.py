@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_1d_trix_volume_crossover_v1
-Strategy: 12h TRIX crossover with volume confirmation and 1d trend filter
+12h_1d_1w_camarilla_breakout_v3
+Strategy: 12h Camarilla pivot breakout with volume confirmation and 1d/1w trend filter
 Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses TRIX (triple smoothed EMA) momentum on 12h timeframe for entry signals, confirmed by volume spikes (>2x average) and filtered by 1d EMA50 trend alignment. TRIX captures momentum changes early while reducing whipsaw. Volume confirmation ensures institutional interest. Trend filter avoids counter-trend trades. Designed for low frequency (15-35 trades/year) to minimize fee drag in both bull and bear markets.
+Hypothesis: Uses 12h Camarilla pivot levels (resistance/support) for breakout entries with volume confirmation (>1.5x average volume) and filtered by 1d EMA20 and 1w EMA50 trend alignment. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses higher timeframes for direction (1d/1w) and 12h only for timing. Reduced trade frequency by requiring stricter trend alignment and volume confirmation. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_trix_volume_crossover_v1"
+name = "12h_1d_1w_camarilla_breakout_v3"
 timeframe = "12h"
 leverage = 1.0
 
@@ -28,59 +28,76 @@ def generate_signals(prices):
     
     # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # 12h TRIX (15-period triple EMA)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix_values = trix.values
+    # 12h EMA20 for trend filter (optional, can be removed if too restrictive)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix_values).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # 1d EMA50 for trend filter
+    # 1d EMA20 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    vol_spike = volume > (1.5 * vol_avg)  # Volume confirmation
+    
+    # Calculate Camarilla levels from previous day's data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_cama = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(trix_values[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # TRIX crossover signals
-        trix_cross_above = trix_values[i] > trix_signal[i] and trix_values[i-1] <= trix_signal[i-1]
-        trix_cross_below = trix_values[i] < trix_signal[i] and trix_values[i-1] >= trix_signal[i-1]
+        price_close = close[i]
         
-        # Trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filters: price above/both EMAs for long, below/both for short
+        uptrend_1d = price_close > ema_20_1d_aligned[i]
+        uptrend_1w = price_close > ema_50_1w_aligned[i]
+        downtrend_1d = price_close < ema_20_1d_aligned[i]
+        downtrend_1w = price_close < ema_50_1w_aligned[i]
+        
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > camarilla_H4_aligned[i]
+        breakout_down = price_close < camarilla_L4_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: TRIX bullish crossover with volume in uptrend
-        long_signal = trix_cross_above and vol_confirmed and uptrend
+        # Long: upward breakout with volume in uptrend (both 1d and 1w)
+        long_signal = breakout_up and vol_confirmed and uptrend_1d and uptrend_1w
         
-        # Short: TRIX bearish crossover with volume in downtrend
-        short_signal = trix_cross_below and vol_confirmed and downtrend
+        # Short: downward breakout with volume in downtrend (both 1d and 1w)
+        short_signal = breakout_down and vol_confirmed and downtrend_1d and downtrend_1w
         
-        # Exit when TRIX crosses back in opposite direction
-        exit_long = position == 1 and trix_values[i] < trix_signal[i]
-        exit_short = position == -1 and trix_values[i] > trix_signal[i]
+        # Exit when price returns to the EMA20 (12h) or opposite Camarilla level
+        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
+        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
