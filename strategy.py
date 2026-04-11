@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_v1
-# Strategy: 4h Camarilla breakout with volume confirmation and 1d trend filter
-# Timeframe: 4h
+# 12h_1d_w_rsi_divergence_volume_v1
+# Strategy: 12h RSI divergence with volume confirmation and weekly trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels (L3, L4, H3, H4) act as support/resistance. Breakouts with volume
-# confirmation and aligned with 1d trend yield high-probability trades. Fewer entries (target ~30-50/year)
-# reduce fee drag and improve generalization to bear markets.
+# Hypothesis: RSI divergences signal exhaustion in trends. Bullish divergence (price LL, RSI HL) in uptrend triggers long. Bearish divergence (price HH, RSI LH) in downtrend triggers short. Uses weekly EMA50 for trend filter and volume confirmation (>1.5x avg) to avoid false signals. Designed for low frequency (15-35/year) to minimize fee drag and work in both bull/bear regimes via trend alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "12h_1d_w_rsi_divergence_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -26,36 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1d and 1w data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d RSI(14) for divergence detection
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Previous day's high/low/close for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla levels: H4, H3, L3, L4
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.1 * (high - low)
-    # L3 = close - 1.1 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low)
-    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -65,30 +55,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i])):
+        if (np.isnan(rsi_14_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i-1]) or 
+            np.isnan(rsi_14_1d_aligned[i-2]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Entry logic: Camarilla breakout + volume + trend alignment
-        if (close[i] > camarilla_h4_aligned[i] and vol_confirm[i] and uptrend and position != 1):
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        bull_div = (low[i] < low[i-1] < low[i-2]) and (rsi_14_1d_aligned[i] > rsi_14_1d_aligned[i-1] > rsi_14_1d_aligned[i-2])
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        bear_div = (high[i] > high[i-1] > high[i-2]) and (rsi_14_1d_aligned[i] < rsi_14_1d_aligned[i-1] < rsi_14_1d_aligned[i-2])
+        
+        # Entry logic: RSI divergence + volume + trend alignment
+        if bull_div and vol_confirm[i] and uptrend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif (close[i] < camarilla_l4_aligned[i] and vol_confirm[i] and downtrend and position != -1):
+        elif bear_div and vol_confirm[i] and downtrend and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: price returns to H3/L3 level or trend reversal
-        elif position == 1 and (close[i] < camarilla_h3_aligned[i] or not uptrend):
+        # Exit: trend reversal or RSI extreme
+        elif position == 1 and (not uptrend or rsi_14_1d_aligned[i] >= 70):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > camarilla_l3_aligned[i] or not downtrend):
+        elif position == -1 and (not downtrend or rsi_14_1d_aligned[i] <= 30):
             position = 0
             signals[i] = 0.0
         else:
