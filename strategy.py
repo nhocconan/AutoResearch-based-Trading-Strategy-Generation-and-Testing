@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_camarilla_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_v7"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,100 +20,69 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return signals
-    
-    # Calculate 12h EMA(34) for trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return signals
     
-    # Calculate 1d RSI(14) for momentum filter
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_14_1d = (100 - (100 / (1 + rs))).values
     
-    # Calculate 1d ATR(14) for volatility filter
-    high_1d = df_12h['high'].values
-    low_1d = df_12h['low'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Camarilla formula: range = high - low
+    daily_range = high_1d - low_1d
     
-    # Calculate 6h ATR(14) for position sizing and stops
-    tr1_6h = high - low
-    tr2_6h = np.abs(high - np.roll(close, 1))
-    tr3_6h = np.abs(low - np.roll(close, 1))
-    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
-    tr_6h[0] = tr1_6h[0]  # First value
-    atr_14_6h = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Key levels for breakout: R4 (resistance) and S4 (support)
+    r4 = close_1d + (daily_range * 1.1 / 2)
+    s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Calculate 6h volume moving average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Exit levels: R3 and S3
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Align 12h EMA to 6h timeframe
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Volume confirmation: 4h volume > 2.0x 100-period average (stricter for fewer trades)
+    vol_ma_100 = pd.Series(volume).rolling(window=100, min_periods=100).mean().values
     
-    # Align 1d RSI to 6h timeframe
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    
-    # Align 1d ATR to 6h timeframe
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Align daily levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(atr_14_6h[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma_100[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation: volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
+        # Volume confirmation
+        vol_confirm = volume_current > 2.0 * vol_ma_100[i]
         
-        # Trend filter: price above/below 12h EMA(34)
-        trend_up = price_close > ema_34_12h_aligned[i]
-        trend_down = price_close < ema_34_12h_aligned[i]
-        
-        # Momentum filter: RSI not in extreme territory
-        rsi_not_overbought = rsi_14_1d_aligned[i] < 70
-        rsi_not_oversold = rsi_14_1d_aligned[i] > 30
-        
-        # Volatility filter: current volatility not too high
-        vol_filter = atr_14_6h[i] < 2.0 * atr_14_1d_aligned[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > r4_aligned[i]  # Break above R4
+        breakout_down = price_close < s4_aligned[i]  # Break below S4
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Uptrend + not overbought + volume confirmation + volatility filter
-        if trend_up and rsi_not_overbought and vol_confirm and vol_filter:
+        # Long: Break above R4 with volume confirmation
+        if breakout_up and vol_confirm:
             enter_long = True
         
-        # Short: Downtrend + not oversold + volume confirmation + volatility filter
-        if trend_down and rsi_not_oversold and vol_confirm and vol_filter:
+        # Short: Break below S4 with volume confirmation
+        if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: trend reversal or volatility spike
-        exit_long = not trend_up or (atr_14_6h[i] > 2.5 * atr_14_1d_aligned[i])
-        exit_short = not trend_down or (atr_14_6h[i] > 2.5 * atr_14_1d_aligned[i])
+        # Exit conditions: return to opposite S3/R3 levels
+        exit_long = price_close < s3_aligned[i]  # Return to S3 level
+        exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
         # Trading logic
         if enter_long and position != 1:
@@ -134,10 +103,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Camarilla breakout strategy using 12h EMA trend filter and 1d RSI momentum filter.
-# Enters long when price is above 12h EMA(34), RSI < 70, with volume > 1.5x 20-period average.
-# Enters short when price is below 12h EMA(34), RSI > 30, with volume > 1.5x 20-period average.
-# Uses volatility filter to avoid choppy markets and prevent whipsaws.
+# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 2.0x 100-period average.
+# Enters short when price breaks below S4 with volume > 2.0x 100-period average.
+# Exits when price returns to S3/R3 levels respectively.
+# Uses stricter volume threshold (2.0x) and longer MA (100) to reduce trade frequency.
 # Position size set to 0.25 to manage risk in volatile markets.
-# Target: 20-40 trades per year (80-160 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by following the higher timeframe trend with momentum confirmation.
+# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# 4h timeframe provides good balance between signal quality and trade frequency.
