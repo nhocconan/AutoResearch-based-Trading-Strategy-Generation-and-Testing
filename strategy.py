@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_trend_v1"
+name = "12h_1d_camarilla_pullback_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # Calculate daily OHLC for Camarilla pivot levels (previous day)
@@ -44,6 +44,7 @@ def generate_signals(prices):
     # Align daily Camarilla levels to 12h timeframe
     r3_12h = align_htf_to_ltf(prices, df_1d, r3)
     s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
     
     # 12h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
@@ -55,22 +56,13 @@ def generate_signals(prices):
     # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 12h ADX for trend strength (14 period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr_dm = tr[1:]
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(300, n):
+    for i in range(200, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+            np.isnan(pivot_12h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -83,17 +75,26 @@ def generate_signals(prices):
         # Volume confirmation (1.5x average)
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Trend filter: ADX > 25
-        trend_filter = adx[i] > 25
+        # Pullback entry: price pulls back to S3/R3 after breaking out
+        # Long: price touches S3 from above after being below it (bounce)
+        # Short: price touches R3 from below after being above it (rejection)
         
-        # Long conditions: price breaks above R3 with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > r3_12h[i])
-        
-        # Short conditions: price breaks below S3 with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < s3_12h[i])
+        # Need previous bar's position relative to levels
+        if i > 0:
+            prev_close = close[i-1]
+            prev_r3 = r3_12h[i-1]
+            prev_s3 = s3_12h[i-1]
+            
+            # Long: price was below S3, now touches or goes above S3 (bounce off support)
+            long_signal = volume_confirmed and (prev_close <= prev_s3) and (price_low <= s3_12h[i]) and (price_close > s3_12h[i])
+            
+            # Short: price was above R3, now touches or goes below R3 (rejection at resistance)
+            short_signal = volume_confirmed and (prev_close >= prev_r3) and (price_high >= r3_12h[i]) and (price_close < r3_12h[i])
+        else:
+            long_signal = False
+            short_signal = False
         
         # Exit when price returns to the daily pivot (mean reversion)
-        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
         exit_long = position == 1 and price_close < pivot_12h[i]
         exit_short = position == -1 and price_close > pivot_12h[i]
         
@@ -115,12 +116,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Camarilla pivot breakout strategy for 12h timeframe with volume confirmation (>1.5x average volume) and ADX trend filter (>25).
-# Enters long when 12h price breaks above daily R3 level (close + 1.166*range) with volume >1.5x average and ADX>25.
-# Enters short when price breaks below daily S3 level (close - 1.166*range) with volume >1.5x average and ADX>25.
+# Hypothesis: Daily Camarilla pullback strategy for 12h timeframe.
+# Enters long when price pulls back to and bounces off daily S3 level (close - 1.166*range) with volume confirmation.
+# Enters short when price pulls back to and gets rejected at daily R3 level (close + 1.166*range) with volume confirmation.
 # Exits when price returns to the daily pivot level (mean reversion within the day's range).
-# Uses R3/S3 levels (not R4/S4) to reduce false breakouts and increase win rate.
-# Tight filters target 12-37 trades per year to stay within optimal range while maintaining edge.
+# Uses pullback entries rather than breakouts to avoid false breakouts and improve win rate.
+# Volume confirmation (>1.5x average) ensures institutional participation.
+# Targets 15-25 trades per year to stay well within optimal range while maintaining edge.
 # Position size: 0.25 to balance risk and return.
-# Camarilla pivots work well in both bull and bear markets as they adapt to daily volatility ranges.
+# Works in both bull and bear markets as it fades intraday extremes toward the daily pivot.
 # Timeframe: 12h (chosen per experiment requirements). HTF: 1d.
