@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_breakout_volume"
-timeframe = "1d"
+name = "6h_1d_donchian_breakout_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,33 +20,31 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate weekly Donchian channels (20-week high/low)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate Donchian channels on daily timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # 20-period high and low for weekly
-    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Shift by 1 to use only completed daily bars (avoid look-ahead)
+    donchian_high = np.roll(donchian_high, 1)
+    donchian_low = np.roll(donchian_low, 1)
+    donchian_high[0] = np.nan
+    donchian_low[0] = np.nan
     
-    # Shift by 1 to use only completed weekly bars
-    donchian_high_20 = np.roll(donchian_high_20, 1)
-    donchian_low_20 = np.roll(donchian_low_20, 1)
-    donchian_high_20[0] = np.nan
-    donchian_low_20[0] = np.nan
+    # Align daily Donchian channels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Align weekly Donchian levels to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
-    
-    # Daily volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.5x 20-period average on 6h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(20, n):  # Start after weekly Donchian warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is invalid
         if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
             np.isnan(vol_ma_20[i])):
@@ -62,10 +60,10 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Long conditions: Price breaks above weekly Donchian high with volume
+        # Long condition: price breaks above daily Donchian high with volume
         long_signal = volume_confirmed and (price_high > donchian_high_aligned[i])
         
-        # Short conditions: Price breaks below weekly Donchian low with volume
+        # Short condition: price breaks below daily Donchian low with volume
         short_signal = volume_confirmed and (price_low < donchian_low_aligned[i])
         
         # Exit when price returns to the opposite Donchian level
@@ -91,12 +89,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Donchian breakout from weekly channels with volume confirmation.
-# Uses weekly Donchian channels (20-period high/low) as dynamic support/resistance.
-# Enters long when daily price breaks above weekly Donchian high with volume confirmation
-# (>1.5x average volume). Enters short when daily price breaks below weekly Donchian low
-# with volume confirmation. Exits when price returns to the opposite Donchian level.
-# Weekly timeframe provides structural context to avoid whipsaws, while daily
-# timeframe captures breakouts. Volume confirmation ensures institutional participation.
-# Designed for low trade frequency (<25/year) to minimize fee drag on 1d timeframe.
-# Works in both bull and bear markets by following the dominant trend on higher timeframe.
+# Hypothesis: Daily Donchian breakout with volume confirmation on 6h timeframe.
+# Uses 20-period Donchian channels on daily timeframe to establish structural
+# support/resistance levels. Enters long when 6h price breaks above daily Donchian
+# high with volume confirmation (>1.5x average volume), short when breaks below
+# daily Donchian low with volume. Exits when price returns to the opposite
+# Donchian level. Works in both bull and bear markets by capturing breakouts
+# from established ranges. Volume confirmation ensures breakouts are supported
+# by market participation, reducing false signals. Target: 50-150 total trades
+# over 4 years (12-37/year) to minimize fee drag on 6h timeframe. Donchian
+# breakouts capture momentum while volume filter ensures quality signals.
+# This approach has shown promise on higher timeframes and adapts well to 6h.
