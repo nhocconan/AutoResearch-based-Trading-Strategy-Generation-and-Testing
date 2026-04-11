@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_vol_filter_v1
-# Strategy: 4h Camarilla pivot breakout with volume confirmation and volatility filter
+# 4h_1d_camarilla_breakout_vol_filter_v2
+# Strategy: 4h Camarilla pivot breakout with volume confirmation and volatility filter (revised)
 # Timeframe: 4h
 # Leverage: 1.0
 # Hypothesis: Camarilla levels from daily pivot provide strong support/resistance.
 # Breakouts aligned with volume confirmation and volatility filter capture
-# sustained moves while avoiding false breakouts. Designed for low trade frequency
-# (~25-40/year) to minimize fee drag in both bull and bear markets.
+# sustained moves while avoiding false breakouts. Reduced trade frequency to
+# improve generalization by tightening volume and volatility filters.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_vol_filter_v1"
+name = "4h_1d_camarilla_breakout_vol_filter_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -69,14 +68,14 @@ def generate_signals(prices):
         if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
             np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
             np.isnan(vol_avg_20[i]) or np.isnan(atr_ratio[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume confirmation: current volume > 2.0x 20-period average (tighter)
+        vol_confirm = volume[i] > 2.0 * vol_avg_20[i]
         
-        # Volatility filter: only trade when volatility is expanding (ATR ratio > 1.0)
-        vol_filter = atr_ratio[i] > 1.0
+        # Volatility filter: only trade when volatility is expanding (ATR ratio > 1.2)
+        vol_filter = atr_ratio[i] > 1.2
         
         # Breakout signals using Camarilla levels
         breakout_up = high[i] > H3_aligned[i-1]
@@ -86,11 +85,11 @@ def generate_signals(prices):
         # Long: Breakout above H3 AND volume confirmation AND volatility filter
         if breakout_up and vol_confirm and vol_filter and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         # Short: Breakdown below L3 AND volume confirmation AND volatility filter
         elif breakdown_down and vol_confirm and vol_filter and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         # Exit: Opposite breakout using H4/L4 levels
         elif position == 1 and low[i] < L4_aligned[i-1]:
             position = 0
@@ -100,6 +99,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
