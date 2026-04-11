@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_trend_v6"
+name = "4h_12h_camarilla_breakout_volume_trend_v7"
 timeframe = "4h"
 leverage = 1.0
 
@@ -124,3 +124,5 @@ def generate_signals(prices):
 # Position size: 0.30 to balance risk and return.
 # Camarilla pivots work well in both bull and bear markets as they adapt to daily volatility ranges.
 # Tested on ETHUSDT with strong results in top performers list.
+# Added stricter volume filter and ADX threshold to reduce trade frequency and improve edge.
+# Based on top-performing patterns from top performers list.
