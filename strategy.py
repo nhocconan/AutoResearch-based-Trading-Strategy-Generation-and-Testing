@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_trend_v3"
-timeframe = "4h"
+name = "12h_1d_donchian_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align daily Donchian to 4h timeframe
+    # Align daily Donchian to 12h timeframe
     donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
     donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
@@ -136,5 +136,5 @@ def generate_signals(prices):
 # Uses daily timeframe for Donchian channels to capture multi-day breakouts.
 # Volume confirmation ensures institutional participation, ADX filter avoids whipsaws in sideways markets.
 # Exits when price returns to the middle of the channel or ATR stop loss (2.0x) is hit.
-# Designed for 4h timeframe with tight entry conditions to target 75-200 total trades over 4 years.
+# Designed for 12h timeframe with tight entry conditions to target 50-150 total trades over 4 years.
 # Works in both bull and bear markets by trading breakouts in either direction with trend filter.
