@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_vortex_breakout_volume_v2
-Strategy: 12h Vortex indicator breakout with volume confirmation and 1d trend filter
-Timeframe: 12h
+4h_1d_camarilla_pivot_volume_v2
+Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter
+Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Vortex indicator (VI+ and VI-) identifies trend direction. Breakouts above/below recent high/low with volume confirmation and aligned 1d trend filter capture strong moves. Designed to work in both bull and bear markets by filtering trades with higher timeframe trend. Target: 50-150 total trades over 4 years.
+Hypothesis: Uses 4h Camarilla pivot levels (resistance/support) for breakout entries with volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses higher timeframe (1d) for direction and 4h only for timing. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_vortex_breakout_volume_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,81 +29,69 @@ def generate_signals(prices):
     # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Vortex indicator (14-period) on 12h data
-    # VI+ = sum(|current high - prior low|) / sum(true range)
-    # VI- = sum(|current low - prior high|) / sum(true range)
-    tr1 = np.abs(high - np.roll(low, 1))
-    tr2 = np.abs(low - np.roll(high, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
+    # 4h EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
-    
-    # Sum over 14 periods
-    n_periods = 14
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=n_periods, min_periods=n_periods).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=n_periods, min_periods=n_periods).sum().values
-    sum_tr = pd.Series(tr).rolling(window=n_periods, min_periods=n_periods).sum().values
-    
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
-    
-    # 1d EMA34 for trend filter
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
-    # Recent high/low for breakout (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day's data
+    # We need to get the previous day's high, low, close for each 4h bar
+    # Since we have 1d data, we can use the previous day's values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_cama = df_1d['close'].values  # same as close_1d above
+    
+    # Calculate Camarilla levels for each day
+    camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below 1d EMA34
-        uptrend_1d = price_close > ema_34_1d_aligned[i]
-        downtrend_1d = price_close < ema_34_1d_aligned[i]
+        # Trend filter: price above/both EMAs for long, below/both for short
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Vortex trend: VI+ > VI- indicates uptrend, VI- > VI+ indicates downtrend
-        vortex_up = vi_plus[i] > vi_minus[i]
-        vortex_down = vi_minus[i] > vi_plus[i]
-        
-        # Breakout conditions
-        breakout_up = price_close > highest_high[i]
-        breakout_down = price_close < lowest_low[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > camarilla_H4_aligned[i]
+        breakout_down = price_close < camarilla_L4_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: bullish vortex + upward breakout with volume in uptrend
-        long_signal = vortex_up and breakout_up and vol_confirmed and uptrend_1d
+        # Long: upward breakout with volume in uptrend (1d)
+        long_signal = breakout_up and vol_confirmed and uptrend_1d
         
-        # Short: bearish vortex + downward breakout with volume in downtrend
-        short_signal = vortex_down and breakout_down and vol_confirmed and downtrend_1d
+        # Short: downward breakout with volume in downtrend (1d)
+        short_signal = breakout_down and vol_confirmed and downtrend_1d
         
-        # Exit when vortex reverses or price returns to recent opposite extreme
-        exit_long = position == 1 and (vi_plus[i] < vi_minus[i] or price_close < lowest_low[i])
-        exit_short = position == -1 and (vi_minus[i] < vi_plus[i] or price_close > highest_high[i])
+        # Exit when price returns to the EMA20 (4h) or opposite Camarilla level
+        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
+        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
