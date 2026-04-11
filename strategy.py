@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_volume_v1
-# Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# Timeframe: 12h
+# 4h_1d_trix_volume_regime_v1
+# Strategy: 4h TRIX momentum with 1d trend filter, volume confirmation, and chop regime filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance. Breakouts with 1d EMA trend alignment and volume confirmation capture significant moves while minimizing false breakouts. Designed for low trade frequency (~12-37/year) to avoid fee decay.
+# Hypothesis: TRIX (triple-smoothed EMA) filters noise and identifies sustained momentum. Combined with 1d EMA trend filter, volume confirmation, and chop regime (avoiding range-bound markets), this strategy captures strong trending moves while avoiding whipsaws. Target: 25-40 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_trix_volume_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,42 +30,33 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Using close of previous day as base
-    prev_close = df_1d['close'].shift(1).values  # Previous day's close
-    prev_high = df_1d['high'].shift(1).values    # Previous day's high
-    prev_low = df_1d['low'].shift(1).values      # Previous day's low
-    
-    # Camarilla levels: H4, L4, H3, L3, H2, L2, H1, L1
-    # Range = prev_high - prev_low
-    # H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    # L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    # H3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    # L3 = prev_close - 1.1 * (prev_high - prev_low) / 4
-    # H2 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    # L2 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    # H1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    # L1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    
-    rng = prev_high - prev_low
-    H4 = prev_close + 1.1 * rng / 2
-    L4 = prev_close - 1.1 * rng / 2
-    H3 = prev_close + 1.1 * rng / 4
-    L3 = prev_close - 1.1 * rng / 4
-    H2 = prev_close + 1.1 * rng / 6
-    L2 = prev_close - 1.1 * rng / 6
-    H1 = prev_close + 1.1 * rng / 12
-    L1 = prev_close - 1.1 * rng / 12
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # TRIX calculation (15-period triple EMA)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.zeros_like(close)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100  # Percentage change
     
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Choppiness Index (14-period) for regime filter
+    # CHOP = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.zeros_like(close)
+    valid = (max_high - min_low) > 0
+    chop[valid] = 100 * np.log10(atr_sum[valid] / (max_high[valid] - min_low[valid])) / np.log10(14)
     
     # 20-period volume average for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -75,39 +66,40 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(chop[i]) or np.isnan(vol_avg_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Breakout signals using Camarilla levels
-        # Breakout above H3 (strong resistance)
-        breakout_up = high[i] > H3_aligned[i-1]
-        # Breakdown below L3 (strong support)
-        breakdown_down = low[i] < L3_aligned[i-1]
+        # TRIX momentum: positive = bullish momentum, negative = bearish momentum
+        trix_bullish = trix[i] > 0
+        trix_bearish = trix[i] < 0
         
         # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
         trend_bullish = close[i] > ema_50_1d_aligned[i]
         trend_bearish = close[i] < ema_50_1d_aligned[i]
         
+        # Chop regime filter: avoid range-bound markets (CHOP > 61.8)
+        # Only trade when CHOP <= 61.8 (trending market)
+        trending_regime = chop[i] <= 61.8
+        
         # Entry conditions
-        # Long: Breakout above H3 AND bullish trend AND volume confirmation
-        if breakout_up and trend_bullish and vol_confirm and position != 1:
+        # Long: TRIX bullish AND bullish trend AND volume confirmation AND trending regime
+        if trix_bullish and trend_bullish and vol_confirm and trending_regime and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Breakdown below L3 AND bearish trend AND volume confirmation
-        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
+        # Short: TRIX bearish AND bearish trend AND volume confirmation AND trending regime
+        elif trix_bearish and trend_bearish and vol_confirm and trending_regime and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite breakout using H4/L4 levels (stronger levels)
-        elif position == 1 and low[i] < L4_aligned[i-1]:  # Break below L4
+        # Exit: Opposite TRIX signal OR trend reversal
+        elif position == 1 and (trix[i] < 0 or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] > H4_aligned[i-1]:  # Break above H4
+        elif position == -1 and (trix[i] > 0 or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
