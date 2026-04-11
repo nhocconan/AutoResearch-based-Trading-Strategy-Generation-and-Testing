@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_trend_v2"
+name = "4h_1d_rsi_pullback_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,57 +22,31 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d high, low, close for pivot calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d close for RSI
     close_1d = df_1d['close'].values
     
-    # 1d pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # 1d Camarilla levels - using correct formulas
-    r3_1d = pivot_1d + (range_1d * 1.1 / 4)
-    r4_1d = pivot_1d + (range_1d * 1.1 / 2)
-    s3_1d = pivot_1d - (range_1d * 1.1 / 4)
-    s4_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # 14-period RSI on 1d close
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain = np.concatenate([[0], gain])
+    loss = np.concatenate([[0], loss])
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
     # Shift by 1 to use only completed 1d bars
-    r3_1d = np.roll(r3_1d, 1)
-    r4_1d = np.roll(r4_1d, 1)
-    s3_1d = np.roll(s3_1d, 1)
-    s4_1d = np.roll(s4_1d, 1)
-    r3_1d[0] = np.nan
-    r4_1d[0] = np.nan
-    s3_1d[0] = np.nan
-    s4_1d[0] = np.nan
+    rsi_1d = np.roll(rsi_1d, 1)
+    rsi_1d[0] = np.nan
     
-    # Align 1d levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align 1d RSI to 4h timeframe
+    rsi_1d_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 4h ADX for trend strength filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h 20-period EMA for trend
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # +DI and -DI
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # 4h volume filter: volume > 1.5x 20-period average (increased threshold)
+    # 4h volume filter: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -80,34 +54,30 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_1d_4h[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
         price_low = low[i]
+        price_high = high[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx[i]
+        rsi_val = rsi_1d_4h[i]
+        ema_val = ema_20[i]
         
         # Volume confirmation: higher threshold to reduce trades
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Trend filter: ADX > 30 for stronger trending market
-        trend_filter = adx_val > 30
+        # Long conditions: RSI < 30 (oversold) and price near/above EMA20 with volume
+        long_signal = volume_confirmed and (rsi_val < 30) and (price_low <= ema_val * 1.02)
         
-        # Long conditions: price breaks below S3 (oversold) with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_low < s3_4h[i])
+        # Short conditions: RSI > 70 (overbought) and price near/below EMA20 with volume
+        short_signal = volume_confirmed and (rsi_val > 70) and (price_high >= ema_val * 0.98)
         
-        # Short conditions: price breaks above R3 (overbought) with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_high > r3_4h[i])
-        
-        # Exit when price returns to 1d pivot level
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        exit_long = position == 1 and price_close > pivot_4h[i]
-        exit_short = position == -1 and price_close < pivot_4h[i]
+        # Exit when RSI returns to neutral zone (40-60)
+        exit_long = position == 1 and rsi_val >= 40
+        exit_short = position == -1 and rsi_val <= 60
         
         # Trading logic
         if long_signal and position != 1:
@@ -127,9 +97,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Camarilla levels act as strong support/resistance for 4h price action.
-# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.5x average)
-# and strong trending market (ADX > 30). Enters short when price breaks above R3 (overbought rejection)
-# with same conditions. Exits when price returns to 1d pivot level.
-# Uses higher volume and trend thresholds to reduce trades to ~15-25/year.
-# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
+# Hypothesis: 1d RSI extremes on 4h timeframe with volume confirmation and EMA filter.
+# Enters long when 1d RSI < 30 (oversold) with volume > 1.8x 20-period average and price near 4h EMA20.
+# Enters short when 1d RSI > 70 (overbought) with same volume condition and price near 4h EMA20.
+# Exits when RSI returns to neutral zone (40 for longs, 60 for shorts).
+# Works in bull markets (buying oversold dips in uptrend) and bear markets (selling overbought rallies in downtrend).
+# Uses strict RSI thresholds and high volume requirement to limit trades to ~20-30/year.
