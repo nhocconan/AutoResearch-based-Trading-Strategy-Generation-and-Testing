@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with Elder Ray filter and volume confirmation
-# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs of median price
-# - Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# - Long: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND volume > 1.5x 20-bar avg
-# - Short: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND volume > 1.5x 20-bar avg
-# - Exit: Alligator lines cross (Lips-Teeth or Teeth-Jaw crossover)
-# - Uses 1d trend filter: price > EMA(50) for long bias, price < EMA(50) for short bias
-# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within fee drag limits
-# - Alligator identifies trends, Elder Ray confirms strength, volume adds conviction
-# - Works in both bull/bear by capturing strong trending moves with filter
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR regime filter
+# - Long: price breaks above Donchian high, volume > 1.3x 20-period avg, ATR(14) > ATR(50) (trending)
+# - Short: price breaks below Donchian low, volume > 1.3x 20-period avg, ATR(14) > ATR(50) (trending)
+# - Exit: price returns to Donchian midpoint
+# - Uses 12h EMA(50) trend filter for multi-timeframe alignment: price > EMA for long bias, price < EMA for short bias
+# - Position size: 0.25 (25% of capital) to balance return and drawdown
+# - Target: 15-35 trades/year (60-140 total over 4 years) to stay within fee drag limits
+# - Works in both bull and bear markets by requiring volume and volatility confirmation for breakouts
 
-name = "12h_1d_alligator_elder_volume_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,92 +29,83 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for EMA trend filter (MTF rule compliance)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return signals
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Pre-compute 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Pre-compute median price for Alligator (12h)
-    median_price = (high + low) / 2
+    # Pre-compute 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
-    # Williams Alligator lines (12h)
-    # Jaw: 13-period SMMA, 8 periods ahead
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift 8 bars ahead
-    # Teeth: 8-period SMMA, 5 periods ahead
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift 5 bars ahead
-    # Lips: 5-period SMMA, 3 periods ahead
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift 3 bars ahead
-    
-    # Pre-compute Elder Ray (12h)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # Pre-compute volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute ATR filters for regime detection
+    # ATR(14) for current volatility
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR(50) for longer-term volatility comparison
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         volume_current = volume[i]
         
-        # Alligator alignment
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
+        # Donchian levels
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        mid_channel = donchian_mid[i]
         
-        bullish_alignment = lips_above_teeth and teeth_above_jaw
-        bearish_alignment = lips_below_teeth and teeth_below_jaw
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume_current > 1.3 * volume_sma_20[i]
         
-        # Elder Ray confirmation
-        bull_confirm = bull_power[i] > 0
-        bear_confirm = bear_power[i] < 0
+        # Trend filter: ATR(14) > ATR(50) (indicates trending market)
+        atr_trend = atr_14[i] > atr_50[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
-        
-        # 1d EMA trend bias
-        ema_bias_long = close_price > ema_50_1d_aligned[i]
-        ema_bias_short = close_price < ema_50_1d_aligned[i]
+        # 12h EMA trend bias
+        ema_bias_long = close_price > ema_50_12h_aligned[i]
+        ema_bias_short = close_price < ema_50_12h_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: bullish Alligator + Bull Power > 0 + volume + long bias
-        if bullish_alignment and bull_confirm and vol_confirm and ema_bias_long:
+        # Long breakout: price above upper Donchian, volume confirmation, trending, long bias
+        if close_price > upper_channel and vol_confirm and atr_trend and ema_bias_long:
             enter_long = True
         
-        # Short: bearish Alligator + Bear Power < 0 + volume + short bias
-        if bearish_alignment and bear_confirm and vol_confirm and ema_bias_short:
+        # Short breakout: price below lower Donchian, volume confirmation, trending, short bias
+        if close_price < lower_channel and vol_confirm and atr_trend and ema_bias_short:
             enter_short = True
         
-        # Exit conditions: Alligator lines cross (Lips-Teeth or Teeth-Jaw)
+        # Exit conditions
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long on bearish cross: Lips < Teeth OR Teeth < Jaw
-            exit_long = (lips[i] < teeth[i]) or (teeth[i] < jaw[i])
+            # Exit long if price returns to Donchian midpoint
+            exit_long = close_price <= mid_channel
         elif position == -1:
-            # Exit short on bullish cross: Lips > Teeth OR Teeth > Jaw
-            exit_short = (lips[i] > teeth[i]) or (teeth[i] > jaw[i])
+            # Exit short if price returns to Donchian midpoint
+            exit_short = close_price >= mid_channel
         
         # Trading logic
         if enter_long and position != 1:
