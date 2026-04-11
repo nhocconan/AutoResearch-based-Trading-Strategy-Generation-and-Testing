@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_triple_barrier_v1
-# Strategy: Triple barrier system using 12h/1d structure with 6h entries
-# Timeframe: 6h
+# 4h_1d_camarilla_breakout_v1
+# Strategy: 4h Camarilla pivot breakout with volume confirmation and 1d trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Combines 12h Donchian channel breakouts with 1d volume confirmation
-# and 6h momentum filters to capture multi-timeframe trends while minimizing false breakouts.
-# Works in bull markets via breakout continuation and bear markets via breakdown continuation.
-# Designed for low trade frequency (~15-25/year) to minimize fee drag.
+# Hypothesis: Camarilla pivot levels (H3/L3) act as strong support/resistance.
+# Breakouts above H3 or below L3 with volume confirmation signal momentum.
+# 1d EMA50 trend filter ensures trades align with higher timeframe direction.
+# Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# Works in bull markets via long breakouts above H3 in uptrend,
+# and bear markets via short breakdowns below L3 in downtrend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_triple_barrier_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,74 +29,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h and 1d data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h Donchian channel (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donch_high_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
-    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
+    # 4h typical price for Camarilla calculation
+    typical_price = (high + low + close) / 3.0
     
-    # 1d volume average (20-period) for confirmation
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align raw 1d volume for confirmation
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Calculate Camarilla levels using previous day's OHLC
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # We use previous day's values to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 6h momentum: RSI(14) for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    H3 = prev_close + 1.1 * (prev_high - prev_low)
+    L3 = prev_close - 1.1 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to 4h timeframe
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Volume confirmation: current 4h volume > 1.5x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or \
-           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]) or \
-           np.isnan(rsi[i]):
+        if np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or \
+           np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.3 * vol_avg_20_1d_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # 12h Donchian breakout/breakdown signals
-        breakout_up = close[i] > donch_high_12h_aligned[i-1]  # Break above 12h Donchian high
-        breakdown_down = close[i] < donch_low_12h_aligned[i-1]  # Break below 12h Donchian low
+        # Trend filter: 1d EMA50 direction
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # 6h momentum filter: RSI > 55 for bullish, RSI < 45 for bearish
-        rsi_bullish = rsi[i] > 55
-        rsi_bearish = rsi[i] < 45
+        # Breakout conditions
+        breakout_up = close[i] > H3_aligned[i]  # Price breaks above H3
+        breakdown_down = close[i] < L3_aligned[i]  # Price breaks below L3
         
         # Entry conditions
-        # Long: 12h Donchian breakout AND volume confirmation AND 6h bullish momentum
-        if breakout_up and vol_confirm and rsi_bullish and position != 1:
+        # Long: Breakout above H3 AND uptrend AND volume confirmation
+        if breakout_up and uptrend and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: 12h Donchian breakdown AND volume confirmation AND 6h bearish momentum
-        elif breakdown_down and vol_confirm and rsi_bearish and position != -1:
+        # Short: Breakdown below L3 AND downtrend AND volume confirmation
+        elif breakdown_down and downtrend and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite 12h Donchian break/breakdown (trend change)
-        elif position == 1 and breakdown_down:
+        # Exit: Opposite breakout or trend reversal
+        elif position == 1 and (close[i] < L3_aligned[i] or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and breakout_up:
+        elif position == -1 and (close[i] > H3_aligned[i] or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
