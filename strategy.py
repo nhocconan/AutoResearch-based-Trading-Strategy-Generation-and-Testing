@@ -1,109 +1,82 @@
 #!/usr/bin/env python3
 """
-4h_1d_cci_extreme_v1
-Strategy: 4h CCI extreme reversal with 1d trend filter
-Timeframe: 4h
+1d_1w_donchian_breakout_v1
+Strategy: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+Timeframe: 1d
 Leverage: 1.0
-Hypothesis: Uses CCI(20) extremes (>100 for short, <-100 for long) on 4h combined with 1d EMA200 trend filter and 1d ADX>25 for trend strength. Designed to capture mean reversals in strong trends while avoiding chop. Works in both bull/bear markets by following the higher timeframe trend. Target: 75-200 total trades over 4 years.
+Hypothesis: Uses Donchian channel breakouts on daily timeframe with weekly trend filter (price above/below weekly EMA20) and volume > 1.5x average to avoid false breakouts. Designed to capture strong trends in both bull and bear markets while minimizing false signals. Target: 20-50 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_cci_extreme_v1"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 200:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 4h CCI(20)
-    tp = (high + low + close) / 3.0
-    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    md = pd.Series(np.abs(tp - ma_tp)).rolling(window=20, min_periods=20).mean().values
-    cci = (tp - ma_tp) / (0.015 * md)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 1d ADX(14) for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Calculate average volume (20-period)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(cci[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(adx_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.30 if position == 1 else -0.30)
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(avg_volume[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
+        vol_ratio = volume[i] / avg_volume[i] if avg_volume[i] > 0 else 0
         
         # Trend filters
-        uptrend_1d = price_close > ema_200_1d_aligned[i]
-        downtrend_1d = price_close < ema_200_1d_aligned[i]
-        strong_trend = adx_aligned[i] > 25
+        uptrend_1w = price_close > ema_20_1w_aligned[i]
+        downtrend_1w = price_close < ema_20_1w_aligned[i]
         
-        # CCI extreme conditions
-        cci_overbought = cci[i] > 100
-        cci_oversold = cci[i] < -100
+        # Breakout conditions with volume confirmation
+        breakout_up = price_close > donchian_high[i-1] and vol_ratio > 1.5
+        breakout_down = price_close < donchian_low[i-1] and vol_ratio > 1.5
         
-        # Long: CCI oversold in uptrend with strong trend
-        long_signal = cci_oversold and uptrend_1d and strong_trend
-        
-        # Short: CCI overbought in downtrend with strong trend
-        short_signal = cci_overbought and downtrend_1d and strong_trend
-        
-        # Exit when CCI returns to neutral zone
-        exit_long = position == 1 and cci[i] > -50
-        exit_short = position == -1 and cci[i] < 50
+        # Exit when price returns to middle of Donchian channel
+        donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+        exit_long = position == 1 and price_close < donchian_mid
+        exit_short = position == -1 and price_close > donchian_mid
         
         # Trading logic
-        if long_signal and position != 1:
+        if breakout_up and uptrend_1w and position != 1:
             position = 1
-            signals[i] = 0.30
-        elif short_signal and position != -1:
+            signals[i] = 0.25
+        elif breakout_down and downtrend_1w and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -111,8 +84,8 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: Uses CCI(20) extremes (>100 for short, <-100 for long) on 4h combined with 1d EMA200 trend filter and 1d ADX>25 for trend strength. Designed to capture mean reversals in strong trends while avoiding chop. Works in both bull/bear markets by following the higher timeframe trend. Target: 75-200 total trades over 4 years.
+# Hypothesis: Uses Donchian channel breakouts on daily timeframe with weekly trend filter (price above/below weekly EMA20) and volume > 1.5x average to avoid false breakouts. Designed to capture strong trends in both bull and bear markets while minimizing false signals. Target: 20-50 trades over 4 years.
