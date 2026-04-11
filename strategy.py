@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ATR-based stoploss
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR-based stoploss
 # - Long: Price breaks above Donchian upper channel (20-period high) + volume > 1.5x 20-period average
 # - Short: Price breaks below Donchian lower channel (20-period low) + volume > 1.5x 20-period average
 # - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Donchian breakout
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
 # - Donchian channels provide clear structure for breakouts in both bull and bear markets
 # - Volume confirmation filters out weak breakouts and increases signal quality
 # - ATR stoploss manages risk during volatile periods
+# - This version adds 1d volume confirmation to reduce false breakouts and improve trade quality
 
-name = "12h_1d_donchian_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,11 +44,11 @@ def generate_signals(prices):
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute Donchian channels on 12h timeframe
+    # Pre-compute Donchian channels on 4h timeframe
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Pre-compute ATR for stoploss (12h timeframe)
+    # Pre-compute ATR for stoploss (4h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
