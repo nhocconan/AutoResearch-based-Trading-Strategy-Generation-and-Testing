@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 4h_1d_cci_rsi_volume_v2
-# Strategy: 4h CCI (Commodity Channel Index) combined with RSI and volume confirmation
-# Timeframe: 4h
+# 1d_1w_camarilla_pivot_volume_v2
+# Strategy: Daily Camarilla pivot reversal with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: CCI identifies cyclical overbought/oversold conditions. In ranging markets, 
-# CCI > 100 with RSI > 70 indicates overextended long (short signal), CCI < -100 with 
-# RSI < 30 indicates oversold short (long signal). Volume confirmation filters weak signals.
-# Works in both bull and bear markets by fading extremes during consolidation.
+# Hypothesis: In ranging markets, price reverses at Camarilla pivot levels (H3/L3). 
+# In trending markets, weekly EMA20 filters direction. Volume confirms institutional participation.
+# Designed for low frequency (<25/year) to minimize fee drag in bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_cci_rsi_volume_v2"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,57 +21,69 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price arrays
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # CCI calculation: Typical price, SMA, Mean Deviation
-    typical_price = (high + low + close) / 3.0
-    tp_series = pd.Series(typical_price)
-    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
-    mean_dev = tp_series.rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci = (typical_price - sma_tp.values) / (0.015 * mean_dev.values)
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # RSI calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
+    # Weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if any required data is invalid
-        if (np.isnan(cci[i]) or np.isnan(rsi.iloc[i]) or np.isnan(vol_avg_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+    for i in range(1, n):
+        # Skip first bar (need previous day for pivot)
+        if i == 0:
             continue
+            
+        # Daily Camarilla pivot levels (based on previous day)
+        phigh = high[i-1]
+        plow = low[i-1]
+        pclose = close[i-1]
+        diff = phigh - plow
         
-        # Mean reversion logic: fade extremes with volume confirmation
-        if (cci[i] > 100 and rsi.iloc[i] > 70 and vol_confirm[i] and position != -1):
-            # Overbought: short signal
-            position = -1
-            signals[i] = -0.25
-        elif (cci[i] < -100 and rsi.iloc[i] < 30 and vol_confirm[i] and position != 1):
-            # Oversold: long signal
-            position = 1
-            signals[i] = 0.25
-        # Exit when CCI returns to neutral zone
-        elif position == 1 and cci[i] >= -50:
+        # Camarilla levels
+        h3 = pclose + (diff * 1.1 / 4)
+        l3 = pclose - (diff * 1.1 / 4)
+        h4 = pclose + (diff * 1.1 / 2)
+        l4 = pclose - (diff * 1.1 / 2)
+        
+        # Volume confirmation: current volume > 1.5x 20-day average
+        if i >= 20:
+            vol_avg_20 = np.mean(volume[i-20:i])
+            vol_confirm = volume[i] > (1.5 * vol_avg_20)
+        else:
+            vol_confirm = False
+        
+        # Weekly trend filter
+        uptrend = ema_20_1w_aligned[i] > ema_20_1w_aligned[i-1] if not np.isnan(ema_20_1w_aligned[i]) else False
+        downtrend = ema_20_1w_aligned[i] < ema_20_1w_aligned[i-1] if not np.isnan(ema_20_1w_aligned[i]) else False
+        
+        # Entry logic: reversal at H3/L3 with volume and weekly trend alignment
+        if (close[i] <= h3 and close[i] > l3 and  # Between H3 and L3
+            vol_confirm and 
+            ((close[i] <= l3 and uptrend) or (close[i] >= h3 and downtrend)) and  # Reversal with trend
+            position == 0):
+            if close[i] <= l3:  # Near L3, go long in uptrend
+                position = 1
+                signals[i] = 0.25
+            else:  # Near H3, go short in downtrend
+                position = -1
+                signals[i] = -0.25
+        # Exit: price moves to H4/L4 or trend changes
+        elif position == 1 and (close[i] >= h4 or not uptrend):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and cci[i] <= 50:
+        elif position == -1 and (close[i] <= l4 or not downtrend):
             position = 0
             signals[i] = 0.0
         else:
