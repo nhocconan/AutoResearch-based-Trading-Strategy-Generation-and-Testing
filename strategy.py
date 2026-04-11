@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Camarilla pivot levels from 4h: fade at R3/S3, breakout at R4/S4
-# - Long: price breaks above R4 with volume confirmation and closes in upper half of 1h bar
-# - Short: price breaks below S4 with volume confirmation and closes in lower half of 1h bar
-# - Exit: price returns to R3/S3 levels (mean reversion at Camarilla levels)
-# - Uses 4h Camarilla levels calculated from prior 4h OHLC, aligned to 1h
-# - Session filter: 08-20 UTC to avoid low-volume noise
-# - Target: 15-37 trades/year (60-150 total over 4 years) to stay within fee drag limits
+# Hypothesis: 6h Williams %R mean reversion with 1d trend filter
+# - Long: Williams %R(14) < -80 (oversold) AND price > 1d EMA50 (uptrend)
+# - Short: Williams %R(14) > -20 (overbought) AND price < 1d EMA50 (downtrend)
+# - Exit: Williams %R returns to -50 level (mean reversion)
+# - Uses 6h Williams %R for timing, 1d EMA50 for trend filter
+# - Works in both bull and bear markets by fading extremes in direction of higher timeframe trend
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
 
-name = "1h_4h_camarilla_breakout_fade_v1"
-timeframe = "1h"
+name = "6h_1d_williamsr_meanreversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,110 +23,72 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 4h data ONCE before loop for Camarilla levels (MTF rule compliance)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Load 1d data ONCE before loop for EMA50 trend filter (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 4h Camarilla levels (based on prior 4h OHLC)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Pre-compute 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Camarilla levels: based on previous 4h bar's range
-    # R4 = close + 1.1*(high-low)*1.1/2
-    # R3 = close + 1.1*(high-low)*1.1/4
-    # S3 = close - 1.1*(high-low)*1.1/4
-    # S4 = close - 1.1*(high-low)*1.1/2
-    range_4h = high_4h - low_4h
-    camarilla_r4 = close_4h + 1.1 * range_4h * 1.1 / 2
-    camarilla_r3 = close_4h + 1.1 * range_4h * 1.1 / 4
-    camarilla_s3 = close_4h - 1.1 * range_4h * 1.1 / 4
-    camarilla_s4 = close_4h - 1.1 * range_4h * 1.1 / 2
-    
-    # Align Camarilla levels to 1h timeframe (use prior 4h bar's levels for current 4h period)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s4)
-    
-    # Pre-compute 1h volume confirmation (20-period average)
-    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    in_session = (hours >= 8) & (hours <= 20)
+    # Pre-compute 6h Williams %R(14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(volume_sma_20[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade during 08-20 UTC
-        if not in_session[i]:
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
-        high_price = high[i]
-        low_price = low[i]
-        volume_current = volume[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Williams %R levels
+        wr = williams_r[i]
         
-        # Price position relative to Camarilla levels
-        r4 = camarilla_r4_aligned[i]
-        r3 = camarilla_r3_aligned[i]
-        s3 = camarilla_s3_aligned[i]
-        s4 = camarilla_s4_aligned[i]
-        
-        # 1h bar close position (upper/lower half)
-        bar_range = high_price - low_price
-        if bar_range > 0:
-            close_position = (close_price - low_price) / bar_range  # 0=low, 1=high
-        else:
-            close_position = 0.5
+        # Trend filter: price vs 1d EMA50
+        price_above_ema = close_price > ema50_1d_aligned[i]
+        price_below_ema = close_price < ema50_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price breaks above R4 with volume and closes in upper half
-        if close_price > r4 and vol_confirm and close_position > 0.5:
+        # Long: oversold AND uptrend (price > EMA50)
+        if wr < -80 and price_above_ema:
             enter_long = True
         
-        # Short breakout: price breaks below S4 with volume and closes in lower half
-        if close_price < s4 and vol_confirm and close_position < 0.5:
+        # Short: overbought AND downtrend (price < EMA50)
+        if wr > -20 and price_below_ema:
             enter_short = True
         
-        # Exit conditions: mean reversion at R3/S3 levels
+        # Exit conditions: mean reversion at Williams %R = -50
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price drops back to R3
-            exit_long = close_price <= r3
+            # Exit long when Williams %R returns to -50 (mean reversion)
+            exit_long = wr >= -50
         elif position == -1:
-            # Exit short if price rises back to S3
-            exit_short = close_price >= s3
+            # Exit short when Williams %R returns to -50 (mean reversion)
+            exit_short = wr <= -50
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -135,6 +97,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
