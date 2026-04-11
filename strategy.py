@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 24:
         return np.zeros(n)
     
     # Price arrays
@@ -33,7 +33,7 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Resistance levels (tighter levels for fewer trades)
+    # Resistance levels
     h1_1d = close_1d + 1.1 * range_1d / 6
     h2_1d = close_1d + 1.1 * range_1d / 4
     h3_1d = close_1d + 1.1 * range_1d / 2
@@ -43,7 +43,7 @@ def generate_signals(prices):
     l2_1d = close_1d - 1.1 * range_1d / 4
     l3_1d = close_1d - 1.1 * range_1d / 2
     
-    # Align 1d levels to 12h
+    # Align 1d levels to 4h
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     h1_aligned = align_htf_to_ltf(prices, df_1d, h1_1d)
     h2_aligned = align_htf_to_ltf(prices, df_1d, h2_1d)
@@ -52,12 +52,12 @@ def generate_signals(prices):
     l2_aligned = align_htf_to_ltf(prices, df_1d, l2_1d)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    # 1d volume confirmation: current volume > 24-period average
+    # 1d volume confirmation: current volume > 10-period average
     volume_1d = df_1d['volume'].values
-    vol_avg_24 = pd.Series(volume_1d).rolling(window=24, min_periods=24).mean().values
-    vol_avg_24_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_24)
+    vol_avg_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_avg_10_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10)
     
-    # 12h ATR for volatility filter
+    # 4h ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -68,21 +68,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 24 to ensure sufficient data
-    for i in range(24, n):
+    # Start from index 10 to ensure sufficient data
+    for i in range(10, n):
         # Skip if any required data is invalid
         if (np.isnan(pivot_aligned[i]) or np.isnan(h1_aligned[i]) or np.isnan(l1_aligned[i]) or
-            np.isnan(vol_avg_24_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(vol_avg_10_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Current 1d volume (aligned)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirm = vol_1d_current > vol_avg_24_aligned[i]
+        vol_confirm = vol_1d_current > vol_avg_10_aligned[i]
         
-        # Volatility filter: only trade when ATR > 50-period average
-        atr_avg_50 = pd.Series(atr).rolling(window=50, min_periods=50).mean()[i]
-        vol_filter = atr[i] > atr_avg_50
+        # Volatility filter: only trade when ATR > 20-period average
+        atr_avg_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean()[i]
+        vol_filter = atr[i] > atr_avg_20
         
         # Price levels for current bar
         h1 = h1_aligned[i]
