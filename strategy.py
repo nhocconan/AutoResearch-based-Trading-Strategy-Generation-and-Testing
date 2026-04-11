@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v2"
+name = "4h_1d_camarilla_breakout_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,8 +34,6 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     
     # Resistance levels: P + (Range * multiplier / 11)
-    # Key levels: R3 = P + (Range * 1.1), R4 = P + (Range * 1.5)
-    # Support levels: S3 = P - (Range * 1.1), S4 = P - (Range * 1.5)
     r3 = pivot + (range_1d * 1.1 / 11.0)
     r4 = pivot + (range_1d * 1.5 / 11.0)
     s3 = pivot - (range_1d * 1.1 / 11.0)
