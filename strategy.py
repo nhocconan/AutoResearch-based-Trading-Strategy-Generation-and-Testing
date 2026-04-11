@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1d ADX regime filter
-# - Bull Power = High - EMA13(close), Bear Power = EMA13(close) - Low
-# - Trend filter: 1d ADX > 25 (strong trend) enables Elder Ray signals
-# - Long: Bull Power > 0 AND Bear Power < 0 AND 1d ADX > 25
-# - Short: Bull Power < 0 AND Bear Power > 0 AND 1d ADX > 25
-# - Exit: Opposite Elder Ray signal OR 1d ADX < 20 (trend weakens)
-# - Works in both bull and bear markets by trading with the 1d trend using 6h momentum
+# Hypothesis: 12h Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4
+# - Long: price breaks above R4 with volume confirmation and closes in upper half of 12h bar
+# - Short: price breaks below S4 with volume confirmation and closes in lower half of 12h bar
+# - Exit: price returns to R3/S3 levels (mean reversion at Camarilla levels)
+# - Uses 1d Camarilla levels calculated from prior 1d OHLC, aligned to 12h
+# - Works in both bull and bear markets by fading extremes and capturing breakouts
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
 
-name = "6h_1d_elder_ray_adx_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_fade_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,102 +27,89 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for ADX and EMA13 (MTF rule compliance)
+    # Load 1d data ONCE before loop for Camarilla levels (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough for ADX calculation
+    if len(df_1d) < 2:
         return signals
     
-    # Pre-compute 1d indicators
+    # Pre-compute 1d Camarilla levels (based on prior day OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA13 for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.1*(high-low)*1.1/2
+    # R3 = close + 1.1*(high-low)*1.1/4
+    # S3 = close - 1.1*(high-low)*1.1/4
+    # S4 = close - 1.1*(high-low)*1.1/2
+    range_1d = high_1d - low_1d
+    camarilla_r4 = close_1d + 1.1 * range_1d * 1.1 / 2
+    camarilla_r3 = close_1d + 1.1 * range_1d * 1.1 / 4
+    camarilla_s3 = close_1d - 1.1 * range_1d * 1.1 / 4
+    camarilla_s4 = close_1d - 1.1 * range_1d * 1.1 / 2
     
-    # Calculate 1d ADX (14-period)
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    
-    # Align 1d indicators to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Pre-compute 6h Elder Ray components
-    # Bull Power = High - EMA13(close)
-    # Bear Power = EMA13(close) - Low
-    ema13_6h = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema13_6h
-    bear_power = ema13_6h - low
+    # Pre-compute 12h volume confirmation (20-period average)
+    volume = prices['volume'].values
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(adx_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
-        ema13_1d_val = ema13_1d_aligned[i]
-        adx_val = adx_aligned[i]
-        bull_power_val = bull_power[i]
-        bear_power_val = bear_power[i]
+        close_price = close[i]
+        high_price = high[i]
+        low_price = low[i]
+        volume_current = volume[i]
         
-        # Regime filter: 1d ADX > 25 for strong trend
-        strong_trend = adx_val > 25
-        weak_trend = adx_val < 20  # Exit when trend weakens
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Elder Ray signals
-        bullish_momentum = bull_power_val > 0 and bear_power_val < 0
-        bearish_momentum = bull_power_val < 0 and bear_power_val > 0
+        # Price position relative to Camarilla levels
+        r4 = camarilla_r4_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        s4 = camarilla_s4_aligned[i]
+        
+        # 12h bar close position (upper/lower half)
+        bar_range = high_price - low_price
+        if bar_range > 0:
+            close_position = (close_price - low_price) / bar_range  # 0=low, 1=high
+        else:
+            close_position = 0.5
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Bullish momentum AND strong 1d trend
-        if bullish_momentum and strong_trend:
+        # Long breakout: price breaks above R4 with volume and closes in upper half
+        if close_price > r4 and vol_confirm and close_position > 0.5:
             enter_long = True
         
-        # Short: Bearish momentum AND strong 1d trend
-        if bearish_momentum and strong_trend:
+        # Short breakout: price breaks below S4 with volume and closes in lower half
+        if close_price < s4 and vol_confirm and close_position < 0.5:
             enter_short = True
         
-        # Exit conditions
+        # Exit conditions: mean reversion at R3/S3 levels
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long: bearish momentum OR trend weakens
-            exit_long = bearish_momentum or weak_trend
+            # Exit long if price drops back to R3
+            exit_long = close_price <= r3
         elif position == -1:
-            # Exit short: bullish momentum OR trend weakens
-            exit_short = bullish_momentum or weak_trend
+            # Exit short if price rises back to S3
+            exit_short = close_price >= s3
         
         # Trading logic
         if enter_long and position != 1:
