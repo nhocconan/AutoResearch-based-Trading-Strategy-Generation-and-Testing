@@ -1,19 +1,44 @@
 #!/usr/bin/env python3
 """
-1d_1w_rsi_reversion_volume
-Strategy: 1d RSI mean reversion with volume confirmation and weekly trend filter
-Timeframe: 1d
+6h_12h_1d_williams_alligator_v1
+Strategy: 6s Williams Alligator (Jaw/Teeth/Lips) with 12h/1d trend filter and volume confirmation
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses daily RSI(14) for mean reversion entries (long when RSI<30, short when RSI>70) with volume confirmation (>1.5x average volume) and filtered by weekly EMA50 trend. Designed to capture reversals in both bull and bear markets by combining oversold/overbought conditions with trend alignment. Weekly EMA50 ensures we only trade in the direction of the higher timeframe trend, reducing false signals in choppy markets. Target: 20-60 total trades over 4 years.
+Hypothesis: Williams Alligator identifies trending vs ranging markets. In trending markets (JAW > TEETH > LIPS for down, JAW < TEETH < LIPS for up), trade in direction of trend with 12h/1d confirmation. In ranging markets (intertwined lines), stay flat. Volume confirmation reduces false signals. Designed to work in both bull (catch trends) and bear (avoid whipsaw via alignment) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_reversion_volume"
-timeframe = "1d"
+name = "6h_12h_1d_williams_alligator_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def williams_alligator(high, low, close):
+    """Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMMA"""
+    median_price = (high + low) / 2
+    
+    def smma(series, period):
+        sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
+        smma_vals = np.full_like(series, np.nan, dtype=float)
+        for i in range(len(series)):
+            if i < period - 1:
+                smma_vals[i] = np.nan
+            elif i == period - 1:
+                smma_vals[i] = sma[i]
+            else:
+                if np.isnan(smma_vals[i-1]) or np.isnan(sma[i]):
+                    smma_vals[i] = np.nan
+                else:
+                    smma_vals[i] = (smma_vals[i-1] * (period - 1) + sma[i]) / period
+        return smma_vals
+    
+    jaw = smma(median_price, 13)  # Blue line
+    teeth = smma(median_price, 8)  # Red line
+    lips = smma(median_price, 5)   # Green line
+    
+    return jaw, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,68 +52,69 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_12h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Williams Alligator on 6h
+    jaw, teeth, lips = williams_alligator(high, low, close)
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume confirmation
+    vol_confirm = volume > vol_avg  # Above average volume
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend_1w = price_close > ema_50_1w_aligned[i]
-        downtrend_1w = price_close < ema_50_1w_aligned[i]
+        # Williams Alligator conditions
+        # Trending up: Lips < Teeth < Jaw (green < red < blue)
+        trending_up = lips[i] < teeth[i] < jaw[i]
+        # Trending down: Jaw < Teeth < Lips (blue < red < green)
+        trending_down = jaw[i] < teeth[i] < lips[i]
+        # Ranging: lines intertwined (not clearly separated)
+        ranging = not (trending_up or trending_down)
         
-        # RSI mean reversion conditions
-        oversold = rsi[i] < 30
-        overbought = rsi[i] > 70
+        # 12h/1d trend alignment
+        uptrend_12h = price_close > ema_50_12h_aligned[i]
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_12h = price_close < ema_50_12h_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Volume confirmation
-        vol_confirmed = vol_spike[i]
+        # Entry conditions
+        long_entry = trending_up and uptrend_12h and uptrend_1d and vol_confirm[i]
+        short_entry = trending_down and downtrend_12h and downtrend_1d and vol_confirm[i]
         
-        # Long: oversold RSI with volume in uptrend
-        long_signal = oversold and vol_confirmed and uptrend_1w
-        
-        # Short: overbought RSI with volume in downtrend
-        short_signal = overbought and vol_confirmed and downtrend_1w
-        
-        # Exit when RSI returns to neutral zone (40-60) or opposite extreme
-        exit_long = position == 1 and (rsi[i] > 40 or rsi[i] > 60)
-        exit_short = position == -1 and (rsi[i] < 60 or rsi[i] < 40)
+        # Exit when market goes ranging or trend breaks
+        exit_long = position == 1 and (ranging or not uptrend_12h or not uptrend_1d)
+        exit_short = position == -1 and (ranging or not downtrend_12h or not downtrend_1d)
         
         # Trading logic
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
