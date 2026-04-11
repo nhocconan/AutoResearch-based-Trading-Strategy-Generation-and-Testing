@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# 12h_1d_camarilla_breakout_volume_v1
-# Strategy: 12h breakout at Camarilla levels calculated from 1d close, with volume confirmation
-# Timeframe: 12h
+# 4h_1d_camarilla_breakout_v20
+# Strategy: 4h breakout at Camarilla levels calculated from 1d close, with volume confirmation and ADX trend filter
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels derived from daily price action provide strong support/resistance.
-# Breakouts above resistance or below support with above-average volume capture momentum.
-# Volume confirmation reduces false breakouts. Works in both bull and bear markets by
-# following the direction of the breakout. Target: 12-37 trades/year.
+# Hypothesis: Camarilla levels from daily price action provide strong support/resistance.
+# Breakouts above resistance or below support with above-average volume and trending market (ADX>25) capture momentum.
+# Works in both bull and bear markets by following the direction of the breakout. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v20"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -59,7 +58,7 @@ def generate_signals(prices):
     s3 = close_1d - range_1d * 1.1 / 4
     s4 = close_1d - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 12h (using previous 1d bar's levels)
+    # Align Camarilla levels to 4h (using previous 1d bar's levels)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
@@ -74,13 +73,42 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
+    # ADX trend filter (14-period)
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with original index
+    
+    # Calculate Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    
+    # DI values
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i])):
+            np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -88,16 +116,19 @@ def generate_signals(prices):
         vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
         vol_confirm = vol_1d_current > vol_avg_20_aligned[i]
         
+        # ADX trend filter: only trade in trending markets
+        trend_filter = adx[i] > 25
+        
         # Breakout conditions using Camarilla levels
         breakout_above_r1 = close[i] > r1_aligned[i-1]  # break above R1
         breakout_below_s1 = close[i] < s1_aligned[i-1]  # break below S1
         
-        long_signal = breakout_above_r1 and vol_confirm
-        short_signal = breakout_below_s1 and vol_confirm
+        long_signal = breakout_above_r1 and vol_confirm and trend_filter
+        short_signal = breakout_below_s1 and vol_confirm and trend_filter
         
-        # Exit conditions: opposite breakout or volume failure
-        long_exit = close[i] < s1_aligned[i-1] or not vol_confirm
-        short_exit = close[i] > r1_aligned[i-1] or not vol_confirm
+        # Exit conditions: opposite breakout or volume failure or trend weakness
+        long_exit = close[i] < s1_aligned[i-1] or not vol_confirm or adx[i] < 20
+        short_exit = close[i] > r1_aligned[i-1] or not vol_confirm or adx[i] < 20
         
         if long_signal and position != 1:
             position = 1
