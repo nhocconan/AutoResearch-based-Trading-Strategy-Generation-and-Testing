@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_volume_v1"
+name = "4h_1d_keltner_squeeze_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,32 +25,49 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return signals
     
-    # Calculate daily OHLC for Camarilla levels
+    # Calculate daily OHLC for Keltner Channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: H3, L3 (tighter than H4/L4 for more entries)
-    hl_range = high_1d - low_1d
-    camarilla_h3 = close_1d + 1.1 * hl_range / 4
-    camarilla_l3 = close_1d - 1.1 * hl_range / 4
+    # Keltner Channels: EMA(20) +/- ATR(10)*2
+    close_series = pd.Series(close_1d)
+    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Volume confirmation: 10-period average on daily volume
+    keltner_upper = ema_20 + 2 * atr_10
+    keltner_lower = ema_20 - 2 * atr_10
+    
+    # Bollinger Bands: SMA(20) +/- 2*STDEV(20)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    
+    # Squeeze condition: Bollinger Bands inside Keltner Channels
+    squeeze = (bb_upper <= keltner_upper) & (bb_lower >= keltner_lower)
+    
+    # Align all indicators to 4h timeframe
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
+    
+    # Daily volume for confirmation
     volume_sma_10 = pd.Series(df_1d['volume'].values).rolling(window=10, min_periods=10).mean().values
     volume_sma_10_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_10)
     
-    # Trend filter: 20-period EMA on daily close
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
-    
-    for i in range(60, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_sma_10_aligned[i]) or np.isnan(ema_20_aligned[i])):
+        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
+            np.isnan(squeeze_aligned[i]) or np.isnan(ema_20_aligned[i]) or
+            np.isnan(atr_10_aligned[i]) or np.isnan(volume_sma_10_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -60,27 +77,43 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 10-period daily average
         vol_confirm = volume_current > 1.5 * volume_sma_10_aligned[i]
         
-        # Trend filter: only trade in direction of 20 EMA
-        above_ema = price_close > ema_20_aligned[i]
-        below_ema = price_close < ema_20_aligned[i]
+        # Squeeze breakout: price breaks out of Bollinger Bands after squeeze
+        # Need previous day's BB values to detect breakout
+        if i == 100:
+            prev_bb_upper = bb_upper[0] if not np.isnan(bb_upper[0]) else 0
+            prev_bb_lower = bb_lower[0] if not np.isnan(bb_lower[0]) else 0
+        else:
+            prev_bb_upper = bb_upper[i-1] if not np.isnan(bb_upper[i-1]) else 0
+            prev_bb_lower = bb_lower[i-1] if not np.isnan(bb_lower[i-1]) else 0
+        
+        # Breakout conditions
+        breakout_up = price_close > bb_upper[i-1] if i > 0 and not np.isnan(bb_upper[i-1]) else False
+        breakout_down = price_close < bb_lower[i-1] if i > 0 and not np.isnan(bb_lower[i-1]) else False
+        
+        # Only trade breakouts that occur after a squeeze
+        squeeze_active = squeeze_aligned[i] if not np.isnan(squeeze_aligned[i]) else False
+        squeeze_recent = False
+        # Check if squeeze was active in the last 3 days
+        for j in range(1, 4):
+            if i - j >= 0 and not np.isnan(squeeze_aligned[i-j]) and squeeze_aligned[i-j]:
+                squeeze_recent = True
+                break
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H3 + volume confirmation + above EMA20
-        if price_close > camarilla_h3_aligned[i] and vol_confirm and above_ema:
+        # Long: Breakout above BB upper after squeeze + volume + above EMA20
+        if breakout_up and squeeze_recent and vol_confirm and price_close > ema_20_aligned[i]:
             enter_long = True
         
-        # Short: Price breaks below Camarilla L3 + volume confirmation + below EMA20
-        if price_close < camarilla_l3_aligned[i] and vol_confirm and below_ema:
+        # Short: Breakout below BB lower after squeeze + volume + below EMA20
+        if breakout_down and squeeze_recent and vol_confirm and price_close < ema_20_aligned[i]:
             enter_short = True
         
-        # Exit conditions: price returns to the day's close (pivot point)
-        prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
-        prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close_1d)
-        exit_long = price_close < prev_close_aligned[i]
-        exit_short = price_close > prev_close_aligned[i]
+        # Exit conditions: price returns to EMA20 or opposite Bollinger Band
+        exit_long = price_close < ema_20_aligned[i] or price_close < bb_lower[i]
+        exit_short = price_close > ema_20_aligned[i] or price_close > bb_upper[i]
         
         # Trading logic
         if enter_long and position != 1:
@@ -101,8 +134,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla H3/L3 breakout on daily timeframe with volume confirmation and EMA20 trend filter.
-# Uses tighter Camarilla H3/L3 levels (Close ± 1.1*(High-Low)/4) for more frequent but still filtered entries.
-# Works in both bull (breakouts above H3) and bear (breakdowns below L3) by capturing institutional activity.
-# Volume confirmation (>1.5x 10-day average) ensures participation. EMA20 filter avoids counter-trend trades.
-# Position size 0.25 balances risk and return. Target: 20-50 trades/year to minimize fee drag.
+# Hypothesis: Keltner Squeeze breakout on daily timeframe with volume confirmation and EMA20 trend filter.
+# The squeeze occurs when Bollinger Bands contract inside Keltner Channels, indicating low volatility.
+# Breakouts from the squeeze often lead to strong directional moves. Works in both bull and bear markets
+# by capturing volatility expansion after contraction. Volume confirmation ensures participation.
+# EMA20 filter avoids counter-trend trades. Position size 0.25 balances risk and return.
+# Target: 20-40 trades/year to minimize fee drag while capturing significant moves.
