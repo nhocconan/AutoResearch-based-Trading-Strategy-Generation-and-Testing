@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend direction with 1d volume spike and 1d Bollinger Band squeeze filter
-# - Long: KAMA(10,2,30) rising, volume > 2.0x 20-period average, BB Width < 20th percentile (low volatility squeeze)
-# - Short: KAMA falling, volume > 2.0x 20-period average, BB Width < 20th percentile
-# - Exit: KAMA direction reverses or ATR-based stop (2.0 ATR)
+# Hypothesis: 4h Donchian(20) breakout + 1d volume confirmation + 1h chop regime filter
+# - Long: price breaks above Donchian(20) high + 1d volume > 1.5x 20-period avg + 1h chop < 61.8 (trending)
+# - Short: price breaks below Donchian(20) low + 1d volume > 1.5x 20-period avg + 1h chop < 61.8 (trending)
+# - Exit: price returns to Donchian(20) midpoint or ATR-based stop (2.0 ATR)
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - KAMA adapts to market noise, effective in both trending and ranging markets
-# - Volume spike confirms institutional participation
-# - Bollinger Band squeeze identifies low volatility periods preceding breakouts
+# - Target: 20-50 trades/year (80-200 total over 4 years) to stay within fee drag limits
+# - Donchian breakouts capture strong momentum moves
+# - Volume confirmation ensures institutional participation
+# - Chop filter avoids whipsaw in ranging markets
 
-name = "12h_1d_kama_volume_bbwidth_v1"
-timeframe = "12h"
+name = "4h_1d_1h_donchian_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,70 +31,62 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     entry_price = 0.0
     
-    # Load 1d data ONCE before loop for KAMA, volume, and Bollinger Bands
+    # Load 1d data ONCE before loop for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d KAMA(10,2,30)
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, 10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close_1d, 1)), axis=0)  # 10-period sum of absolute changes
-    # Pad the beginning with zeros for alignment
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing Constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # Start with first close
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Align 1d KAMA to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Pre-compute 1d KAMA previous value for direction detection
-    kama_prev = np.roll(kama_aligned, 1)
-    kama_prev[0] = kama_aligned[0]
-    
-    # Pre-compute 1d volume confirmation (20-period average)
+    # Pre-compute 1d volume SMA(20)
     volume_1d = df_1d['volume'].values
     volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute 1d Bollinger Band Width (20,2)
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    # Handle division by zero
-    bb_width = np.where(bb_middle == 0, np.nan, bb_width)
+    # Load 1h data ONCE before loop for chop regime filter
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
+        return signals
     
-    # Align 1d BB Width to 12h timeframe
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    # Pre-compute 1h Chopiness Index(14)
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # Calculate 20th percentile of BB Width for squeeze filter (using expanding window)
-    bb_width_percentile_20 = np.full_like(bb_width_aligned, np.nan)
-    for i in range(len(bb_width_aligned)):
-        if i >= 20:  # Need at least 20 values for percentile
-            valid_values = bb_width_aligned[max(0, i-100):i+1]  # Use last 100 values or available
-            valid_values = valid_values[~np.isnan(valid_values)]
-            if len(valid_values) >= 20:
-                bb_width_percentile_20[i] = np.percentile(valid_values, 20)
+    # True Range
+    tr_1h = np.maximum(high_1h - low_1h, np.maximum(np.abs(high_1h - np.roll(close_1h, 1)), np.abs(low_1h - np.roll(close_1h, 1))))
+    tr_1h[0] = high_1h[0] - low_1h[0]
     
-    # Pre-compute ATR for stoploss (12h timeframe)
+    # Sum of TR over 14 periods
+    tr_sum_14 = pd.Series(tr_1h).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh_14 = pd.Series(high_1h).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low_1h).rolling(window=14, min_periods=14).min().values
+    
+    # Chopiness Index = 100 * log10(tr_sum_14 / (hh_14 - ll_14)) / log10(14)
+    # Avoid division by zero and log of zero
+    hl_range = hh_14 - ll_14
+    chop_raw = np.where((hl_range > 0) & (tr_sum_14 > 0), 
+                        100 * np.log10(tr_sum_14 / hl_range) / np.log10(14), 
+                        50.0)  # neutral value when undefined
+    chopiness = chop_raw
+    
+    # Align 1h chopiness to 4h timeframe
+    chopiness_aligned = align_htf_to_ltf(prices, df_1h, chopiness)
+    
+    # Pre-compute ATR for stoploss (4h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Pre-compute Donchian channels (20-period) for 4h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+    
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(kama_prev[i]) or np.isnan(volume_sma_20_aligned[i]) or
-            np.isnan(bb_width_aligned[i]) or np.isnan(bb_width_percentile_20[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(volume_sma_20_aligned[i]) or np.isnan(chopiness_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
@@ -102,26 +94,27 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # KAMA values
-        kama_current = kama_aligned[i]
-        kama_previous = kama_prev[i]
+        # Donchian levels
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        mid_channel = donchian_mid[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average
-        vol_confirm = volume_current > 2.0 * volume_sma_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
-        # Bollinger Band squeeze filter: BB Width < 20th percentile (low volatility)
-        bb_squeeze = bb_width_aligned[i] < bb_width_percentile_20[i]
+        # Regime filter: 1h chop < 61.8 (trending market)
+        chop_filter = chopiness_aligned[i] < 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: KAMA rising + volume spike + BB squeeze
-        if kama_current > kama_previous and vol_confirm and bb_squeeze:
+        # Long breakout: price closes above upper Donchian channel
+        if close_price > upper_channel and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short: KAMA falling + volume spike + BB squeeze
-        if kama_current < kama_previous and vol_confirm and bb_squeeze:
+        # Short breakout: price closes below lower Donchian channel
+        if close_price < lower_channel and vol_confirm and chop_filter:
             enter_short = True
         
         # Exit conditions
@@ -129,11 +122,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if KAMA reverses or ATR-based stop
-            exit_long = (kama_current < kama_previous) or (close_price <= entry_price - 2.0 * atr_14[i])
+            # Exit long if price returns to midpoint or ATR-based stop
+            exit_long = (close_price <= mid_channel) or (close_price <= entry_price - 2.0 * atr_14[i])
         elif position == -1:
-            # Exit short if KAMA reverses or ATR-based stop
-            exit_short = (kama_current > kama_previous) or (close_price >= entry_price + 2.0 * atr_14[i])
+            # Exit short if price returns to midpoint or ATR-based stop
+            exit_short = (close_price >= mid_channel) or (close_price >= entry_price + 2.0 * atr_14[i])
         
         # Track entry price for stoploss calculation
         if enter_long or enter_short:
