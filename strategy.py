@@ -1,19 +1,18 @@
-#!/usr/bin/env python3
-# 4h_1d_donchian_volume_chop_v1
-# Strategy: 4h Donchian(20) breakout with volume confirmation and chop regime filter
-# Timeframe: 4h
+# 6h_1w_camarilla_breakout_volume_v1
+# Strategy: 6h Camarilla breakout with weekly trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture momentum in trending markets, while chop filter avoids false signals in ranging conditions.
-# Volume confirmation ensures breakouts are supported by participation. Designed to work in both bull (long breakouts) and bear (short breakouts).
-# Uses 1-day Chop Index (14) to filter regimes: < 38.2 = trend (follow breakout), > 61.8 = range (avoid breakouts).
-# Target: 20-40 trades/year to minimize fee drag.
+# Hypothesis: Camarilla pivot levels (R4/S4) act as strong support/resistance. Breakouts beyond these levels
+# with volume confirmation indicate institutional interest. Weekly trend filter ensures we only trade
+# in the direction of the higher timeframe trend, reducing false positives. Works in both bull and bear
+# markets by adapting to the weekly trend direction.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_volume_chop_v1"
-timeframe = "4h"
+name = "6h_1w_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,53 +26,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d Chop Index (14) - measures trend vs ranging
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # ATR(14)
-    atr_period = 14
-    atr = np.zeros(len(close_1d))
-    atr[:atr_period] = np.nan
-    if len(close_1d) > atr_period:
-        atr[atr_period] = np.nanmean(tr[1:atr_period+1])
-        for i in range(atr_period+1, len(close_1d)):
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Chop Index = 100 * log10(sum(TR14)/(ATR14 * n)) / log10(n)
-    chop = np.full(len(close_1d), np.nan)
-    for i in range(atr_period, len(close_1d)):
-        if not np.isnan(atr[i]) and atr[i] > 0:
-            sum_tr = np.nansum(tr[i-atr_period+1:i+1])
-            chop[i] = 100 * np.log10(sum_tr / (atr[i] * atr_period)) / np.log10(atr_period)
+    # Calculate Camarilla levels using previous day's OHLC
+    # Camarilla formula: 
+    # R4 = Close + ((High - Low) * 1.1 / 2)
+    # R3 = Close + ((High - Low) * 1.1 / 4)
+    # R2 = Close + ((High - Low) * 1.1 / 6)
+    # R1 = Close + ((High - Low) * 1.1 / 12)
+    # S1 = Close - ((High - Low) * 1.1 / 12)
+    # S2 = Close - ((High - Low) * 1.1 / 6)
+    # S3 = Close - ((High - Low) * 1.1 / 4)
+    # S4 = Close - ((High - Low) * 1.1 / 2)
     
-    # Chop regime: < 38.2 = trend, > 61.8 = range
-    chop_regime = chop  # will align and use thresholds
+    # We need previous day's data, so we shift by 1
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align Chop to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
+    # Calculate Camarilla levels
+    rang = prev_high - prev_low
+    r4 = prev_close + (rang * 1.1 / 2)
+    r3 = prev_close + (rang * 1.1 / 4)
+    s3 = prev_close - (rang * 1.1 / 4)
+    s4 = prev_close - (rang * 1.1 / 2)
     
-    # Donchian(20) on 4h
-    lookback = 20
-    highest = np.full(n, np.nan)
-    lowest = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        highest[i] = np.max(high[i-lookback+1:i+1])
-        lowest[i] = np.min(low[i-lookback+1:i+1])
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -83,31 +80,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(lookback, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(chop_aligned[i]) or np.isnan(highest[i]) or np.isnan(lowest[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(s4_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Chop regime filter: only trade in trending markets (Chop < 38.2)
-        is_trending = chop_aligned[i] < 38.2
+        # Determine weekly trend
+        uptrend_weekly = close[i] > ema_21_1w_aligned[i]
+        downtrend_weekly = close[i] < ema_21_1w_aligned[i]
         
-        # Breakout conditions
-        long_breakout = close[i] > highest[i-1]  # break above prior 20-period high
-        short_breakout = close[i] < lowest[i-1]  # break below prior 20-period low
-        
-        # Entry logic: breakout + volume + trend regime
-        if long_breakout and vol_confirm[i] and is_trending and position != 1:
+        # Entry logic: Camarilla breakout with volume and weekly trend alignment
+        # Long: break above R4 in uptrend OR break above R3 in strong uptrend
+        # Short: break below S4 in downtrend OR break below S3 in strong downtrend
+        if ((close[i] > r4_aligned[i] and uptrend_weekly) or 
+            (close[i] > r3_aligned[i] and uptrend_weekly and vol_confirm[i])) and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and vol_confirm[i] and is_trending and position != -1:
+        elif ((close[i] < s4_aligned[i] and downtrend_weekly) or 
+              (close[i] < s3_aligned[i] and downtrend_weekly and vol_confirm[i])) and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: opposite breakout or chop regime shifts to range
-        elif position == 1 and (short_breakout or chop_aligned[i] > 61.8):
+        # Exit: price returns to opposite side of Camarilla bands or trend change
+        elif position == 1 and (close[i] < s3_aligned[i] or not uptrend_weekly):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (long_breakout or chop_aligned[i] > 61.8):
+        elif position == -1 and (close[i] > r3_aligned[i] or not downtrend_weekly):
             position = 0
             signals[i] = 0.0
         else:
