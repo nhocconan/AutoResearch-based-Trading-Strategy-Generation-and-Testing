@@ -1,89 +1,117 @@
 #!/usr/bin/env python3
-# 4h_12h_adx_trend_v1
-# Strategy: 4h trend following with ADX filter and 12h EMA trend confirmation
-# Timeframe: 4h
+# 1h_4h_1d_camarilla_range_v1
+# Strategy: 1h mean reversion with 4h/1d Camarilla levels and volume filter
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: ADX > 25 indicates strong trend; 12h EMA confirms higher timeframe direction.
-# Long when ADX > 25, price > 12h EMA, and price > 20-period high; short when ADX > 25, price < 12h EMA, and price < 20-period low.
-# Designed for low frequency (15-25 trades/year) to minimize fee drag in trending markets.
+# Hypothesis: Price reverts to mean from extreme Camarilla levels (H3/L3) with volume confirmation.
+# Works in both bull/bear markets by fading extremes. Uses 4h for direction filter, 1d for stronger S/R.
+# Target: 15-30 trades/year (60-120 over 4 years) to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_adx_trend_v1"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_range_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 30:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # ADX calculation
-    period = 14
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
-    tr = np.insert(tr, 0, 0)
+    # 4h Camarilla levels (based on previous day's range)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean()
-    plus_di = 100 * (pd.Series(plus_dm).rolling(window=period, min_periods=period).sum() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).rolling(window=period, min_periods=period).sum() / atr)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).rolling(window=period, min_periods=period).mean()
+    # Calculate Camarilla for each 4h bar using prior 4h bar's range
+    h3_4h = np.zeros_like(close_4h)
+    l3_4h = np.zeros_like(close_4h)
+    for i in range(1, len(close_4h)):
+        range_ = high_4h[i-1] - low_4h[i-1]
+        h3_4h[i] = close_4h[i-1] + range_ * 1.1 / 6
+        l3_4h[i] = close_4h[i-1] - range_ * 1.1 / 6
     
-    # Price channels for entry
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    h3_4h_aligned = align_htf_to_ltf(prices, df_4h, h3_4h)
+    l3_4h_aligned = align_htf_to_ltf(prices, df_4h, l3_4h)
+    
+    # 1d Camarilla levels (more significant S/R)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    h3_1d = np.zeros_like(close_1d)
+    l3_1d = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        range_ = high_1d[i-1] - low_1d[i-1]
+        h3_1d[i] = close_1d[i-1] + range_ * 1.1 / 6
+        l3_1d[i] = close_1d[i-1] - range_ * 1.1 / 6
+    
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    
+    # Volume filter: 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
-        # Skip if any required data is invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(adx.iloc[i]) or 
-            np.isnan(high_20.iloc[i]) or np.isnan(low_20.iloc[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+    for i in range(20, n):  # Start after warmup
+        # Skip if any data invalid
+        if (np.isnan(h3_4h_aligned[i]) or np.isnan(l3_4h_aligned[i]) or
+            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # ADX trend strength filter
-        strong_trend = adx.iloc[i] > 25
+        # Volume confirmation: above average
+        vol_ok = volume[i] > vol_ma[i]
         
-        # Entry conditions
-        if strong_trend and close[i] > ema_50_12h_aligned[i] and close[i] > high_20.iloc[i-1] and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif strong_trend and close[i] < ema_50_12h_aligned[i] and close[i] < low_20.iloc[i-1] and position != -1:
+        # Mean reversion from extreme levels
+        near_h3_4h = close[i] >= h3_4h_aligned[i] * 0.998  # Within 0.2% of H3
+        near_l3_4h = close[i] <= l3_4h_aligned[i] * 1.002  # Within 0.2% of L3
+        near_h3_1d = close[i] >= h3_1d_aligned[i] * 0.995  # Within 0.5% of H3 (stronger)
+        near_l3_1d = close[i] <= l3_1d_aligned[i] * 1.005  # Within 0.5% of L3 (stronger)
+        
+        # Entry conditions: fade extremes with volume
+        if vol_ok and near_h3_1d and position != -1:  # Strong rejection at 1d H3 -> short
             position = -1
-            signals[i] = -0.25
-        # Exit conditions: trend weakening or opposite signal
-        elif position == 1 and (adx.iloc[i] < 20 or close[i] < ema_50_12h_aligned[i]):
+            signals[i] = -0.20
+        elif vol_ok and near_l3_1d and position != 1:  # Strong bounce at 1d L3 -> long
+            position = 1
+            signals[i] = 0.20
+        elif vol_ok and near_h3_4h and not near_h3_1d and position != -1:  # Weak rejection at 4h H3 -> short
+            position = -1
+            signals[i] = -0.20
+        elif vol_ok and near_l3_4h and not near_l3_1d and position != 1:  # Weak bounce at 4h L3 -> long
+            position = 1
+            signals[i] = 0.20
+        # Exit conditions: return to mean or opposite signal
+        elif position == 1 and (close[i] <= (h3_4h_aligned[i] + l3_4h_aligned[i]) / 2 or near_l3_4h):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (adx.iloc[i] < 20 or close[i] > ema_50_12h_aligned[i]):
+        elif position == -1 and (close[i] >= (h3_4h_aligned[i] + l3_4h_aligned[i]) / 2 or near_h3_4h):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
