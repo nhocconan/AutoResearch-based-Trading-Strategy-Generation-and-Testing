@@ -1,18 +1,16 @@
-# 6h_1d_ewz_volume_trend_v1
-# Hypothesis: 6h Ehlers Zero Lag (EZL) with 1d trend filter and volume confirmation
-# EZL reduces lag while maintaining smoothness - effective in both trending and ranging markets
-# 1d trend filter ensures alignment with higher timeframe direction
-# Volume confirmation filters out false breakouts
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years)
-# Works in bull markets via trend following, in bear via mean reversion at extremes
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ewz_volume_trend_v1"
-timeframe = "6h"
+# Hypothesis: 12h 1w Camarilla pivot with volume confirmation and 1d trend filter
+# Long when price touches Camarilla L3 support + volume > 1.5x average + 1d trend up
+# Short when price touches Camarilla H3 resistance + volume > 1.5x average + 1d trend down
+# Exit when price reaches Camarilla H4/L4 or trend reverses
+# Designed for 12-37 trades/year on 12h timeframe with mean reversion in range and trend following in breakouts
+
+name = "12h_1w_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,9 +24,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
+    
+    # Calculate 1w Camarilla pivot levels (based on previous week)
+    # Camarilla formulas: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
+    # We use the previous week's data to calculate levels for current week
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate pivot levels for each week (using previous week's data)
+    camarilla_h4 = close_1w + 1.5 * (high_1w - low_1w)
+    camarilla_h3 = close_1w + 1.1 * (high_1w - low_1w)
+    camarilla_l3 = close_1w - 1.1 * (high_1w - low_1w)
+    camarilla_l4 = close_1w - 1.5 * (high_1w - low_1w)
+    
+    # Align to 12h timeframe (wait for weekly bar to close)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate 1d EMA(50) for trend filter
@@ -36,15 +58,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Ehlers Zero Lag (EZL) indicator
-    # EZL = 2*EMA(price, n) - EMA(EMA(price, n), n) where n = sqrt(period)
-    period = 20
-    lag = int(np.sqrt(period))
-    ema1 = pd.Series(close).ewm(span=lag, adjust=False, min_periods=lag).mean().values
-    ema2 = pd.Series(ema1).ewm(span=lag, adjust=False, min_periods=lag).mean().values
-    ezl = 2 * ema1 - ema2
-    
-    # Calculate 20-period average volume for volume filter
+    # Calculate 20-period average volume for volume filter (using 12h data)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -52,29 +66,31 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ezl[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        volume_filter = volume[i] > 1.3 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
         # Trend filter: price relative to 1d EMA50
         is_uptrend = close[i] > ema_50_1d_aligned[i]
         is_downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # EZL signals: price crossing above/below EZL with slope confirmation
-        ezl_slope = ezl[i] - ezl[i-1] if i > 0 else 0
-        ezl_cross_up = close[i] > ezl[i] and close[i-1] <= ezl[i-1]
-        ezl_cross_down = close[i] < ezl[i] and close[i-1] >= ezl[i-1]
+        # Entry conditions: price touches Camarilla H3/L3 with volume and trend confirmation
+        # Use small epsilon for touch detection due to floating point precision
+        epsilon = 0.0001 * close[i]
+        touches_h3 = abs(high[i] - camarilla_h3_aligned[i]) <= epsilon
+        touches_l3 = abs(low[i] - camarilla_l3_aligned[i]) <= epsilon
         
-        long_entry = ezl_cross_up and volume_filter and is_uptrend and ezl_slope > 0
-        short_entry = ezl_cross_down and volume_filter and is_downtrend and ezl_slope < 0
+        long_entry = touches_l3 and volume_filter and is_uptrend
+        short_entry = touches_h3 and volume_filter and is_downtrend
         
-        # Exit when price crosses back through EZL or trend changes
-        long_exit = ezl_cross_down or (not is_uptrend)
-        short_exit = ezl_cross_up or (not is_downtrend)
+        # Exit conditions: price reaches H4/L4 or trend reverses
+        long_exit = (low[i] <= camarilla_l4_aligned[i] + epsilon) or (not is_uptrend)
+        short_exit = (high[i] >= camarilla_h4_aligned[i] - epsilon) or (not is_downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
