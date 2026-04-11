@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 4h_1d_donchian_breakout_volume_trend_v1
-# Strategy: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
-# Timeframe: 4h
+# 1d_1w_ema_trend_volume_v1
+# Strategy: 1d EMA trend filter with weekly volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture strong momentum. Combined with 1d EMA trend filter and volume confirmation, this reduces false breakouts and works in both bull and bear markets by following the higher timeframe trend. Designed for low trade frequency (~20-40/year) to avoid fee drag.
+# Hypothesis: EMA crossover on daily timeframe combined with weekly volume surge captures strong trends while avoiding chop. Weekly volume filter reduces false signals. Designed for low trade frequency (<20/year) to minimize fee drag in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "1d_1w_ema_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,59 +24,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d EMA100 for trend filter
-    ema_100_1d = pd.Series(df_1d['close'].values).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
+    # Calculate EMA cross on daily timeframe (fast=21, slow=55)
+    ema_fast = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_slow = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # 20-period Donchian channels (using previous period to avoid look-ahead)
-    donchian_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # 20-period volume average for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate weekly volume average (20-period)
+    vol_avg_20w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(55, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_100_1d_aligned[i]) or 
-            np.isnan(donchian_high_20[i]) or np.isnan(donchian_low_20[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(vol_avg_20w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Weekly volume confirmation: current week's volume > 1.8x 20-week average
+        # Note: For daily data, we check if the current day belongs to a week with high volume
+        vol_confirm = volume[i] > 1.8 * vol_avg_20w_aligned[i]
         
-        # Breakout signals using Donchian levels (from previous period)
-        breakout_up = high[i] > donchian_high_20[i]
-        breakdown_down = low[i] < donchian_low_20[i]
-        
-        # 1d EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_100_1d_aligned[i]
-        trend_bearish = close[i] < ema_100_1d_aligned[i]
+        # EMA crossover signals
+        ema_cross_up = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
+        ema_cross_down = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
         
         # Entry conditions
-        # Long: Breakout above Donchian high AND bullish trend AND volume confirmation
-        if breakout_up and trend_bullish and vol_confirm and position != 1:
+        # Long: EMA bullish crossover AND volume confirmation
+        if ema_cross_up and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Breakdown below Donchian low AND bearish trend AND volume confirmation
-        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
+        # Short: EMA bearish crossover AND volume confirmation
+        elif ema_cross_down and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite breakout using Donchian levels
-        elif position == 1 and low[i] < donchian_low_20[i]:  # Break below Donchian low
+        # Exit: Opposite EMA crossover
+        elif position == 1 and ema_cross_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] > donchian_high_20[i]:  # Break above Donchian high
+        elif position == -1 and ema_cross_up:
             position = 0
             signals[i] = 0.0
         else:
