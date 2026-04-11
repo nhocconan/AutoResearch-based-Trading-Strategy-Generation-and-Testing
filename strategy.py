@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_camarilla_breakout_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -43,7 +43,7 @@ def generate_signals(prices):
     r3 = close_1d + (daily_range * 1.1 / 4)
     s3 = close_1d - (daily_range * 1.1 / 4)
     
-    # Volume confirmation: 4h volume > 1.5x 50-period average
+    # Volume confirmation: 4h volume > 2.0x 50-period average (very strict to reduce trades)
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     # Align daily levels to 4h timeframe
@@ -63,8 +63,8 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation
-        vol_confirm = volume_current > 1.5 * vol_ma_50[i]
+        # Volume confirmation - very strict
+        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -106,9 +106,11 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 1.5x 50-period average.
-# Enters short when price breaks below S4 with volume > 1.5x 50-period average.
+# Enters long when price breaks above R4 with volume > 2.0x 50-period average.
+# Enters short when price breaks below S4 with volume > 2.0x 50-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses 4h timeframe for better trend capture and daily Camarilla levels for institutional reference.
-# Volume filter (1.5x) reduces false breakouts while maintaining sufficient trade frequency.
-# Position size 0.30 balances risk and return. Target: 20-40 trades per year.
+# Uses very strict volume threshold (2.0x) and moderate MA (50) to achieve 15-30 trades per year.
+# Position size set to 0.30 to balance risk and reward.
+# Target: 15-30 trades per year (60-120 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# 4h timeframe reduces noise and 1d Camarilla levels provide institutional reference points.
