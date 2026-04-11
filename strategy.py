@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_cci_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,48 +17,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Donchian channel (20-period high/low)
-    high_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
+    # Calculate daily CCI(20)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Use previous week's levels to avoid look-ahead
-    donchian_upper = np.roll(high_20, 1)
-    donchian_lower = np.roll(low_20, 1)
-    donchian_upper[0] = np.nan
-    donchian_lower[0] = np.nan
+    tp_1d = (high_1d + low_1d + close_1d) / 3
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean()
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci_1d = (tp_1d - sma_tp.values) / (0.015 * mad.values)
     
-    # Align weekly Donchian levels to daily timeframe
-    upper_daily = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    lower_daily = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    # Align daily CCI to 6h timeframe
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
-    # Daily ADX for trend strength (14 period)
+    # 6h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr_dm = tr[1:]
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily volume filter: volume > 1.5x 20-period average
+    # 6h volume filter: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_daily[i]) or np.isnan(lower_daily[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(cci_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -68,27 +60,22 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation (1.5x average)
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        # Volume confirmation (1.3x average)
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
-        # Trend filter: ADX > 25 (strong trend)
-        trend_filter = adx[i] > 25
+        # CCI reversal signals: long when CCI < -100, short when CCI > +100
+        cci_long_signal = cci_1d_aligned[i] < -100
+        cci_short_signal = cci_1d_aligned[i] > 100
         
-        # Long conditions: price breaks above weekly Donchian upper with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > upper_daily[i])
-        
-        # Short conditions: price breaks below weekly Donchian lower with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < lower_daily[i])
-        
-        # Exit when price returns to the opposite Donchian level (mean reversion within the week's range)
-        exit_long = position == 1 and price_close < lower_daily[i]
-        exit_short = position == -1 and price_close > upper_daily[i]
+        # Exit when CCI returns to neutral zone (-50 to 50)
+        exit_long = position == 1 and cci_1d_aligned[i] > -50
+        exit_short = position == -1 and cci_1d_aligned[i] < 50
         
         # Trading logic
-        if long_signal and position != 1:
+        if cci_long_signal and volume_confirmed and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif cci_short_signal and volume_confirmed and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
@@ -102,12 +89,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Donchian breakout based on weekly channels with volume confirmation and ADX trend filter.
-# Enters long when daily price breaks above the weekly Donchian upper channel (20-week high) with volume >1.5x average and ADX>25.
-# Enters short when price breaks below the weekly Donchian lower channel (20-week low) with same conditions.
-# Exits when price returns to the opposite Donchian level, capturing mean reversion within the weekly range.
-# Weekly timeframe provides structural context, reducing noise from daily fluctuations.
-# ADX > 25 ensures trades occur only in strong trends, reducing whipsaws and false breakouts.
-# Volume confirmation adds conviction to breakouts.
-# Target: 15-25 trades per year to minimize fee drag while capturing significant weekly trends.
-# Works in both bull and bear markets by capturing directional moves with proper filtering.
+# Hypothesis: Daily CCI reversal strategy for 6h timeframe with volume confirmation.
+# Enters long when daily CCI < -100 (oversold) with volume >1.3x average.
+# Enters short when daily CCI > +100 (overbought) with volume >1.3x average.
+# Exits when CCI returns to neutral zone (-50 to 50) to capture mean reversion.
+# CCI is effective in ranging markets which dominate BTC/ETH price action.
+# Volume confirmation filters out low-conviction signals.
+# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+# Works in both bull and bear markets as it captures reversals from extremes.
