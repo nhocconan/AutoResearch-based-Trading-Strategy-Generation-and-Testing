@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_breakout_volatility_v1
+4h_1d_camarilla_breakout_volatility_v2
 Strategy: 4h breakout with 1d volatility filter and volume confirmation
 Timeframe: 4h
 Leverage: 1.0
-Hypothesis: Buy when 4h closes above prior 1d R3 with volume compression breakout and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
+Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volatility_v1"
+name = "4h_1d_camarilla_breakout_volatility_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -80,6 +80,7 @@ def generate_signals(prices):
     # Align 1d Camarilla to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # Session filter: 08-20 UTC (major sessions)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -106,9 +107,6 @@ def generate_signals(prices):
         # Volatility filter: low volatility regime (ATR ratio < 0.8)
         low_volatility = atr_ratio_aligned[i] < 0.8
         
-        # Price vs prior 1d close for context (not trend filter)
-        price_vs_prior_close = price_close > close_1d_prior[i]
-        
         # Long conditions: 4h closes above prior 1d's R3 with volume expansion + low volatility
         long_signal = volume_expanded and low_volatility and (price_close > r3_1d_aligned[i])
         
@@ -116,7 +114,6 @@ def generate_signals(prices):
         short_signal = volume_expanded and low_volatility and (price_close < s3_1d_aligned[i])
         
         # Exit when price returns to the 1d pivot (mean reversion within prior 1d's range)
-        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
         exit_long = position == 1 and price_close < pivot_1d_aligned[i]
         exit_short = position == -1 and price_close > pivot_1d_aligned[i]
         
@@ -138,4 +135,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when 4h closes above prior 1d R3 with volume compression breakout and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
+# Hypothesis: Buy when 4h closes above prior 1d R3 with volume expansion and low volatility regime; sell when 4h closes below prior 1d S3 with same conditions. Uses 1d ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 20-40 trades/year to minimize fee drag.
