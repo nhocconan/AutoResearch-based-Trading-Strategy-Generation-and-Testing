@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout + volume confirmation + weekly trend filter
-# - Long when price breaks above Donchian(20) high + volume > 1.5x 20-period average + weekly EMA50 rising
-# - Short when price breaks below Donchian(20) low + volume > 1.5x 20-period average + weekly EMA50 falling
-# - Uses discrete position sizing: ±0.30 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 12h
-# - Works in both bull (breakouts with volume in uptrend) and bear (breakdowns with volume in downtrend) markets
-# - Weekly EMA50 provides strong trend filter, reducing false signals in choppy markets
+# Hypothesis: 4h Trix + 1d Volume Spike + Choppiness Regime
+# - Trix(9): Triple-smoothed ROC, captures momentum with less lag
+# - Long when Trix crosses above zero AND 1d volume > 2x 20-day average AND Choppiness > 61.8 (range)
+# - Short when Trix crosses below zero AND 1d volume > 2x 20-day average AND Choppiness > 61.8 (range)
+# - Uses chop filter to avoid trending markets where momentum fails
+# - Volume spike confirms institutional participation
+# - Discrete position sizing ±0.25 to limit drawdown and reduce churn
+# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee limits
 
-name = "12h_1w_donchian_volume_trend_v1"
-timeframe = "12h"
+name = "4h_1d_trix_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,30 +29,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for volume and chop filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute weekly EMA50
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Pre-compute 1d volume SMA (20-period)
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Pre-compute Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Pre-compute 1d Choppiness Index (14-period)
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low))))
+    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
+    tr1 = np.concatenate([[np.nan], tr1])  # align length
+    atr14 = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
+    atr_sum_14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
+    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop_raw = 100 * np.log10(atr_sum_14 / (np.log10(14) * (max_high_14 - min_low_14)))
+    chop_raw = np.where((max_high_14 - min_low_14) == 0, 50, chop_raw)  # avoid div by zero
+    chop = chop_raw
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Pre-compute volume SMA (20-period)
-    volume_series = pd.Series(volume)
-    volume_sma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Pre-compute Trix (9) on 4h close
+    # TRIX = EMA(EMA(EMA(close, 9), 9), 9) - 1 period ago, then / previous
+    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
+    trix[0] = 0  # first value has no previous
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_sma_20[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or  # need previous for cross
+            np.isnan(volume_sma_20_1d_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -59,48 +73,46 @@ def generate_signals(prices):
         price_close = close[i]
         volume_current = volume[i]
         
-        # Donchian breakout conditions
-        breakout_up = price_close > donchian_high[i-1]  # Break above previous high
-        breakdown_down = price_close < donchian_low[i-1]  # Break below previous low
+        # Trix zero-cross signals
+        trix_cross_up = trix[i-1] <= 0 and trix[i] > 0
+        trix_cross_down = trix[i-1] >= 0 and trix[i] < 0
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Volume confirmation: current 1d volume > 2x 20-day average
+        vol_confirm = volume_sma_20_1d_aligned[i] > 0 and volume[i] > 2.0 * volume_sma_20_1d_aligned[i]
         
-        # Weekly EMA50 trend filter: rising/falling
-        ema50_prev = ema50_1w_aligned[i-1] if i > 0 else ema50_1w_aligned[i]
-        ema50_rising = ema50_1w_aligned[i] > ema50_prev
-        ema50_falling = ema50_1w_aligned[i] < ema50_prev
+        # Chop filter: range market (CHOP > 61.8)
+        chop_filter = chop_aligned[i] > 61.8
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Donchian breakout up + volume confirmation + weekly EMA50 rising
-        if breakout_up and vol_confirm and ema50_rising:
+        # Long: Trix crosses up + volume spike + chop (range)
+        if trix_cross_up and vol_confirm and chop_filter:
             enter_long = True
         
-        # Short: Donchian breakdown down + volume confirmation + weekly EMA50 falling
-        if breakdown_down and vol_confirm and ema50_falling:
+        # Short: Trix crosses down + volume spike + chop (range)
+        if trix_cross_down and vol_confirm and chop_filter:
             enter_short = True
         
-        # Exit conditions: opposite breakout or loss of volume confirmation
+        # Exit conditions: opposite Trix cross or chop breaks down (trending)
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if breakdown OR loss of volume confirmation
-            exit_long = breakdown_down or not vol_confirm
+            # Exit long if Trix crosses down OR chop breaks below 38.2 (trending)
+            exit_long = trix_cross_down or chop_aligned[i] < 38.2
         elif position == -1:
-            # Exit short if breakout OR loss of volume confirmation
-            exit_short = breakout_up or not vol_confirm
+            # Exit short if Trix crosses up OR chop breaks below 38.2 (trending)
+            exit_short = trix_cross_up or chop_aligned[i] < 38.2
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -109,6 +121,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
