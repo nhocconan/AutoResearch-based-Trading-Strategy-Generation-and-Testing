@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR trend filter
-# - Long: price breaks above Donchian upper band (20-period high), volume > 1.5x 20-period avg, ATR(14) > ATR(50) (trending)
-# - Short: price breaks below Donchian lower band (20-period low), volume > 1.5x 20-period avg, ATR(14) > ATR(50) (trending)
-# - Exit: price returns to Donchian midpoint (20-period average of high/low)
-# - Uses 1d EMA(50) trend filter: price > EMA for long bias, price < EMA for short bias
+# Hypothesis: 4h Donchian channel breakout with volume confirmation and chop regime filter
+# - Long: price breaks above Donchian(20) high, volume > 1.5x 20-period avg, CHOP(14) < 38.2 (trending)
+# - Short: price breaks below Donchian(20) low, volume > 1.5x 20-period avg, CHOP(14) < 38.2 (trending)
+# - Exit: price returns to Donchian midpoint or ATR-based stop
+# - Uses 12h EMA(50) trend filter: price > EMA for long bias, price < EMA for short bias
 # - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
 # - Target: 25-40 trades/year (100-160 total over 4 years) to stay within fee drag limits
-# - Donchian channels work in both trending and ranging markets with volume/volatility filters
+# - Donchian channels work well in trending markets; chop filter avoids ranging conditions
 
-name = "4h_1d_donchian_atr_volume_v1"
+name = "4h_12h_donchian_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,40 +29,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 12h data ONCE before loop for EMA trend filter (MTF rule compliance)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return signals
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Pre-compute 12h EMA(50) for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Pre-compute 4h Donchian channels (20-period)
-    high_rolling_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_rolling_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_rolling_max
-    donchian_lower = low_rolling_min
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    donchian_window = 20
+    dc_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    dc_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    dc_mid = (dc_high + dc_low) / 2
     
     # Pre-compute 4h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute ATR filters for regime detection
+    # Pre-compute Choppiness Index (CHOP) for regime detection
     # True Range
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
-    # ATR(14) for current volatility
+    # ATR(14)
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR(50) for longer-term volatility comparison
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Sum of TR over 14 periods
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Max(HH) - Min(LL) over 14 periods
+    max_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # CHOP formula: 100 * log10(sum_tr_14 / (max_high_14 - min_low_14)) / log10(14)
+    # Avoid division by zero
+    range_14 = max_high_14 - min_low_14
+    chop = np.where(range_14 > 0, 100 * np.log10(sum_tr_14 / range_14) / np.log10(14), 50)
+    chop = np.nan_to_num(chop, nan=50.0)
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_mid[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or np.isnan(dc_mid[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(chop[i]) or
+            np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -71,30 +78,30 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Donchian levels
-        upper_band = donchian_upper[i]
-        lower_band = donchian_lower[i]
-        mid_band = donchian_mid[i]
+        dc_high_level = dc_high[i]
+        dc_low_level = dc_low[i]
+        dc_mid_level = dc_mid[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Trend filter: ATR(14) > ATR(50) (indicates trending market)
-        atr_trend = atr_14[i] > atr_50[i]
+        # Chop regime filter: CHOP < 38.2 indicates trending market (avoid ranging)
+        chop_trend = chop[i] < 38.2
         
-        # 1d EMA trend bias
-        ema_bias_long = close_price > ema_50_1d_aligned[i]
-        ema_bias_short = close_price < ema_50_1d_aligned[i]
+        # 12h EMA trend bias
+        ema_bias_long = close_price > ema_50_12h_aligned[i]
+        ema_bias_short = close_price < ema_50_12h_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above Donchian upper band, volume confirmation, trending, long bias
-        if close_price > upper_band and vol_confirm and atr_trend and ema_bias_long:
+        # Long breakout: price above Donchian high, volume confirmation, trending chop, long bias
+        if close_price > dc_high_level and vol_confirm and chop_trend and ema_bias_long:
             enter_long = True
         
-        # Short breakout: price below Donchian lower band, volume confirmation, trending, short bias
-        if close_price < lower_band and vol_confirm and atr_trend and ema_bias_short:
+        # Short breakout: price below Donchian low, volume confirmation, trending chop, short bias
+        if close_price < dc_low_level and vol_confirm and chop_trend and ema_bias_short:
             enter_short = True
         
         # Exit conditions
@@ -103,10 +110,10 @@ def generate_signals(prices):
         
         if position == 1:
             # Exit long if price returns to Donchian midpoint
-            exit_long = close_price <= mid_band
+            exit_long = close_price <= dc_mid_level
         elif position == -1:
             # Exit short if price returns to Donchian midpoint
-            exit_short = close_price >= mid_band
+            exit_short = close_price >= dc_mid_level
         
         # Trading logic
         if enter_long and position != 1:
