@@ -3,111 +3,121 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray combination with regime filter
-# - Williams Alligator (Jaws, Teeth, Lips) on 12h defines trend direction (bull/bear/neutral)
-# - Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) on 6s measures trend strength
-# - Long when: Alligator bullish (Lips > Teeth > Jaws) AND Bull Power > 0 AND Bear Power < 0
-# - Short when: Alligator bearish (Lips < Teeth < Jaws) AND Bear Power > 0 AND Bull Power < 0
-# - Neutral when: Alligator intertwined (no clear order) - stay flat
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 6h
-# - Works in trending markets (both bull and bear) by following Alligator direction
-# - Avoids choppy markets via Alligator intertwined condition
+# Hypothesis: 4h Donchian(20) breakout + 1d volume spike + ATR regime filter
+# - Donchian levels from 4h: upper/lower bands act as dynamic support/resistance
+# - Long when price breaks above upper band with volume > 2.5x 20-period average (strong conviction)
+# - Short when price breaks below lower band with volume > 2.5x 20-period average
+# - ATR regime filter: only trade when ATR(14) > 1.2 * ATR(50) to avoid low volatility chop and false breakouts
+# - Uses discrete position sizing: ±0.28 to limit drawdown and reduce fee churn
+# - Target: 25-40 trades/year (100-160 total over 4 years) to stay within fee drag limits for 4h
+# - Volume spike requirement (>2.5x average) ensures we only trade high-conviction breakouts
+# - Works in both bull (breakouts with volume) and bear (breakdowns with volume) markets
+# - 1d HTF provides reliable volume confirmation, reducing false signals from lower timeframe noise
 
-name = "6h_12h_alligator_elder_ray_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_volume_atr_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for Alligator calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Load 1d data ONCE before loop for volume confirmation and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # 12h data for Alligator
-    close_12h = df_12h['close'].values
+    # Pre-compute 1d volume SMA and ATR
+    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator lines (13,8,5 periods SMAs shifted)
-    # Jaws: 13-period SMA shifted 8 bars
-    jaws_12h = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth: 8-period SMA shifted 5 bars
-    teeth_12h = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips: 5-period SMA shifted 3 bars
-    lips_12h = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().shift(3).values
+    # True range for ATR
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50_1d = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Alligator lines to 6t
-    jaws_aligned = align_htf_to_ltf(prices, df_12h, jaws_12h)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
+    # 1d volume SMA (20-period)
+    volume_series = pd.Series(volume_1d)
+    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # 6h data for Elder Ray (EMA13 of close)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).values
+    # Align 1d indicators to 4h timeframe
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
-    # Elder Ray components
-    bull_power = high - ema13  # High - EMA13
-    bear_power = ema13 - low   # EMA13 - Low
+    # Pre-compute 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    for i in range(50, n):  # Start after 50-bar warmup
+    for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator conditions
-        # Bullish: Lips > Teeth > Jaws (green alignment)
-        alligator_bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaws_aligned[i]
-        # Bearish: Lips < Teeth < Jaws (red alignment)
-        alligator_bearish = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaws_aligned[i]
-        # Neutral: intertwined (no clear order)
-        alligator_neutral = not (alligator_bullish or alligator_bearish)
+        # Current price data
+        price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
+        volume_current = volume[i]
         
-        # Elder Ray conditions
-        bull_strong = bull_power[i] > 0  # Bullish momentum
-        bear_strong = bear_power[i] > 0  # Bearish momentum
+        # Donchian breakout conditions
+        breakout_long = price_close > donchian_upper[i-1]  # Close above previous period's upper band
+        breakout_short = price_close < donchian_lower[i-1]  # Close below previous period's lower band
+        
+        # Volume confirmation: current volume > 2.5x 20-period average (using 1d aligned volume)
+        vol_confirm = volume_current > 2.5 * volume_sma_20_aligned[i]
+        
+        # ATR regime filter: trade only when short-term ATR > 1.2 * long-term ATR (avoid low volatility chop)
+        atr_filter = atr_14_aligned[i] > 1.2 * atr_50_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Alligator bullish AND Bull Power positive AND Bear Power negative
-        if alligator_bullish and bull_strong and (bear_power[i] < 0):
+        # Long: Donchian upper breakout + volume confirmation + ATR filter
+        if breakout_long and vol_confirm and atr_filter:
             enter_long = True
         
-        # Short: Alligator bearish AND Bear power positive AND Bull Power negative
-        if alligator_bearish and bear_strong and (bull_power[i] < 0):
+        # Short: Donchian lower breakdown + volume confirmation + ATR filter
+        if breakout_short and vol_confirm and atr_filter:
             enter_short = True
         
-        # Exit conditions: opposite Alligator signal or neutral
+        # Exit conditions: opposite Donchian breakout or volatility collapse
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if Alligator turns bearish or neutral
-            exit_long = alligator_bearish or alligator_neutral
+            # Exit long if price breaks below lower band OR volatility collapses
+            exit_long = (price_close < donchian_lower[i-1]) or (not atr_filter)
         elif position == -1:
-            # Exit short if Alligator turns bullish or neutral
-            exit_short = alligator_bullish or alligator_neutral
+            # Exit short if price breaks above upper band OR volatility collapses
+            exit_short = (price_close > donchian_upper[i-1]) or (not atr_filter)
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.28
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.28
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -116,6 +126,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.28 if position == 1 else (-0.28 if position == -1 else 0.0)
     
     return signals
