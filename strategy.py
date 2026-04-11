@@ -1,18 +1,16 @@
-#/usr/bin/env python3
-# 12h_1d_donchian_breakout_v1
-# Strategy: 12h Donchian breakout (20) with 1d EMA trend filter and volume confirmation
-# Timeframe: 12h
+#!/usr/bin/env python3
+# 6h_1d_cci_trend_v1
+# Strategy: 6h CCI with 1d EMA trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture breakout moves in both bull and bear markets.
-# Combined with 1d EMA trend filter to avoid counter-trend trades and volume confirmation
-# to ensure institutional participation. This reduces false signals in choppy markets.
+# Hypothesis: CCI identifies overbought/oversold conditions. Combined with 1d EMA trend filter and volume confirmation, it captures mean-reversion in trending markets while avoiding false signals in choppy periods.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "6h_1d_cci_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,9 +35,11 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # CCI(20) calculation
+    tp = (high + low + close) / 3.0  # Typical Price
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp - sma_tp) / (0.015 * mad)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -50,8 +50,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ratio.iloc[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cci[i]) or 
+            np.isnan(vol_ratio.iloc[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -59,19 +59,19 @@ def generate_signals(prices):
         vol_confirmed = vol_ratio.iloc[i] > 1.5
         
         # Entry conditions
-        # Long: Price breaks above 20-period high + above 1d EMA50 (uptrend) + volume confirmation
-        if vol_confirmed and close[i] > high_max[i] and close[i] > ema_50_1d_aligned[i] and position != 1:
+        # Long: CCI < -100 (oversold) + price above 1d EMA50 (uptrend) + volume confirmation
+        if vol_confirmed and cci[i] < -100 and close[i] > ema_50_1d_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price breaks below 20-period low + below 1d EMA50 (downtrend) + volume confirmation
-        elif vol_confirmed and close[i] < low_min[i] and close[i] < ema_50_1d_aligned[i] and position != -1:
+        # Short: CCI > 100 (overbought) + price below 1d EMA50 (downtrend) + volume confirmation
+        elif vol_confirmed and cci[i] > 100 and close[i] < ema_50_1d_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: trend reversal or loss of momentum
-        elif position == 1 and (close[i] < ema_50_1d_aligned[i]):
+        # Exit conditions: CCI returns to neutral range or trend reversal
+        elif position == 1 and (cci[i] > -50 or close[i] < ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > ema_50_1d_aligned[i]):
+        elif position == -1 and (cci[i] < 50 or close[i] > ema_50_1d_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
