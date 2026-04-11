@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v4"
+name = "4h_1d_camarilla_breakout_volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,8 +39,8 @@ def generate_signals(prices):
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Volume confirmation: 4h volume > 2.5x 20-period average (more selective)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 4h volume > 3x 30-period average (more selective to reduce trades)
+    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     # Align daily levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -49,7 +49,7 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+            np.isnan(vol_ma_30[i])):
             signals[i] = 0.0
             continue
         
@@ -57,7 +57,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.5 * vol_ma_20[i]
+        vol_confirm = volume_current > 3.0 * vol_ma_30[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -88,10 +88,10 @@ def generate_signals(prices):
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.30
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.30
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -100,15 +100,15 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
 # Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with stricter volume confirmation.
-# Enters long when price breaks above R4 with volume > 2.5x 20-period average.
-# Enters short when price breaks below S4 with volume > 2.5x 20-period average.
+# Enters long when price breaks above R4 with volume > 3x 30-period average.
+# Enters short when price breaks below S4 with volume > 3x 30-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold to reduce false breakouts and overtrading.
-# Position size 0.30 balances profit potential with drawdown control.
-# Target: 20-30 trades per year (80-120 total over 4 years) to minimize fee drag.
+# Uses higher volume threshold (3x vs 2.5x) and longer MA (30 vs 20) to significantly reduce false breakouts and overtrading.
+# Position size reduced to 0.25 to improve risk-adjusted returns.
+# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
