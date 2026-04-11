@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-# 1d_1w_cci_reversal_volume_v1
-# Strategy: 1d CCI reversal with volume confirmation and 1w EMA trend filter
-# Timeframe: 1d
+# 12h_1d_camarilla_pivot_volume_v1
+# Strategy: 12h Camarilla Pivot reversal with volume confirmation and 1d trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: CCI > 100 indicates overbought conditions in uptrend, CCI < -100 indicates oversold in downtrend.
-# In bull markets, look for CCI < -100 with volume spike and weekly uptrend for long entries.
-# In bear markets, look for CCI > 100 with volume spike and weekly downtrend for short entries.
-# Volume confirms reversal conviction. Weekly EMA filter ensures alignment with higher timeframe trend.
-# Target: 20-40 trades/year to minimize fee drag.
+# Hypothesis: Camarilla pivot levels act as strong support/resistance on 12h timeframe. 
+# Price rejecting these levels with volume confirms reversal. 1d EMA filter ensures trades align with daily trend.
+# Works in bull/bear: buys dips in uptrend, sells rallies in downtrend. Low trade frequency (~15-30/year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_cci_reversal_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,55 +26,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop for trend filter and pivot calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1w EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily CCI(20)
-    typical_price = (high + low + close) / 3.0
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean()
-    tp_dev = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=False
-    )
-    cci = (typical_price - tp_mean.values) / (0.015 * tp_dev.values)
+    # Calculate Camarilla pivot levels from previous 1d candle
+    # Typical price = (H + L + C) / 3
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    # Pivot point = typical price
+    pivot_1d = typical_price_1d.values
+    # R1 = C + (H - L) * 1.1/12
+    r1_1d = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1/12
+    s1_1d = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 12
+    r1_1d_vals = r1_1d.values
+    s1_1d_vals = s1_1d.values
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Align pivot levels to 12h timeframe (use previous day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d_vals)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d_vals)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_avg_20)
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(cci[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: CCI reversal + volume + trend alignment
-        if cci[i] < -100 and vol_confirm[i] and uptrend and position != 1:
+        # Entry logic: Camarilla pivot rejection + volume + trend alignment
+        # Long: price rejects S1 support in uptrend with volume
+        if close[i] <= s1_aligned[i] and close[i] > s1_aligned[i] * 0.999 and uptrend and vol_confirm[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif cci[i] > 100 and vol_confirm[i] and downtrend and position != -1:
+        # Short: price rejects R1 resistance in downtrend with volume
+        elif close[i] >= r1_aligned[i] and close[i] < r1_aligned[i] * 1.001 and downtrend and vol_confirm[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: CCI returns to neutral zone (-50 to 50)
-        elif position == 1 and cci[i] > -50:
+        # Exit: price moves back to pivot level
+        elif position == 1 and close[i] >= pivot_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and cci[i] < 50:
+        elif position == -1 and close[i] <= pivot_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
