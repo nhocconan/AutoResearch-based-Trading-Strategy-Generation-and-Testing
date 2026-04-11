@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_keltner_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_kama_rsi_momentum_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,66 +25,81 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return signals
     
-    # Calculate 1d Keltner Channel components
+    # Calculate 1d KAMA (Kaufman Adaptive Moving Average)
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            er[i] = 0
+        else:
+            er[i] = change[i] / (np.sum(volatility[max(0, i-9):i+1]) + 1e-10)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # 20-period EMA of close
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Average True Range (ATR) over 10 periods
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Keltner Channel bounds
-    upper_keltner = ema_20 + 2.0 * atr_10
-    lower_keltner = ema_20 - 2.0 * atr_10
+    # Calculate 1d RSI
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Shift by 1 to use only completed 1d bars
-    upper_keltner = np.roll(upper_keltner, 1)
-    lower_keltner = np.roll(lower_keltner, 1)
-    ema_20 = np.roll(ema_20, 1)
-    upper_keltner[0] = np.nan
-    lower_keltner[0] = np.nan
-    ema_20[0] = np.nan
+    kama = np.roll(kama, 1)
+    rsi = np.roll(rsi, 1)
+    kama[0] = np.nan
+    rsi[0] = np.nan
     
-    # Align 1d indicators to 12h timeframe
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Align 1d indicators to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate 4h RSI for entry timing
+    delta_4h = np.diff(close, prepend=close[0])
+    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
+    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
+    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    
+    # Volume filter: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(60, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
-            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(rsi_4h[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
-        # Long conditions: Price breaks above upper Keltner with volume
-        long_signal = volume_confirmed and (price_high > upper_keltner_aligned[i])
+        # Determine trend from 1d KAMA slope
+        kama_slope = kama_aligned[i] - kama_aligned[i-1] if i > 0 else 0
         
-        # Short conditions: Price breaks below lower Keltner with volume
-        short_signal = volume_confirmed and (price_low < lower_keltner_aligned[i])
+        # Long conditions: Uptrend (KAMA rising) + RSI not oversold + volume
+        long_signal = volume_confirmed and (kama_slope > 0) and (rsi_4h[i] > 30) and (rsi_4h[i] < 70)
         
-        # Exit when price crosses back to EMA
-        exit_long = position == 1 and (price_close < ema_20_aligned[i])
-        exit_short = position == -1 and (price_close > ema_20_aligned[i])
+        # Short conditions: Downtrend (KAMA falling) + RSI not overbought + volume
+        short_signal = volume_confirmed and (kama_slope < 0) and (rsi_4h[i] > 30) and (rsi_4h[i] < 70)
+        
+        # Exit when trend changes
+        exit_long = position == 1 and kama_slope <= 0
+        exit_short = position == -1 and kama_slope >= 0
         
         # Trading logic
         if long_signal and position != 1:
@@ -105,12 +120,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Keltner breakout on 12h with daily Keltner Channel and volume confirmation.
-# Uses daily Keltner Channel (EMA20 ± 2*ATR10) to identify volatility breakouts.
-# Enters long when 12h high breaks above daily upper Keltner with volume confirmation
-# (>1.5x average volume). Enters short when 12h low breaks below daily lower Keltner
-# with volume confirmation. Exits when price crosses back to the daily EMA20.
-# Works in both bull and bear markets by capturing volatility expansion phases.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe.
-# Volume confirmation ensures participation from market actors, reducing false breakouts.
-# Keltner channels adapt to volatility, making them effective in various market conditions.
+# Hypothesis: 4h momentum strategy using 1d KAMA for trend direction and 4h RSI for entry timing.
+# Uses Kaufman Adaptive Moving Average (KAMA) on daily timeframe to identify adaptive trend.
+# Enters long when daily KAMA is rising (uptrend) and 4h RSI is between 30-70 (not extreme)
+# with volume confirmation (>1.3x average). Enters short when daily KAMA is falling
+# (downtrend) with same RSI and volume conditions. Exits when KAMA slope changes direction.
+# KAMA adapts to market noise, reducing false signals in choppy conditions. Volume
+# confirmation ensures participation. Designed for 4h timeframe to target 20-50 trades/year
+# (80-200 total over 4 years) to minimize fee drag. Works in both bull and bear markets
+# by following the adaptive trend on higher timeframe.
