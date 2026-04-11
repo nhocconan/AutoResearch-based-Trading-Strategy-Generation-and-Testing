@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + 1w regime filter
-# - Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-# - Long: Bull Power > 0 and Bear Power < 0 (strong bullish momentum) AND 1w close > 1w EMA(34) (bullish weekly regime)
-# - Short: Bear Power > 0 and Bull Power < 0 (strong bearish momentum) AND 1w close < 1w EMA(34) (bearish weekly regime)
-# - Exit: Opposite power crosses zero (Bear Power > 0 for long exit, Bull Power > 0 for short exit)
-# - Uses 1w EMA(34) for regime filter to avoid counter-trend trades in strong weekly trends
+# Hypothesis: 12h Camarilla pivot breakout with volume confirmation and ATR trend filter
+# - Long: price breaks above Camarilla H3 level, volume > 1.3x 20-period avg, ATR(14) > ATR(50) (trending)
+# - Short: price breaks below Camarilla L3 level, volume > 1.3x 20-period avg, ATR(14) > ATR(50) (trending)
+# - Exit: price returns to Camarilla pivot point (PP)
+# - Uses 1d EMA(50) trend filter: price > EMA for long bias, price < EMA for short bias
 # - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within fee drag limits
-# - Elder Ray measures bull/bear power relative to EMA, effective in both trending and ranging markets
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Camarilla levels derived from prior day's range work well in both trending and ranging markets
 
-name = "6h_1w_elder_ray_regime_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_atr_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,55 +24,88 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop for regime filter (MTF rule compliance)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 1d data ONCE before loop for Camarilla pivot calculation and EMA trend filter (MTF rule compliance)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1w EMA(34) for regime filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Pre-compute 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Pre-compute 6h EMA(13) for Elder Ray calculation
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Pre-compute 1d OHLC for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute Elder Ray components
-    bull_power = high - ema_13  # Bull Power = High - EMA(13)
-    bear_power = ema_13 - low   # Bear Power = EMA(13) - Low
+    # Calculate Camarilla levels for each 1d bar
+    # PP = (H + L + C) / 3
+    # R3 = C + ((H-L) * 1.1/4)
+    # S3 = C - ((H-L) * 1.1/4)
+    PP = (high_1d + low_1d + close_1d) / 3
+    R3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
+    S3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe
+    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Pre-compute 12h volume confirmation (20-period average)
+    volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute ATR filters for regime detection
+    # True Range
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    # ATR(14) for current volatility
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR(50) for longer-term volatility comparison
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(close[i])):
+        if (np.isnan(PP_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        volume_current = volume[i]
         
-        # Elder Ray values
-        bp = bull_power[i]   # Bull Power
-        br = bear_power[i]   # Bear Power
+        # Camarilla levels
+        PP_level = PP_aligned[i]
+        R3_level = R3_aligned[i]
+        S3_level = S3_aligned[i]
         
-        # 1w regime filter
-        weekly_bullish = close_price > ema_34_1w_aligned[i]
-        weekly_bearish = close_price < ema_34_1w_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume_current > 1.3 * volume_sma_20[i]
+        
+        # Trend filter: ATR(14) > ATR(50) (indicates trending market)
+        atr_trend = atr_14[i] > atr_50[i]
+        
+        # 1d EMA trend bias
+        ema_bias_long = close_price > ema_50_1d_aligned[i]
+        ema_bias_short = close_price < ema_50_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Strong bullish momentum (BP>0 and BR<0) AND bullish weekly regime
-        if bp > 0 and br < 0 and weekly_bullish:
+        # Long breakout: price above Camarilla R3, volume confirmation, trending, long bias
+        if close_price > R3_level and vol_confirm and atr_trend and ema_bias_long:
             enter_long = True
         
-        # Short: Strong bearish momentum (BR>0 and BP<0) AND bearish weekly regime
-        if br > 0 and bp < 0 and weekly_bearish:
+        # Short breakout: price below Camarilla S3, volume confirmation, trending, short bias
+        if close_price < S3_level and vol_confirm and atr_trend and ema_bias_short:
             enter_short = True
         
         # Exit conditions
@@ -81,11 +113,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long when Bear Power turns positive (bullish momentum fading)
-            exit_long = br > 0
+            # Exit long if price returns to pivot point
+            exit_long = close_price <= PP_level
         elif position == -1:
-            # Exit short when Bull Power turns positive (bearish momentum fading)
-            exit_short = bp > 0
+            # Exit short if price returns to pivot point
+            exit_short = close_price >= PP_level
         
         # Trading logic
         if enter_long and position != 1:
