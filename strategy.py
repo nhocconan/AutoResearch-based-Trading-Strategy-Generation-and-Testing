@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Simple_v1
-Hypothesis: Uses daily Camarilla pivot levels for breakout entries on 12h timeframe with volume confirmation.
-Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets.
-Uses tight entry conditions: price must break R3/S3 with volume > 2x 20-period average.
+4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v3
+Hypothesis: Uses 1-day Camarilla pivot levels for breakout entries with volume confirmation and 4-hour EMA trend filter.
+Optimized for lower trade frequency: fewer trades by tightening entry conditions and using EMA50 trend filter.
+Targets 15-30 trades/year per symbol with focus on high-probability setups in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Simple_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -30,8 +30,11 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Volume filter: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 4h EMA50 for trend filter (slower = fewer whipsaws)
+    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: 50-period average (higher threshold)
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     # Calculate Camarilla levels from daily data
     close_1d = df_1d['close'].values
@@ -42,34 +45,38 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(vol_ma_20[i]) or 
+        if (np.isnan(ema_50_4h[i]) or np.isnan(vol_ma_50[i]) or 
             np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 2x 20-period average (strict)
-        volume_filter = volume[i] > 2.0 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.5x 50-period average (stricter)
+        volume_filter = volume[i] > 1.5 * vol_ma_50[i]
+        
+        # Trend filter: price above/below 4h EMA50
+        uptrend = close[i] > ema_50_4h[i]
+        downtrend = close[i] < ema_50_4h[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = close[i] > camarilla_r3_aligned[i]  # Break above R3
         breakdown_down = close[i] < camarilla_s3_aligned[i]  # Break below S3
         
-        # Entry conditions
-        long_entry = breakout_up and volume_filter
-        short_entry = breakdown_down and volume_filter
+        # Entry conditions: only trade in direction of 4h trend
+        long_entry = breakout_up and volume_filter and uptrend
+        short_entry = breakdown_down and volume_filter and downtrend
         
-        # Exit conditions: return to opposite Camarilla level
-        long_exit = close[i] < camarilla_s3_aligned[i]  # Break below S3
-        short_exit = close[i] > camarilla_r3_aligned[i]  # Break above R3
+        # Exit conditions: return to opposite Camarilla level or trend reversal
+        long_exit = (close[i] < camarilla_s3_aligned[i]) or (not uptrend)  # Break below S3 or trend change
+        short_exit = (close[i] > camarilla_r3_aligned[i]) or (not downtrend)  # Break above R3 or trend change
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
