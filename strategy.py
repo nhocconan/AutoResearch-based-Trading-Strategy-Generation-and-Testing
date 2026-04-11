@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-# 12h_1w_cci_trend_volume_v1
-# Strategy: 12h CCI trend following with 1w EMA filter and volume confirmation
-# Timeframe: 12h
+# 4h_12h_camarilla_volume_reversal_v1
+# Strategy: 4h reversal at 12h Camarilla pivot levels with volume confirmation
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: CCI identifies overbought/oversold conditions while trend follows higher timeframe EMA.
-# Volume confirms institutional participation. Designed for low trade frequency (<30/year) to minimize fee drag.
+# Hypothesis: Camarilla pivot levels from 12h timeframe act as strong support/resistance.
+# Price reversals at these levels with above-average volume capture mean-reversion moves.
+# Works in both bull and bear markets as it fades extremes rather than following trends.
+# Low trade frequency (~25/year) minimizes fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_cci_trend_volume_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_volume_reversal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,68 +27,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 50:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 12h CCI calculation
-    typical_price = (high + low + close) / 3
-    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
-    # Avoid division by zero
-    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
-    cci = (typical_price - tp_mean) / (0.015 * tp_std)
+    # Calculate Camarilla levels for 12h timeframe
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Camarilla formula: based on previous day's range
+    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, etc.
+    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, etc.
+    # We'll use S3 and R3 as primary levels (more significant)
+    # S3 = C - (H-L)*1.1/4, R3 = C + (H-L)*1.1/4
+    camarilla_s3 = close_12h - (high_12h - low_12h) * 1.1 / 4
+    camarilla_r3 = close_12h + (high_12h - low_12h) * 1.1 / 4
     
-    # 1w volume average (20-period) for confirmation
-    volume_1w = df_1w['volume'].values
-    vol_avg_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20_1w)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
     
-    # Align raw 1w volume for confirmation
-    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_1w)
+    # Volume confirmation: 4h volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(cci[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20_1w_aligned[i]) or np.isnan(vol_1w_aligned[i]):
+        if np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1w volume > 1.3x 20-period average
-        vol_confirm = vol_1w_aligned[i] > 1.3 * vol_avg_20_1w_aligned[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: price vs 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Price near Camarilla levels (within 0.2% tolerance)
+        near_s3 = abs(close[i] - camarilla_s3_aligned[i]) / close[i] < 0.002
+        near_r3 = abs(close[i] - camarilla_r3_aligned[i]) / close[i] < 0.002
         
-        # CCI conditions
-        cci_overbought = cci[i] > 100
-        cci_oversold = cci[i] < -100
-        cci_neutral = (cci[i] >= -100) & (cci[i] <= 100)
-        
-        # Entry conditions
-        # Long: CCI crosses above -100 from oversold AND uptrend AND volume confirmation
-        if cci[i] > -100 and (i == 50 or cci[i-1] <= -100) and uptrend and vol_confirm and position != 1:
+        # Reversal conditions
+        # Long: Price near S3 support AND volume confirmation AND showing rejection (close > open)
+        if near_s3 and vol_confirm and close[i] > prices['open'].iloc[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: CCI crosses below 100 from overbought AND downtrend AND volume confirmation
-        elif cci[i] < 100 and (i == 50 or cci[i-1] >= 100) and downtrend and vol_confirm and position != -1:
+        # Short: Price near R3 resistance AND volume confirmation AND showing rejection (close < open)
+        elif near_r3 and vol_confirm and close[i] < prices['open'].iloc[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: CCI returns to neutral zone (mean reversion)
-        elif position == 1 and cci[i] < 0:
+        # Exit: Price moves back toward middle (opposite Camarilla level) or opposite signal
+        elif position == 1 and (close[i] > camarilla_r3_aligned[i] or close[i] < camarilla_s3_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and cci[i] > 0:
+        elif position == -1 and (close[i] < camarilla_s3_aligned[i] or close[i] > camarilla_r3_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
