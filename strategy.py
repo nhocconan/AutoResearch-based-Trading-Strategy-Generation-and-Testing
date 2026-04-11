@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_volume_reversal_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,13 +46,13 @@ def generate_signals(prices):
     s3[0] = np.nan
     s4[0] = np.nan
     
-    # Align daily levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align daily levels to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Calculate 12h ATR for volatility filter and stoploss
+    # Calculate 4h ATR for volatility filter and stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -62,16 +62,16 @@ def generate_signals(prices):
     # Volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate pivot for exit
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    # Trend filter: 4h close > 50 EMA for long, < 50 EMA for short
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(r3_12h[i]) or np.isnan(r4_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(pivot_12h[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
@@ -81,6 +81,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
+        ema_val = ema_50[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma
@@ -88,15 +89,16 @@ def generate_signals(prices):
         # Volatility filter: avoid extremely low volatility
         vol_filter = atr_val > 0.005 * price_close  # ATR > 0.5% of price
         
-        # Long conditions: price breaks below S3 or S4 (oversold bounce)
-        long_signal = volume_confirmed and vol_filter and (price_low < s3_12h[i] or price_low < s4_12h[i])
+        # Long conditions: price breaks below S3 or S4 (oversold) with volume, vol filter, and above EMA50
+        long_signal = volume_confirmed and vol_filter and (price_low < s3_4h[i] or price_low < s4_4h[i]) and (price_close > ema_val)
         
-        # Short conditions: price breaks above R3 or R4 (overbought rejection)
-        short_signal = volume_confirmed and vol_filter and (price_high > r3_12h[i] or price_high > r4_12h[i])
+        # Short conditions: price breaks above R3 or R4 (overbought) with volume, vol filter, and below EMA50
+        short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i] or price_high > r4_4h[i]) and (price_close < ema_val)
         
-        # Exit when price returns to pivot level
-        exit_long = position == 1 and price_close > pivot_12h[i]
-        exit_short = position == -1 and price_close < pivot_12h[i]
+        # Exit when price returns to daily pivot level
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+        exit_long = position == 1 and price_close > pivot_4h[i]
+        exit_short = position == -1 and price_close < pivot_4h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -117,12 +119,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla pivot levels from daily timeframe provide key support/resistance levels for 12h trading.
-# Enters long when price breaks below S3/S4 (oversold bounce) with volume confirmation (>1.5x average) and sufficient volatility.
-# Enters short when price breaks above R3/R4 (overbought rejection) with same conditions.
-# Exits when price returns to the daily pivot level, capturing mean reversion in ranging markets.
-# Works in both bull and bear markets by fading extremes at key pivot levels.
-# Volume confirmation ensures institutional participation at these key levels.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe.
-# Uses Camarilla formula for mathematically derived support/resistance levels.
-# Volatility filter prevents whipsaws in low-volatility environments.
+# Hypothesis: Daily Camarilla levels act as strong support/resistance for 4h price action.
+# Enters long when 4h price breaks below S3/S4 (oversold bounce) with volume confirmation (>1.5x average),
+# sufficient volatility (ATR > 0.5% of price), and above 4h 50 EMA (trend filter).
+# Enters short when price breaks above R3/R4 (overbought rejection) with same conditions plus below EMA50.
+# Exits when price returns to daily pivot level, capturing mean reversion.
+# Trend filter reduces whipsaws in strong trends. Volume and volatility filters reduce false breaks.
+# Designed for 4-8 trades per month (~50-100/year) to minimize fee drag on 4h timeframe.
+# Works in both bull (buying dips) and bear (selling rallies) markets.
