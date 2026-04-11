@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-# 6h_12h_keltner_reversion_v1
-# Strategy: Mean reversion at Keltner bands with 12h trend filter
-# Timeframe: 6h
+# 4h_1d_camarilla_breakout_volume_trend_atrstop_v1
+# Strategy: 4h Camarilla pivot breakout with 1d trend filter, volume confirmation, and ATR stop
+# Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Price reverts to EMA when touching Keltner bands (ATR-based) during strong 12h trends.
-# Works in bull by buying dips in uptrend, in bear by selling rallies in downtrend.
-# Uses ATR(20) for band width and EMA(20) for mean. Trend filter: EMA(50) slope on 12h.
+# Hypothesis: Camarilla pivot levels (from 1d) act as strong support/resistance. Breakouts
+# with volume confirmation and 1d trend alignment capture sustained moves. ATR-based stop
+# limits losses. Works in bull by catching breakouts in uptrend, and in bear by catching
+# breakdowns in downtrend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_keltner_reversion_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_trend_atrstop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -26,60 +27,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periodos=50).mean().values
-    ema_12h_slope = np.diff(ema_12h, prepend=ema_12h[0])
-    ema_12h_up = ema_12h_slope > 0  # Uptrend when rising
-    ema_12h_up_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_up)
+    # Calculate ATR (14-period) for stop loss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h EMA(20) - mean
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels from previous day's close (using 1d data)
+    # Camarilla: H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
+    # We'll use the previous day's range to calculate levels for current 4h bars
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 6h ATR(20) for Keltner bands
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = tr2[0] if len(tr2) > 0 else 0
-    tr3[0] = tr3[0] if len(tr3) > 0 else 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate camarilla levels for each 1d bar
+    camarilla_high = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_low = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Keltner bands: EMA(20) ± 2.0 * ATR(20)
-    keltner_upper = ema_20 + 2.0 * atr_20
-    keltner_lower = ema_20 - 2.0 * atr_20
+    # Align camarilla levels to 4h timeframe (using previous day's levels)
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume average (20-period) for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20[i]) or np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
-            np.isnan(ema_12h_up_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or np.isnan(atr[i])):
+            # Hold current position or flat if invalid
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
             continue
         
-        # Long: price touches lower band in 12h uptrend
-        if low[i] <= keltner_lower[i] and ema_12h_up_aligned[i] and position != 1:
+        # Current price and levels
+        price_now = close[i]
+        camarilla_high_now = camarilla_high_aligned[i]
+        camarilla_low_now = camarilla_low_aligned[i]
+        ema_50_now = ema_50_1d_aligned[i]
+        vol_spike_now = vol_spike[i]
+        
+        # Breakout conditions
+        bull_breakout = price_now > camarilla_high_now and vol_spike_now
+        bear_breakout = price_now < camarilla_low_now and vol_spike_now
+        
+        # Trend filter: only trade in direction of 1d EMA50
+        bull_trend = price_now > ema_50_now
+        bear_trend = price_now < ema_50_now
+        
+        # ATR-based stop loss
+        stop_long = position == 1 and price_now < entry_price - 2.0 * atr[i]
+        stop_short = position == -1 and price_now > entry_price + 2.0 * atr[i]
+        
+        # Trading logic
+        if bull_breakout and bull_trend and position != 1:
+            # Enter long
             position = 1
+            entry_price = price_now
             signals[i] = 0.25
-        # Short: price touches upper band in 12h downtrend
-        elif high[i] >= keltner_upper[i] and not ema_12h_up_aligned[i] and position != -1:
+        elif bear_breakout and bear_trend and position != -1:
+            # Enter short
             position = -1
+            entry_price = price_now
             signals[i] = -0.25
-        # Exit: price crosses EMA(20) or trend change
-        elif position == 1 and (close[i] >= ema_20[i] or not ema_12h_up_aligned[i]):
+        elif stop_long or stop_short:
+            # Stop loss hit
             position = 0
-            signals[i] = 0.0
-        elif position == -1 and (close[i] <= ema_20[i] or ema_12h_up_aligned[i]):
-            position = 0
+            entry_price = 0.0
             signals[i] = 0.0
         else:
             # Hold current position
