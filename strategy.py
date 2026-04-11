@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_pivot_volume_v1
-Strategy: 1d Camarilla pivot level touch with volume confirmation and weekly trend filter
-Timeframe: 1d
+12h_1d_vortex_breakout_volume_v1
+Strategy: 12h Vortex indicator breakout with volume confirmation and 1d trend filter
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses daily Camarilla pivot levels (support/resistance) from prior day's range, entered on touch with volume spike (>1.5x avg volume) and filtered by weekly EMA50 trend direction. Designed to capture mean reversion at key levels in ranging markets and breakouts in trending markets. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend). Target: 30-100 total trades over 4 years.
+Hypothesis: Uses 12h Vortex Indicator (VI+) and (VI-) crossovers as trend signals, confirmed by volume spike (>1.5x average volume) and filtered by 1d EMA50 trend direction. Designed to capture strong momentum moves in trending markets while avoiding false signals in chop. Works in bull markets (VI+ > VI- with trend) and bear markets (VI- > VI+ with trend). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "12h_1d_vortex_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,77 +27,67 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily pivot points from previous day
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # 12h Vortex Indicator (VI+ and VI-)
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(low[1:] - high[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
+    vm = np.abs(high - low)
+    vi_plus = np.concatenate([[np.nan], np.abs(high[1:] - low[:-1])])
+    vi_minus = np.concatenate([[np.nan], np.abs(low[1:] - high[:-1])])
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    r4 = pivot + (range_val * 1.1 / 2)
-    r3 = pivot + (range_val * 1.1 / 4)
-    r2 = pivot + (range_val * 1.1 / 6)
-    r1 = pivot + (range_val * 1.1 / 12)
-    s1 = pivot - (range_val * 1.1 / 12)
-    s2 = pivot - (range_val * 1.1 / 6)
-    s3 = pivot - (range_val * 1.1 / 4)
-    s4 = pivot - (range_val * 1.1 / 2)
-    
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Smooth with 14-period Wilder's smoothing (EMA with alpha=1/14)
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    vi_plus_smooth = pd.Series(vi_plus).ewm(alpha=1/14, adjust=False).mean().values
+    vi_minus_smooth = pd.Series(vi_minus).ewm(alpha=1/14, adjust=False).mean().values
+    vi_plus_norm = vi_plus_smooth / atr_14
+    vi_minus_norm = vi_minus_smooth / atr_14
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(14, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(vi_plus_norm[i]) or np.isnan(vi_minus_norm[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend_1w = price_close > ema_50_1w_aligned[i]
-        downtrend_1w = price_close < ema_50_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Touch conditions (within 0.1% of level)
-        touch_r1 = abs(price_close - r1[i]) / r1[i] < 0.001
-        touch_s1 = abs(price_close - s1[i]) / s1[i] < 0.001
-        touch_r2 = abs(price_close - r2[i]) / r2[i] < 0.001
-        touch_s2 = abs(price_close - s2[i]) / s2[i] < 0.001
+        # Vortex crossover signals
+        vi_cross_up = vi_plus_norm[i] > vi_minus_norm[i] and vi_plus_norm[i-1] <= vi_minus_norm[i-1]
+        vi_cross_down = vi_minus_norm[i] > vi_plus_norm[i] and vi_minus_norm[i-1] <= vi_plus_norm[i-1]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: touch support in uptrend or break resistance with volume
-        long_signal = ((touch_s1 or touch_s2) and vol_confirmed and uptrend_1w) or \
-                      (price_close > r1[i] and vol_confirmed and uptrend_1w)
+        # Long: VI+ crosses above VI- with volume in uptrend
+        long_signal = vi_cross_up and vol_confirmed and uptrend_1d
         
-        # Short: touch resistance in downtrend or break support with volume
-        short_signal = ((touch_r1 or touch_r2) and vol_confirmed and downtrend_1w) or \
-                       (price_close < s1[i] and vol_confirmed and downtrend_1w)
+        # Short: VI- crosses above VI+ with volume in downtrend
+        short_signal = vi_cross_down and vol_confirmed and downtrend_1d
         
-        # Exit when price reaches opposite level or midpoint
-        exit_long = position == 1 and (price_close > r1[i] or abs(price_close - pivot[i]) / pivot[i] < 0.0005)
-        exit_short = position == -1 and (price_close < s1[i] or abs(price_close - pivot[i]) / pivot[i] < 0.0005)
+        # Exit when Vortex lines re-cross (trend change)
+        exit_long = position == 1 and vi_minus_norm[i] > vi_plus_norm[i]
+        exit_short = position == -1 and vi_plus_norm[i] > vi_minus_norm[i]
         
         # Trading logic
         if long_signal and position != 1:
