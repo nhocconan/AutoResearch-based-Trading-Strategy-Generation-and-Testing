@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_volume_v3"
+name = "4h_1d_choppiness_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -22,87 +22,84 @@ def generate_signals(prices):
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate Choppiness Index on 1d
+    # ATR component
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Camarilla pivot calculation
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_val = high_prev - low_prev
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean()
+    atr_sum_14 = atr_1d.rolling(window=14, min_periods=14).sum()
     
-    # Resistance levels
-    r4 = close_prev + range_val * 1.1 / 2
-    r3 = close_prev + range_val * 1.1 / 4
-    r2 = close_prev + range_val * 1.1 / 6
-    r1 = close_prev + range_val * 1.1 / 12
+    # Highest high and lowest low over 14 periods
+    highest_high_14 = df_1d['high'].rolling(window=14, min_periods=14).max()
+    lowest_low_14 = df_1d['low'].rolling(window=14, min_periods=14).min()
     
-    # Support levels
-    s1 = close_prev - range_val * 1.1 / 12
-    s2 = close_prev - range_val * 1.1 / 6
-    s3 = close_prev - range_val * 1.1 / 4
-    s4 = close_prev - range_val * 1.1 / 2
+    # Choppiness Index formula
+    chop = 100 * np.log10(atr_sum_14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop_values = chop.values
     
-    # Align pivot levels to 4h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align chop to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     # 1d volume confirmation
     volume_1d = df_1d['volume'].values
-    vol_avg_10 = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_avg_10_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    
+    # 4h Donchian breakout levels (20-period)
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 4h ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr1_4h = high - low
+    tr2_4h = np.abs(high - np.roll(close, 1))
+    tr3_4h = np.abs(low - np.roll(close, 1))
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    tr_4h[0] = tr1_4h[0]
+    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 20 to ensure sufficient data
-    for i in range(20, n):
+    # Start from index 30 to ensure sufficient data
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_avg_10_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
+            np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or 
+            np.isnan(atr_4h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Current 1d volume (aligned)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirm = vol_1d_current > vol_avg_10_aligned[i]
+        vol_confirm = vol_1d_current > vol_avg_20_aligned[i]
         
         # Price levels
         price = close[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
+        upper_donchian = highest_high_20[i]
+        lower_donchian = lowest_low_20[i]
         
-        # Volatility filter: only trade when ATR > 10-period average
-        atr_avg_10 = pd.Series(atr).rolling(window=10, min_periods=10).mean()[i]
-        vol_filter = atr[i] > atr_avg_10
+        # Chop regime: chop > 61.8 = range, chop < 38.2 = trending
+        chop_value = chop_aligned[i]
+        in_range = chop_value > 61.8
+        in_trend = chop_value < 38.2
         
-        # Long conditions: price touches S1 with volume and volatility confirmation
-        long_signal = vol_confirm and vol_filter and (price <= s1_level * 1.002)
+        # Volatility filter: only trade when ATR > 15-period average
+        atr_avg_15 = pd.Series(atr_4h).rolling(window=15, min_periods=15).mean()[i]
+        vol_filter = atr_4h[i] > atr_avg_15
         
-        # Short conditions: price touches R1 with volume and volatility confirmation
-        short_signal = vol_confirm and vol_filter and (price >= r1_level * 0.998)
+        # Entry conditions: Donchian breakout in correct regime with volume
+        long_signal = vol_confirm and vol_filter and in_trend and (price > upper_donchian)
+        short_signal = vol_confirm and vol_filter and in_trend and (price < lower_donchian)
         
-        # Exit conditions: price touches opposite level or pivot
-        long_exit = price >= pivot_aligned[i] * 0.998
-        short_exit = price <= pivot_aligned[i] * 1.002
+        # Exit conditions: opposite Donchian breakout
+        long_exit = price < lower_donchian
+        short_exit = price > upper_donchian
         
         if long_signal and position != 1:
             position = 1
