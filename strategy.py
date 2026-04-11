@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_donchian_weekly_pivot_v1"
-timeframe = "6h"
+name = "12h_1d_chaikin_money_flow_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -18,35 +18,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d CMF (Chaikin Money Flow) with period 20
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    # Money Flow Multiplier
+    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d)
+    mfm = np.where((high_1d - low_1d) == 0, 0, mfm)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Money Flow Volume
+    mfv = mfm * volume_1d
     
-    # Calculate 6h Donchian channels (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # CMF(20) = sum(MFV, 20) / sum(volume, 20)
+    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
+    vol_sum = pd.Series(volume_1d).rolling(window=20, min_periods=20).sum().values
+    cmf_20_1d = np.where(vol_sum == 0, 0, mfv_sum / vol_sum)
     
-    # Calculate 6h average volume (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d RSI(14) for overbought/oversold filter
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    
+    # Calculate 1d ADX(14) for trend strength filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    plus_dm[0] = minus_dm[0] = 0
+    
+    plus_di_14_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values / atr_14_1d
+    minus_di_14_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values / atr_14_1d
+    dx = np.where((plus_di_14_1d + minus_di_14_1d) == 0, 0, 
+                  100 * np.abs(plus_di_14_1d - minus_di_14_1d) / (plus_di_14_1d + minus_di_14_1d))
+    adx_14_1d = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    
+    # Align all 1d indicators to 12h timeframe
+    cmf_20_1d_aligned = align_htf_to_ltf(prices, df_1d, cmf_20_1d)
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -54,34 +81,29 @@ def generate_signals(prices):
     # Start from index 20 to ensure sufficient data for calculations
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_avg_20[i]) or np.isnan(pivot_1w_aligned[i]) or
-            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i])):
+        if (np.isnan(cmf_20_1d_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(adx_14_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current 6h volume
-        vol_current = volume[i]
-        vol_surge = vol_current > 1.5 * vol_avg_20[i]  # 50% above average
+        cmf = cmf_20_1d_aligned[i]
+        rsi = rsi_14_1d_aligned[i]
+        adx = adx_14_1d_aligned[i]
         
-        price = close[i]
+        # Long when CMF > 0.1 (bullish money flow), RSI < 70 (not overbought), and ADX > 20 (trending)
+        long_condition = (cmf > 0.1) and (rsi < 70) and (adx > 20)
         
-        # Long when price breaks above weekly R3 with volume surge
-        long_breakout = price > r3_1w_aligned[i]
-        long_signal = long_breakout and vol_surge
+        # Short when CMF < -0.1 (bearish money flow), RSI > 30 (not oversold), and ADX > 20 (trending)
+        short_condition = (cmf < -0.1) and (rsi > 30) and (adx > 20)
         
-        # Short when price breaks below weekly S3 with volume surge
-        short_breakout = price < s3_1w_aligned[i]
-        short_signal = short_breakout and vol_surge
+        # Exit when CMF crosses zero (money flow reversal)
+        exit_long = cmf < 0
+        exit_short = cmf > 0
         
-        # Exit when price returns to weekly pivot (mean reversion to weekly mean)
-        exit_long = price < pivot_1w_aligned[i]
-        exit_short = price > pivot_1w_aligned[i]
-        
-        if long_signal and position != 1:
+        if long_condition and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
