@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h volume confirmation + ATR volatility filter
-# - Donchian levels from 4h: upper/lower bands act as dynamic support/resistance
-# - Long when price breaks above upper band with volume > 1.3x 20-period average
-# - Short when price breaks below lower band with volume > 1.3x 20-period average
-# - ATR filter: only trade when ATR(14) > 0.4 * ATR(50) to avoid low volatility chop
-# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 19-50 trades/year (75-200 total over 4 years) to stay within fee drag limits
-# - Donchian breakouts work in both bull (breakouts with volume) and bear (breakdowns with volume) markets
-# - 12h HTF provides reliable volume confirmation, 4h timeframe balances frequency and cost
+# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and ATR regime filter
+# - Donchian channels from 4h provide dynamic support/resistance levels
+# - Long when price closes above upper band with volume > 1.5x 20-period 1d average (spike confirmation)
+# - Short when price closes below lower band with volume > 1.5x 20-period 1d average
+# - ATR filter: only trade when ATR(14) > 0.3 * ATR(50) to avoid extremely low volatility chop
+# - Uses discrete position sizing: ±0.25 to balance return and drawdown
+# - Target: 25-40 trades/year (100-160 total over 4 years) to stay within fee drag limits
+# - Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume)
+# - 1d HTF provides reliable volume confirmation less prone to 4h noise
 
-name = "4h_12h_donchian_volume_atr_v1"
+name = "4h_1d_donchian_volume_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,33 +30,33 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop for volume confirmation and ATR
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Load 1d data ONCE before loop for volume confirmation and ATR
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 12h volume SMA and ATR
-    volume_12h = df_12h['volume'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Pre-compute 1d volume SMA and ATR
+    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True range for ATR
-    tr1 = pd.Series(high_12h).shift(1) - pd.Series(low_12h).shift(1)
-    tr2 = abs(pd.Series(high_12h).shift(1) - pd.Series(close_12h).shift(1))
-    tr3 = abs(pd.Series(low_12h).shift(1) - pd.Series(close_12h).shift(1))
-    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_50_12h = pd.Series(tr_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
+    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
+    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_50_1d = pd.Series(tr_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 12h volume SMA (20-period)
-    volume_series = pd.Series(volume_12h)
-    volume_sma_20_12h = volume_series.rolling(window=20, min_periods=20).mean().values
+    # 1d volume SMA (20-period)
+    volume_series = pd.Series(volume_1d)
+    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Align 12h indicators to 4h timeframe
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_12h, volume_sma_20_12h)
-    atr_14_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
-    atr_50_aligned = align_htf_to_ltf(prices, df_12h, atr_50_12h)
+    # Align 1d indicators to 4h timeframe
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50_1d)
     
     # Pre-compute 4h Donchian channels (20-period)
     high_series = pd.Series(high)
@@ -81,11 +81,11 @@ def generate_signals(prices):
         breakout_long = price_close > donchian_upper[i-1]  # Close above previous period's upper band
         breakout_short = price_close < donchian_lower[i-1]  # Close below previous period's lower band
         
-        # Volume confirmation: current volume > 1.3x 20-period average (using 12h aligned volume)
-        vol_confirm = volume_current > 1.3 * volume_sma_20_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average (using 1d aligned volume)
+        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
-        # ATR filter: trade only when short-term ATR > 0.4 * long-term ATR (avoid low volatility)
-        atr_filter = atr_14_aligned[i] > 0.4 * atr_50_aligned[i]
+        # ATR filter: trade only when short-term ATR > 0.3 * long-term ATR (avoid low volatility chop)
+        atr_filter = atr_14_aligned[i] > 0.3 * atr_50_aligned[i]
         
         # Entry conditions
         enter_long = False
