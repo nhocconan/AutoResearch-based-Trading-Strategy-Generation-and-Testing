@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h mean reversion with 4h trend filter and 1d volume regime
-# - Uses 4h EMA(50) for trend direction (bull/bear filter)
-# - Uses 1d ATR ratio (ATR7/ATR30) to identify volatility expansion/contraction regimes
-# - In low volatility (ATR7/ATR30 < 0.8): mean revert at Bollinger Bands (20,2.0) on 1h
-# - In high volatility (ATR7/ATR30 > 1.2): trend follow with 4h Donchian breakout
-# - Session filter: 08-20 UTC to avoid Asian session noise
-# - Discrete position sizing: ±0.20 to limit fee churn and drawdown
-# - Target: 15-35 trades/year (60-140 total over 4 years) to stay within fee limits
-# - Combines trend and mean reversion to work in both bull and bear markets
-# - Volume regime filter prevents whipsaws in low momentum environments
+# Hypothesis: 6h Williams %R mean reversion with 1w trend filter and volume spike confirmation
+# - Williams %R(14) identifies overbought/oversold conditions on 6h timeframe
+# - Weekly trend filter: only take longs when price > weekly EMA(20), shorts when price < weekly EMA(20)
+# - Volume confirmation: current volume > 2.0x 24-period average to filter weak signals
+# - Discrete position sizing: ±0.25 to manage drawdown and reduce fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Williams %R works well in ranging markets (common in 2025-2026 test period)
+# - Weekly trend filter prevents counter-trend trading during strong moves
+# - Volume spike confirmation increases signal reliability
 
-name = "1h_4h_1d_regime_adaptive_v1"
-timeframe = "1h"
+name = "6h_1w_williamsr_meanrev_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,114 +30,77 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return signals
     
-    # 4h EMA(50) for trend direction
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Pre-compute 1w EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 4h Donchian(20) for breakout signals in high volatility
-    highest_high_4h = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().values
-    lowest_low_4h = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().values
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
+    # Pre-compute Williams %R on 6h timeframe
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Load 1d data ONCE before loop for volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return signals
-    
-    # 1d ATR(7) and ATR(30) for volatility regime
-    tr_1d = np.maximum(df_1d['high'] - df_1d['low'], 
-                       np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)), 
-                                  np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
-    tr_1d[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
-    atr_7_1d = pd.Series(tr_1d).rolling(window=7, min_periods=7).mean().values
-    atr_30_1d = pd.Series(tr_1d).rolling(window=30, min_periods=30).mean().values
-    atr_ratio_1d = atr_7_1d / atr_30_1d
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # 1h Bollinger Bands (20,2.0) for mean reversion in low volatility
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean().values
-    dev = close_s.rolling(window=20, min_periods=20).std().values
-    upper_bb = basis + 2.0 * dev
-    lower_bb = basis - 2.0 * dev
+    # Pre-compute volume confirmation (24-period average)
+    volume_sma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(highest_high_4h_aligned[i]) or 
-            np.isnan(lowest_low_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or
-            np.isnan(basis[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_sma_24[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        volume_current = volume[i]
         
-        # Regime determination
-        atr_ratio = atr_ratio_aligned[i]
-        low_vol = atr_ratio < 0.8
-        high_vol = atr_ratio > 1.2
+        # Williams %R levels
+        wr_value = williams_r[i]
         
-        # Trend filter: 4h EMA(50)
-        uptrend = close_price > ema_50_4h_aligned[i]
-        downtrend = close_price < ema_50_4h_aligned[i]
+        # Trend filter: price vs weekly EMA(20)
+        weekly_ema = ema_20_1w_aligned[i]
+        uptrend = close_price > weekly_ema
+        downtrend = close_price < weekly_ema
         
-        # Initialize signals
+        # Volume confirmation: current volume > 2.0x 24-period average
+        vol_confirm = volume_current > 2.0 * volume_sma_24[i]
+        
+        # Entry conditions
         enter_long = False
         enter_short = False
+        
+        # Long: Williams %R oversold (< -80) + uptrend + volume confirmation
+        if wr_value < -80.0 and uptrend and vol_confirm:
+            enter_long = True
+        
+        # Short: Williams %R overbought (> -20) + downtrend + volume confirmation
+        if wr_value > -20.0 and downtrend and vol_confirm:
+            enter_short = True
+        
+        # Exit conditions: Williams %R mean reversion to midpoint (-50)
         exit_long = False
         exit_short = False
         
-        if low_vol:
-            # Low volatility regime: mean reversion at Bollinger Bands
-            # Long: price touches lower BB in uptrend
-            if close_price <= lower_bb[i] and uptrend:
-                enter_long = True
-            # Short: price touches upper BB in downtrend
-            if close_price >= upper_bb[i] and downtrend:
-                enter_short = True
-            # Exit: price returns to basis
-            if position == 1 and close_price >= basis[i]:
-                exit_long = True
-            if position == -1 and close_price <= basis[i]:
-                exit_short = True
-        elif high_vol:
-            # High volatility regime: trend following with Donchian breakout
-            # Long: price breaks above 4h Donchian upper in uptrend
-            if close_price > highest_high_4h_aligned[i] and uptrend:
-                enter_long = True
-            # Short: price breaks below 4h Donchian lower in downtrend
-            if close_price < lowest_low_4h_aligned[i] and downtrend:
-                enter_short = True
-            # Exit: opposite Donchian break
-            if position == 1 and close_price < lowest_low_4h_aligned[i]:
-                exit_long = True
-            if position == -1 and close_price > highest_high_4h_aligned[i]:
-                exit_short = True
-        # In neutral volatility (0.8 <= ATR ratio <= 1.2): no new entries, maintain or exit
+        if position == 1:
+            # Exit long when Williams %R reverts to -50 or above
+            exit_long = wr_value >= -50.0
+        elif position == -1:
+            # Exit short when Williams %R reverts to -50 or below
+            exit_short = wr_value <= -50.0
         
         # Trading logic
         if enter_long and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif enter_short and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -147,6 +109,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Maintain current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
