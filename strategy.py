@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_volume_v1
-# Strategy: Daily Camarilla pivot levels with weekly trend filter and volume confirmation
-# Timeframe: 1d
+# 6h_1d_cci_trend_volume_v2
+# Strategy: 6-hour CCI with 1-day trend filter and volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (L3/L4 for long, H3/H4 for short) act as support/resistance.
-# Weekly trend filter (price above/below weekly SMA50) ensures trades align with higher timeframe trend.
-# Volume confirmation (daily volume > 1.5x 20-day average) filters low-conviction moves.
-# Designed for low trade frequency (~10-25/year) to minimize fee drift and work in both bull and bear markets.
+# Hypothesis: CCI identifies overbought/oversold conditions. Combined with 1-day trend (EMA50) and volume spikes,
+# it captures mean reversion in ranging markets and trend continuation in strong moves.
+# Works in bull markets via trend-following longs and bear markets via trend-following shorts.
+# Designed for low trade frequency (~15-30/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "6h_1d_cci_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,74 +27,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly SMA50 for trend filter
-    close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    # 6h CCI(20)
+    tp = (high + low + close) / 3.0
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=False).values
+    cci = (tp - sma_tp) / (0.015 * mad + 1e-10)
     
-    # Daily high, low, close for Camarilla calculation
-    high_1d = high
-    low_1d = low
-    close_1d = close
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for each day using previous day's OHLC
-    # Camarilla formulas:
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.0 * (high - low)
-    # L3 = close - 1.0 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # We use shifted values to avoid look-ahead (yesterday's range)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # avoid NaN on first bar
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # 1d volume average (20-period) for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
-    camarilla_h3 = prev_close + 1.0 * (prev_high - prev_low)
-    camarilla_l3 = prev_close - 1.0 * (prev_high - prev_low)
-    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
-    
-    # Daily volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align raw 1d volume for confirmation
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # start after warmup
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(sma_50_1w_aligned[i]) or np.isnan(camarilla_h3[i]) or np.isnan(camarilla_l3[i]) or \
-           np.isnan(vol_avg_20[i]):
+        if np.isnan(cci[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Weekly trend filter: price above/below weekly SMA50
-        weekly_uptrend = close_1d[i] > sma_50_1w_aligned[i]
-        weekly_downtrend = close_1d[i] < sma_50_1w_aligned[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Trend filter: price above/below 1d EMA50
+        price_above_trend = close[i] > ema_50_1d_aligned[i]
+        price_below_trend = close[i] < ema_50_1d_aligned[i]
+        
+        # CCI signals: oversold (< -100) or overbought (> 100)
+        cci_oversold = cci[i] < -100
+        cci_overbought = cci[i] > 100
         
         # Entry conditions
-        # Long: price crosses above Camarilla L3 in uptrend with volume
-        if weekly_uptrend and vol_confirm and close_1d[i] > camarilla_l3[i] and close_1d[i-1] <= camarilla_l3[i-1] and position != 1:
+        # Long: CCI oversold AND price above 1d EMA50 (uptrend) AND volume confirmation
+        if cci_oversold and price_above_trend and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: price crosses below Camarilla H3 in downtrend with volume
-        elif weekly_downtrend and vol_confirm and close_1d[i] < camarilla_h3[i] and close_1d[i-1] >= camarilla_h3[i-1] and position != -1:
+        # Short: CCI overbought AND price below 1d EMA50 (downtrend) AND volume confirmation
+        elif cci_overbought and price_below_trend and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: opposite Camarilla level touch (mean reversion)
-        elif position == 1 and close_1d[i] < camarilla_l4[i]:  # reversed to L4
+        # Exit: CCI returns to neutral zone (-50 to 50)
+        elif position == 1 and cci[i] > -50:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close_1d[i] > camarilla_h4[i]:  # reversed to H4
+        elif position == -1 and cci[i] < 50:
             position = 0
             signals[i] = 0.0
         else:
