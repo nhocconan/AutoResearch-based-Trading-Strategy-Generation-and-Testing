@@ -3,79 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_momentum_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 40:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate weekly RSI (14-period)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Calculate daily EMA13 and EMA20 for Elder Ray
+    close_1d = df_1d['close'].values
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Shift by 1 to use only completed weekly bars
-    rsi_1w = np.roll(rsi_1w, 1)
-    rsi_1w[0] = np.nan
+    # Calculate Bull Power and Bear Power
+    bull_power = high - ema13  # Daily high minus EMA13
+    bear_power = low - ema20   # Daily low minus EMA20
     
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align Elder Ray indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
+    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
     
-    # Daily RSI (14-period)
-    delta_d = np.diff(close, prepend=close[0])
-    gain_d = np.where(delta_d > 0, delta_d, 0)
-    loss_d = np.where(delta_d < 0, -delta_d, 0)
-    avg_gain_d = pd.Series(gain_d).rolling(window=14, min_periods=14).mean().values
-    avg_loss_d = pd.Series(loss_d).rolling(window=14, min_periods=14).mean().values
-    rs_d = np.where(avg_loss_d != 0, avg_gain_d / avg_loss_d, 0)
-    rsi_d = 100 - (100 / (1 + rs_d))
+    # Calculate 60-period EMA for trend filter (on 6h)
+    ema60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Volume filter: volume > 1.3x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    for i in range(30, n):  # Start after warmup
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    for i in range(40, n):  # Start after warmup
         # Skip if any required data is invalid
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_d[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema60[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        rsi_weekly = rsi_1w_aligned[i]
-        rsi_daily = rsi_d[i]
+        price_close = close[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
+        atr_val = atr[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Momentum conditions: 
-        # Long when weekly RSI > 50 (bullish bias) and daily RSI crosses above 50
-        # Short when weekly RSI < 50 (bearish bias) and daily RSI crosses below 50
-        long_signal = volume_confirmed and (rsi_weekly > 50) and (rsi_daily > 50) and (rsi_d[i-1] <= 50)
-        short_signal = volume_confirmed and (rsi_weekly < 50) and (rsi_daily < 50) and (rsi_d[i-1] >= 50)
+        # Volatility filter: avoid extremely low volatility
+        vol_filter = atr_val > 0.008 * price_close  # ATR > 0.8% of price
         
-        # Exit when RSI reaches opposite extreme (overbought/oversold)
-        exit_long = position == 1 and (rsi_daily >= 70)
-        exit_short = position == -1 and (rsi_daily <= 30)
+        # Trend filter: price above/below EMA60
+        uptrend = price_close > ema60[i]
+        downtrend = price_close < ema60[i]
+        
+        # Elder Ray conditions
+        strong_bull = bull_power_aligned[i] > 0 and bull_power_aligned[i] > -bear_power_aligned[i]
+        strong_bear = bear_power_aligned[i] < 0 and bear_power_aligned[i] < bull_power_aligned[i]
+        
+        # Long conditions: uptrend + bull power dominance + volume + volatility
+        long_signal = uptrend and strong_bull and volume_confirmed and vol_filter
+        
+        # Short conditions: downtrend + bear power dominance + volume + volatility
+        short_signal = downtrend and strong_bear and volume_confirmed and vol_filter
+        
+        # Exit when power weakens or trend changes
+        exit_long = position == 1 and (bull_power_aligned[i] <= 0 or not uptrend)
+        exit_short = position == -1 and (bear_power_aligned[i] >= 0 or not downtrend)
         
         # Trading logic
         if long_signal and position != 1:
@@ -96,14 +108,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly RSI momentum with daily RSI confirmation on daily timeframe.
-# Uses weekly RSI to establish long-term trend bias (above/below 50) and daily RSI for entry timing.
-# Enters long when weekly RSI > 50 (bullish bias) AND daily RSI crosses above 50 with volume confirmation.
-# Enters short when weekly RSI < 50 (bearish bias) AND daily RSI crosses below 50 with volume confirmation.
-# Exits when daily RSI reaches overbought (>=70) for longs or oversold (<=30) for shorts.
-# Works in both bull and bear markets by following the weekly momentum while using daily RSI for precise entries.
-# Volume confirmation ensures institutional participation and reduces false signals.
-# Target: 20-60 total trades over 4 years (5-15/year) to minimize fee drag on daily timeframe.
-# Weekly timeframe reduces noise and captures multi-week trends. RSI provides clear overbought/oversold levels.
-# This strategy avoids the overtrading pitfalls of previous RSI-based strategies by requiring both weekly bias
-# and daily crossover with volume confirmation, resulting in fewer but higher-quality signals.
+# Hypothesis: Elder Ray Power with trend and volume filters on 6h timeframe.
+# Uses daily Bull Power (high-EMA13) and Bear Power (low-EMA20) to measure
+# bull/bear strength relative to trend. Enters long when Bull Power positive
+# and dominant, price above 60-period EMA, with volume and volatility confirmation.
+# Enters short when Bear Power negative and dominant, price below EMA60,
+# with volume and volatility confirmation. Exits when power weakens or trend changes.
+# Works in both bull and bear markets by measuring underlying strength/weakness.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
+# Elder Ray is effective in trending markets and avoids whipsaws in ranging conditions.
