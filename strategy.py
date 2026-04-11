@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_volume_profile_reversion_v1
-Strategy: 12h volume profile mean reversion with 1d/1w trend filter
-Timeframe: 12h
+1h_4h_1d_camarilla_pivot_volume_v3
+Strategy: 1h Camarilla pivot breakout with volume confirmation and 4h/1d trend filter
+Timeframe: 1h
 Leverage: 1.0
-Hypothesis: Uses 12h volume profile to identify high-volume nodes (support/resistance). When price deviates significantly from the volume-weighted average price (VWAP) with confirmation from volume imbalance, mean reversion trades are taken. Trend filtered by 1d EMA50 and 1w EMA200 to avoid fighting major trends. Designed for low-frequency, high-conviction trades in ranging markets while avoiding trend exhaustion. Target: 15-35 trades per year.
+Hypothesis: Uses 1h Camarilla pivot levels (resistance/support) for breakout entries with volume confirmation (>1.5x average volume) and filtered by 4h EMA20 and 1d EMA50 trend alignment. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses higher timeframes for direction (4h/1d) and 1h only for timing. Reduced trade frequency by requiring stricter trend alignment and volume confirmation. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_volume_profile_reversion_v1"
-timeframe = "12h"
+name = "1h_4h_1d_camarilla_pivot_volume_v3"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,87 +27,85 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50 or len(df_1w) < 20:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h VWAP (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den > 0, vwap_num / vwap_den, typical_price)
+    # 1h EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 12h standard deviation of price from VWAP (20-period)
-    price_dev = typical_price - vwap
-    vwap_std = pd.Series(price_dev).rolling(window=20, min_periods=20).std().values
-    
-    # Volume imbalance: current volume vs 20-period average (detect absorption)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_avg > 0, vol_avg, 1.0)
+    # 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
     # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)  # Increased volume threshold
+    
+    # Calculate Camarilla levels from previous day's data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_cama = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 1h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap[i]) or np.isnan(vwap_std[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or
-            np.isnan(vol_avg[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_20[i]) or np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
-        vwap_val = vwap[i]
-        vwap_std_val = vwap_std[i]
-        vol_ratio_val = vol_ratio[i]
         
-        # Avoid division by zero or extremely small std
-        if vwap_std_val <= 0:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-        
-        # Z-score of price deviation from VWAP
-        z_score = (price_close - vwap_val) / vwap_std_val
-        
-        # Volume imbalance filter: look for exhaustion (low volume on extreme moves)
-        vol_exhaustion = vol_ratio_val < 0.5  # Low volume on extreme move suggests exhaustion
-        
-        # Trend filters
+        # Trend filters: price above/both EMAs for long, below/both for short
+        uptrend_4h = price_close > ema_20_4h_aligned[i]
         uptrend_1d = price_close > ema_50_1d_aligned[i]
-        uptrend_1w = price_close > ema_200_1w_aligned[i]
+        downtrend_4h = price_close < ema_20_4h_aligned[i]
         downtrend_1d = price_close < ema_50_1d_aligned[i]
-        downtrend_1w = price_close < ema_200_1w_aligned[i]
         
-        # Mean reversion conditions
-        # Long: price significantly below VWAP with volume exhaustion in uptrend context
-        long_signal = (z_score < -2.0) and vol_exhaustion and uptrend_1d and uptrend_1w
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > camarilla_H4_aligned[i]
+        breakout_down = price_close < camarilla_L4_aligned[i]
         
-        # Short: price significantly above VWAP with volume exhaustion in downtrend context
-        short_signal = (z_score > 2.0) and vol_exhaustion and downtrend_1d and downtrend_1w
+        # Volume confirmation
+        vol_confirmed = vol_spike[i]
         
-        # Exit when price returns to VWAP or extreme reverses
-        exit_long = position == 1 and (price_close >= vwap_val or z_score > -0.5)
-        exit_short = position == -1 and (price_close <= vwap_val or z_score < 0.5)
+        # Long: upward breakout with volume in uptrend (both 4h and 1d)
+        long_signal = breakout_up and vol_confirmed and uptrend_4h and uptrend_1d
+        
+        # Short: downward breakout with volume in downtrend (both 4h and 1d)
+        short_signal = breakout_down and vol_confirmed and downtrend_4h and downtrend_1d
+        
+        # Exit when price returns to the EMA20 (1h) or opposite Camarilla level
+        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
+        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -115,6 +113,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
