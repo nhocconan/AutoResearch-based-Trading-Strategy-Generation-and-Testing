@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_ma_cross_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,59 +20,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate weekly volume average (20-period)
-    vol_ma_20 = pd.Series(df_1w['volume']).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1d Elder Ray and 13-period EMA
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly high and low for range
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 13-period EMA of close
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Previous week's range
-    range_1w = high_1w - low_1w
+    # Bull Power = High - EMA13
+    bull_power = high_1d - ema_13
+    # Bear Power = Low - EMA13
+    bear_power = low_1d - ema_13
     
-    # Previous week's close for Camarilla calculation
-    close_1w = df_1w['close'].values
+    # Shift by 1 to use only completed 1d bars
+    bull_power = np.roll(bull_power, 1)
+    bear_power = np.roll(bear_power, 1)
+    ema_13 = np.roll(ema_13, 1)
+    bull_power[0] = np.nan
+    bear_power[0] = np.nan
+    ema_13[0] = np.nan
     
-    # Camarilla levels (based on previous week's close)
-    l4 = close_1w - (range_1w * 1.1000)
-    l3 = close_1w - (range_1w * 1.1000 / 2)
-    h3 = close_1w + (range_1w * 1.1000 / 2)
-    h4 = close_1w + (range_1w * 1.1000)
+    # Align 1d indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
     
-    # Shift by 1 to use only completed weekly bars
-    l4 = np.roll(l4, 1)
-    l3 = np.roll(l3, 1)
-    h3 = np.roll(h3, 1)
-    h4 = np.roll(h4, 1)
-    l4[0] = np.nan
-    l3[0] = np.nan
-    h3[0] = np.nan
-    h4[0] = np.nan
+    # Calculate 6h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly Camarilla levels to daily timeframe
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align weekly volume average to daily timeframe
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
-    
-    # Align previous week's close (pivot point) to daily timeframe
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_close_1w[0] = np.nan
-    prev_close_aligned = align_htf_to_ltf(prices, df_1w, prev_close_1w)
-    
-    for i in range(20, n):
+    for i in range(60, n):  # Start after EMA50 warmup
         # Skip if any required data is invalid
-        if (np.isnan(l4_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(prev_close_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema_13_aligned[i]) or np.isnan(ema_50[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -80,20 +69,20 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        vol_ma = vol_ma_20_aligned[i]
+        vol_ma = vol_ma_20[i]
         
-        # Volume confirmation: volume > 2.0x 20-period weekly average
-        volume_confirmed = volume_current > 2.0 * vol_ma
+        # Volume confirmation
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Long: price breaks above H3/H4 with volume
-        long_signal = volume_confirmed and (price_high > h3_aligned[i] or price_high > h4_aligned[i])
+        # Long conditions: Bull Power > 0 AND price > EMA50 (uptrend) with volume
+        long_signal = volume_confirmed and (bull_power_aligned[i] > 0) and (price_close > ema_50[i])
         
-        # Short: price breaks below L3/L4 with volume
-        short_signal = volume_confirmed and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
+        # Short conditions: Bear Power < 0 AND price < EMA50 (downtrend) with volume
+        short_signal = volume_confirmed and (bear_power_aligned[i] < 0) and (price_close < ema_50[i])
         
-        # Exit when price returns to the previous week's close (pivot point)
-        exit_long = position == 1 and price_close < prev_close_aligned[i]
-        exit_short = position == -1 and price_close > prev_close_aligned[i]
+        # Exit when Elder Power reverses
+        exit_long = position == 1 and bull_power_aligned[i] <= 0
+        exit_short = position == -1 and bear_power_aligned[i] >= 0
         
         # Trading logic
         if long_signal and position != 1:
@@ -105,7 +94,7 @@ def generate_signals(prices):
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_exit:
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
@@ -114,14 +103,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Camarilla pivot breakout strategy on daily timeframe with volume confirmation.
-# Uses 1w Camarilla levels (L3, L4, H3, H4) from the previous week's price action.
-# Enters long when price breaks above H3 or H4 with volume confirmation (>2x average weekly volume).
-# Enters short when price breaks below L3 or L4 with volume confirmation.
-# Exits when price returns to the previous week's close (pivot point).
-# Weekly timeframe reduces noise and increases signal reliability.
-# Volume confirmation (>2x average) reduces false breakouts.
-# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag on daily timeframe.
-# Works in both bull and bear markets by trading breakouts in the direction of momentum.
-# Weekly Camarilla levels provide stronger support/resistance levels than daily levels.
-# Targets BTC and ETH primarily, with potential applicability to SOL.
+# Hypothesis: Elder Ray + EMA50 trend filter on 6h with volume confirmation.
+# Uses 1d Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) to measure
+# bull/bear strength relative to the 13-day EMA. Enters long when Bull Power > 0
+# and price above 6h EMA50 with volume confirmation (>1.5x average). Enters short
+# when Bear Power < 0 and price below 6h EMA50 with volume confirmation.
+# Exits when the respective power crosses zero. Works in both bull and bear markets
+# by aligning with the dominant trend on higher timeframe. Target: 50-150 total trades
+# over 4 years (12-37/year) to minimize fee drag on 6h timeframe. Elder Ray captures
+# the underlying power behind price moves, reducing false signals. Volume confirmation
+# ensures participation from market actors. EMA50 filter prevents counter-trend trades.
