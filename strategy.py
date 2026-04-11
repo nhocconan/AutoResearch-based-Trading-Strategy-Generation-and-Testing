@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_breakout_volume_v1
-# Strategy: Daily breakout at Camarilla levels calculated from weekly close, with volume confirmation
-# Timeframe: 1d
+# 12h_1d_camarilla_breakout_volume_v1
+# Strategy: 12h breakout at Camarilla levels calculated from 1d close, with volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Camarilla levels derived from weekly price action provide strong support/resistance.
+# Hypothesis: Camarilla levels derived from daily price action provide strong support/resistance.
 # Breakouts above resistance or below support with above-average volume capture momentum.
 # Volume confirmation reduces false breakouts. Works in both bull and bear markets by
-# following the direction of the breakout. Target: 20-40 trades/year.
+# following the direction of the breakout. Target: 12-37 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,18 +27,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from weekly OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels from 1d OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous week's range
+    # Camarilla levels: based on previous day's range
     # R4 = Close + Range * 1.1/2
     # R3 = Close + Range * 1.1/4
     # R2 = Close + Range * 1.1/6
@@ -49,30 +49,30 @@ def generate_signals(prices):
     # S4 = Close - Range * 1.1/2
     # where Range = High - Low
     
-    range_1w = high_1w - low_1w
-    r4 = close_1w + range_1w * 1.1 / 2
-    r3 = close_1w + range_1w * 1.1 / 4
-    r2 = close_1w + range_1w * 1.1 / 6
-    r1 = close_1w + range_1w * 1.1 / 12
-    s1 = close_1w - range_1w * 1.1 / 12
-    s2 = close_1w - range_1w * 1.1 / 6
-    s3 = close_1w - range_1w * 1.1 / 4
-    s4 = close_1w - range_1w * 1.1 / 2
+    range_1d = high_1d - low_1d
+    r4 = close_1d + range_1d * 1.1 / 2
+    r3 = close_1d + range_1d * 1.1 / 4
+    r2 = close_1d + range_1d * 1.1 / 6
+    r1 = close_1d + range_1d * 1.1 / 12
+    s1 = close_1d - range_1d * 1.1 / 12
+    s2 = close_1d - range_1d * 1.1 / 6
+    s3 = close_1d - range_1d * 1.1 / 4
+    s4 = close_1d - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to daily (using previous week's levels)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align Camarilla levels to 12h (using previous 1d bar's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation: weekly volume > average
-    vol_1w = df_1w['volume'].values
-    vol_avg_20 = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_20)
+    # Volume confirmation: 1d volume > average
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -84,9 +84,9 @@ def generate_signals(prices):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current weekly volume (aligned)
-        vol_1w_current = align_htf_to_ltf(prices, df_1w, vol_1w)[i]
-        vol_confirm = vol_1w_current > vol_avg_20_aligned[i]
+        # Current 1d volume (aligned)
+        vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
+        vol_confirm = vol_1d_current > vol_avg_20_aligned[i]
         
         # Breakout conditions using Camarilla levels
         breakout_above_r1 = close[i] > r1_aligned[i-1]  # break above R1
