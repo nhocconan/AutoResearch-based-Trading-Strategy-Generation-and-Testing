@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_supertrend_follow_v1"
-timeframe = "1h"
+name = "6h_1w_1d_camarilla_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,116 +17,109 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1w and 1d data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 30 or len(df_1d) < 30:
+    if len(df_1w) < 10 or len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 4h Supertrend (ATR=10, multiplier=3)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly OHLC for weekly trend
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range for 4h
-    tr1_4h = high_4h[1:] - low_4h[1:]
-    tr2_4h = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3_4h = np.abs(low_4h[1:] - close_4h[:-1])
-    tr_4h = np.concatenate([[np.nan], np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))])
-    atr_4h = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
+    # Calculate daily OHLC for Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Basic Upper and Lower Bands
-    hl2_4h = (high_4h + low_4h) / 2
-    upper_band_4h = hl2_4h + 3.0 * atr_4h
-    lower_band_4h = hl2_4h - 3.0 * atr_4h
-    
-    # Initialize Supertrend
-    supertrend_4h = np.full_like(close_4h, np.nan)
-    direction_4h = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close_4h)):
-        if np.isnan(atr_4h[i-1]) or np.isnan(upper_band_4h[i-1]) or np.isnan(lower_band_4h[i-1]):
-            supertrend_4h[i] = np.nan
-            direction_4h[i] = direction_4h[i-1] if i > 0 else 1
-            continue
-            
-        if close_4h[i] > upper_band_4h[i-1]:
-            direction_4h[i] = 1
-        elif close_4h[i] < lower_band_4h[i-1]:
-            direction_4h[i] = -1
-        else:
-            direction_4h[i] = direction_4h[i-1]
-            if direction_4h[i] == 1 and lower_band_4h[i] < lower_band_4h[i-1]:
-                lower_band_4h[i] = lower_band_4h[i-1]
-            if direction_4h[i] == -1 and upper_band_4h[i] > upper_band_4h[i-1]:
-                upper_band_4h[i] = upper_band_4h[i-1]
-        
-        supertrend_4h[i] = lower_band_4h[i] if direction_4h[i] == 1 else upper_band_4h[i]
-    
-    # Align 4h Supertrend direction to 1h
-    supertrend_dir_1h = align_htf_to_ltf(prices, df_4h, direction_4h)
-    
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 1h ATR for volatility filter
+    # 6h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 1h volume filter: volume > 1.2x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # 6h volume filter: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 8-20 UTC
+    # Weekly trend: price above/below 20-week EMA
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Daily Camarilla pivot levels (previous day's data)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + range_1d * 1.166
+    s3_1d = close_1d - range_1d * 1.166
+    
+    # Shift by 1 to use only completed daily bars
+    r3_1d = np.roll(r3_1d, 1)
+    s3_1d = np.roll(s3_1d, 1)
+    r3_1d[0] = np.nan
+    s3_1d[0] = np.nan
+    
+    # Align daily Camarilla levels to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Session filter: 0-23 UTC (6h bars cover full day)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = (hours >= 0) & (hours <= 23)
     
-    # Minimum holding period: 4 bars (4 hours) to reduce churn
+    # Minimum holding period: 2 bars (12 hours) to reduce churn
     hold_count = np.zeros(n, dtype=int)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
+        # Decrease hold counter
         if hold_count[i] > 0:
             hold_count[i] -= 1
         
-        if (np.isnan(supertrend_dir_1h[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(atr_1h[i]) or np.isnan(vol_ma_30[i]) or
+        # Skip if any required data is invalid or outside session or holding
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
             not in_session[i] or hold_count[i] > 0):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        vol_ma = vol_ma_30[i]
+        vol_ma = vol_ma_20[i]
         
-        volume_confirmed = volume_current > 1.2 * vol_ma
+        # Volume confirmation: 6h volume must be elevated
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Long: 4h uptrend, price above 1d EMA50, volume confirmation
-        long_signal = (supertrend_dir_1h[i] == 1) and (price_close > ema_50_1d_aligned[i]) and volume_confirmed
+        # Weekly trend filter
+        weekly_uptrend = price_close > ema_20_1w_aligned[i]
+        weekly_downtrend = price_close < ema_20_1w_aligned[i]
         
-        # Short: 4h downtrend, price below 1d EMA50, volume confirmation
-        short_signal = (supertrend_dir_1h[i] == -1) and (price_close < ema_50_1d_aligned[i]) and volume_confirmed
+        # Long conditions: price breaks above R3 with volume and weekly uptrend
+        long_signal = volume_confirmed and (price_high > r3_6h[i]) and weekly_uptrend
         
-        # Exit when 4h trend changes
-        exit_long = position == 1 and supertrend_dir_1h[i] == -1
-        exit_short = position == -1 and supertrend_dir_1h[i] == 1
+        # Short conditions: price breaks below S3 with volume and weekly downtrend
+        short_signal = volume_confirmed and (price_low < s3_6h[i]) and weekly_downtrend
         
+        # Exit when price returns to the daily pivot (mean reversion)
+        pivot_1d_today = (high_1d + low_1d + close_1d) / 3
+        pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d_today)
+        exit_long = position == 1 and price_close < pivot_6h[i]
+        exit_short = position == -1 and price_close > pivot_6h[i]
+        
+        # Trading logic with minimum holding period
         if long_signal and position != 1:
             position = 1
-            hold_count[i] = 4
-            signals[i] = 0.20
+            hold_count[i] = 2  # Hold for 2 bars minimum
+            signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            hold_count[i] = 4
-            signals[i] = -0.20
+            hold_count[i] = 2  # Hold for 2 bars minimum
+            signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -134,16 +127,18 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: 1h Supertrend following with 4h trend filter and 1d EMA50.
-# Uses 4h Supertrend (ATR=10, multiplier=3) as primary trend filter - only trade in direction of 4h trend.
-# 1d EMA50 ensures alignment with daily trend to avoid counter-trend trades in strong moves.
-# Volume confirmation (>1.2x 30-period average) filters weak breakouts.
-# Session filter (8-20 UTC) reduces noise during low-liquidity hours.
-# Minimum holding period of 4 bars prevents churn and allows trends to develop.
-# Position size: 0.20 for risk management.
-# Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
-# Works in bull markets (follow 4h uptrends) and bear markets (follow 4h downtrends).
+# Hypothesis: 6h Camarilla breakout using daily pivot levels with volume confirmation and weekly trend filter.
+# Uses daily Camarilla R3/S3 levels (previous day's high/low/close) for intraday structure.
+# Enters long when 6h price breaks above daily R3 with volume >1.8x 6h 20-period average and price above weekly EMA20.
+# Enters short when 6h price breaks below daily S3 with same volume conditions and price below weekly EMA20.
+# Exits when price returns to the daily pivot level (mean reversion within the daily range).
+# Weekly EMA20 filter ensures trades align with higher timeframe trend, reducing false signals in ranging markets.
+# Volume filter reduces false breakouts, targeting 12-30 trades per year per symbol.
+# Minimum holding period of 2 bars (12 hours) reduces churn and forces trades to develop.
+# Position size: 0.25 to manage risk in volatile markets.
+# Designed to work in both bull and bear markets by combining intraday breakouts with higher timeframe trend.
+# Target: 48-120 total trades over 4 years (12-30/year) to minimize fee drag.
