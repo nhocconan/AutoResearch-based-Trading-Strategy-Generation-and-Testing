@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 6h_1d_ellis_618_v1
-# Strategy: 6h Fibonacci retracement (61.8%) from daily swing high/low + volume confirmation
-# Timeframe: 6h
+# 12h_1w_keltner_breakout_volume_v1
+# Strategy: 12h Keltner channel breakout with 1w trend filter and volume confirmation
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Daily swing high/low defines major support/resistance. Price retracing to 61.8%
-# of the daily range with volume confirmation indicates institutional interest and continuation.
-# Works in bull markets via long at 61.8% of daily pullback, bear markets via short at 61.8% of daily bounce.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: Keltner channels (ATR-based) capture volatility expansion. Breakouts above upper band or below lower band
+# with volume confirmation and 1w trend alignment capture high-probability moves. Works in bull markets via long breakouts
+# and bear markets via short breakdowns. Designed for low trade frequency (~15-30/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ellis_618_v1"
-timeframe = "6h"
+name = "12h_1w_keltner_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,87 +26,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 5:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Daily swing high/low (10-period lookback for swing points)
-    # Swing high: highest high in last 10 days
-    # Swing low: lowest low in last 10 days
-    lookback = 10
-    if len(df_1d) < lookback:
-        return np.zeros(n)
+    # 12h ATR for Keltner channels
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate swing points with proper lookback
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # 12h EMA20 for middle band
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Rolling max/min for swing points
-    swing_high = pd.Series(daily_high).rolling(window=lookback, min_periods=lookback).max().values
-    swing_low = pd.Series(daily_low).rolling(window=lookback, min_periods=lookback).min().values
+    # Keltner bands: upper = EMA + 2*ATR, lower = EMA - 2*ATR
+    keltner_upper = ema_20 + 2.0 * atr
+    keltner_lower = ema_20 - 2.0 * atr
     
-    # Calculate 61.8% retracement level: swing_low + 0.618 * (swing_high - swing_low)
-    daily_range = swing_high - swing_low
-    fib_618 = swing_low + 0.618 * daily_range
+    # 1w EMA40 for trend filter
+    ema_40_1w = pd.Series(df_1w['close'].values).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
-    # Align Fibonacci level from daily to 6h
-    fib_618_6h = align_htf_to_ltf(prices, df_1d, fib_618)
-    
-    # 6h EMA20 for trend filter (avoid counter-trend)
-    ema_20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # 6h volume average (20-period) for confirmation
+    # 12h volume average (20-period) for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if any required data is invalid
-        if np.isnan(fib_618_6h[i]) or np.isnan(ema_20_6h[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or np.isnan(ema_40_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Determine if we are in a daily uptrend or downtrend based on swing points
-        # Uptrend: today's swing high > yesterday's swing high AND today's swing low > yesterday's swing low
-        # Downtrend: today's swing high < yesterday's swing high AND today's swing low < yesterday's swing low
-        if i >= len(df_1d) * 4:  # Approximate 6h bars per day (varies, but safe)
-            daily_idx = i // 4  # Rough daily index from 6h
-            if daily_idx >= 1 and daily_idx < len(df_1d):
-                prev_swing_high = swing_high[daily_idx-1]
-                prev_swing_low = swing_low[daily_idx-1]
-                curr_swing_high = swing_high[daily_idx]
-                curr_swing_low = swing_low[daily_idx]
-                
-                daily_uptrend = (curr_swing_high > prev_swing_high) and (curr_swing_low > prev_swing_low)
-                daily_downtrend = (curr_swing_high < prev_swing_high) and (curr_swing_low < prev_swing_low)
-            else:
-                daily_uptrend = False
-                daily_downtrend = False
-        else:
-            daily_uptrend = False
-            daily_downtrend = False
+        # Breakout signals
+        breakout_up = high[i] > keltner_upper[i-1]
+        breakdown_down = low[i] < keltner_lower[i-1]
+        
+        # 1w EMA trend filter: price above EMA = bullish trend, below = bearish
+        trend_bullish = close[i] > ema_40_1w_aligned[i]
+        trend_bearish = close[i] < ema_40_1w_aligned[i]
         
         # Entry conditions
-        # Long: Price near 61.8% fib level (within 0.5%) AND daily uptrend AND volume confirmation
-        fib_proximity_long = abs(close[i] - fib_618_6h[i]) / close[i] < 0.005
-        if fib_proximity_long and daily_uptrend and vol_confirm and position != 1:
+        # Long: Breakout above upper band AND bullish trend AND volume confirmation
+        if breakout_up and trend_bullish and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Price near 61.8% fib level (within 0.5%) AND daily downtrend AND volume confirmation
-        elif fib_proximity_long and daily_downtrend and vol_confirm and position != -1:
+        # Short: Breakdown below lower band AND bearish trend AND volume confirmation
+        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Price moves back to swing level (invalidates the retracement premise)
-        elif position == 1 and close[i] > swing_high[min(i//4, len(swing_high)-1)]:
+        # Exit: Opposite breakout (breakdown for long, breakout for short)
+        elif position == 1 and breakdown_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] < swing_low[min(i//4, len(swing_low)-1)]:
+        elif position == -1 and breakout_up:
             position = 0
             signals[i] = 0.0
         else:
