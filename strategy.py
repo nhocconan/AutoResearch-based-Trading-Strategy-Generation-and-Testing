@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-# 1d_1w_camarilla_pivot_volume_v1
-# Strategy: 1d Camarilla pivot levels with weekly trend filter and volume confirmation
-# Timeframe: 1d
+# 6h_12h_pivot_volume_v1
+# Strategy: 6h price reversal at 12h Camarilla pivot levels with volume confirmation
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels provide strong support/resistance. Long at L3/S3 bounce with weekly uptrend, short at H3/H4 rejection with weekly downtrend. Volume spike confirms institutional interest. Designed for low frequency (10-25 trades/year) to minimize fee drag in all market regimes.
+# Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance on 12h timeframe.
+# Price approaching these levels with diminishing momentum (volume < average) indicates exhaustion.
+# Entry: Fade moves toward R3/S3 when volume is below 20-period average (mean reversion).
+# Exit: Return to mean (12h VWAP) or opposite pivot level.
+# Designed for low frequency (15-30 trades/year) to minimize fee drag in choppy markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_v1"
-timeframe = "1d"
+name = "6h_12h_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,74 +28,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 30:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
-    close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate 12h Camarilla pivot levels (based on previous day)
+    # Camarilla: R4 = C + ((H-L) * 1.500), R3 = C + ((H-L) * 1.250)
+    #          S3 = C - ((H-L) * 1.250), S4 = C - ((H-L) * 1.500)
+    # where C = (H+L+Close)/3 of previous period
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
+    
+    # Previous period's values for pivot calculation
+    h_prev = np.roll(h_12h, 1)
+    l_prev = np.roll(l_12h, 1)
+    c_prev = np.roll(c_12h, 1)
+    # First value will be invalid (rolled), but we'll handle with valid check
+    
+    pivot = (h_prev + l_prev + c_prev) / 3.0
+    range_prev = h_prev - l_prev
+    
+    r3 = pivot + (range_prev * 1.250)
+    s3 = pivot - (range_prev * 1.250)
+    
+    # Align pivot levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    
+    # 12h VWAP as mean reversion target
+    typical_price_12h = (h_12h + l_12h + c_12h) / 3.0
+    vwap_12h = (typical_price_12h * df_12h['volume'].values).cumsum() / df_12h['volume'].values.cumsum()
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+    
+    # Volume filter: below average indicates exhaustion
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    low_volume = volume < vol_ma_20  # Volume below 20-period average
+    
+    # Distance to pivot levels (normalized by ATR-like measure)
+    atr_14 = pd.Series(high - low).rolling(window=14, min_periods=14).mean()
+    dist_to_r3 = (r3_aligned - close) / atr_14
+    dist_to_s3 = (close - s3_aligned) / atr_14
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup period
-        # Calculate daily Camarilla pivot levels
-        # Based on previous day's OHLC
-        if i < 1:
+    for i in range(50, n):  # Start after warmup period
+        # Skip if any required data is invalid
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vwap_12h_aligned[i]) or np.isnan(dist_to_r3[i]) or 
+            np.isnan(dist_to_s3[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
-            
-        prev_close = close[i-1]
-        prev_high = high[i-1]
-        prev_low = low[i-1]
-        prev_range = prev_high - prev_low
         
-        if prev_range <= 0:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
-            
-        # Camarilla levels
-        # H4 = close + 1.5 * range * 1.1
-        # H3 = close + 1.25 * range * 1.1
-        # L3 = close - 1.1 * range * 1.1
-        # L4 = close - 2 * range * 1.1
-        h4 = prev_close + 1.5 * prev_range * 1.1
-        h3 = prev_close + 1.25 * prev_range * 1.1
-        l3 = prev_close - 1.1 * prev_range * 1.1
-        l4 = prev_close - 2.0 * prev_range * 1.1
+        # Entry conditions: price near pivot with low volume (exhaustion)
+        near_r3 = dist_to_r3[i] <= 0.5  # Within 0.5x ATR of R3
+        near_s3 = dist_to_s3[i] <= 0.5  # Within 0.5x ATR of S3
         
-        # Volume spike: current volume > 1.8x 20-day average
-        if i >= 20:
-            vol_ma_20 = np.mean(volume[i-20:i])
-            volume_spike = volume[i] > (vol_ma_20 * 1.8)
-        else:
-            volume_spike = False
-        
-        # Trend filter: price above/below weekly EMA21
-        uptrend = close[i] > ema_21_1w_aligned[i]
-        downtrend = close[i] < ema_21_1w_aligned[i]
-        
-        # Entry logic: Camarilla bounce/rejection + volume + trend
-        long_signal = (close[i] <= l3 * 1.002 and close[i] >= l4 * 0.998 and 
-                      volume_spike and uptrend and position != 1)
-        short_signal = (close[i] >= h3 * 0.998 and close[i] <= h4 * 1.002 and 
-                       volume_spike and downtrend and position != -1)
-        
-        if long_signal:
+        # Fade R3 (sell pressure exhaustion -> long)
+        if near_r3 and low_volume[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal:
+        # Fade S3 (buy pressure exhaustion -> short)
+        elif near_s3 and low_volume[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: price moves to opposite side of pivot point
-        elif position == 1 and close[i] >= (prev_high + prev_low) / 2:
+        # Exit conditions: price returns to mean (VWAP) or reaches opposite pivot
+        elif position == 1 and (close[i] >= vwap_12h_aligned[i] or close[i] <= s3_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] <= (prev_high + prev_low) / 2:
+        elif position == -1 and (close[i] <= vwap_12h_aligned[i] or close[i] >= r3_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
