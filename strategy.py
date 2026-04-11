@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -47,23 +47,23 @@ def generate_signals(prices):
     s3_1d[0] = np.nan
     s4_1d[0] = np.nan
     
-    # Align 1d levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align 1d levels to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # 12h ATR for volatility filter
+    # 4h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 12h volume filter: volume > 1.5x 20-period average
+    # 4h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # 12h trend filter: close > 50 EMA for long, < 50 EMA for short
+    # 4h trend filter: close > 50 EMA for long, < 50 EMA for short
     ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
@@ -71,7 +71,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_12h[i]) or np.isnan(r4_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
+        if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
             np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
@@ -91,15 +91,15 @@ def generate_signals(prices):
         vol_filter = atr_val > 0.004 * price_close  # ATR > 0.4% of price
         
         # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA50
-        long_signal = volume_confirmed and vol_filter and (price_low < s3_12h[i]) and (price_close > ema_val)
+        long_signal = volume_confirmed and vol_filter and (price_low < s3_4h[i]) and (price_close > ema_val)
         
         # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA50
-        short_signal = volume_confirmed and vol_filter and (price_high > r3_12h[i]) and (price_close < ema_val)
+        short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i]) and (price_close < ema_val)
         
         # Exit when price returns to 1d pivot level
-        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        exit_long = position == 1 and price_close > pivot_12h[i]
-        exit_short = position == -1 and price_close < pivot_12h[i]
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = position == 1 and price_close > pivot_4h[i]
+        exit_short = position == -1 and price_close < pivot_4h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -120,11 +120,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Camarilla levels act as strong support/resistance for 12h price action.
-# Enters long when 12h price breaks below S3 (oversold bounce) with volume confirmation (>1.5x average),
-# sufficient volatility (ATR > 0.4% of price), and above 12h 50 EMA (trend filter).
+# Hypothesis: 1d Camarilla levels act as strong support/resistance for 4h price action.
+# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.5x average),
+# sufficient volatility (ATR > 0.4% of price), and above 4h 50 EMA (trend filter).
 # Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA50.
 # Exits when price returns to 1d pivot level, capturing mean reversion.
 # Trend filter reduces whipsaws in strong trends. Volume and volatility filters reduce false breaks.
-# Designed for 12-30 trades per year (~48-120/4 years) on 12h timeframe, balancing opportunity and fee cost.
+# Designed for 20-50 trades per year (~80-200/4 years) on 4h timeframe, balancing opportunity and fee cost.
 # Works in both bull (buying dips) and bear (selling rallies) markets.
