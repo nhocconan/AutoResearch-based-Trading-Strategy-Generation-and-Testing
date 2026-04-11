@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with weekly pivot breakout + volume confirmation.
+# Hypothesis: 1d timeframe with weekly pivot breakout + volume confirmation.
 # Uses weekly pivot points (S1/S2/R1/R2) from prior week to filter breakouts.
 # Long when price breaks above weekly R2 with volume > 1.5x average, short when breaks below S2.
 # Designed for low trade frequency (~20-30/year) to minimize fee drag while capturing strong momentum.
 # Works in bull/bear markets by only taking breakouts in the direction of weekly pivot bias.
 
-name = "6h_1w_pivot_breakout_volume_v1"
-timeframe = "6h"
+name = "1d_1w_pivot_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,9 +42,10 @@ def generate_signals(prices):
     r2 = pivot_1w + range_1w
     s2 = pivot_1w - range_1w
     
-    # Align weekly pivot levels to 6h timeframe
+    # Align weekly pivot levels to 1d timeframe
     r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
     # Calculate weekly average volume (for confirmation)
     volume_1w = df_1w['volume'].values
@@ -58,7 +59,7 @@ def generate_signals(prices):
     for i in range(5, n):
         # Skip if any required data is invalid
         if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(vol_avg_aligned[i])):
+            np.isnan(vol_avg_aligned[i]) or np.isnan(pivot_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -70,9 +71,8 @@ def generate_signals(prices):
         short_entry = (low[i] < s2_aligned[i] and vol_filter)
         
         # Exit conditions: price returns to weekly pivot level
-        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-        exit_long = low[i] < pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else False
-        exit_short = high[i] > pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else False
+        exit_low = low[i] < pivot_aligned[i]
+        exit_high = high[i] > pivot_aligned[i]
         
         if long_entry and position != 1:
             position = 1
@@ -80,10 +80,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        elif position == 1 and exit_low:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and exit_high:
             position = 0
             signals[i] = 0.0
         else:
