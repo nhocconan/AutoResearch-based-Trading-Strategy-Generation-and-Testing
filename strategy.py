@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_keltner_breakout_volume_trend_v1"
+name = "12h_1w_donchian_breakout_volume_trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,32 +22,23 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Weekly OHLC for Keltner channel calculation
+    # Weekly high and low for Donchian channel (20 period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA(20) and ATR(10) for Keltner channel
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Keltner channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Calculate weekly Donchian channels (20-period high/low)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
     # Shift by 1 to use only completed weekly bars (previous week's levels)
-    keltner_upper = np.roll(keltner_upper, 1)
-    keltner_lower = np.roll(keltner_lower, 1)
-    keltner_upper[0] = np.nan
-    keltner_lower[0] = np.nan
+    donchian_high = np.roll(donchian_high, 1)
+    donchian_low = np.roll(donchian_low, 1)
+    donchian_high[0] = np.nan
+    donchian_low[0] = np.nan
     
-    # Align weekly Keltner levels to 12h timeframe
-    upper_12h = align_htf_to_ltf(prices, df_1w, keltner_upper)
-    lower_12h = align_htf_to_ltf(prices, df_1w, keltner_lower)
+    # Align weekly Donchian levels to 12h timeframe
+    upper_12h = align_htf_to_ltf(prices, df_1w, donchian_high)
+    lower_12h = align_htf_to_ltf(prices, df_1w, donchian_low)
     
     # 12h ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
@@ -90,16 +81,16 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 (strong trend filter to reduce trades)
         trend_filter = adx[i] > 25
         
-        # Long conditions: price breaks above upper Keltner with volume and trend
+        # Long conditions: price breaks above upper Donchian with volume and trend
         long_signal = volume_confirmed and trend_filter and (price_high > upper_12h[i])
         
-        # Short conditions: price breaks below lower Keltner with volume and trend
+        # Short conditions: price breaks below lower Donchian with volume and trend
         short_signal = volume_confirmed and trend_filter and (price_low < lower_12h[i])
         
-        # Exit when price returns to the opposite side of the EMA (mean reversion)
-        ema_12h = align_htf_to_ltf(prices, df_1w, ema_20)
-        exit_long = position == 1 and price_close < ema_12h[i]
-        exit_short = position == -1 and price_close > ema_12h[i]
+        # Exit when price returns to the opposite side of the Donchian midpoint (mean reversion)
+        donchian_mid = (upper_12h + lower_12h) / 2
+        exit_long = position == 1 and price_close < donchian_mid[i]
+        exit_short = position == -1 and price_close > donchian_mid[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -119,12 +110,12 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Weekly Keltner breakout strategy for 12h timeframe with ADX filter (>25) and volume confirmation (>1.5x average volume).
-# Enters long when 12h price breaks above weekly upper Keltner band (EMA20 + 2*ATR10) with volume >1.5x average and ADX>25.
-# Enters short when price breaks below weekly lower Keltner band (EMA20 - 2*ATR10) with same conditions.
-# Exits when price returns to the weekly EMA20 (mean reversion within the week's range).
+# Hypothesis: Weekly Donchian breakout strategy for 12h timeframe with ADX filter (>25) and volume confirmation (>1.5x average volume).
+# Enters long when 12h price breaks above weekly upper Donchian band (20-period high) with volume >1.5x average and ADX>25.
+# Enters short when price breaks below weekly lower Donchian band (20-period low) with same conditions.
+# Exits when price returns to the weekly Donchian midpoint (mean reversion within the week's range).
 # Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
 # Target: 15-25 trades per year to minimize fee drift while capturing strong weekly trends.
-# Keltner channels adapt better to volatility changes than fixed percentage channels, making them suitable for both bull and bear markets.
+# Donchian channels provide clear support/resistance levels that work in both trending and ranging markets.
 # The 12h timeframe provides a balance between capturing weekly moves and reducing noise compared to lower timeframes.
 # Weekly timeframe is used to capture longer-term trends and avoid noise from shorter-term fluctuations.
