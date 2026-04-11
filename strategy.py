@@ -3,94 +3,87 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_kama_rsi_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # KAMA calculation for daily trend
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_trend = kama > np.roll(kama, 1)  # Rising KAMA = uptrend
-    kama_trend[0] = False
+    # Calculate weekly OHLC for Camarilla pivot levels (previous week)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Daily RSI for overbought/oversold
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_oversold = rsi < 30
-    rsi_overbought = rsi > 70
+    # Camarilla pivot calculation (previous week)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # Align daily indicators to 4h
-    kama_trend_4h = align_htf_to_ltf(prices, df_1d, kama_trend)
-    rsi_oversold_4h = align_htf_to_ltf(prices, df_1d, rsi_oversold)
-    rsi_overbought_4h = align_htf_to_ltf(prices, df_1d, rsi_overbought)
+    # Resistance and support levels (previous week's data)
+    r3_1w = close_1w + range_1w * 1.166
+    s3_1w = close_1w - range_1w * 1.166
     
-    # 4h ATR for volatility filter
+    # Shift by 1 to use only completed weekly bars (previous week's levels)
+    r3_1w = np.roll(r3_1w, 1)
+    s3_1w = np.roll(s3_1w, 1)
+    r3_1w[0] = np.nan
+    s3_1w[0] = np.nan
+    
+    # Align weekly Camarilla levels to daily timeframe
+    r3_1d = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1d = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # Daily ATR for volatility filter (14 period)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 1.3x 20-period average
+    # Daily volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_trend_4h[i]) or np.isnan(rsi_oversold_4h[i]) or 
-            np.isnan(rsi_overbought_4h[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
-        # Volume confirmation (1.3x average)
-        volume_confirmed = volume_current > 1.3 * vol_ma
+        # Volume confirmation (1.5x average)
+        volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Long conditions: KAMA uptrend + RSI oversold + volume
-        long_signal = volume_confirmed and kama_trend_4h[i] and rsi_oversold_4h[i]
+        # Long conditions: price breaks above R3 with volume
+        long_signal = volume_confirmed and (price_high > r3_1d[i])
         
-        # Short conditions: KAMA downtrend + RSI overbought + volume
-        short_signal = volume_confirmed and (~kama_trend_4h[i]) and rsi_overbought_4h[i]
+        # Short conditions: price breaks below S3 with volume
+        short_signal = volume_confirmed and (price_low < s3_1d[i])
         
-        # Exit when RSI returns to neutral zone (40-60)
-        exit_long = position == 1 and (rsi_oversold_4h[i] == False and rsi_overbought_4h[i] == False)
-        exit_short = position == -1 and (rsi_oversold_4h[i] == False and rsi_overbought_4h[i] == False)
+        # Exit when price returns to the weekly pivot (mean reversion)
+        pivot_1d = align_htf_to_ltf(prices, df_1w, pivot_1w)
+        exit_long = position == 1 and price_close < pivot_1d[i]
+        exit_short = position == -1 and price_close > pivot_1d[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -110,13 +103,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily KAMA trend + RSI extremes strategy for 4h timeframe with volume confirmation.
-# Uses daily KAMA to determine trend direction (rising = uptrend, falling = downtrend).
-# Enters long when daily KAMA is rising AND daily RSI is oversold (<30) with volume >1.3x average.
-# Enters short when daily KAMA is falling AND daily RSI is overbought (>70) with volume >1.3x average.
-# Exits when RSI returns to neutral zone (40-60) to capture mean reversion within the trend.
-# KAMA adapts to market noise, making it effective in both trending and ranging markets.
-# RSI extremes provide high-probability reversal points in the direction of the trend.
-# Volume confirmation ensures institutional participation.
-# Designed for low trade frequency (~20-40 trades/year) to minimize drag.
-# Works in both bull and bear markets as it follows the daily trend while fading extreme RSI readings.
+# Hypothesis: Daily Camarilla pivot breakout strategy using weekly pivot levels.
+# Uses weekly Camarilla R3/S3 levels (previous week's high/low/close) for longer-term structure.
+# Enters long when daily price breaks above weekly R3 with volume >1.5x 20-day average.
+# Enters short when daily price breaks below weekly S3 with volume >1.5x 20-day average.
+# Exits when price returns to the weekly pivot level (mean reversion within the week's range).
+# Weekly timeframe reduces noise and false breakouts compared to daily pivots alone.
+# Volume confirmation filters out low-conviction breakouts.
+# Position size: 0.25 to balance risk and return, limiting drawdown in volatile markets.
+# Designed to work in both bull and bear markets by adapting to weekly volatility ranges.
+# Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag.
