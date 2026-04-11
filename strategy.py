@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
+name = "4h_1d_4h_donchian_volume_regime"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,49 +20,52 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load daily data ONCE before loop
+    # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return signals
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # 1d Donchian(20) - previous completed day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_1d = np.roll(high_20_1d, 1)
+    donch_low_1d = np.roll(low_20_1d, 1)
+    donch_high_1d[0] = np.nan
+    donch_low_1d[0] = np.nan
     
-    # Previous day's range
-    range_1d = high_1d - low_1d
+    # Align to 4h
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Camarilla levels (based on previous close)
-    l4 = close_1d - (range_1d * 1.1000)
-    l3 = close_1d - (range_1d * 1.1000 / 2)
-    h3 = close_1d + (range_1d * 1.1000 / 2)
-    h4 = close_1d + (range_1d * 1.1000)
+    # 4h Donchian(20) breakout
+    high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Shift by 1 to use only completed 1d bars
-    l4 = np.roll(l4, 1)
-    l3 = np.roll(l3, 1)
-    h3 = np.roll(h3, 1)
-    h4 = np.roll(h4, 1)
-    l4[0] = np.nan
-    l3[0] = np.nan
-    h3[0] = np.nan
-    h4[0] = np.nan
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    
-    # Volume confirmation: volume > 2.0x 20-period average on 4h
+    # Volume confirmation: volume > 1.8x 20-period average on 4h
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Choppiness regime filter: CHOP(14) > 61.8 = range (mean revert), CHOP < 38.2 = trending (trend follow)
+    # Calculate CHOP on 4h
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # first element has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((atr14 * 14) / (highest_high - lowest_low)) / np.log10(14)
+    chop[np.isnan(chop)] = 50  # neutral when undefined
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(l4_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or
+            np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -73,23 +76,20 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 2.0 * vol_ma
+        volume_confirmed = volume_current > 1.8 * vol_ma
         
-        # Long: price breaks above H3/H4 with volume
-        long_signal = volume_confirmed and (price_high > h3_aligned[i] or price_high > h4_aligned[i])
+        # Regime filter: only trade when market is trending (CHOP < 38.2)
+        trending_regime = chop[i] < 38.2
         
-        # Short: price breaks below L3/L4 with volume
-        short_signal = volume_confirmed and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
+        # Long: price breaks above 1d Donchian high with volume and trending regime
+        long_signal = volume_confirmed and trending_regime and (price_high > donch_high_1d_aligned[i])
         
-        # Exit when price returns to the previous day's close (pivot point)
-        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        if np.isnan(prev_close_aligned[i]):
-            pivot_value = price_close
-        else:
-            pivot_value = prev_close_aligned[i]
+        # Short: price breaks below 1d Donchian low with volume and trending regime
+        short_signal = volume_confirmed and trending_regime and (price_low < donch_low_1d_aligned[i])
         
-        exit_long = position == 1 and price_close < pivot_value
-        exit_short = position == -1 and price_close > pivot_value
+        # Exit: price crosses back inside 4h Donchian channels
+        exit_long = position == 1 and price_close < low_4h[i]
+        exit_short = position == -1 and price_close > high_4h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -110,14 +110,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla pivot breakout strategy on 4h timeframe with volume confirmation.
-# Uses 1d Camarilla levels (L3, L4, H3, H4) from the previous day's price action.
-# Enters long when price breaks above H3 or H4 with volume confirmation (>2x average volume).
-# Enters short when price breaks below L3 or L4 with volume confirmation.
-# Exits when price returns to the previous day's close (pivot point).
-# The Camarilla levels identify key support/resistance levels where price often reverses or accelerates.
-# Volume confirmation (>2x average) reduces false breakouts.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag on 4h timeframe.
-# Works in both bull and bear markets by trading breakouts in the direction of momentum.
-# Based on top-performing patterns from the database showing Camarilla strategies with
-# volume confirmation achieving Sharpe ratios >1.0 on ETHUSDT and SOLUSDT.
+# Hypothesis: 4h Donchian breakout with 1d Donchian filter, volume confirmation, and chop regime filter.
+# Uses 1d Donchian(20) from previous completed day as higher timeframe trend filter.
+# Enters long when 4h price breaks above 1d Donchian high with volume (>1.8x average) in trending regime (CHOP<38.2).
+# Enters short when 4h price breaks below 1d Donchian low with volume and trending regime.
+# Exits when price returns inside 4h Donchian(20) channels.
+# The 1d Donchian filter ensures we only trade in the direction of the higher timeframe trend.
+# Volume confirmation reduces false breakouts.
+# Chop regime filter avoids whipsaws in ranging markets.
+# Designed for low trade frequency (target: 25-50 trades/year) to minimize fee drag on 4h timeframe.
+# Works in both bull and bear markets by trading breakouts in the direction of the higher timeframe trend.
