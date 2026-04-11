@@ -3,16 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot long/short with volume spike and chop regime filter
-# - Long: price crosses above Camarilla H3 (1d) with volume > 2x 20-period average and CHOP(14) > 61.8 (ranging market)
-# - Short: price crosses below Camarilla L3 (1d) with volume > 2x 20-period average and CHOP(14) > 61.8
-# - Exit: price returns to Camarilla H4/L4 levels or opposite pivot touch
-# - Uses discrete position sizing (0.25) to limit fee drag
-# - Target: 12-25 trades/year (50-100 total over 4 years) to stay within fee limits for 12h timeframe
-# - Works in ranging markets by fading extreme moves with volume confirmation
+# Hypothesis: 4h Donchian breakout with volume confirmation and ATR-based trend filter
+# - Long: price breaks above Donchian(20) high, volume > 1.8x 20-period avg, ATR(10) > ATR(30) * 1.1 (weak trend filter)
+# - Short: price breaks below Donchian(20) low, volume > 1.8x 20-period avg, ATR(10) > ATR(30) * 1.1
+# - Exit: price returns to Donchian midpoint
+# - Uses 1d EMA(50) for trend bias: price > EMA(50) for long bias, price < EMA(50) for short bias
+# - Position size: 0.25 (discrete to minimize fee churn)
+# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee drag limits
+# - Weak ATR trend filter reduces trade frequency vs previous versions while maintaining edge
+# - Volume multiplier increased to 1.8x for stricter confirmation
+# - Works in both bull and bear by requiring volume surge and trend alignment
 
-name = "12h_1d_camarilla_volume_chop_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_atr_volume_v7"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,80 +31,71 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla pivots and chop regime (MTF rule compliance)
+    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMA(50) for trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Pre-compute 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2
     
-    # Camarilla levels: H4, H3, L3, L4
-    camarilla_h4 = close_1d + range_1d * 1.1 / 2
-    camarilla_h3 = close_1d + range_1d * 1.1 / 4
-    camarilla_l3 = close_1d - range_1d * 1.1 / 4
-    camarilla_l4 = close_1d - range_1d * 1.1 / 2
-    
-    # Align 1d Camarilla levels to 12h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Pre-compute 12h volume confirmation (20-period average)
+    # Pre-compute 4h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute Choppiness Index (CHOP) regime filter on 12h data
-    # CHOP > 61.8 = ranging market (good for mean reversion)
-    # CHOP < 38.2 = trending market
-    tr_12h = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_12h[0] = high[0] - low[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_12h * 14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
-    # Handle division by zero and invalid values
-    chop = np.where((highest_high_14 - lowest_low_14) == 0, 50, chop)
-    chop = np.where(np.isnan(chop), 50, chop)
+    # Pre-compute ATR filters for regime detection
+    # ATR(10) for current volatility
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # ATR(30) for longer-term volatility comparison
+    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_10[i]) or np.isnan(atr_30[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
+        high_price = high[i]
+        low_price = low[i]
         volume_current = volume[i]
         
-        # Camarilla levels
-        h3 = camarilla_h3_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        h4 = camarilla_h4_aligned[i]
-        l4 = camarilla_l4_aligned[i]
+        # Donchian levels
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        mid_channel = donchian_mid[i]
         
-        # Volume confirmation: current volume > 2x 20-period average
-        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
+        # Volume confirmation: current volume > 1.8x 20-period average (stricter)
+        vol_confirm = volume_current > 1.8 * volume_sma_20[i]
         
-        # Regime filter: CHOP > 61.8 indicates ranging market (fade extreme moves)
-        ranging_market = chop[i] > 61.8
+        # Trend filter: ATR(10) > ATR(30) * 1.1 (weak trend filter to reduce trades)
+        atr_trend = atr_10[i] > (atr_30[i] * 1.1)
+        
+        # 1d EMA trend bias
+        ema_bias_long = close_price > ema_50_1d_aligned[i]
+        ema_bias_short = close_price < ema_50_1d_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: price crosses above H3 with volume confirmation in ranging market
-        if close_price > h3 and close_price <= high[i] and vol_confirm and ranging_market:
+        # Long breakout: price above upper Donchian, volume confirmation, trending, long bias
+        if close_price > upper_channel and vol_confirm and atr_trend and ema_bias_long:
             enter_long = True
         
-        # Short: price crosses below L3 with volume confirmation in ranging market
-        if close_price < l3 and close_price >= low[i] and vol_confirm and ranging_market:
+        # Short breakout: price below lower Donchian, volume confirmation, trending, short bias
+        if close_price < lower_channel and vol_confirm and atr_trend and ema_bias_short:
             enter_short = True
         
         # Exit conditions
@@ -109,11 +103,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to H4 or touches L3 (mean reversion complete)
-            exit_long = close_price >= h4 or close_price <= l3
+            # Exit long if price returns to Donchian midpoint
+            exit_long = close_price <= mid_channel
         elif position == -1:
-            # Exit short if price returns to L4 or touches H3 (mean reversion complete)
-            exit_short = close_price <= l4 or close_price >= h3
+            # Exit short if price returns to Donchian midpoint
+            exit_short = close_price >= mid_channel
         
         # Trading logic
         if enter_long and position != 1:
