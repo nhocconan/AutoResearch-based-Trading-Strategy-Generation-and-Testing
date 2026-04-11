@@ -1,94 +1,121 @@
 #!/usr/bin/env python3
-# 4h_12h_camarilla_volume_v1
-# Strategy: 4h Camarilla pivot levels with volume confirmation and 12h trend filter
-# Timeframe: 4h
+# 1h_4d_1d_adx_volume_v1
+# Strategy: 1h ADX trend strength with volume confirmation and 4h/1d trend filter
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels act as strong support/resistance. In bull markets, price bounces from L3/S3 and breaks above H3/H4 with volume. In bear markets, price rejects at H3/H4 and breaks below L3/L4 with volume. Uses 12h EMA50 for trend filter to avoid counter-trend trades. Low frequency (~20-40/year) to minimize fee drag.
+# Hypothesis: ADX > 25 indicates strong trend. In bull markets: long when ADX rising, price above 4h/1d EMA50, volume > 1.5x average. In bear markets: short when ADX rising, price below 4h/1d EMA50, volume > 1.5x average. Uses 4h and 1d EMA50 for trend alignment to avoid counter-trend trades. Low frequency (~15-35/year) to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume_v1"
-timeframe = "4h"
+name = "1h_4d_1d_adx_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h EMA(50) for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate Camarilla pivot levels for each 4h bar using previous bar's H/L/C
-    # Camarilla formulas:
-    # H4 = C + (H-L) * 1.5
-    # H3 = C + (H-L) * 1.25
-    # L3 = C - (H-L) * 1.25
-    # L4 = C - (H-L) * 1.5
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # Set first bar values to avoid NaN
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    hl_range = prev_high - prev_low
-    camarilla_h4 = prev_close + hl_range * 1.5
-    camarilla_h3 = prev_close + hl_range * 1.25
-    camarilla_l3 = prev_close - hl_range * 1.25
-    camarilla_l4 = prev_close - hl_range * 1.5
+    # ADX calculation (14-period)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    def smooth(val, period):
+        result = np.zeros_like(val)
+        result[period-1] = np.nansum(val[:period])
+        for i in range(period, len(val)):
+            result[i] = result[i-1] - (result[i-1] / period) + val[i]
+        return result
+    
+    atr = smooth(tr, 14)
+    plus_di = 100 * smooth(plus_dm, 14) / atr
+    minus_di = 100 * smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smooth(dx, 14)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.8 * vol_avg_20)
+    vol_confirm = volume > (1.5 * vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Trend alignment: price above/both EMAs for long, below/both for short
+        uptrend_4h = close[i] > ema_50_4h_aligned[i]
+        uptrend_1d = close[i] > ema_50_1d_aligned[i]
+        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        downtrend_1d = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: Camarilla breakout + volume + trend alignment
-        if (close[i] > camarilla_h4[i] and vol_confirm[i] and uptrend and position != 1):
+        # ADX rising and strong trend
+        adx_rising = adx[i] > adx[i-1]
+        strong_trend = adx[i] > 25
+        
+        # Entry logic: ADX strength + volume + trend alignment
+        if (strong_trend and adx_rising and (plus_di[i] > minus_di[i]) and 
+            uptrend_4h and uptrend_1d and vol_confirm[i] and position != 1):
             position = 1
-            signals[i] = 0.25
-        elif (close[i] < camarilla_l4[i] and vol_confirm[i] and downtrend and position != -1):
+            signals[i] = 0.20
+        elif (strong_trend and adx_rising and (minus_di[i] > plus_di[i]) and 
+              downtrend_4h and downtrend_1d and vol_confirm[i] and position != -1):
             position = -1
-            signals[i] = -0.25
-        # Exit: price returns to mean (L3/H3) or trend change
-        elif position == 1 and (close[i] < camarilla_h3[i] or not uptrend):
+            signals[i] = -0.20
+        # Exit: ADX weakening or trend change
+        elif position == 1 and (adx[i] < 20 or not (uptrend_4h and uptrend_1d)):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > camarilla_l3[i] or not downtrend):
+        elif position == -1 and (adx[i] < 20 or not (downtrend_4h and downtrend_1d)):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
