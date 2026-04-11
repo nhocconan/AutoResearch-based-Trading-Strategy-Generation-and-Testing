@@ -1,90 +1,94 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_pivot_volume_trend_v1
-Strategy: Daily Camarilla pivot breakout with weekly EMA trend filter and volume confirmation
-Timeframe: 1d
+6h_1d_elder_ray_power_zone_v1
+Strategy: 6h Elder Ray Power Zone with 1d EMA trend filter
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses daily Camarilla pivot levels (H4/L4) for breakout entries, filtered by weekly EMA50 trend alignment and volume > 1.8x average. Designed to capture major breakouts in trending markets while avoiding false signals in chop. Target: 30-100 total trades over 4 years.
+Hypothesis: Uses 6h Elder Ray (bull/bear power) to detect momentum exhaustion and reversals. 
+Bull Power = High - EMA(13), Bear Power = EMA(13) - Low. 
+Enter long when Bull Power turns positive after being negative (momentum shift up) 
+and price is above 1d EMA50 (uptrend filter). 
+Enter short when Bear Power turns positive after being negative (momentum shift down) 
+and price is below 1d EMA50 (downtrend filter).
+Exit when power returns to zero or opposite signal occurs.
+Designed to capture momentum shifts in both bull and bear markets by focusing on 
+institutional buying/selling pressure rather than price alone. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_pivot_volume_trend_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_zone_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load higher timeframe data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 20-period volume average for spike detection
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_avg)
+    # 6h EMA13 for Elder Ray calculation
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous day's high/low/close for Camarilla calculation
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Elder Ray components
+    bull_power = high - ema_13  # Buying power
+    bear_power = ema_13 - low   # Selling power
     
-    # Calculate Camarilla levels (H4 and L4)
-    camarilla_H4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_L4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # Previous values for crossover detection
+    bull_power_prev = np.roll(bull_power, 1)
+    bear_power_prev = np.roll(bear_power, 1)
+    bull_power_prev[0] = np.nan
+    bear_power_prev[0] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(13, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg[i]) or
-            np.isnan(camarilla_H4[i]) or np.isnan(camarilla_L4[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(bull_power_prev[i]) or np.isnan(bear_power_prev[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend_1w = price_close > ema_50_1w_aligned[i]
-        downtrend_1w = price_close < ema_50_1w_aligned[i]
+        # Trend filter from 1d EMA50
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions using Camarilla levels from previous day
-        breakout_up = price_close > camarilla_H4[i]
-        breakout_down = price_close < camarilla_L4[i]
+        # Elder Ray signals: momentum shift detection
+        # Bullish: Bull Power crosses above zero (buying pressure emerging)
+        bull_crossover = bull_power_prev[i] <= 0 and bull_power[i] > 0
+        # Bearish: Bear Power crosses above zero (selling pressure emerging) 
+        bear_crossover = bear_power_prev[i] <= 0 and bear_power[i] > 0
         
-        # Volume confirmation
-        vol_confirmed = vol_spike[i]
+        # Long: bullish momentum shift in uptrend
+        long_signal = bull_crossover and uptrend_1d
         
-        # Long: upward breakout with volume in uptrend
-        long_signal = breakout_up and vol_confirmed and uptrend_1w
+        # Short: bearish momentum shift in downtrend
+        short_signal = bear_crossover and downtrend_1d
         
-        # Short: downward breakout with volume in downtrend
-        short_signal = breakout_down and vol_confirmed and downtrend_1w
-        
-        # Exit when price returns to the opposite Camarilla level
-        exit_long = position == 1 and price_close < camarilla_L4[i]
-        exit_short = position == -1 and price_close > camarilla_H4[i]
+        # Exit conditions
+        exit_long = position == 1 and (bull_power[i] <= 0 or bear_crossover)  # Long exit: buying pressure fades or selling pressure emerges
+        exit_short = position == -1 and (bear_power[i] <= 0 or bull_crossover)  # Short exit: selling pressure fades or buying pressure emerges
         
         # Trading logic
         if long_signal and position != 1:
