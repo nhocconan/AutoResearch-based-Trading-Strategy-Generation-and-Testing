@@ -1,23 +1,37 @@
 #!/usr/bin/env python3
 """
-1d_1w_camarilla_breakout
-Strategy: 1d breakout with weekly volatility filter and volume confirmation
-Timeframe: 1d
+6h_1d_williams_alligator_elder_ray_v1
+Strategy: 6f Williams Alligator + Elder Ray (Bull/Bear Power) with 1d trend filter
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Buy when 1d closes above prior week's R3 with volume expansion and low volatility regime; sell when 1d closes below prior week's S3 with same conditions. Uses weekly ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 10-20 trades/year to minimize fee drift.
+Hypothesis: Go long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA) and Elder Ray Bull Power > 0 on 6h, with 1d close above 200 EMA for trend alignment. Reverse for short. Uses SMMA (Smoothed Moving Average) to reduce whipsaw. Trend filter avoids counter-trend trades in strong markets. Designed for both bull and bear by following the dominant trend on 1d. Low-frequency design targets 15-30 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout"
-timeframe = "1d"
+name = "6h_1d_williams_alligator_elder_ray_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
+    if length <= 0:
+        return source.copy()
+    result = np.full_like(source, np.nan, dtype=np.float64)
+    # First value is simple average
+    if len(source) >= length:
+        result[length-1] = np.nanmean(source[:length])
+    # Subsequent values: SMMA = (prev_smma * (length-1) + current) / length
+    for i in range(length, len(source)):
+        if not np.isnan(result[i-1]):
+            result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -27,95 +41,69 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # === 6h Williams Alligator (SMMA based) ===
+    # Jaws: 13-period SMMA of median price
+    # Teeth: 8-period SMMA of median price  
+    # Lips: 5-period SMMA of median price
+    median_price = (high + low) / 2
+    jaws = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
-    # 1d volume filter: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 6h Elder Ray (Bull Power / Bear Power) ===
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # === Weekly ATR (volatility filter: low volatility regime) ===
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Trend Filter: EMA 200 ===
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate weekly ATR
-    tr1_1w = high_1w[1:] - low_1w[1:]
-    tr2_1w = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3_1w = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.nan], np.maximum(tr1_1w, np.maximum(tr2_1w, tr3_1w))])
-    atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).mean().values
-    
-    # Weekly ATR ratio: current ATR / 20-period average ATR (low when < 0.8)
-    atr_ma_20 = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1w / atr_ma_20
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
-    
-    # === Weekly Close (prior close for context) ===
-    close_1w_shifted = np.roll(close_1w, 1)
-    close_1w_shifted[0] = np.nan
-    close_1w_prior = align_htf_to_ltf(prices, df_1w, close_1w_shifted)
-    
-    # === Weekly Camarilla (entry levels from prior week) ===
-    high_1w_shift = np.roll(high_1w, 1)
-    low_1w_shift = np.roll(low_1w, 1)
-    close_1w_shift = np.roll(close_1w, 1)
-    high_1w_shift[0] = np.nan
-    low_1w_shift[0] = np.nan
-    close_1w_shift[0] = np.nan
-    
-    pivot_1w = (high_1w_shift + low_1w_shift + close_1w_shift) / 3
-    range_1w = high_1w_shift - low_1w_shift
-    r3_1w = close_1w_shift + range_1w * 1.166
-    s3_1w = close_1w_shift - range_1w * 1.166
-    
-    # Align weekly Camarilla to 1d timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    
-    # Session filter: 08-20 UTC (major sessions)
+    # Session filter: 00-23 UTC (6h bars cover full day, but avoid illiquid hours)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    in_session = (hours >= 0) & (hours <= 23)  # All hours for 6h
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid or outside session
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(close_1w_prior[i]) or np.isnan(atr_ratio_aligned[i]) or np.isnan(atr_1d[i]) or np.isnan(vol_ma_20[i]) or
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or
             not in_session[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        price_close = close[i]
-        volume_current = volume[i]
-        vol_ma = vol_ma_20[i]
+        # Alligator alignment: Jaws > Teeth > Lips (bullish) OR Jaws < Teeth < Lips (bearish)
+        alligator_bull = jaws[i] > teeth[i] and teeth[i] > lips[i]
+        alligator_bear = jaws[i] < teeth[i] and teeth[i] < lips[i]
         
-        # Volume confirmation: 1d volume must be expanded
-        volume_expanded = volume_current > 1.5 * vol_ma
+        # Elder Ray: Bull Power > 0 and Bear Power < 0 for confirmation
+        bull_power_pos = bull_power[i] > 0
+        bear_power_neg = bear_power[i] < 0
         
-        # Volatility filter: low volatility regime (ATR ratio < 0.8)
-        low_volatility = atr_ratio_aligned[i] < 0.8
+        # 1d trend filter: price above/below 200 EMA
+        price_above_200ema = close[i] > ema_200_1d_aligned[i]
+        price_below_200ema = close[i] < ema_200_1d_aligned[i]
         
-        # Long conditions: 1d closes above prior week's R3 with volume expansion + low volatility
-        long_signal = volume_expanded and low_volatility and (price_close > r3_1w_aligned[i])
+        # Long conditions: Alligator bullish + Bull Power positive + above 200 EMA
+        long_signal = alligator_bull and bull_power_pos and price_above_200ema
         
-        # Short conditions: 1d closes below prior week's S3 with volume expansion + low volatility
-        short_signal = volume_expanded and low_volatility and (price_close < s3_1w_aligned[i])
+        # Short conditions: Alligator bearish + Bear Power negative + below 200 EMA
+        short_signal = alligator_bear and bear_power_neg and price_below_200ema
         
-        # Exit when price returns to the weekly pivot (mean reversion within prior week's range)
-        exit_long = position == 1 and price_close < pivot_1w_aligned[i]
-        exit_short = position == -1 and price_close > pivot_1w_aligned[i]
+        # Exit when Alligator re-aligns (teeth crosses lips) or Elder Ray diverges
+        exit_long = position == 1 and (teeth[i] < lips[i] or bull_power[i] <= 0)
+        exit_short = position == -1 and (teeth[i] > lips[i] or bear_power[i] >= 0)
         
         # Trading logic
         if long_signal and position != 1:
@@ -135,4 +123,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Buy when 1d closes above prior week's R3 with volume expansion and low volatility regime; sell when 1d closes below prior week's S3 with same conditions. Uses weekly ATR-based volatility filter to avoid choppy markets and volume expansion to confirm breakouts. Designed for both bull and bear markets by focusing on volatility breakouts rather than trend direction, which works in ranging and trending conditions. Low-frequency design targets 10-20 trades/year to minimize fee drift.
+# Hypothesis: Go long when Alligator jaws (13-period SMMA) > teeth (8-period SMMA) > lips (5-period SMMA) and Elder Ray Bull Power > 0 on 6h, with 1d close above 200 EMA for trend alignment. Reverse for short. Uses SMMA (Smoothed Moving Average) to reduce whipsaw. Trend filter avoids counter-trend trades in strong markets. Designed for both bull and bear by following the dominant trend on 1d. Low-frequency design targets 15-30 trades/year to minimize fee drag.
