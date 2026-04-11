@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-# 4h_12h_donchian_breakout_volume_v1
-# Strategy: 4h Donchian breakout with 12h trend filter and volume confirmation
-# Timeframe: 4h
+# 1h_4h_1d_rsi_volume_breakout_v1
+# Strategy: 1h RSI mean reversion with 4h/1d trend filter and volume confirmation
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: Donchian(20) breakouts with 12h EMA20 trend alignment and volume capture strong moves.
-# Works in bull markets via long breakouts and bear markets via short breakdowns.
-# Designed for low trade frequency (~20-40/year) to minimize fee drag.
+# Hypothesis: In ranging markets, RSI extremes (<30 or >70) with volume spikes offer mean reversion opportunities.
+# In trending markets, 4h/1d trend filters prevent counter-trend trades. Works in both bull/bear by combining
+# mean reversion in ranges with trend-following in strong moves. Low trade frequency via strict 4h/1d trend alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_donchian_breakout_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_rsi_volume_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -26,19 +26,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 20-period Donchian channels on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 14-period RSI on 1h
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # 12h EMA20 for trend filter
-    ema_20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # 1d EMA200 for long-term trend filter
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # 20-period volume average for confirmation
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,39 +59,43 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_20_12h_aligned[i]) or np.isnan(vol_avg_20[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume confirmation: current volume > 2.0x 20-period average
+        vol_confirm = volume[i] > 2.0 * vol_avg_20[i]
         
-        # Breakout signals
-        breakout_up = high[i] > high_20[i-1]
-        breakdown_down = low[i] < low_20[i-1]
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # 12h EMA trend filter: price above EMA = bullish trend, below = bearish
-        trend_bullish = close[i] > ema_20_12h_aligned[i]
-        trend_bearish = close[i] < ema_20_12h_aligned[i]
+        # Trend filters
+        # 4h trend: price above/below EMA50
+        trend_4h_bullish = close[i] > ema_50_4h_aligned[i]
+        trend_4h_bearish = close[i] < ema_50_4h_aligned[i]
+        # 1d trend: price above/below EMA200 (stronger filter)
+        trend_1d_bullish = close[i] > ema_200_1d_aligned[i]
+        trend_1d_bearish = close[i] < ema_200_1d_aligned[i]
         
         # Entry conditions
-        # Long: Breakout above upper Donchian AND bullish trend AND volume confirmation
-        if breakout_up and trend_bullish and vol_confirm and position != 1:
+        # Long: RSI oversold + volume spike + 4h bullish OR 1d bullish (avoid fighting strong trends)
+        if rsi_oversold and vol_confirm and (trend_4h_bullish or trend_1d_bullish) and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short: Breakdown below lower Donchian AND bearish trend AND volume confirmation
-        elif breakdown_down and trend_bearish and vol_confirm and position != -1:
+            signals[i] = 0.20
+        # Short: RSI overbought + volume spike + 4h bearish OR 1d bearish
+        elif rsi_overbought and vol_confirm and (trend_4h_bearish or trend_1d_bearish) and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit: Opposite breakout (breakdown for long, breakout for short)
-        elif position == 1 and breakdown_down:
+            signals[i] = -0.20
+        # Exit: RSI returns to neutral zone (40-60)
+        elif position == 1 and rsi[i] > 40:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and breakout_up:
+        elif position == -1 and rsi[i] < 60:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
