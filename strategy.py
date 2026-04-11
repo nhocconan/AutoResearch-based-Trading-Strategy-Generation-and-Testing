@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_camarilla_breakout_volume_v28"
+name = "1h_4h_1d_camarilla_breakout_volume_v29"
 timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -70,15 +70,22 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
+    # Minimum holding period: 3 bars (45 minutes) to reduce churn
+    hold_count = np.zeros(n, dtype=int)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any required data is invalid or outside session
+    for i in range(60, n):
+        # Decrease hold counter
+        if hold_count[i] > 0:
+            hold_count[i] -= 1
+        
+        # Skip if any required data is invalid or outside session or holding
         if (np.isnan(r3_1h[i]) or np.isnan(s3_1h[i]) or
             np.isnan(ema_20_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or
-            not in_session[i]):
-            signals[i] = 0.0
+            not in_session[i] or hold_count[i] > 0):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
@@ -102,12 +109,14 @@ def generate_signals(prices):
         exit_long = position == 1 and price_close < pivot_1h[i]
         exit_short = position == -1 and price_close > pivot_1h[i]
         
-        # Trading logic
+        # Trading logic with minimum holding period
         if long_signal and position != 1:
             position = 1
+            hold_count[i] = 3  # Hold for 3 bars minimum
             signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
+            hold_count[i] = 3  # Hold for 3 bars minimum
             signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
@@ -120,13 +129,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1h Camarilla breakout using 4h pivot levels with volume confirmation and daily trend filter.
+# Hypothesis: 1h Camarilla breakout using 4h pivot levels with volume confirmation, daily trend filter, and minimum holding period.
 # Uses 4h Camarilla R3/S3 levels (previous 4h bar's high/low/close) for intraday structure.
 # Enters long when 1h price breaks above 4h R3 with volume >1.5x 1h 20-period average and price above daily EMA20.
 # Enters short when 1h price breaks below 4h S3 with same volume conditions and price below daily EMA20.
 # Exits when price returns to the 4h pivot level (mean reversion within the 4h range).
 # Daily EMA20 filter ensures trades align with higher timeframe trend, reducing false signals in ranging markets.
 # Volume filter reduces false breakouts, targeting 15-37 trades per year per symbol.
+# Minimum holding period of 3 bars (45 minutes) reduces churn and forces trades to develop.
 # Position size: 0.20 to manage risk in volatile markets.
 # Session filter (8-20 UTC) reduces noise trades outside active hours.
 # Designed to work in both bull and bear markets by combining intraday breakouts with higher timeframe trend.
