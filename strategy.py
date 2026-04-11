@@ -3,106 +3,111 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray (Bull/Bear Power) combination
-# - Uses 1d Elder Ray to determine market regime (bull/bear)
-# - Uses 6h Williams Alligator for entry timing within that regime
-# - In bull regime (Bear Power < 0): long when Jaw < Teeth < Lips (Alligator aligned up)
-# - In bear regime (Bull Power > 0): short when Jaw > Teeth > Lips (Alligator aligned down)
-# - Uses discrete position sizing: ±0.25 to limit drawdown
+# Hypothesis: 12h Donchian(20) breakout with 1d volume confirmation and ATR-based stoploss
+# - Long: Price breaks above Donchian upper channel (20-period high) + volume > 1.5x 20-period average
+# - Short: Price breaks below Donchian lower channel (20-period low) + volume > 1.5x 20-period average
+# - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Donchian breakout
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
 # - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
-# - Williams Alligator provides trend confirmation with smoothing
-# - Elder Ray filters for regime-appropriate trades only
+# - Donchian channels provide clear structure for breakouts in both bull and bear markets
+# - Volume confirmation filters out weak breakouts and increases signal quality
+# - ATR stoploss manages risk during volatile periods
 
-name = "6h_1d_elder_ray_alligator_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    entry_price = 0.0
+    long_stop = 0.0
+    short_stop = 0.0
     
-    # Load 1d data ONCE before loop for Elder Ray regime
+    # Load 1d data ONCE before loop for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Compute 1d Elder Ray (Bull Power and Bear Power)
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Pre-compute 1d volume confirmation (20-period average)
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
     
-    # Align Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    # Pre-compute Donchian channels on 12h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Precompute 6h Williams Alligator components
-    # Jaw: 13-period SMMA smoothed 8 bars ahead
-    # Teeth: 8-period SMMA smoothed 5 bars ahead
-    # Lips: 5-period SMMA smoothed 3 bars ahead
-    # Using EMA as approximation for SMMA for computational efficiency
-    jaw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Pre-compute ATR for stoploss (12h timeframe)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Smooth further (SMMA effect) by applying additional EMA smoothing
-    jaw = pd.Series(jaw).ewm(span=8, adjust=False, min_periods=8).mean().values
-    teeth = pd.Series(teeth).ewm(span=5, adjust=False, min_periods=5).mean().values
-    lips = pd.Series(lips).ewm(span=3, adjust=False, min_periods=3).mean().values
-    
-    for i in range(100, n):  # Start after 100-bar warmup
+    for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_sma_20_aligned[i]) or
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
-        # Determine regime from Elder Ray
-        # Bull regime: Bear Power < 0 (bears weak)
-        # Bear regime: Bull Power > 0 (bulls weak)
-        bull_regime = bear_power_aligned[i] < 0
-        bear_regime = bull_power_aligned[i] > 0
+        # Current price data
+        close_price = close[i]
+        volume_current = volume[i]
         
-        # Alligator alignment conditions
-        # Bullish alignment: Jaw < Teeth < Lips (Alligator mouth opening up)
-        # Bearish alignment: Jaw > Teeth > Lips (Alligator mouth opening down)
-        bullish_aligned = jaw[i] < teeth[i] and teeth[i] < lips[i]
-        bearish_aligned = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        # Donchian levels
+        upper_channel = highest_high[i]
+        lower_channel = lowest_low[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: bull regime + Alligator bullish alignment
-        if bull_regime and bullish_aligned:
+        # Long breakout: price closes above upper Donchian channel with volume confirmation
+        if close_price > upper_channel and vol_confirm:
             enter_long = True
         
-        # Short: bear regime + Alligator bearish alignment
-        if bear_regime and bearish_aligned:
+        # Short breakout: price closes below lower Donchian channel with volume confirmation
+        if close_price < lower_channel and vol_confirm:
             enter_short = True
         
-        # Exit conditions: reverse of entry or regime change
+        # Exit conditions
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if bear regime or Alligator turns bearish
-            exit_long = bear_regime or bearish_aligned
+            # Exit long if price hits ATR stoploss or breaks below lower channel
+            exit_long = (close_price <= long_stop) or (close_price < lower_channel)
         elif position == -1:
-            # Exit short if bull regime or Alligator turns bullish
-            exit_short = bull_regime or bullish_aligned
+            # Exit short if price hits ATR stoploss or breaks above upper channel
+            exit_short = (close_price >= short_stop) or (close_price > upper_channel)
+        
+        # Update stoploss levels when entering a position
+        if enter_long:
+            entry_price = close_price
+            long_stop = entry_price - 2.0 * atr_14[i]
+        elif enter_short:
+            entry_price = close_price
+            short_stop = entry_price + 2.0 * atr_14[i]
+        
+        # Update trailing stoploss for existing positions
+        if position == 1:
+            # Trail long stop upward: max of current stop and (high - 2*ATR)
+            long_stop = max(long_stop, high[i] - 2.0 * atr_14[i])
+        elif position == -1:
+            # Trail short stop downward: min of current stop and (low + 2*ATR)
+            short_stop = min(short_stop, low[i] + 2.0 * atr_14[i])
         
         # Trading logic
         if enter_long and position != 1:
