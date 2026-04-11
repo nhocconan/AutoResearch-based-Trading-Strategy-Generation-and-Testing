@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R extreme reversal with 1d trend filter and volume spike
-# - Long: Williams %R(14) < -80 (oversold) + price > 1d EMA(50) (uptrend bias) + volume > 2.0x 20-period avg
-# - Short: Williams %R(14) > -20 (overbought) + price < 1d EMA(50) (downtrend bias) + volume > 2.0x 20-period avg
-# - Exit: Williams %R returns to -50 level (mean reversion to midpoint)
-# - Uses discrete position sizing (0.25) to limit fee churn
-# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within 6h fee drag limits
-# - Works in both bull and bear markets by capturing mean reversions from extremes during trending regimes
+# Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation
+# - Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3) SMAs on median price
+# - Long: Lips > Teeth > Jaw (bullish alignment) + price > Lips + 1w close > 1w EMA(21) + volume > 1.5x 20-period avg
+# - Short: Lips < Teeth < Jaw (bearish alignment) + price < Lips + 1w close < 1w EMA(21) + volume > 1.5x 20-period avg
+# - Exit: Alligator lines cross (Lips-Teeth or Teeth-Jaw crossover) or price closes inside Alligator mouth
+# - Uses 1w trend filter to avoid counter-trend trades in strong trends
+# - Target: 12-30 trades/year (50-120 total over 4 years) to stay within fee drag limits
+# - Alligator catches trends early; 1w filter ensures alignment with higher timeframe trend
 
-name = "6h_1d_williamsr_extreme_v1"
-timeframe = "6h"
+name = "12h_1w_alligator_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,68 +29,101 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load 1w data ONCE before loop for trend filter (MTF rule compliance)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return signals
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Pre-compute 1w EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Pre-compute 6h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Pre-compute 12h Williams Alligator
+    # Median price = (high + low + close) / 3
+    median_price = (high + low + close) / 3
     
-    # Pre-compute 6h volume confirmation (20-period average)
+    # Jaw: 13-period SMA, shifted 8 bars
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan  # First 8 values invalid due to shift
+    
+    # Teeth: 8-period SMA, shifted 5 bars
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan  # First 5 values invalid due to shift
+    
+    # Lips: 5-period SMA, shifted 3 bars
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan  # First 3 values invalid due to shift
+    
+    # Pre-compute 12h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(williams_r[i]) or np.isnan(volume_sma_20[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_21_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
         volume_current = volume[i]
-        wr = williams_r[i]
         
-        # Volume confirmation: current volume > 2.0x 20-period average (spike filter)
-        vol_confirm = volume_current > 2.0 * volume_sma_20[i]
+        # Alligator lines
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
         
-        # 1d EMA trend bias
-        ema_bias_long = close_price > ema_50_1d_aligned[i]
-        ema_bias_short = close_price < ema_50_1d_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        
+        # 1w trend filter: close above/below 1w EMA(21)
+        trend_filter_long = close_price > ema_21_1w_aligned[i]
+        trend_filter_short = close_price < ema_21_1w_aligned[i]
+        
+        # Alligator alignment conditions
+        # Bullish: Lips > Teeth > Jaw
+        bullish_alignment = lips_val > teeth_val > jaw_val
+        # Bearish: Lips < Teeth < Jaw
+        bearish_alignment = lips_val < teeth_val < jaw_val
+        
+        # Mouth open/closed detection
+        # Mouth closed when Lips crosses Teeth or Jaw, or price inside Alligator
+        lips_teeth_cross = (lips_val <= teeth_val and 
+                           (i == 100 or lips[i-1] > teeth[i-1])) or \
+                          (lips_val >= teeth_val and 
+                           (i == 100 or lips[i-1] < teeth[i-1]))
+        teeth_jaw_cross = (teeth_val <= jaw_val and 
+                          (i == 100 or teeth[i-1] > jaw[i-1])) or \
+                         (teeth_val >= jaw_val and 
+                          (i == 100 or teeth[i-1] < jaw[i-1]))
+        price_inside_mouth = (close_price >= min(lips_val, jaw_val) and 
+                             close_price <= max(lips_val, jaw_val))
+        
+        # Exit conditions: mouth closes or price inside mouth
+        exit_long = lips_teeth_cross or teeth_jaw_cross or price_inside_mouth
+        exit_short = lips_teeth_cross or teeth_jaw_cross or price_inside_mouth
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long entry: Williams %R deeply oversold (< -80) + uptrend bias + volume spike
-        if wr < -80.0 and ema_bias_long and vol_confirm:
+        # Long entry: bullish alignment + price above lips + volume confirmation + long trend filter
+        if (bullish_alignment and 
+            close_price > lips_val and 
+            vol_confirm and 
+            trend_filter_long):
             enter_long = True
         
-        # Short entry: Williams %R deeply overbought (> -20) + downtrend bias + volume spike
-        if wr > -20.0 and ema_bias_short and vol_confirm:
+        # Short entry: bearish alignment + price below lips + volume confirmation + short trend filter
+        if (bearish_alignment and 
+            close_price < lips_val and 
+            vol_confirm and 
+            trend_filter_short):
             enter_short = True
-        
-        # Exit conditions: Williams %R returns to midpoint (-50)
-        exit_long = False
-        exit_short = False
-        
-        if position == 1:
-            # Exit long when Williams %R returns to -50 (mean reversion complete)
-            exit_long = wr >= -50.0
-        elif position == -1:
-            # Exit short when Williams %R returns to -50 (mean reversion complete)
-            exit_short = wr <= -50.0
         
         # Trading logic
         if enter_long and position != 1:
