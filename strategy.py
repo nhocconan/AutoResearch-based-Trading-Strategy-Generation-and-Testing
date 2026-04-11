@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1
-Hypothesis: Uses 1-day Camarilla pivot levels for breakout entries on 12h timeframe with volume confirmation and daily ATR trend filter.
-Targets 15-30 trades/year per symbol with focus on high-probability setups in both bull and bear markets.
+6h_1w_Donchian_Breakout_Trend
+Hypothesis: Weekly Donchian channels (20-week) provide robust trend filters for 6-hour breakouts.
+In bull markets, price tends to stay above weekly lower band; in bear markets, below weekly upper band.
+Breakouts in direction of weekly trend with volume confirmation capture sustained moves while avoiding counter-trend whipsaws.
+Targets 12-30 trades/year per symbol by requiring weekly trend alignment + 6h breakout + volume spike.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "6h_1w_Donchian_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -24,69 +26,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 14-day ATR for trend filter (using daily data)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly Donchian channels (20-period) for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # True Range calculation
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Pad with NaN for first element
-    tr = np.concatenate([[np.nan], tr])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate weekly Donchian bands
+    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Calculate 12-period SMA of ATR for trend direction
-    atr_ma_12 = pd.Series(atr_14).rolling(window=12, min_periods=12).mean().values
+    # Align weekly Donchian levels to 6h timeframe (wait for weekly close)
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
     
-    # Volume filter: 20-period average on 12h timeframe
+    # 6h Donchian breakout (20-period) for entry timing
+    donchian_high_6h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low_6h = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate Camarilla levels from daily data
-    # Camarilla levels: R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low)
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(atr_ma_12[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or
+            np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average (stricter)
-        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.8x 20-period average
+        volume_filter = volume[i] > 1.8 * vol_ma_20[i]
         
-        # Trend filter: ATR rising = trending market, ATR falling = ranging market
-        # Using ATR MA slope: rising when current > previous
-        trending_up = atr_ma_12[i] > atr_ma_12[i-1] if i > 0 else False
-        trending_down = atr_ma_12[i] < atr_ma_12[i-1] if i > 0 else False
+        # 6h breakout conditions
+        breakout_up = close[i] > donchian_high_6h[i]
+        breakdown_down = close[i] < donchian_low_6h[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = close[i] > camarilla_r3_aligned[i]  # Break above R3
-        breakdown_down = close[i] < camarilla_s3_aligned[i]  # Break below S3
+        # Weekly trend filter: price relative to weekly Donchian bands
+        # In uptrend: price above weekly lower band (bullish bias)
+        # In downtrend: price below weekly upper band (bearish bias)
+        weekly_uptrend = close[i] > donchian_low_20_aligned[i]
+        weekly_downtrend = close[i] < donchian_high_20_aligned[i]
         
-        # Entry conditions: only trade in trending markets
-        long_entry = breakout_up and volume_filter and trending_up
-        short_entry = breakdown_down and volume_filter and trending_down
+        # Entry conditions: breakout in direction of weekly trend
+        long_entry = breakout_up and volume_filter and weekly_uptrend
+        short_entry = breakdown_down and volume_filter and weekly_downtrend
         
-        # Exit conditions: return to opposite Camarilla level or trend change
-        long_exit = (close[i] < camarilla_s3_aligned[i]) or (not trending_up)
-        short_exit = (close[i] > camarilla_r3_aligned[i]) or (not trending_down)
+        # Exit conditions: opposite 6h breakout or weekly trend reversal
+        long_exit = breakdown_down or (not weekly_uptrend)
+        short_exit = breakout_up or (not weekly_downtrend)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
