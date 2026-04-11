@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_camarilla_breakout_volume_v1"
+name = "6h_12h_camarilla_breakout_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -53,14 +53,14 @@ def generate_signals(prices):
     s3_6h = align_htf_to_ltf(prices, df_12h, s3_12h)
     s4_6h = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # 6h ATR for volatility filter and stoploss
+    # 6h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 1.5x 20-period average
+    # 6h volume filter: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # 6h trend filter: close > 50 EMA for long, < 50 EMA for short
@@ -85,16 +85,16 @@ def generate_signals(prices):
         ema_val = ema_50[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
         # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_val > 0.005 * price_close  # ATR > 0.5% of price
+        vol_filter = atr_val > 0.003 * price_close  # ATR > 0.3% of price
         
-        # Long conditions: price breaks below S3 or S4 (oversold) with volume, vol filter, and above EMA50
-        long_signal = volume_confirmed and vol_filter and (price_low < s3_6h[i] or price_low < s4_6h[i]) and (price_close > ema_val)
+        # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA50
+        long_signal = volume_confirmed and vol_filter and (price_low < s3_6h[i]) and (price_close > ema_val)
         
-        # Short conditions: price breaks above R3 or R4 (overbought) with volume, vol filter, and below EMA50
-        short_signal = volume_confirmed and vol_filter and (price_high > r3_6h[i] or price_high > r4_6h[i]) and (price_close < ema_val)
+        # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA50
+        short_signal = volume_confirmed and vol_filter and (price_high > r3_6h[i]) and (price_close < ema_val)
         
         # Exit when price returns to 12h pivot level
         pivot_6h = align_htf_to_ltf(prices, df_12h, pivot_12h)
@@ -121,9 +121,9 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 12h Camarilla levels act as strong support/resistance for 6h price action.
-# Enters long when 6h price breaks below S3/S4 (oversold bounce) with volume confirmation (>1.5x average),
-# sufficient volatility (ATR > 0.5% of price), and above 6h 50 EMA (trend filter).
-# Enters short when price breaks above R3/R4 (overbought rejection) with same conditions plus below EMA50.
+# Enters long when 6h price breaks below S3 (oversold bounce) with volume confirmation (>1.3x average),
+# sufficient volatility (ATR > 0.3% of price), and above 6h 50 EMA (trend filter).
+# Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA50.
 # Exits when price returns to 12h pivot level, capturing mean reversion.
 # Trend filter reduces whipsaws in strong trends. Volume and volatility filters reduce false breaks.
 # Designed for 10-30 trades per month (~120-360/year) on 6h timeframe, balancing opportunity and fee cost.
