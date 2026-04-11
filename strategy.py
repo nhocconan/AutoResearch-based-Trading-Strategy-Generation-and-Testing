@@ -1,140 +1,83 @@
 #!/usr/bin/env python3
 """
-1d KAMA + RSI + Chop Filter Strategy
-- KAMA determines trend direction (fast/slow adaptation)
-- RSI(14) for momentum confirmation (30/70 levels)
-- Chop index filter to avoid whipsaws in ranging markets (CHOP > 61.8 = range)
-- Position sizing: 0.25 for long/short, 0.0 for flat
-- Designed for low trade frequency (target: 20-60 trades/year) to minimize fee drag
-- Works in both bull (trend following) and bear (mean reversion in range) markets
+12h Donchian Breakout with Volume and Trend Filter
+Strategy: Break above/below 12-period Donchian channel on 12h chart with volume confirmation and 1d trend filter.
+Target: 50-150 trades over 4 years (12-37/year) with strong breakout moves.
 """
+
 from typing import Tuple
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "12h_donchian_breakout_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
-def calculate_kama(close, slow_period=10, fast_period=2):
-    """Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, n=slow_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1))**2
-    kama = np.full_like(close, np.nan)
-    kama[slow_period] = close[slow_period]
-    for i in range(slow_period+1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_chop(high, low, close, period=14):
-    """Choppiness Index"""
-    atr = np.zeros_like(close)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr[1:] = tr
-    atr_sum = np.zeros_like(close)
-    for i in range(period, len(close)):
-        atr_sum[i] = np.sum(atr[i-period+1:i+1])
-    highest_high = np.zeros_like(close)
-    lowest_low = np.zeros_like(close)
-    for i in range(period-1, len(close)):
-        highest_high[i] = np.max(high[i-period+1:i+1])
-        lowest_low[i] = np.min(low[i-period+1:i+1])
-    chop = np.full_like(close, 50.0)
-    mask = (highest_high - lowest_low) != 0
-    chop[mask] = 100 * np.log10(atr_sum[mask] / period / (highest_high[mask] - lowest_low[mask])) / np.log10(period)
-    return chop
+def calculate_donchian(high: np.ndarray, low: np.ndarray, period: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Calculate Donchian channel upper and lower bands."""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price arrays
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate indicators
-    kama = calculate_kama(close, slow_period=10, fast_period=2)
-    rsi = np.full_like(close, 50.0)
-    # Calculate RSI
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    for i in range(1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14 if i >= 1 else 0
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14 if i >= 1 else 0
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100 if avg_gain[i] > 0 else 50
+    # Load daily data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    chop = calculate_chop(high, low, close, period=14)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate 12h Donchian channel (20-period)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    
+    # Volume filter: 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(20, n):
-        # Skip if KAMA not ready
-        if np.isnan(kama[i]):
+        # Skip if any required data is invalid
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Market regime filter: avoid trading in strong ranging markets
-        # Chop > 61.8 indicates ranging market (avoid trend following)
-        # Chop < 38.2 indicates trending market (favor trend following)
-        chop_value = chop[i] if not np.isnan(chop[i]) else 50
-        is_ranging = chop_value > 61.8
-        is_trending = chop_value < 38.2
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # KAMA trend direction
-        kama_up = kama[i] > kama[i-1] if i > 0 else False
-        kama_down = kama[i] < kama[i-1] if i > 0 else False
+        # Trend filter: price above/below 1d EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # RSI momentum
-        rsi_value = rsi[i] if not np.isnan(rsi[i]) else 50
-        rsi_overbought = rsi_value > 70
-        rsi_oversold = rsi_value < 30
+        # Breakout conditions using Donchian channels
+        breakout_up = close[i] > donchian_upper[i]  # Break above upper band
+        breakdown_down = close[i] < donchian_lower[i]  # Break below lower band
         
-        # Entry logic: adapt to market regime
-        long_entry = False
-        short_entry = False
+        # Entry conditions: breakout + volume + trend alignment
+        long_entry = breakout_up and volume_filter and uptrend
+        short_entry = breakdown_down and volume_filter and downtrend
         
-        if is_trending:
-            # In trending markets: follow KAMA direction with RSI filter
-            long_entry = kama_up and rsi_value < 70  # Not overbought
-            short_entry = kama_down and rsi_value > 30  # Not oversold
-        elif is_ranging:
-            # In ranging markets: mean reversion at RSI extremes
-            long_entry = rsi_oversold and kama_up  # Oversold + turning up
-            short_entry = rsi_overbought and kama_down  # Overbought + turning down
-        else:
-            # Transition zone: neutral, no entries
-            pass
+        # Exit conditions: return to middle of channel or opposite breakout
+        donchian_mid = (donchian_upper[i] + donchian_lower[i]) / 2
+        long_exit = close[i] < donchian_mid  # Return below midpoint
+        short_exit = close[i] > donchian_mid  # Return above midpoint
         
-        # Exit logic: opposite signal or RSI extreme in trending markets
-        long_exit = False
-        short_exit = False
-        
-        if is_trending:
-            # Exit on opposite KAMA direction
-            long_exit = kama_down
-            short_exit = kama_up
-        else:
-            # Exit on RSI normalization
-            long_exit = rsi_value >= 50
-            short_exit = rsi_value <= 50
-        
-        # Update position
+        # Priority: entry > exit > hold
         if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
