@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# 1d_1w_donchian_breakout_volume_regime_v1
-# Strategy: 1d Donchian breakout with volume confirmation and weekly regime filter
-# Timeframe: 1d
+# 12h_1d_donchian_breakout_volume_v1
+# Strategy: 12h Donchian breakout with volume confirmation and 1d trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: Donchian breakouts capture momentum in both bull and bear markets. Volume confirms breakout strength. Weekly regime filter (price above/below weekly EMA200) ensures we trade with the higher timeframe trend. Low frequency (~10-20/year) minimizes fee drag. Works in bull markets via upside breakouts and in bear markets via downside breakouts.
+# Hypothesis: Donchian breakouts capture trends with clear entry/exit rules. Volume confirmation filters false breakouts. 1d EMA50 ensures trades align with higher timeframe trend. Designed for low trade frequency (15-30/year) to minimize fee drag while capturing major trends in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_breakout_volume_regime_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,20 +24,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly EMA(200) for regime filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian channels (20-period) on daily data
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h Donchian(20) channels
+    donchian_window = 20
+    high_max = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    low_min = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -47,29 +48,29 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(donchian_window, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(high_max_20[i]) or 
-            np.isnan(low_min_20[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: price above/below weekly EMA200
-        bull_regime = close[i] > ema_200_1w_aligned[i]
-        bear_regime = close[i] < ema_200_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic: Donchian breakout + volume + regime alignment
-        if (high[i] > high_max_20[i] and vol_confirm[i] and bull_regime and position != 1):
+        # Entry logic: Donchian breakout + volume + trend alignment
+        if (high[i] > high_max[i-1] and vol_confirm[i] and uptrend and position != 1):
             position = 1
             signals[i] = 0.25
-        elif (low[i] < low_min_20[i] and vol_confirm[i] and bear_regime and position != -1):
+        elif (low[i] < low_min[i-1] and vol_confirm[i] and downtrend and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: opposite breakout or regime change
-        elif position == 1 and (low[i] < low_min_20[i] or not bull_regime):
+        # Exit: trend reversal or opposite breakout
+        elif position == 1 and (not uptrend or low[i] < low_min[i-1]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (high[i] > high_max_20[i] or not bear_regime):
+        elif position == -1 and (not downtrend or high[i] > high_max[i-1]):
             position = 0
             signals[i] = 0.0
         else:
