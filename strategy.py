@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_breakout_v1"
-timeframe = "1d"
+name = "6h_1d_ewma_crossover_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,49 +12,33 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate weekly Keltner Channel (20-period EMA, 2.0 ATR)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate EWMA on daily closes
+    close_1d = df_1d['close'].values
+    ewma_fast = pd.Series(close_1d).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ewma_slow = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # ATR(20) for weekly
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Align EWMA to 6h timeframe
+    ewma_fast_aligned = align_htf_to_ltf(prices, df_1d, ewma_fast)
+    ewma_slow_aligned = align_htf_to_ltf(prices, df_1d, ewma_slow)
     
-    # EMA(20) for weekly
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume filter: 6h volume > 1.5x 50-period average
+    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    # Keltner Channels
-    upper_keltner = ema_20 + 2.0 * atr_20
-    lower_keltner = ema_20 - 2.0 * atr_20
-    
-    # Align weekly Keltner channels to daily
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
-    
-    # Daily volume confirmation: volume > 1.5x 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ewma_fast_aligned[i]) or np.isnan(ewma_slow_aligned[i]) or
+            np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
         
@@ -62,27 +46,27 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
+        vol_confirm = volume_current > 1.5 * vol_ma_50[i]
         
-        # Breakout conditions using weekly Keltner Channels
-        breakout_up = price_close > upper_keltner_aligned[i]  # Break above upper Keltner
-        breakout_down = price_close < lower_keltner_aligned[i]  # Break below lower Keltner
+        # EWMA crossover signals
+        cross_up = ewma_fast_aligned[i] > ewma_slow_aligned[i]
+        cross_down = ewma_fast_aligned[i] < ewma_slow_aligned[i]
         
-        # Entry conditions
+        # Entry conditions with volume confirmation
         enter_long = False
         enter_short = False
         
-        # Long: Break above upper Keltner with volume confirmation
-        if breakout_up and vol_confirm:
+        # Long: Fast EWMA crosses above slow EWMA with volume
+        if i > 50 and cross_up and not (ewma_fast_aligned[i-1] > ewma_slow_aligned[i-1]) and vol_confirm:
             enter_long = True
         
-        # Short: Break below lower Keltner with volume confirmation
-        if breakout_down and vol_confirm:
+        # Short: Fast EWMA crosses below slow EWMA with volume
+        if i > 50 and cross_down and not (ewma_fast_aligned[i-1] < ewma_slow_aligned[i-1]) and vol_confirm:
             enter_short = True
         
-        # Exit conditions: return to opposite Keltner level (mean reversion)
-        exit_long = price_close < ema_20_aligned[i]  # Return to weekly EMA
-        exit_short = price_close > ema_20_aligned[i]  # Return to weekly EMA
+        # Exit conditions: opposite crossover
+        exit_long = i > 50 and cross_down and not (ewma_fast_aligned[i-1] > ewma_slow_aligned[i-1])
+        exit_short = i > 50 and cross_up and not (ewma_fast_aligned[i-1] < ewma_slow_aligned[i-1])
         
         # Trading logic
         if enter_long and position != 1:
@@ -103,11 +87,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 1d Keltner breakout strategy using weekly Keltner Channels (EMA20 ± 2*ATR20).
-# Enters long when price breaks above weekly upper Keltner with volume > 1.5x 20-day average.
-# Enters short when price breaks below weekly lower Keltner with volume > 1.5x 20-day average.
-# Exits when price returns to weekly EMA(20) level.
-# Weekly timeframe provides higher timeframe trend context, reducing false breakouts.
-# Volume confirmation ensures breakouts are supported by participation.
-# Target: 10-25 trades per year (40-100 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# Hypothesis: 6s EWMA crossover on daily timeframe with volume confirmation.
+# Uses fast (9) and slow (21) EWMA on daily closes aligned to 6h timeframe.
+# Enters long when fast EWMA crosses above slow EWMA with volume > 1.5x 50-period average.
+# Enters short when fast EWMA crosses below slow EWMA with volume > 1.5x 50-period average.
+# Exits on opposite crossover.
+# Volume filter reduces false signals and controls trade frequency.
+# Position size 0.25 manages risk. Target: 20-40 trades per year (80-160 total over 4 years).
+# Works in both bull and bear markets by capturing trend changes with volume confirmation.
+# 6h timeframe provides balance between signal quality and trade frequency.
+# EWMA crossover is less prone to whipsaw than SMA crossover in volatile markets.
