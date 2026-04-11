@@ -1,15 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v3"
+name = "4h_1d_camarilla_breakout_volume_v4"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 80:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -30,7 +30,7 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 1.8x 20-period average (stricter to reduce trades)
+    # 4h volume filter: volume > 2.0x 20-period average (stricter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Daily OHLC for Camarilla pivot levels
@@ -58,13 +58,13 @@ def generate_signals(prices):
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 0) & (hours <= 23)
     
-    # Minimum holding period: 3 bars (12 hours) to reduce churn
+    # Minimum holding period: 4 bars (16 hours) to reduce churn
     hold_count = np.zeros(n, dtype=int)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(80, n):
         # Decrease hold counter
         if hold_count[i] > 0:
             hold_count[i] -= 1
@@ -83,7 +83,7 @@ def generate_signals(prices):
         vol_ma = vol_ma_20[i]
         
         # Volume confirmation: 4h volume must be elevated (stricter threshold)
-        volume_confirmed = volume_current > 1.8 * vol_ma
+        volume_confirmed = volume_current > 2.0 * vol_ma
         
         # Long conditions: price breaks above R3 with volume
         long_signal = volume_confirmed and (price_high > r3_4h[i])
@@ -100,11 +100,11 @@ def generate_signals(prices):
         # Trading logic with minimum holding period
         if long_signal and position != 1:
             position = 1
-            hold_count[i] = 3  # Hold for 3 bars minimum
+            hold_count[i] = 4  # Hold for 4 bars minimum
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
-            hold_count[i] = 3  # Hold for 3 bars minimum
+            hold_count[i] = 4  # Hold for 4 bars minimum
             signals[i] = -0.25
         elif position == 1 and exit_long:
             position = 0
@@ -119,9 +119,9 @@ def generate_signals(prices):
 
 # Hypothesis: 4h Camarilla breakout using daily pivot levels with stricter volume confirmation.
 # Uses daily Camarilla R3/S3 levels (previous day's high/low/close) for intraday structure.
-# Enters long when 4h price breaks above daily R3 with volume >1.8x 4h 20-period average.
+# Enters long when 4h price breaks above daily R3 with volume >2.0x 4h 20-period average.
 # Enters short when 4h price breaks below daily S3 with same volume conditions.
 # Exits when price returns to the daily pivot level (mean reversion within the daily range).
-# Stricter volume filter (1.8x vs 1.5x) and longer hold period (3 bars vs 2) to reduce trades.
-# Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag.
+# Stricter volume filter (2.0x vs 1.8x) and longer hold period (4 bars vs 3) to reduce trades.
+# Target: 40-80 total trades over 4 years (10-20/year) to minimize fee drag.
 # Works in both bull and bear markets by capturing breakouts with volume confirmation.
