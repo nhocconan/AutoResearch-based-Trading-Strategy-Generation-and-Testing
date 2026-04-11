@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
-# 1d_1w_rsi_volume_extreme_v1
-# Strategy: 1d RSI extremes with volume confirmation and weekly trend filter
-# Timeframe: 1d
+# 12h_1d_donchian_breakout_v1
+# Strategy: 12h Donchian breakout with 1d volume confirmation and ADX trend filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: RSI extremes (<30 or >70) indicate overextended conditions likely to reverse.
-# Volume confirmation ensures institutional participation. Weekly trend filter (EMA50) ensures
-# trades align with higher-timeframe momentum, reducing counter-trend trades in strong trends.
-# Designed for low trade frequency (~10-25/year) to minimize fee drag. Works in bull markets
-# by buying oversold dips in uptrends and selling overbought rallies in downtrends. In ranging
-# markets, captures mean reversion at extremes.
+# Hypothesis: Donchian breakouts capture momentum in both bull and bear markets.
+# Volume confirms institutional participation. ADX > 25 filters choppy markets.
+# Target: 20-40 trades/year to minimize fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_volume_extreme_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
@@ -29,63 +26,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h ADX(14) for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - high[:-1]), np.abs(low[1:] - low[:-1])))
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     # 1d volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    
+    # Align raw 1d volume for confirmation
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(rsi[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(adx[i]) or \
+           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(vol_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Volume confirmation: current 1d volume > 1.5x 20-period average
+        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Trend filter: ADX > 25
+        trending = adx[i] > 25
         
-        # Weekly trend: price above/below EMA50
-        price_above_weekly_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_50_1w_aligned[i]
+        # Donchian breakout signals
+        breakout_up = high[i] > donchian_high[i-1]
+        breakout_down = low[i] < donchian_low[i-1]
         
         # Entry conditions
-        # Long: RSI oversold AND price above weekly EMA (uptrend) AND volume confirmation
-        if rsi_oversold and price_above_weekly_ema and vol_confirm and position != 1:
+        # Long: Donchian breakout up AND volume confirmation AND trending
+        if breakout_up and vol_confirm and trending and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: RSI overbought AND price below weekly EMA (downtrend) AND volume confirmation
-        elif rsi_overbought and price_below_weekly_ema and vol_confirm and position != -1:
+        # Short: Donchian breakout down AND volume confirmation AND trending
+        elif breakout_down and vol_confirm and trending and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: RSI returns to neutral zone (40-60)
-        elif position == 1 and rsi[i] >= 40:
+        # Exit: Opposite Donchian breakout (reversal)
+        elif position == 1 and breakout_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and rsi[i] <= 60:
+        elif position == -1 and breakout_up:
             position = 0
             signals[i] = 0.0
         else:
