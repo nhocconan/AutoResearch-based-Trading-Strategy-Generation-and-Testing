@@ -3,15 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ewma_crossover_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -20,24 +22,40 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return signals
     
-    # Calculate EWMA on daily closes
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ewma_fast = pd.Series(close_1d).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ewma_slow = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align EWMA to 6h timeframe
-    ewma_fast_aligned = align_htf_to_ltf(prices, df_1d, ewma_fast)
-    ewma_slow_aligned = align_htf_to_ltf(prices, df_1d, ewma_slow)
+    # Camarilla formula: range = high - low
+    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
+    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
+    daily_range = high_1d - low_1d
     
-    # Volume filter: 6h volume > 1.5x 50-period average
+    # Key levels for breakout: R4 (resistance) and S4 (support)
+    r4 = close_1d + (daily_range * 1.1 / 2)
+    s4 = close_1d - (daily_range * 1.1 / 2)
+    
+    # Exit levels: R3 and S3
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    s3 = close_1d - (daily_range * 1.1 / 4)
+    
+    # Volume confirmation: 12h volume > 2.0x 50-period average (fewer trades for 12h)
     vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
-    for i in range(50, n):
+    # Align daily levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(ewma_fast_aligned[i]) or np.isnan(ewma_slow_aligned[i]) or
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ma_50[i])):
             signals[i] = 0.0
             continue
@@ -46,27 +64,27 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 1.5 * vol_ma_50[i]
+        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
         
-        # EWMA crossover signals
-        cross_up = ewma_fast_aligned[i] > ewma_slow_aligned[i]
-        cross_down = ewma_fast_aligned[i] < ewma_slow_aligned[i]
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > r4_aligned[i]  # Break above R4
+        breakout_down = price_close < s4_aligned[i]  # Break below S4
         
-        # Entry conditions with volume confirmation
+        # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Fast EWMA crosses above slow EWMA with volume
-        if i > 50 and cross_up and not (ewma_fast_aligned[i-1] > ewma_slow_aligned[i-1]) and vol_confirm:
+        # Long: Break above R4 with volume confirmation
+        if breakout_up and vol_confirm:
             enter_long = True
         
-        # Short: Fast EWMA crosses below slow EWMA with volume
-        if i > 50 and cross_down and not (ewma_fast_aligned[i-1] < ewma_slow_aligned[i-1]) and vol_confirm:
+        # Short: Break below S4 with volume confirmation
+        if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite crossover
-        exit_long = i > 50 and cross_down and not (ewma_fast_aligned[i-1] > ewma_slow_aligned[i-1])
-        exit_short = i > 50 and cross_up and not (ewma_fast_aligned[i-1] < ewma_slow_aligned[i-1])
+        # Exit conditions: return to opposite S3/R3 levels
+        exit_long = price_close < s3_aligned[i]  # Return to S3 level
+        exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
         # Trading logic
         if enter_long and position != 1:
@@ -87,13 +105,11 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6s EWMA crossover on daily timeframe with volume confirmation.
-# Uses fast (9) and slow (21) EWMA on daily closes aligned to 6h timeframe.
-# Enters long when fast EWMA crosses above slow EWMA with volume > 1.5x 50-period average.
-# Enters short when fast EWMA crosses below slow EWMA with volume > 1.5x 50-period average.
-# Exits on opposite crossover.
-# Volume filter reduces false signals and controls trade frequency.
-# Position size 0.25 manages risk. Target: 20-40 trades per year (80-160 total over 4 years).
-# Works in both bull and bear markets by capturing trend changes with volume confirmation.
-# 6h timeframe provides balance between signal quality and trade frequency.
-# EWMA crossover is less prone to whipsaw than SMA crossover in volatile markets.
+# Hypothesis: 12h Camarilla breakout strategy using daily pivot levels with volume confirmation.
+# Enters long when price breaks above R4 with volume > 2.0x 50-period average.
+# Enters short when price breaks below S4 with volume > 2.0x 50-period average.
+# Exits when price returns to S3/R3 levels respectively.
+# Higher volume threshold (2.0x) and longer MA (50) reduce trade frequency for 12h timeframe.
+# Position size 0.25 manages risk. Target: 15-25 trades per year (60-100 total over 4 years).
+# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# 12h timeframe reduces noise and increases signal reliability vs lower timeframes.
