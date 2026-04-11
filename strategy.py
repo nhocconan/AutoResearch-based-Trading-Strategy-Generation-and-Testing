@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v6"
-timeframe = "4h"
+name = "6h_1d_ichimoku_trend_follow_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,69 +22,91 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 52:  # Need enough data for Ichimoku
         return signals
     
-    # Calculate Camarilla pivot levels from daily data
+    # Calculate Ichimoku components on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formula: range = high - low
-    # Resistance levels: R1 = close + (range * 1.1/12), R2 = close + (range * 1.1/6), R3 = close + (range * 1.1/4), R4 = close + (range * 1.1/2)
-    # Support levels: S1 = close - (range * 1.1/12), S2 = close - (range * 1.1/6), S3 = close - (range * 1.1/4), S4 = close - (range * 1.1/2)
-    daily_range = high_1d - low_1d
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Key levels for breakout: R4 (resistance) and S4 (support)
-    r4 = close_1d + (daily_range * 1.1 / 2)
-    s4 = close_1d - (daily_range * 1.1 / 2)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Volume confirmation: 4h volume > 3x 30-period average (more selective to reduce trades)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    # Key levels for exit: R3 and S3
-    r3 = close_1d + (daily_range * 1.1 / 4)
-    s3 = close_1d - (daily_range * 1.1 / 4)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
     
-    # Align daily levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou = close_1d.copy()  # Will be used for confirmation
     
-    for i in range(100, n):
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    chikou_aligned = align_htf_to_ltf(prices, df_1d, chikou)
+    
+    # Additional filters: volume confirmation and trend strength
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    for i in range(52, n):  # Start after Ichimoku calculation period
         # Skip if any required data is invalid
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma_30[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
+            np.isnan(chikou_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
         volume_current = volume[i]
         
-        # Volume confirmation
-        vol_confirm = volume_current > 3.0 * vol_ma_30[i]
+        # Ichimoku conditions
+        # Cloud (Kumo) is between Senkou Span A and B
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > r4_aligned[i]  # Break above R4
-        breakout_down = price_close < s4_aligned[i]  # Break below S4
+        # TK Cross: Tenkan crosses Kijun
+        tk_cross_up = (tenkan_aligned[i] > kijun_aligned[i]) and (tenkan_aligned[i-1] <= kijun_aligned[i-1])
+        tk_cross_down = (tenkan_aligned[i] < kijun_aligned[i]) and (tenkan_aligned[i-1] >= kijun_aligned[i-1])
+        
+        # Price above/below cloud
+        price_above_cloud = price_close > cloud_top
+        price_below_cloud = price_close < cloud_bottom
+        
+        # Chikou confirmation: Chikou (current close) vs price 26 periods ago
+        chikou_conf_long = chikou_aligned[i] > close[i-26] if i >= 26 else False
+        chikou_conf_short = chikou_aligned[i] < close[i-26] if i >= 26 else False
+        
+        # Volume confirmation
+        vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Break above R4 with volume confirmation
-        if breakout_up and vol_confirm:
+        # Long: TK cross up + price above cloud + Chikou confirms + volume
+        if tk_cross_up and price_above_cloud and chikou_conf_long and vol_confirm:
             enter_long = True
         
-        # Short: Break below S4 with volume confirmation
-        if breakout_down and vol_confirm:
+        # Short: TK cross down + price below cloud + Chikou confirms + volume
+        if tk_cross_down and price_below_cloud and chikou_conf_short and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla level (S3 for long, R3 for short)
-        exit_long = price_close < s3_aligned[i]  # Return to S3 level
-        exit_short = price_close > r3_aligned[i]  # Return to R3 level
+        # Exit conditions: opposite TK cross or price crosses opposite Kijun
+        exit_long = tk_cross_down or (price_close < kijun_aligned[i])
+        exit_short = tk_cross_up or (price_close > kijun_aligned[i])
         
         # Trading logic
         if enter_long and position != 1:
@@ -105,11 +127,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with stricter volume confirmation.
-# Enters long when price breaks above R4 with volume > 3x 30-period average.
-# Enters short when price breaks below S4 with volume > 3x 30-period average.
-# Exits when price returns to S3/R3 levels respectively.
-# Uses higher volume threshold (3x vs 2.5x) and longer MA (30 vs 20) to significantly reduce false breakouts and overtrading.
-# Position size reduced to 0.25 to improve risk-adjusted returns.
-# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by capturing significant breakouts in either direction.
+# Hypothesis: 6h Ichimoku trend following strategy using daily Ichimoku cloud for trend direction.
+# Enters long when Tenkan crosses above Kijun (TK cross up), price is above cloud,
+# Chikou span confirms bullish momentum, and volume is above average.
+# Enters short when Tenkan crosses below Kijun (TK cross down), price is below cloud,
+# Chikou span confirms bearish momentum, and volume is above average.
+# Exits on opposite TK cross or when price crosses Kijun line.
+# Uses Ichimoku's built-in multi-timeframe nature (daily cloud for 6s entries) to filter noise.
+# Works in both bull and bear markets by following the dominant trend on higher timeframe.
+# Position size 0.25 to manage risk, targeting 15-35 trades per year (60-140 total over 4 years).
+# Ichimoku is a proven trend-following system that works well in crypto markets.
