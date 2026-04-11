@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with 12h Williams %R overbought/oversold + 12h ADX trend filter + volume confirmation.
-# Williams %R(14) identifies overextended moves: > -20 = overbought (short), < -80 = oversold (long).
-# ADX(14) > 25 filters for trending conditions to avoid whipsaws in ranging markets.
-# Volume confirmation ensures institutional participation.
-# Designed for 12-37 trades/year to minimize fee drag while capturing mean reversion in trends.
-# Works in bull/bear markets by combining momentum overextension with trend strength filtering.
+# Hypothesis: 4h timeframe with 1-day Keltner Channel + RSI mean reversion.
+# Uses Keltner Channel (ATR-based) to identify overextended moves and RSI for momentum exhaustion.
+# Long when price touches lower KC and RSI < 30, short when price touches upper KC and RSI > 70.
+# Volume confirmation ensures institutional participation. Designed for 20-40 trades/year.
+# Works in bull/bear markets by adapting to volatility via ATR and using RSI extremes.
 
-name = "6h_12h_williams_r_adx_volume_v1"
-timeframe = "6h"
+name = "4h_1d_keltner_rsi_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,117 +24,95 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 12h Williams %R (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate daily ATR for Keltner Channel
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        (highest_high - close_12h) / (highest_high - lowest_low) * -100,
-        -50  # neutral when range is zero
-    )
-    
-    # Calculate 12h ADX (14-period)
     # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Directional Movement
-    dm_plus = np.where(
-        (high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]),
-        np.maximum(high_12h[1:] - high_12h[:-1], 0),
-        0
-    )
-    dm_minus = np.where(
-        (low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]),
-        np.maximum(low_12h[:-1] - low_12h[1:], 0),
-        0
-    )
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # ATR(10)
+    atr_10 = np.full_like(tr, np.nan, dtype=float)
+    for i in range(9, len(tr)):
+        if not np.isnan(tr[i-9:i+1]).any():
+            atr_10[i] = np.nanmean(tr[i-9:i+1])
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period])  # skip first NaN
-        # Wilder smoothing
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+    # Keltner Channel (20-period EMA ± 2*ATR)
+    close_series = pd.Series(close_1d)
+    ema_20 = close_series.ewm(span=20, adjust=False).mean().values
+    kc_upper = ema_20 + 2 * atr_10
+    kc_lower = ema_20 - 2 * atr_10
+    
+    # Daily RSI(14)
+    delta = np.diff(close_1d, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(gain, np.nan, dtype=float)
+    avg_loss = np.full_like(loss, np.nan, dtype=float)
+    for i in range(14, len(gain)):
+        if i == 14:
+            avg_gain[i] = np.nanmean(gain[1:15])
+            avg_loss[i] = np.nanmean(loss[1:15])
+        else:
+            if not np.isnan(avg_gain[i-1]) and not np.isnan(gain[i]):
+                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
             else:
-                result[i] = np.nan
-        return result
+                avg_gain[i] = np.nan
+            if not np.isnan(avg_loss[i-1]) and not np.isnan(loss[i]):
+                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+            else:
+                avg_loss[i] = np.nan
     
-    atr = smooth_wilder(tr, 14)
-    dm_plus_smooth = smooth_wilder(dm_plus, 14)
-    dm_minus_smooth = smooth_wilder(dm_minus, 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.nan)
+    rsi = 100 - (100 / (1 + rs))
     
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
-    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    # Align daily indicators to 4h timeframe
+    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # DX and ADX
-    dx = np.where(
-        (di_plus + di_minus) != 0,
-        np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100,
-        0
-    )
-    adx = smooth_wilder(dx, 14)
-    
-    # Calculate 12h average volume (20-period)
-    volume_12h = df_12h['volume'].values
-    vol_avg_20 = np.full_like(volume_12h, np.nan, dtype=float)
-    for i in range(19, len(volume_12h)):
-        vol_avg_20[i] = np.mean(volume_12h[i-19:i+1])
-    
-    # Align 12h indicators to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r)
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20)
+    # Volume filter: 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Warmup for indicators
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * 12h average volume
-        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Williams %R signals
-        williams_oversold = williams_r_aligned[i] < -80  # Oversold - long signal
-        williams_overbought = williams_r_aligned[i] > -20  # Overbought - short signal
+        # Mean reversion signals
+        touch_lower = low[i] <= kc_lower_aligned[i]
+        touch_upper = high[i] >= kc_upper_aligned[i]
+        rsi_oversold = rsi_aligned[i] < 30
+        rsi_overbought = rsi_aligned[i] > 70
         
-        # ADX trend filter: only trade when trending (ADX > 25)
-        trending = adx_aligned[i] > 25
+        long_signal = touch_lower and rsi_oversold and vol_filter
+        short_signal = touch_upper and rsi_overbought and vol_filter
         
-        # Entry logic: Williams extremes only in trending markets
-        long_signal = williams_oversold and trending and vol_filter
-        short_signal = williams_overbought and trending and vol_filter
+        # Exit when price returns to middle of KC (EMA20)
+        exit_long = position == 1 and close[i] >= ema_20[i] if not np.isnan(ema_20[i]) else False
+        exit_short = position == -1 and close[i] <= ema_20[i] if not np.isnan(ema_20[i]) else False
         
-        # Exit when Williams %R returns to neutral range (-50 ± 15)
-        exit_long = williams_r_aligned[i] > -65  # Exit long when less oversold
-        exit_short = williams_r_aligned[i] < -35  # Exit short when less overbought
-        
-        # Update position and signals
+        # Entry/exit logic
         if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
