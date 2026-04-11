@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily price action filtered by weekly Bollinger Band squeeze and Donchian breakout.
-# Long when price breaks above upper Donchian(20) with weekly BB width < 30th percentile (low volatility),
-# short when breaks below lower Donchian(20) under same conditions.
-# Uses volatility contraction (BB squeeze) followed by expansion (breakout) to capture trends in both bull and bear markets.
-# Designed for low trade frequency (~10-20/year) to minimize fee decay on 1d timeframe.
+# Hypothesis: 12h timeframe with daily Donchian breakout + volume confirmation + chop regime filter.
+# Uses daily Donchian channels (20-period) to identify breakouts, volume > 1.5x average for confirmation,
+# and Choppiness Index < 38.2 to ensure trending market. Designed for low trade frequency
+# (~15-25/year) to minimize fee decay while capturing strong momentum in both bull and bear markets.
+# Works in bull markets by buying breakouts above upper band, in bear markets by selling breakdowns below lower band.
 
-name = "1d_1w_bb_squeeze_donchian_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_donchian_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -24,55 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly Bollinger Bands (20, 2)
-    close_1w = df_1w['close'].values
-    bb_mid = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Calculate daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Weekly BB width percentile (30-day lookback for squeeze threshold)
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=30, min_periods=10).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    # Squeeze condition: BB width < 30th percentile (low volatility)
-    squeeze_condition = bb_width_percentile < 30
-    squeeze_aligned = align_htf_to_ltf(prices, df_1w, squeeze_condition)
+    # Align daily Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Daily Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily average volume (for confirmation)
+    volume_1d = df_1d['volume'].values
+    vol_avg_10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10_1d)
+    
+    # Calculate Choppiness Index on daily timeframe (14-period)
+    # CHOP = 100 * log10(sum(TR over n) / (max(HH,n) - min(LL,n))) / log10(n)
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+    chop[hh - ll == 0] = 100  # Avoid division by zero
+    
+    # Align Choppiness Index to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 50 to ensure all indicators are valid
-    for i in range(50, n):
-        # Skip if squeeze data is invalid
-        if np.isnan(squeeze_aligned[i]):
+    # Start from index 20 to ensure Donchian channels are valid
+    for i in range(20, n):
+        # Skip if any required data is invalid
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_avg_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volatility contraction filter: weekly BB squeeze
-        vol_filter = squeeze_aligned[i]
+        # Volume filter: current volume > 1.5 * daily average volume
+        vol_filter = volume[i] > 1.5 * vol_avg_aligned[i]
         
-        # Breakout conditions: price breaks Donchian bands with volatility contraction
-        long_breakout = high[i] > donch_high[i]
-        short_breakout = low[i] < donch_low[i]
+        # Chop filter: Choppiness Index < 38.2 (trending market)
+        chop_filter = chop_aligned[i] < 38.2
         
-        long_entry = long_breakout and vol_filter
-        short_entry = short_breakout and vol_filter
+        # Entry conditions: price breaks through daily Donchian levels with volume and chop confirmation
+        long_entry = (high[i] > donchian_high_aligned[i] and vol_filter and chop_filter)
+        short_entry = (low[i] < donchian_low_aligned[i] and vol_filter and chop_filter)
         
-        # Exit: reverse Donchian breakout
-        exit_long = low[i] < donch_low[i]
-        exit_short = high[i] > donch_high[i]
+        # Exit conditions: price returns to opposite Donchian level
+        exit_long = low[i] < donchian_low_aligned[i]
+        exit_short = high[i] > donchian_high_aligned[i]
         
         if long_entry and position != 1:
             position = 1
