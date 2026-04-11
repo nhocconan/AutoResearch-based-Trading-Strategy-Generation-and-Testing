@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1d/1w trend filter.
-# Uses 1w SMA(13,8,5) for trend direction (Jaws/Teeth/Lips alignment).
-# Enters long when 12h price crosses above Lips in bullish weekly trend.
-# Enters short when 12h price crosses below Lips in bearish weekly trend.
-# Volume filter (1.5x 20-period average) confirms momentum.
-# Designed for 12-37 trades/year on 12h timeframe.
+# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation.
+# Enters long when price breaks above Donchian(20) high in bullish 12h trend.
+# Enters short when price breaks below Donchian(20) low in bearish 12h trend.
+# Volume confirmation: current volume > 1.5x 20-period average volume.
+# Designed for 20-50 trades/year on 4h with low drawdown.
+# Trend filter from 12h reduces whipsaw in sideways markets.
 
-name = "12h_1w_alligator_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,77 +25,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Calculate 12h EMA(50) for trend
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = close_12h > ema_12h
+    trend_down = close_12h < ema_12h
     
-    # Calculate Williams Alligator on weekly timeframe
-    close_1w = df_1w['close'].values
+    # Align 12h trend to 4h
+    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
+    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
     
-    # Jaw (13-period, 8-bar shift)
-    jaw = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (8-period, 5-bar shift)
-    teeth = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (5-period, 3-bar shift)
-    lips = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(19, n):
+        donch_high[i] = np.max(high[i-19:i+1])
+        donch_low[i] = np.min(low[i-19:i+1])
     
-    # Weekly trend: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
-    weekly_trend_bull = (lips > teeth) & (teeth > jaw)
-    weekly_trend_bear = (lips < teeth) & (teeth < jaw)
-    
-    # Align weekly Alligator lines and trend to 12h
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    weekly_trend_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bull)
-    weekly_trend_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_bear)
-    
-    # Volume filter: 20-period average on 12h
-    vol_avg_20 = np.full_like(volume, np.nan, dtype=float)
-    for i in range(19, len(volume)):
+    # Calculate 20-period average volume
+    vol_avg_20 = np.full(n, np.nan)
+    for i in range(19, n):
         vol_avg_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or
-            np.isnan(weekly_trend_bull_aligned[i]) or np.isnan(weekly_trend_bear_aligned[i])):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_avg_20[i]) or \
+           np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: current volume > 1.5 * 20-period average
+        # Volume filter
         vol_filter = volume[i] > 1.5 * vol_avg_20[i]
         
-        # Determine weekly trend direction
-        is_bullish_week = weekly_trend_bull_aligned[i]
-        is_bearish_week = weekly_trend_bear_aligned[i]
+        # Entry conditions
+        long_breakout = close[i] > donch_high[i] and vol_filter and trend_up_aligned[i]
+        short_breakout = close[i] < donch_low[i] and vol_filter and trend_down_aligned[i]
         
-        # Enter long when price crosses above Lips in bullish weekly trend
-        long_entry = (close[i] > lips_aligned[i] and close[i-1] <= lips_aligned[i-1] and 
-                     vol_filter and is_bullish_week)
-        
-        # Enter short when price crosses below Lips in bearish weekly trend
-        short_entry = (close[i] < lips_aligned[i] and close[i-1] >= lips_aligned[i-1] and 
-                      vol_filter and is_bearish_week)
-        
-        # Exit when price crosses Teeth (opposite signal)
-        exit_long = (position == 1 and close[i] < teeth_aligned[i])
-        exit_short = (position == -1 and close[i] > teeth_aligned[i])
+        # Exit conditions
+        exit_long = position == 1 and close[i] < donch_low[i]
+        exit_short = position == -1 and close[i] > donch_high[i]
         
         # Priority: entry > exit > hold
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
