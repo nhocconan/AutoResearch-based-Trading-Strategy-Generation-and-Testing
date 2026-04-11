@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-# 4h_12h_camarilla_pivot_volume_v1
-# Strategy: 4h Camarilla pivot breakout with 12h volume confirmation
-# Timeframe: 4h
+# 1h_4h_1d_momentum_volume_v1
+# Strategy: 1h momentum with 4h/1d trend filter and volume confirmation
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels (based on prior 12h candle) act as strong intraday support/resistance.
-# Breakouts above/below these levels with above-average volume capture momentum moves.
-# Works in both bull and bear markets as pivots adapt to recent price action.
-# Target: 20-50 trades/year to minimize fee drag.
+# Hypothesis: Momentum breakouts aligned with higher timeframe trends and volume capture
+# sustained moves while avoiding false breakouts. Works in both bull (trend following) and
+# bear (mean reversion during oversold bounces) by using momentum direction + volume.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_pivot_volume_v1"
-timeframe = "4h"
+name = "1h_4h_1d_momentum_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,81 +26,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    
-    if len(df_12h) < 2:
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from prior 12h candle
-    # Typical price = (H + L + C) / 3
-    typical_price_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # We use R3, R4, S3, S4 for breakouts
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    camarilla_r4 = close_12h + ((high_12h - low_12h) * 1.1 / 2)
-    camarilla_r3 = close_12h + ((high_12h - low_12h) * 1.1 / 4)
-    camarilla_s3 = close_12h - ((high_12h - low_12h) * 1.1 / 4)
-    camarilla_s4 = close_12h - ((high_12h - low_12h) * 1.1 / 2)
+    # 4h EMA20 for trend
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    # Align Camarilla levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    # 1d EMA50 for trend
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h volume average (10-period) for confirmation
-    volume_12h = df_12h['volume'].values
-    vol_avg_10_12h = pd.Series(volume_12h).rolling(window=10, min_periods=10).mean().values
-    vol_avg_10_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_10_12h)
+    # 1h momentum (ROC 6-period)
+    roc_period = 6
+    roc = np.zeros_like(close)
+    roc[roc_period:] = (close[roc_period:] - close[:-roc_period]) / close[:-roc_period]
     
-    # Align raw 12h volume for confirmation
-    vol_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_12h)
+    # 1h volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(10, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or \
-           np.isnan(vol_avg_10_12h_aligned[i]) or np.isnan(vol_12h_aligned[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or \
+           np.isnan(roc[i]) or np.isnan(vol_avg_20[i]):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume confirmation: current 12h volume > 1.2x 10-period average
-        vol_confirm = vol_12h_aligned[i] > 1.2 * vol_avg_10_12h_aligned[i]
+        # Trend alignment: both 4h and 1d EMAs agree
+        uptrend_4h = close[i] > ema_20_4h_aligned[i]
+        uptrend_1d = close[i] > ema_50_1d_aligned[i]
+        downtrend_4h = close[i] < ema_20_4h_aligned[i]
+        downtrend_1d = close[i] < ema_50_1d_aligned[i]
         
-        # Price relative to Camarilla levels
-        above_r4 = close[i] > r4_aligned[i]
-        above_r3 = close[i] > r3_aligned[i]
-        below_s3 = close[i] < s3_aligned[i]
-        below_s4 = close[i] < s4_aligned[i]
+        # Momentum condition
+        mom_up = roc[i] > 0.005  # 0.5% momentum
+        mom_down = roc[i] < -0.005  # -0.5% momentum
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
         
         # Entry conditions
-        # Long: Price breaks above R4 with volume confirmation
-        if above_r4 and vol_confirm and position != 1:
-            # Additional check: ensure we didn't just break above R4 in previous bar
-            if i == 10 or close[i-1] <= r4_aligned[i-1]:
-                position = 1
-                signals[i] = 0.25
-        # Short: Price breaks below S4 with volume confirmation
-        elif below_s4 and vol_confirm and position != -1:
-            # Additional check: ensure we didn't just break below S4 in previous bar
-            if i == 10 or close[i-1] >= s4_aligned[i-1]:
-                position = -1
-                signals[i] = -0.25
-        # Exit: Price returns to R3/S3 levels (mean reversion)
-        elif position == 1 and close[i] < r3_aligned[i]:
+        # Long: Uptrend on both timeframes + positive momentum + volume
+        if uptrend_4h and uptrend_1d and mom_up and vol_confirm and position != 1:
+            position = 1
+            signals[i] = 0.20
+        # Short: Downtrend on both timeframes + negative momentum + volume
+        elif downtrend_4h and downtrend_1d and mom_down and vol_confirm and position != -1:
+            position = -1
+            signals[i] = -0.20
+        # Exit: Momentum divergence or trend change
+        elif position == 1 and (mom_down or not uptrend_4h or not uptrend_1d):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > s3_aligned[i]:
+        elif position == -1 and (mom_up or not downtrend_4h or not downtrend_1d):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
