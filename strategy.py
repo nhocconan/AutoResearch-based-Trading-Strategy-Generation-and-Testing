@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pivot_reversion_v1
-# Strategy: 4h Camarilla pivot mean reversion with 1d trend filter and volume confirmation
-# Timeframe: 4h
+# 6h_1d_1w_camarilla_pivot_volume_v1
+# Strategy: 6h Camarilla pivot levels with 1d volume confirmation and 1w trend filter
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: Price tends to revert to Camarilla pivot levels (H3/L3) during ranging markets.
-# In trending markets (1d EMA50), we trade pullbacks to H4/L4 in direction of trend.
-# Volume > 1.3x 20-period average confirms institutional participation.
-# Designed for low trade frequency (~20-40/year) to minimize fee drag.
-# Works in bull markets via long pullbacks to L4 and bear markets via short pullbacks to H4.
-# Uses Camarilla levels calculated from prior 1d session.
+# Hypothesis: Camarilla pivot levels provide high-probability reversal points. 1d volume confirms institutional participation at these levels. 1w trend filter ensures alignment with higher timeframe direction. Designed for low trade frequency to minimize fee drag in choppy markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_reversion_v1"
-timeframe = "4h"
+name = "6h_1d_1w_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,78 +26,79 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior 1d session
-    # H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    # H3 = C + 1.1*(H-L)/4, L3 = C - 1.1*(H-L)/4
-    # Where H,L,C are from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    close_1d_prev = np.roll(close_1d, 1)
-    high_1d_prev[0] = np.nan  # First value invalid
-    low_1d_prev[0] = np.nan
-    close_1d_prev[0] = np.nan
+    # Calculate 1d Camarilla pivot levels (based on previous day)
+    # Using typical formula: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    # We'll calculate these for each day and align to 6h
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla levels for each 1d bar
-    H4_1d = close_1d_prev + 1.1 * (high_1d_prev - low_1d_prev) / 2
-    L4_1d = close_1d_prev - 1.1 * (high_1d_prev - low_1d_prev) / 2
-    H3_1d = close_1d_prev + 1.1 * (high_1d_prev - low_1d_prev) / 4
-    L3_1d = close_1d_prev - 1.1 * (high_1d_prev - low_1d_prev) / 4
+    # Calculate Camarilla levels for previous day
+    R4 = prev_day_close + 1.5 * (prev_day_high - prev_day_low)
+    R3 = prev_day_close + 1.1 * (prev_day_high - prev_day_low)
+    S3 = prev_day_close - 1.1 * (prev_day_high - prev_day_low)
+    S4 = prev_day_close - 1.5 * (prev_day_high - prev_day_low)
     
-    # Align to 4h timeframe (wait for 1d bar to close)
-    H4_1d_aligned = align_htf_to_ltf(prices, df_1d, H4_1d)
-    L4_1d_aligned = align_htf_to_ltf(prices, df_1d, L4_1d)
-    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
+    # Align Camarilla levels to 6h timeframe
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d volume confirmation: current 1d volume > 1.5x 20-period average
+    vol_1d = df_1d['volume'].values
+    vol_avg_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_confirm_1d = vol_1d > 1.5 * vol_avg_20_1d
+    vol_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm_1d.astype(float))
     
-    # 4h volume average (20-period) for confirmation
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1w trend filter: EMA21 on weekly close
+    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after sufficient warmup
         # Skip if any required data is invalid
-        if (np.isnan(H4_1d_aligned[i]) or np.isnan(L4_1d_aligned[i]) or 
-            np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(R4_6h[i]) or np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or np.isnan(S4_6h[i]) or
+            np.isnan(vol_confirm_1d_aligned[i]) or np.isnan(ema_21_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_avg_20[i]
+        # Fade at S3/R3 levels with volume confirmation
+        fade_long = (low[i] <= S3_6h[i]) and (close[i] > S3_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
+        fade_short = (high[i] >= R3_6h[i]) and (close[i] < R3_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
         
-        # Trend filter: price above EMA = bullish, below = bearish
-        trend_bullish = close[i] > ema_50_1d_aligned[i]
-        trend_bearish = close[i] < ema_50_1d_aligned[i]
+        # Breakout continuation at S4/R4 levels with volume confirmation
+        breakout_long = (high[i] > S4_6h[i]) and (close[i] > S4_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
+        breakdown_short = (low[i] < R4_6h[i]) and (close[i] < R4_6h[i]) and vol_confirm_1d_aligned[i] > 0.5
+        
+        # 1w trend filter: only take longs in uptrend, shorts in downtrend
+        trend_up = close[i] > ema_21_1w_aligned[i]
+        trend_down = close[i] < ema_21_1w_aligned[i]
         
         # Entry conditions
-        # Long: Price touches L3 or L4 AND bullish trend AND volume confirmation
-        long_touch = (low[i] <= L3_1d_aligned[i] or low[i] <= L4_1d_aligned[i])
-        if long_touch and trend_bullish and vol_confirm and position != 1:
+        # Long: Fade at S3 OR breakout above S4, with volume confirmation and trend alignment
+        if ((fade_long or breakout_long) and trend_up and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short: Price touches H3 or H4 AND bearish trend AND volume confirmation
-        elif (high[i] >= H3_1d_aligned[i] or high[i] >= H4_1d_aligned[i]) and trend_bearish and vol_confirm and position != -1:
+        # Short: Fade at R3 OR breakdown below R4, with volume confirmation and trend alignment
+        elif ((fade_short or breakdown_short) and trend_down and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: Price reaches opposite level (H4 for long, L4 for short) or opposite touch
-        elif position == 1 and (high[i] >= H4_1d_aligned[i] or low[i] <= L3_1d_aligned[i]):
+        # Exit: Opposite signal or loss of volume confirmation
+        elif position == 1 and (fade_short or breakdown_short or vol_confirm_1d_aligned[i] <= 0.5):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (low[i] <= L4_1d_aligned[i] or high[i] >= H3_1d_aligned[i]):
+        elif position == -1 and (fade_long or breakout_long or vol_confirm_1d_aligned[i] <= 0.5):
             position = 0
             signals[i] = 0.0
         else:
