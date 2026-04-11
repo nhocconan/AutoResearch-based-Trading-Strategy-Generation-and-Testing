@@ -3,21 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w trend filter + volume confirmation
-# - Donchian(20) breakout provides clean entry/exit signals with low trade frequency
-# - 1-week EMA50 trend filter ensures we only trade in direction of higher timeframe trend
-# - Volume confirmation (1.5x 20-period average) filters out weak breakouts
-# - Discrete position sizing ±0.25 to limit drawdown and reduce fee churn
-# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits
-# - Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend)
+# Hypothesis: 12h Volume-Weighted MACD with 1d Regime Filter
+# - MACD(12,26,9) on volume-weighted price (VWP) for momentum
+# - 1d ADX(14) > 25 for trending regime filter (avoid whipsaws in ranging markets)
+# - Volume confirmation: current 12h volume > 1.3x 20-period 1d average volume
+# - Long: MACD line > signal line AND VWP > VWP EMA(50) AND ADX > 25 AND volume confirmation
+# - Short: MACD line < signal line AND VWP < VWP EMA(50) AND ADX > 25 AND volume confirmation
+# - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Volume-weighted price reduces noise from low-volume spikes
+# - ADX regime filter ensures we only trade in trending conditions
+# - Works in both bull (strong upward momentum) and bear (strong downward momentum)
 
-name = "1d_donchian_breakout_1w_trend_volume_v1"
-timeframe = "1d"
+name = "12h_vwap_macd_adx_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,78 +32,108 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1w data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data ONCE before loop for regime and volume filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return signals
     
-    # Pre-compute 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Pre-compute 1d ADX for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute 1d volume confirmation (20-period average)
-    volume_1d = df_1w['volume'].values if 'volume' in df_1w.columns else np.ones(len(df_1w))  # fallback if no volume
-    # Actually get 1d volume data for proper confirmation
-    df_1d_for_vol = get_htf_data(prices, '1d')
-    if len(df_1d_for_vol) >= 20:
-        volume_1d_actual = df_1d_for_vol['volume'].values
-        volume_sma_20_1d = pd.Series(volume_1d_actual).rolling(window=20, min_periods=20).mean().values
-        volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d_for_vol, volume_sma_20_1d)
-    else:
-        volume_sma_20_aligned = np.ones(n) * 1e-9  # avoid division by zero
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Pre-compute 1d Donchian channels (20-period)
-    # Upper band: 20-period high
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period low
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    for i in range(50, n):  # Start after 50-bar warmup
+    # Smoothed values
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Pre-compute 1d average volume for confirmation
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    
+    # Pre-compute Volume-Weighted Price (VWP) on 12h timeframe
+    typical_price = (high + low + close) / 3
+    vwp = np.sum(typical_price * volume) / np.sum(volume)  # Will compute properly below
+    # Instead compute cumulative VWP-like indicator: VWMA
+    vwma_numerator = pd.Series(typical_price * volume).rolling(window=21, min_periods=21).sum().values
+    vwma_denominator = pd.Series(volume).rolling(window=21, min_periods=21).sum().values
+    vwma = vwma_numerator / vwma_denominator
+    
+    # Pre-compute MACD on VWMA
+    vwma_series = pd.Series(vwma)
+    ema12 = vwma_series.ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = vwma_series.ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_histogram = macd_line - signal_line
+    
+    # Pre-compute VWMA EMA(50) for trend filter
+    vwma_ema50 = pd.Series(vwma).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or
+            np.isnan(vwma[i]) or np.isnan(vwma_ema50[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(volume_sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
-        close_current = close[i]
         volume_current = volume[i]
         
-        # Donchian breakout conditions
-        breakout_long = close_current > donchian_high[i-1]  # break above previous period's high
-        breakout_short = close_current < donchian_low[i-1]  # break below previous period's low
+        # MACD conditions
+        macd_bullish = macd_line[i] > signal_line[i]
+        macd_bearish = macd_line[i] < signal_line[i]
         
-        # 1-week trend filter: price above/below EMA50
-        uptrend = close_current > ema50_1w_aligned[i]
-        downtrend = close_current < ema50_1w_aligned[i]
+        # Trend filter: VWMA above/below its EMA50
+        vwma_uptrend = vwma[i] > vwma_ema50[i]
+        vwma_downtrend = vwma[i] < vwma_ema50[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Regime filter: ADX > 25 indicates trending market
+        trending_regime = adx_aligned[i] > 25
+        
+        # Volume confirmation: current volume > 1.3x 20-period 1d average
+        vol_confirm = volume_current > 1.3 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: bullish breakout + uptrend + volume confirmation
-        if breakout_long and uptrend and vol_confirm:
+        # Long: bullish MACD + uptrend VWMA + trending regime + volume confirmation
+        if macd_bullish and vwma_uptrend and trending_regime and vol_confirm:
             enter_long = True
         
-        # Short: bearish breakout + downtrend + volume confirmation
-        if breakout_short and downtrend and vol_confirm:
+        # Short: bearish MACD + downtrend VWMA + trending regime + volume confirmation
+        if macd_bearish and vwma_downtrend and trending_regime and vol_confirm:
             enter_short = True
         
-        # Exit conditions: reverse Donchian breakout or trend change
+        # Exit conditions: reverse MACD or loss of trend
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price breaks below Donchian low OR trend turns down
-            exit_long = (close_current < donchian_low[i]) or (not uptrend)
+            # Exit long if MACD turns bearish OR VWMA loses uptrend
+            exit_long = (not macd_bullish) or (not vwma_uptrend)
         elif position == -1:
-            # Exit short if price breaks above Donchian high OR trend turns up
-            exit_short = (close_current > donchian_high[i]) or (not downtrend)
+            # Exit short if MACD turns bullish OR VWMA loses downtrend
+            exit_short = (not macd_bearish) or (not vwma_downtrend)
         
         # Trading logic
         if enter_long and position != 1:
