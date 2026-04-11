@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_adx_momentum_v1
-Strategy: 1d ADX momentum with 1w trend filter
-Timeframe: 1d
+6h_1d_heikinashi_engulfing_v1
+Strategy: Heikin-Ashi engulfing pattern on 6h with 1d trend filter
+Timeframe: 6h
 Leverage: 1.0
-Hypothesis: Uses ADX(14) > 25 to identify strong trends on daily, combined with 1-week EMA20 trend filter for direction. Enters long when both ADX>25 and price>weekly EMA20, short when ADX>25 and price<weekly EMA20. Exits when ADX<20 (trend weakening). Designed to capture strong trends in both bull and bear markets while avoiding choppy periods. Target: 20-50 trades over 4 years.
+Hypothesis: Heikin-Ashi smooths price action to filter noise. Bullish engulfing (green candle engulfing prior red) signals strength in uptrend; bearish engulfing (red candle engulfing prior green) signals weakness in downtrend. Uses 1d EMA50 to filter trend direction. Works in bull/bear by following higher timeframe trend. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_adx_momentum_v1"
-timeframe = "1d"
+name = "6h_1d_heikinashi_engulfing_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +24,66 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     
     # Load higher timeframe data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX(14) for trend strength
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Heikin-Ashi calculation
+    ha_close = (open_price + high + low + close) / 4.0
+    ha_open = np.zeros_like(ha_close)
+    ha_open[0] = (open_price[0] + close[0]) / 2.0
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2.0
+    ha_high = np.maximum.reduce([high, ha_open, ha_close])
+    ha_low = np.minimum.reduce([low, ha_open, ha_close])
     
-    # Calculate Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Bullish engulfing: current HA green (close >= open) engulfs prior HA red (close < open)
+    ha_bull_engulf = (ha_close >= ha_open) & (ha_close >= ha_open[1:]) & (ha_open <= ha_close[1:]) & (ha_close[1:] < ha_open[1:])
+    # Bearish engulfing: current HA red (close < open) engulfs prior HA green (close >= open)
+    ha_bear_engulf = (ha_close < ha_open) & (ha_close <= ha_open[1:]) & (ha_open >= ha_close[1:]) & (ha_close[1:] >= ha_open[1:])
+    # Shift to align with current bar (pattern completes at current bar)
+    ha_bull_engulf = np.roll(ha_bull_engulf, 1)
+    ha_bear_engulf = np.roll(ha_bear_engulf, 1)
+    ha_bull_engulf[0] = False
+    ha_bear_engulf[0] = False
     
-    # Avoid division by zero
-    atr_safe = np.where(atr == 0, 1e-10, atr)
-    
-    # Smoothed values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_safe
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_safe
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # 1-week EMA20 for trend direction
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
-        # Skip if any required data is invalid
-        if (np.isnan(adx[i]) or np.isnan(ema_20_1w_aligned[i])):
+    for i in range(1, n):
+        # Skip if EMA data is invalid
+        if np.isnan(ema_50_1d_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
         
-        # Trend strength filter
-        strong_trend = adx[i] > 25
-        weak_trend = adx[i] < 20
-        
-        # Direction from weekly EMA
-        price_above_weekly_ema = price_close > ema_20_1w_aligned[i]
-        price_below_weekly_ema = price_close < ema_20_1w_aligned[i]
+        # Trend filter
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
         # Entry conditions
-        long_entry = strong_trend and price_above_weekly_ema
-        short_entry = strong_trend and price_below_weekly_ema
+        long_signal = ha_bull_engulf[i] and uptrend_1d
+        short_signal = ha_bear_engulf[i] and downtrend_1d
         
-        # Exit conditions
-        exit_long = position == 1 and (weak_trend or price_below_weekly_ema)
-        exit_short = position == -1 and (weak_trend or price_above_weekly_ema)
+        # Exit on opposite engulfing signal
+        exit_long = position == 1 and ha_bear_engulf[i]
+        exit_short = position == -1 and ha_bull_engulf[i]
         
         # Trading logic
-        if long_entry and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
@@ -104,4 +97,4 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Uses ADX(14) > 25 to identify strong trends on daily, combined with 1-week EMA20 trend filter for direction. Enters long when both ADX>25 and price>weekly EMA20, short when ADX>25 and price<weekly EMA20. Exits when ADX<20 (trend weakening). Designed to capture strong trends in both bull and bear markets while avoiding choppy periods. Target: 20-50 trades over 4 years.
+# Hypothesis: Heikin-Ashi smooths price action to filter noise. Bullish engulfing (green candle engulfing prior red) signals strength in uptrend; bearish engulfing (red candle engulfing prior green) signals weakness in downtrend. Uses 1d EMA50 to filter trend direction. Works in bull/bear by following higher timeframe trend. Target: 50-150 total trades over 4 years.
