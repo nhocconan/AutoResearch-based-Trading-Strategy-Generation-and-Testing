@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
+name = "4h_1d_camarilla_breakout_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,7 +52,6 @@ def generate_signals(prices):
     r4_4h = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_4h = align_htf_to_ltf(prices, df_1d, s4_1d)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # 4h ATR for volatility filter
     tr1 = high[1:] - low[1:]
@@ -61,8 +60,11 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h volume filter: volume > 1.5x 20-period average
+    # 4h volume filter: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # 4h trend filter: close > 50 EMA for long, < 50 EMA for short
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -70,7 +72,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(pivot_4h[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
@@ -80,20 +82,22 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
+        ema_val = ema_50[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma
+        volume_confirmed = volume_current > 1.3 * vol_ma
         
         # Volatility filter: avoid extremely low volatility
-        vol_filter = atr_val > 0.004 * price_close  # ATR > 0.4% of price
+        vol_filter = atr_val > 0.003 * price_close  # ATR > 0.3% of price
         
-        # Long conditions: price breaks below S3 (oversold) with volume and vol filter
-        long_signal = volume_confirmed and vol_filter and (price_low < s3_4h[i])
+        # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA50
+        long_signal = volume_confirmed and vol_filter and (price_low < s3_4h[i]) and (price_close > ema_val)
         
-        # Short conditions: price breaks above R3 (overbought) with volume and vol filter
-        short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i])
+        # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA50
+        short_signal = volume_confirmed and vol_filter and (price_high > r3_4h[i]) and (price_close < ema_val)
         
         # Exit when price returns to 1d pivot level
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
         exit_long = position == 1 and price_close > pivot_4h[i]
         exit_short = position == -1 and price_close < pivot_4h[i]
         
@@ -107,7 +111,7 @@ def generate_signals(prices):
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and exit_exit:
             position = 0
             signals[i] = 0.0
         else:
@@ -117,9 +121,10 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 1d Camarilla levels act as strong support/resistance for 4h price action.
-# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.5x average)
-# and sufficient volatility (ATR > 0.4% of price).
-# Enters short when price breaks above R3 (overbought rejection) with same conditions.
+# Enters long when 4h price breaks below S3 (oversold bounce) with volume confirmation (>1.3x average),
+# sufficient volatility (ATR > 0.3% of price), and above 4h 50 EMA (trend filter).
+# Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA50.
 # Exits when price returns to 1d pivot level, capturing mean reversion.
-# Volume and volatility filters reduce false breaks. Designed for 20-50 trades per year on 4h timeframe.
-# Works in both bull (buying dips) and bear (selling rallies) markets by fading extremes at proven daily levels.
+# Trend filter reduces whipsaws in strong trends. Volume and volatility filters reduce false breaks.
+# Designed for 10-30 trades per month (~120-360/year) on 4h timeframe, balancing opportunity and fee cost.
+# Works in both bull (buying dips) and bear (selling rallies) markets.
