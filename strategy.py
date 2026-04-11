@@ -3,82 +3,90 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v34"
-timeframe = "4h"
+name = "6h_12h_1d_ma_deviation_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE
+    # Load 12h and 1d data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    
+    if len(df_12h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
+    # Calculate 12h EMA(20) for trend
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    
+    # Calculate 1d ATR(14) for deviation threshold
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Previous day's close for Camarilla calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_close[0] = close_1d[0]  # First day uses its own close
+    # Calculate 1d RSI(14) for mean reversion signals
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels (based on previous day)
-    high_low = high_1d - low_1d
-    camarilla_h5 = prev_close + 1.1 * high_low / 2
-    camarilla_h4 = prev_close + 1.1 * high_low / 4
-    camarilla_h3 = prev_close + 1.1 * high_low / 6
-    camarilla_l3 = prev_close - 1.1 * high_low / 6
-    camarilla_l4 = prev_close - 1.1 * high_low / 4
-    camarilla_l5 = prev_close - 1.1 * high_low / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    h5 = align_htf_to_ltf(prices, df_1d, camarilla_h5)
-    h4 = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    h3 = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3 = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4 = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    l5 = align_htf_to_ltf(prices, df_1d, camarilla_l5)
-    
-    # Volume spike detection (1d)
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
-    vol_current = align_htf_to_ltf(prices, df_1d, volume_1d)
-    vol_spike = vol_current > 2.0 * vol_avg_aligned  # Volume > 2x average
+    # Align all indicators to 6h timeframe
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after 20-bar warmup
-        if np.isnan(h4[i]) or np.isnan(l4[i]) or np.isnan(vol_spike[i]):
+    # Start from index 20 to ensure sufficient data
+    for i in range(20, n):
+        # Skip if any required data is invalid
+        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(rsi_14_1d_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price = close[i]
+        ema_trend = ema_20_12h_aligned[i]
+        atr_dev = atr_14_1d_aligned[i]
+        rsi = rsi_14_1d_aligned[i]
         
-        # Long when price breaks above H4 with volume spike
-        long_signal = price > h4[i] and vol_spike[i]
+        # Calculate deviation from 12h EMA
+        deviation = price - ema_trend
         
-        # Short when price breaks below L4 with volume spike
-        short_signal = price < l4[i] and vol_spike[i]
+        # Long: price below EMA + RSI oversold + mean reversion expected
+        long_condition = (deviation < -0.5 * atr_dev) and (rsi < 35)
         
-        # Exit when price returns to midpoint (H3/L3)
-        midpoint = (h3[i] + l3[i]) / 2
-        exit_long = price < midpoint
-        exit_short = price > midpoint
+        # Short: price above EMA + RSI overbought + mean reversion expected
+        short_condition = (deviation > 0.5 * atr_dev) and (rsi > 65)
         
-        if long_signal and position != 1:
+        # Exit when price returns toward EMA (mean reversion complete)
+        exit_long = deviation > -0.2 * atr_dev
+        exit_short = deviation < 0.2 * atr_dev
+        
+        if long_condition and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
@@ -88,6 +96,7 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
+            # Hold current position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
