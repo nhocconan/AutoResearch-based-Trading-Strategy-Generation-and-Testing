@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-# 6h_1d_ccitrade_v1
-# Strategy: 6h CCI combined with 1d ADX for trend strength and volume confirmation
-# Timeframe: 6h
+# 12h_1d_w_trend_following_v1
+# Strategy: 12h timeframe with 1d weekly trend filter and ATR-based volatility filter
+# Timeframe: 12h
 # Leverage: 1.0
-# Hypothesis: CCI identifies overbought/oversold conditions. In trending markets (ADX>25), we trade pullbacks in trend direction. In ranging markets (ADX<20), we mean-revert at extremes. Volume confirms momentum. Works in both bull/bear by adapting to trend regime.
+# Hypothesis: In trending markets (price above/below 1d EMA50), follow the trend with entries on pullbacks to the 12h EMA21. In ranging markets (price near 1d EMA50), avoid trades. Uses ATR to filter low-volatility chop. Designed for low frequency (~20-40/year) to minimize fee drag while capturing major trends in both bull and bear markets.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ccitrade_v1"
-timeframe = "6h"
+name = "12h_1d_w_trend_following_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,85 +30,58 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d ADX(14) for trend strength
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1d ATR(14) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr1[0] = np.inf
+    tr2[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], 0.0])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # 12h EMA(21) for trend following
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI and DX
-    di_plus = 100 * dm_plus_ma / tr_ma
-    di_minus = 100 * dm_minus_ma / tr_ma
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    adx_1d = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 6h CCI(20)
-    tp = (high + low + close) / 3
-    tp_ma = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    tp_mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp - tp_ma) / (0.015 * tp_mad)
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.3 * vol_avg_20)
+    # ATR-based volatility filter: current ATR > 0.5 * 1d ATR
+    atr_12 = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).rolling(window=14, min_periods=14).mean().values
+    atr_12[0] = np.nan
+    vol_filter = atr_12 > (0.5 * atr_14_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(21, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_1d[i]) or np.isnan(cci[i]) or 
-            np.isnan(tp_mad[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(ema_21[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filters
-        trending = adx_1d[i] > 25
-        ranging = adx_1d[i] < 20
+        # Trend: price relative to 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry logic
-        if trending:
-            # In trending markets: buy pullbacks in uptrend, sell rallies in downtrend
-            if cci[i] < -100 and close[i] > close[i-1] and vol_confirm[i] and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif cci[i] > 100 and close[i] < close[i-1] and vol_confirm[i] and position != -1:
-                position = -1
-                signals[i] = -0.25
-        elif ranging:
-            # In ranging markets: mean reversion at extremes
-            if cci[i] < -200 and vol_confirm[i] and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif cci[i] > 200 and vol_confirm[i] and position != -1:
-                position = -1
-                signals[i] = -0.25
-        # Exit: opposite signal or volatility expansion
-        elif position == 1 and (cci[i] > 0 or (trending and cci[i] > 50)):
+        # Entry logic: pullback to 12h EMA21 in trending market with volatility filter
+        if uptrend and close[i] <= ema_21[i] * 1.01 and close[i] >= ema_21[i] * 0.99 and vol_filter[i] and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif downtrend and close[i] <= ema_21[i] * 1.01 and close[i] >= ema_21[i] * 0.99 and vol_filter[i] and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit: trend reversal or low volatility
+        elif position == 1 and (not uptrend or not vol_filter[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (cci[i] < 0 or (trending and cci[i] < -50)):
+        elif position == -1 and (not downtrend or not vol_filter[i]):
             position = 0
             signals[i] = 0.0
         else:
