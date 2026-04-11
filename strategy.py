@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_donchian_volume_trend_v1"
-timeframe = "1d"
+name = "4h_1d_cci_volatility_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,66 +18,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 25:
-        return np.zeros(n)
-    
-    # Calculate 20-day Donchian channels from weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # 20-period Donchian high and low
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
-    
-    # Load daily data for volume confirmation
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily volume confirmation: current volume > 20-day average
-    volume_1d = df_1d['volume'].values
-    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    # Calculate CCI on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly ADX for trend strength filter
-    # +DM and -DM
-    up_move = high_1w - np.roll(high_1w, 1)
-    down_move = np.roll(low_1w, 1) - low_1w
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # True Price
+    tp = (high_1d + low_1d + close_1d) / 3.0
     
-    # True Range for weekly
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1w[0] = tr1[0]
+    # SMA of TP
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
     
-    # Smoothed values
-    atr_1w_smooth = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Mean Deviation
+    mad = np.abs(tp - sma_tp)
+    mean_dev = pd.Series(mad).rolling(window=20, min_periods=20).mean().values
     
-    # DI values
-    plus_di = 100 * plus_dm_smooth / atr_1w_smooth
-    minus_di = 100 * minus_dm_smooth / atr_1w_smooth
+    # CCI
+    cci = (tp - sma_tp) / (0.015 * mean_dev)
+    cci = np.where(mean_dev == 0, 0, cci)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align CCI to 4h timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
     
-    # Align ADX to daily timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Calculate daily ATR for volatility
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = tr1[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align ATR to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
+    # Load 1-hour data for volume confirmation
+    df_1h = get_htf_data(prices, '1h')
+    
+    if len(df_1h) < 20:
+        return np.zeros(n)
+    
+    # Hourly volume confirmation
+    volume_1h = df_1h['volume'].values
+    vol_avg_20 = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1h, vol_avg_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
@@ -85,30 +74,34 @@ def generate_signals(prices):
     # Start from index 40 to ensure sufficient data
     for i in range(40, n):
         # Skip if any required data is invalid
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(cci_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Current daily volume (aligned)
-        vol_1d_current = align_htf_to_ltf(prices, df_1d, volume_1d)[i]
-        vol_confirm = vol_1d_current > vol_avg_20_aligned[i]
+        # Current hourly volume (aligned)
+        vol_1h_current = align_htf_to_ltf(prices, df_1h, volume_1h)[i]
+        vol_confirm = vol_1h_current > vol_avg_20_aligned[i]
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        trend_filter = adx_aligned[i] > 25
+        # CCI extremes for mean reversion
+        cci_extreme_long = cci_aligned[i] < -100
+        cci_extreme_short = cci_aligned[i] > 100
+        
+        # Volatility filter: only trade when ATR is above its 50-period average (avoid low vol chop)
+        atr_avg_50 = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).mean()
+        atr_avg_50_val = atr_avg_50.iloc[i] if hasattr(atr_avg_50, 'iloc') else atr_avg_50[i] if i < len(atr_avg_50) else np.nan
+        vol_filter = not np.isnan(atr_avg_50_val) and atr_1d_aligned[i] > atr_avg_50_val
         
         price = close[i]
-        upper = donch_high_aligned[i]
-        lower = donch_low_aligned[i]
         
-        # Entry conditions: Breakout of weekly Donchian channels with volume and trend confirmation
-        long_signal = vol_confirm and trend_filter and (price > upper)
-        short_signal = vol_confirm and trend_filter and (price < lower)
+        # Entry conditions: CCI extreme with volume and volatility confirmation
+        long_signal = vol_confirm and vol_filter and cci_extreme_long
+        short_signal = vol_confirm and vol_filter and cci_extreme_short
         
-        # Exit conditions: Return to middle of channel or opposite extreme
-        mid_channel = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
-        long_exit = price < mid_channel
-        short_exit = price > mid_channel
+        # Exit conditions: CCI returns to neutral zone
+        cci_neutral = (cci_aligned[i] >= -50) and (cci_aligned[i] <= 50)
+        long_exit = cci_neutral
+        short_exit = cci_neutral
         
         if long_signal and position != 1:
             position = 1
