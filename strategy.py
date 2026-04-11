@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_ema_bounce_volume_v1
-Strategy: 12h EMA bounce with volume confirmation and 1d trend filter
-Timeframe: 12h
+1h_4h_1d_camarilla_pivot_volume_v2
+Strategy: 1h Camarilla pivot breakout with volume confirmation and 4h/1d trend filter (revised)
+Timeframe: 1h
 Leverage: 1.0
-Hypothesis: Price tends to bounce off the 1d EMA50 on 12h timeframe during pullbacks in trending markets. Uses 1d EMA50 as dynamic support/resistance, enters on 12h close near EMA50 with volume confirmation (>1.5x average volume). Trend filter requires 12h price above/below 1d EMA200 to ensure alignment with higher timeframe trend. Designed to work in both bull and bear markets by trading pullbacks in the direction of the 1d trend.
+Hypothesis: Uses 1h Camarilla pivot levels (resistance/support) for breakout entries with volume confirmation (>1.5x average volume) and filtered by 4h EMA20 and 1d EMA50 trend alignment. Designed to capture breakouts in trending markets while avoiding false breakouts in chop. Uses higher timeframes for direction (4h/1d) and 1h only for timing. Target: 60-150 total trades over 4 years. This version tightens entry conditions to reduce trade frequency and improve robustness across BTC/ETH.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_ema_bounce_volume_v1"
-timeframe = "12h"
+name = "1h_4h_1d_camarilla_pivot_volume_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,65 +27,87 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 for dynamic support/resistance
+    # 1h EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # 1d EMA200 for trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
+    # Calculate Camarilla levels from previous day's data
+    # We need to get the previous day's high, low, close for each 1h bar
+    # Since we have 1d data, we can use the previous day's values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_cama = df_1d['close'].values  # same as close_1d above
+    
+    # Calculate Camarilla levels for each day
+    camarilla_H4 = close_1d_for_cama + 1.1 * (high_1d - low_1d) / 2
+    camarilla_L4 = close_1d_for_cama - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align Camarilla levels to 1h timeframe
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(vol_avg[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_20[i]) or np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg[i]) or
+            np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
-        ema_50 = ema_50_1d_aligned[i]
-        ema_200 = ema_200_1d_aligned[i]
         
-        # Trend filter: price above EMA200 for long, below for short
-        uptrend = price_close > ema_200
-        downtrend = price_close < ema_200
+        # Trend filters: price above/both EMAs for long, below/both for short
+        uptrend_4h = price_close > ema_20_4h_aligned[i]
+        uptrend_1d = price_close > ema_50_1d_aligned[i]
+        downtrend_4h = price_close < ema_20_4h_aligned[i]
+        downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Proximity to EMA50: within 1% of EMA50
-        near_ema50 = abs(price_close - ema_50) / ema_50 < 0.01
+        # Breakout conditions using Camarilla levels
+        breakout_up = price_close > camarilla_H4_aligned[i]
+        breakout_down = price_close < camarilla_L4_aligned[i]
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: near EMA50 from below in uptrend with volume
-        long_signal = near_ema50 and price_close > ema_50 and uptrend and vol_confirmed
+        # Long: upward breakout with volume in uptrend (both 4h and 1d)
+        long_signal = breakout_up and vol_confirmed and uptrend_4h and uptrend_1d
         
-        # Short: near EMA50 from above in downtrend with volume
-        short_signal = near_ema50 and price_close < ema_50 and downtrend and vol_confirmed
+        # Short: downward breakout with volume in downtrend (both 4h and 1d)
+        short_signal = breakout_down and vol_confirmed and downtrend_4h and downtrend_1d
         
-        # Exit when price moves 2% away from EMA50 or trend changes
-        exit_long = position == 1 and (price_close < ema_50 * 0.98 or price_close > ema_50 * 1.02 or not uptrend)
-        exit_short = position == -1 and (price_close > ema_50 * 1.02 or price_close < ema_50 * 0.98 or not downtrend)
+        # Exit when price returns to the EMA20 (1h) or opposite Camarilla level
+        exit_long = position == 1 and (price_close < ema_20[i] or price_close < camarilla_L4_aligned[i])
+        exit_short = position == -1 and (price_close > ema_20[i] or price_close > camarilla_H4_aligned[i])
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -93,6 +115,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
