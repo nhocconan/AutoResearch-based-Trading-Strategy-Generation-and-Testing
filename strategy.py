@@ -1,27 +1,24 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-4h_1d_camarilla_breakout_v1
-Strategy: 4-hour Camarilla pivot breakout with daily trend filter and volume confirmation
-Timeframe: 4h
-Leverage: 1.0
-Hypothesis: Price breaking above/below Camarilla pivot levels (H3/L3) on 4h timeframe,
-            confirmed by daily trend (EMA50 > EMA200 for long, EMA50 < EMA200 for short)
-            and volume spike, captures institutional breakouts. Works in bull/bear
-            by aligning with higher timeframe trend while using intraday precision.
-"""
+# 12h_1w_camarilla_volume_trend_v1
+# Strategy: 12h Camarilla pivot breakout with weekly trend filter and volume confirmation
+# Timeframe: 12h
+# Leverage: 1.0
+# Hypothesis: Price breaking Camarilla H4/L4 levels with volume spike and weekly trend alignment
+# provides high-probability breakout trades. Weekly filter ensures we trade with higher timeframe momentum.
+# Volume confirmation avoids false breakouts. Works in bull (breakouts in uptrend) and bear 
+# (breakdowns in downtrend) by only trading in direction of weekly trend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "12h_1w_camarilla_volume_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -30,37 +27,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Daily EMA50 and EMA200 for trend filter
+    # Weekly close for trend filter (simple MA crossover)
+    close_1w = df_1w['close'].values
+    ma_fast = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ma_slow = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_uptrend = ma_fast > ma_slow
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    
+    # Daily data for Camarilla levels (using previous day's OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for each 12h bar using previous day's OHLC
+    # Camarilla: H4 = C + (H-L)*1.1/2, L4 = C - (H-L)*1.1/2
+    # where C, H, L are from previous day
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    daily_uptrend = ema50_1d > ema200_1d  # Uptrend when EMA50 > EMA200
-    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate Camarilla pivot levels for each 4h bar
-    # Using previous bar's OHLC (standard pivot calculation)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # Set first value to current to avoid NaN
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Previous day's values (shift by 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first bar uses same day
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
+    # Camarilla H4 and L4 levels
+    camarilla_h4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_l4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Camarilla levels
-    H3 = pivot + (range_hl * 1.1 / 4)
-    L3 = pivot - (range_hl * 1.1 / 4)
-    H4 = pivot + (range_hl * 1.1 / 2)
-    L4 = pivot - (range_hl * 1.1 / 2)
+    # Align to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,35 +76,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after volume lookback
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d[i]) or np.isnan(ema200_1d[i]) or 
-            np.isnan(vol_avg[i]) or np.isnan(H3[i]) or np.isnan(L3[i])):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(vol_avg[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
+        # Current values
+        price_now = close[i]
+        vol_spike_now = vol_spike[i]
+        
         # Breakout conditions
-        breakout_long = close[i] > H3[i] and vol_spike[i]
-        breakout_short = close[i] < L3[i] and vol_spike[i]
+        breakout_long = price_now > camarilla_h4_aligned[i]
+        breakout_short = price_now < camarilla_l4_aligned[i]
         
-        # Exit conditions: reverse breakout or volume drop
-        exit_long = position == 1 and (close[i] < pivot[i] or not vol_spike[i])
-        exit_short = position == -1 and (close[i] > pivot[i] or not vol_spike[i])
-        
-        # Trading logic: only trade in direction of daily trend
-        if breakout_long and daily_uptrend_aligned[i] and position != 1:
+        # Entry logic: breakout with volume spike and weekly trend alignment
+        if breakout_long and vol_spike_now and weekly_uptrend_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif breakout_short and not daily_uptrend_aligned[i] and position != -1:
+        elif breakout_short and vol_spike_now and not weekly_uptrend_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        # Exit conditions: opposite breakout or loss of weekly trend
+        elif position == 1 and (breakout_short or not weekly_uptrend_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and (breakout_long or weekly_uptrend_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
+            # Hold current position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
