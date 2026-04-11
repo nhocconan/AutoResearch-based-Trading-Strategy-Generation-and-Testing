@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_alligator_v1"
-timeframe = "6h"
+name = "12h_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,66 +17,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Williams Alligator on daily data
-    # Jaw (blue): 13-period SMMA shifted 8 bars forward
-    # Teeth (red): 8-period SMMA shifted 5 bars forward  
-    # Lips (green): 5-period SMMA shifted 3 bars forward
+    # Calculate 1w high, low, close for pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    def smma(data, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(data, np.nan, dtype=np.float64)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: (prev * (period-1) + current) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # 1w pivot and ranges
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # Calculate SMMA for different periods
-    close_1d = df_1d['close'].values
-    jaw_raw = smma(close_1d, 13)  # Jaw: 13-period
-    teeth_raw = smma(close_1d, 8)  # Teeth: 8-period
-    lips_raw = smma(close_1d, 5)   # Lips: 5-period
+    # 1w Camarilla levels - using correct formulas
+    r3_1w = pivot_1w + (range_1w * 1.1 / 4)
+    r4_1w = pivot_1w + (range_1w * 1.1 / 2)
+    s3_1w = pivot_1w - (range_1w * 1.1 / 4)
+    s4_1w = pivot_1w - (range_1w * 1.1 / 2)
     
-    # Apply forward shift (Alligator shifts lines into future)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
+    # Shift by 1 to use only completed 1w bars
+    r3_1w = np.roll(r3_1w, 1)
+    r4_1w = np.roll(r4_1w, 1)
+    s3_1w = np.roll(s3_1w, 1)
+    s4_1w = np.roll(s4_1w, 1)
+    r3_1w[0] = np.nan
+    r4_1w[0] = np.nan
+    s3_1w[0] = np.nan
+    s4_1w[0] = np.nan
     
-    # Set NaN for shifted values that don't have data
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Align 1w levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1w, r3_1w)
+    r4_12h = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s3_12h = align_htf_to_ltf(prices, df_1w, s3_1w)
+    s4_12h = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # Align Alligator lines to 6h timeframe
-    jaw_6h = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_6h = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_6h = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # 6h ATR for volatility filter
+    # 12h ATR for volatility filter
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 6h volume filter: volume > 2x 20-period average
+    # 12h volume filter: volume > 2.0x 20-period average (selective)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # 12h trend filter: close > 50 EMA for long, < 50 EMA for short
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(r4_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50[i])):
             signals[i] = 0.0
             continue
         
@@ -86,38 +82,24 @@ def generate_signals(prices):
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         atr_val = atr[i]
+        ema_val = ema_50[i]
         
-        # Volume confirmation
+        # Volume confirmation: moderate threshold for selectivity
         volume_confirmed = volume_current > 2.0 * vol_ma
         
         # Volatility filter: avoid extremely low volatility
         vol_filter = atr_val > 0.006 * price_close  # ATR > 0.6% of price
         
-        # Alligator conditions:
-        # Green lips below red teeth below blue jaw = bearish alignment (mouth opening down)
-        # Green lips above red teeth above blue jaw = bullish alignment (mouth opening up)
-        lips_val = lips_6h[i]
-        teeth_val = teeth_6h[i]
-        jaw_val = jaw_6h[i]
+        # Long conditions: price breaks below S3 (oversold) with volume, vol filter, and above EMA50
+        long_signal = volume_confirmed and vol_filter and (price_low < s3_12h[i]) and (price_close > ema_val)
         
-        bearish_aligned = lips_val < teeth_val and teeth_val < jaw_val
-        bullish_aligned = lips_val > teeth_val and teeth_val > jaw_val
+        # Short conditions: price breaks above R3 (overbought) with volume, vol filter, and below EMA50
+        short_signal = volume_confirmed and vol_filter and (price_high > r3_12h[i]) and (price_close < ema_val)
         
-        # Additional filter: price must be outside the Alligator's mouth
-        # For longs: price above jaws (strong bullish)
-        # For shorts: price below jaws (strong bearish)
-        price_above_jaw = price_close > jaw_val
-        price_below_jaw = price_close < jaw_val
-        
-        # Long conditions: bullish alignment + price above jaw + volume + volatility
-        long_signal = bullish_aligned and price_above_jaw and volume_confirmed and vol_filter
-        
-        # Short conditions: bearish alignment + price below jaw + volume + volatility
-        short_signal = bearish_aligned and price_below_jaw and volume_confirmed and vol_filter
-        
-        # Exit when Alligator lines re-align (mouth closes) or opposite signal
-        exit_long = position == 1 and not bullish_aligned
-        exit_short = position == -1 and not bearish_aligned
+        # Exit when price returns to 1w pivot level
+        pivot_12h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+        exit_long = position == 1 and price_close > pivot_12h[i]
+        exit_short = position == -1 and price_close < pivot_12h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -138,11 +120,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Williams Alligator on daily timeframe identifies strong trending regimes.
-# Enters long when daily Alligator shows bullish alignment (lips>teeth>jaw) and 6h price
-# is above the jaw (strong bullish momentum), with volume and volatility confirmation.
-# Enters short when daily Alligator shows bearish alignment (lips<teeth<jaw) and 6h price
-# is below the jaw (strong bearish momentum), with volume and volatility confirmation.
-# Exits when the Alligator's mouth closes (lines re-intertwine), signaling trend exhaustion.
-# Uses daily timeframe for trend identification to avoid 6h whipsaw, with 6h timing for entry.
-# Works in both bull (catching strong uptrends) and bear (catching strong downtrends) markets.
+# Hypothesis: 1w Camarilla levels act as strong support/resistance for 12h price action.
+# Enters long when 12h price breaks below S3 (oversold bounce) with volume confirmation (>2.0x average),
+# sufficient volatility (ATR > 0.6% of price), and above 12h 50 EMA (trend filter).
+# Enters short when price breaks above R3 (overbought rejection) with same conditions plus below EMA50.
+# Exits when price returns to 1w pivot level, capturing mean reversion.
+# Uses selective volume filter (2.0x) and volatility filter to reduce trades to ~15-25/year.
+# Works in both bull (buying dips) and bear (selling rallies) markets by fading extremes.
