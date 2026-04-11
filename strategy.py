@@ -3,18 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and ATR-based trend filter
-# - Long: price breaks above Donchian(20) high, volume > 1.8x 20-period avg, ATR(14) > ATR(50) * 1.1
-# - Short: price breaks below Donchian(20) low, volume > 1.8x 20-period avg, ATR(14) > ATR(50) * 1.1
-# - Exit: price returns to Donchian midpoint
-# - Uses 1d EMA(50) for trend bias: price > EMA50 for long bias, price < EMA50 for short bias
-# - Position size: 0.25 (discrete to reduce churn)
-# - Target: 20-35 trades/year (80-140 total) to stay within fee drag limits
-# - Volume multiplier increased to 1.8x and ATR trend threshold tightened to reduce trades
-# - Works in both bull and bear by capturing strong breakouts with confirmation
+# Hypothesis: 1d Camarilla pivot breakout with volume confirmation and weekly trend filter
+# - Long: price breaks above H3 level, volume > 1.5x 20-day avg, price > weekly EMA(20)
+# - Short: price breaks below L3 level, volume > 1.5x 20-day avg, price < weekly EMA(20)
+# - Exit: price returns to pivot point (PP) or opposite Camarilla level (L3/H3)
+# - Uses 1w EMA(20) for trend filter to avoid counter-trend trades
+# - Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag
+# - Camarilla levels provide institutional support/resistance that work in ranging and trending markets
 
-name = "4h_1d_donchian_atr_volume_v6"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,72 +28,69 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for EMA trend filter (MTF rule compliance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return signals
     
-    # Pre-compute 1d EMA(50) for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Pre-compute weekly EMA(20) for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Pre-compute 4h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2
+    # Pre-compute daily Camarilla pivot levels from previous day
+    # PP = (H + L + C) / 3
+    # R4 = PP + (H - L) * 1.1/2, R3 = PP + (H - L) * 1.1/4, R2 = PP + (H - L) * 1.1/6, R1 = PP + (H - L) * 1.1/12
+    # S1 = PP - (H - L) * 1.1/12, S2 = PP - (H - L) * 1.1/6, S3 = PP - (H - L) * 1.1/4, S4 = PP - (H - L) * 1.1/2
+    # Camarilla uses H3 = R3 and L3 = S3 for trading
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # First bar: use current values
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    pp = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    h3 = pp + range_hl * 1.1 / 4  # R3
+    l3 = pp - range_hl * 1.1 / 4  # S3
+    
+    # Pre-compute daily volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Pre-compute ATR filters for regime detection
-    # True Range calculation
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    # ATR(14) for current volatility
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR(50) for longer-term volatility comparison
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(h3[i]) or np.isnan(l3[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Current price data
         close_price = close[i]
-        high_price = high[i]
-        low_price = low[i]
         volume_current = volume[i]
         
-        # Donchian levels
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
-        mid_channel = donchian_mid[i]
+        # Volume confirmation: current volume > 1.5x 20-day average
+        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average (tighter)
-        vol_confirm = volume_current > 1.8 * volume_sma_20[i]
+        # Weekly trend filter
+        weekly_uptrend = close_price > ema_20_1w_aligned[i]
+        weekly_downtrend = close_price < ema_20_1w_aligned[i]
         
-        # Trend filter: ATR(14) > ATR(50) * 1.1 (tighter trending market filter)
-        atr_trend = atr_14[i] > (atr_50[i] * 1.1)
-        
-        # 1d EMA trend bias
-        ema_bias_long = close_price > ema_50_1d_aligned[i]
-        ema_bias_short = close_price < ema_50_1d_aligned[i]
+        # Camarilla levels
+        h3_level = h3[i]
+        l3_level = l3[i]
+        pp_level = pp[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above upper Donchian, volume confirmation, trending, long bias
-        if close_price > upper_channel and vol_confirm and atr_trend and ema_bias_long:
+        # Long breakout: price closes above H3, volume confirmation, weekly uptrend
+        if close_price > h3_level and vol_confirm and weekly_uptrend:
             enter_long = True
         
-        # Short breakout: price below lower Donchian, volume confirmation, trending, short bias
-        if close_price < lower_channel and vol_confirm and atr_trend and ema_bias_short:
+        # Short breakout: price closes below L3, volume confirmation, weekly downtrend
+        if close_price < l3_level and vol_confirm and weekly_downtrend:
             enter_short = True
         
         # Exit conditions
@@ -103,11 +98,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price returns to Donchian midpoint
-            exit_long = close_price <= mid_channel
+            # Exit long if price returns to pivot point or below L3
+            exit_long = close_price <= pp_level
         elif position == -1:
-            # Exit short if price returns to Donchian midpoint
-            exit_short = close_price >= mid_channel
+            # Exit short if price returns to pivot point or above H3
+            exit_short = close_price >= pp_level
         
         # Trading logic
         if enter_long and position != 1:
