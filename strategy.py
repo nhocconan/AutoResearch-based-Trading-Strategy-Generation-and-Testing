@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_camarilla_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,16 +19,6 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
-    
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return signals
-    
-    # Calculate weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
@@ -59,20 +49,20 @@ def generate_signals(prices):
     h3[0] = np.nan
     h4[0] = np.nan
     
-    # Align 1d Camarilla levels to 12h timeframe
+    # Align 1d Camarilla levels to 4h timeframe
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     
-    # Volume confirmation: volume > 2.0x 50-period average on 12h
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 2.0x 20-period average on 4h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
         if (np.isnan(l4_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_50[i])):
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -80,20 +70,16 @@ def generate_signals(prices):
         price_high = high[i]
         price_low = low[i]
         volume_current = volume[i]
-        vol_ma = vol_ma_50[i]
+        vol_ma = vol_ma_20[i]
         
         # Volume confirmation
         volume_confirmed = volume_current > 2.0 * vol_ma
         
-        # Weekly trend filter
-        weekly_uptrend = price_close > ema_50_1w_aligned[i]
-        weekly_downtrend = price_close < ema_50_1w_aligned[i]
+        # Long: price breaks above H3/H4 with volume
+        long_signal = volume_confirmed and (price_high > h3_aligned[i] or price_high > h4_aligned[i])
         
-        # Long: price breaks above H3/H4 with volume in weekly uptrend
-        long_signal = volume_confirmed and weekly_uptrend and (price_high > h3_aligned[i] or price_high > h4_aligned[i])
-        
-        # Short: price breaks below L3/L4 with volume in weekly downtrend
-        short_signal = volume_confirmed and weekly_downtrend and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
+        # Short: price breaks below L3/L4 with volume
+        short_signal = volume_confirmed and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
         
         # Exit when price returns to the previous day's close (pivot point)
         prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
@@ -124,13 +110,14 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Camarilla pivot breakout strategy on 12h timeframe with weekly trend filter.
+# Hypothesis: Camarilla pivot breakout strategy on 4h timeframe with volume confirmation.
 # Uses 1d Camarilla levels (L3, L4, H3, H4) from the previous day's price action.
-# Enters long when price breaks above H3 or H4 with volume confirmation (>2x average volume) during weekly uptrend (price > weekly 50 EMA).
-# Enters short when price breaks below L3 or L4 with volume confirmation during weekly downtrend (price < weekly 50 EMA).
+# Enters long when price breaks above H3 or H4 with volume confirmation (>2x average volume).
+# Enters short when price breaks below L3 or L4 with volume confirmation.
 # Exits when price returns to the previous day's close (pivot point).
 # The Camarilla levels identify key support/resistance levels where price often reverses or accelerates.
-# Weekly EMA(50) filter ensures we trade with the higher timeframe momentum, reducing whipsaw.
 # Volume confirmation (>2x average) reduces false breakouts.
-# Designed for low trade frequency (target: 15-35 trades/year) to minimize fee drag on 12h timeframe.
-# Works in both bull and bear markets by trading breakouts in the direction of the weekly trend.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag on 4h timeframe.
+# Works in both bull and bear markets by trading breakouts in the direction of momentum.
+# Based on top-performing patterns from the database showing Camarilla strategies with
+# volume confirmation achieving Sharpe ratios >1.0 on ETHUSDT and SOLUSDT.
