@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_camarilla_breakout_volume"
-timeframe = "4h"
+name = "12h_1w_camarilla_breakout_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prrices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,62 +17,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily OHLC for Camarilla pivot levels (previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla pivot calculation (previous day)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Resistance and support levels (previous day's data)
-    r3_1d = close_1d + range_1d * 1.166
-    s3_1d = close_1d - range_1d * 1.166
-    
-    # Shift by 1 to use only completed daily bars (previous day's levels)
-    r3_1d = np.roll(r3_1d, 1)
-    s3_1d = np.roll(s3_1d, 1)
-    r3_1d[0] = np.nan
-    s3_1d[0] = np.nan
-    
-    # Align daily Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Calculate weekly ATR for volatility filter (14 period)
+    # Calculate weekly OHLC for Camarilla pivot levels (previous week)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    
+    # Camarilla pivot calculation (previous week)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    
+    # Resistance and support levels (previous week's data)
+    r3_1w = close_1w + range_1w * 1.166
+    s3_1w = close_1w - range_1w * 1.166
+    
+    # Shift by 1 to use only completed weekly bars (previous week's levels)
+    r3_1w = np.roll(r3_1w, 1)
+    s3_1w = np.roll(s3_1w, 1)
+    r3_1w[0] = np.nan
+    s3_1w[0] = np.nan
+    
+    # Align weekly Camarilla levels to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_12h = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # 12h ATR for volatility filter (14 period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly ATR to 4h timeframe
-    atr_4h = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # 4h volume filter: volume > 1.5x 20-period average
+    # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
-            np.isnan(atr_4h[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -86,19 +75,16 @@ def generate_signals(prices):
         volume_confirmed = volume_current > 1.5 * vol_ma
         
         # Long conditions: price breaks above R3 with volume
-        long_signal = volume_confirmed and (price_high > r3_4h[i])
+        long_signal = volume_confirmed and (price_high > r3_12h[i])
         
         # Short conditions: price breaks below S3 with volume
-        short_signal = volume_confirmed and (price_low < s3_4h[i])
+        short_signal = volume_confirmed and (price_low < s3_12h[i])
         
-        # Exit when price returns to the daily pivot (mean reversion)
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        exit_long = position == 1 and price_close < pivot_4h[i]
-        exit_short = position == -1 and price_close > pivot_4h[i]
-        
-        # ATR-based stop loss (2x weekly ATR)
-        stop_long = position == 1 and price_close < (price_high - 2 * atr_4h[i])
-        stop_short = position == -1 and price_close > (price_low + 2 * atr_4h[i])
+        # Exit when price returns to the weekly pivot (mean reversion)
+        pivot_1w = (high_1w + low_1w + close_1w) / 3
+        pivot_12h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+        exit_long = position == 1 and price_close < pivot_12h[i]
+        exit_short = position == -1 and price_close > pivot_12h[i]
         
         # Trading logic
         if long_signal and position != 1:
@@ -107,10 +93,10 @@ def generate_signals(prices):
         elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (exit_long or stop_long):
+        elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (exit_short or stop_short):
+        elif position == -1 and exit_short:
             position = 0
             signals[i] = 0.0
         else:
@@ -118,14 +104,13 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with weekly volatility filter.
-# Uses daily Camarilla R3/S3 levels (previous day's high/low/close) for intraday structure.
-# Enters long when 4h price breaks above daily R3 with volume >1.5x 20-period average.
-# Enters short when 4h price breaks below daily S3 with volume >1.5x 20-period average.
-# Exits when price returns to the daily pivot level (mean reversion within the day's range).
-# Uses weekly ATR for volatility-adjusted stop loss to adapt to changing market conditions.
-# Weekly timeframe provides volatility context without adding look-ahead bias.
+# Hypothesis: 12h Camarilla pivot breakout strategy using weekly pivot levels.
+# Uses weekly Camarilla R3/S3 levels (previous week's high/low/close) for longer-term structure.
+# Enters long when 12h price breaks above weekly R3 with volume >1.5x 20-period average.
+# Enters short when 12h price breaks below weekly S3 with volume >1.5x 20-period average.
+# Exits when price returns to the weekly pivot level (mean reversion within the week's range).
+# Weekly timeframe reduces noise and false breakouts compared to daily pivots alone.
 # Volume confirmation filters out low-conviction breakouts.
 # Position size: 0.25 to balance risk and return, limiting drawdown in volatile markets.
-# Designed to work in both bull and bear markets by adapting to daily volatility ranges.
-# Target: 50-150 trades over 4 years (12-38/year) to minimize fee drag.
+# Designed to work in both bull and bear markets by adapting to weekly volatility ranges.
+# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
