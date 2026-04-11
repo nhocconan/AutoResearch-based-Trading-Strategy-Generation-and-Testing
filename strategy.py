@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with 1d volume spike and 1d ADX trend filter
-# - Long when price touches Camarilla L3 support with volume > 1.5x 20-period average and ADX > 25 (trending market)
-# - Short when price touches Camarilla H3 resistance with volume > 1.5x 20-period average and ADX > 25
-# - Uses Camarilla levels from 1d: H3/L3 as key intraday support/resistance levels
-# - Volume confirmation ensures institutional participation
-# - ADX filter ensures we trade in trending conditions to avoid whipsaws
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d/1w regime filter
+# - Elder Ray = Bull Power (High - EMA13) and Bear Power (Low - EMA13)
+# - Long when Bull Power > 0 and rising (bullish momentum) AND 1d EMA50 > 1d EMA200 (bullish regime)
+# - Short when Bear Power < 0 and falling (bearish momentum) AND 1d EMA50 < 1d EMA200 (bearish regime)
+# - Uses 1w trend filter: only trade long if price > 1w EMA50, short if price < 1w EMA50
 # - Discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within limits
-# - Works in bull (buying dips at L3) and bear (selling rallies at H3) markets
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits for 6h
+# - Works in bull markets (trend following with momentum) and bear markets (counter-trend reversals at extremes)
 
-name = "4h_1d_camarilla_volume_adx_v1"
-timeframe = "4h"
+name = "6h_1d_1w_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,98 +24,91 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla, volume and ADX
+    # Load 1d data ONCE before loop for EMA regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return signals
     
-    # Extract 1d arrays
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Pre-compute 1d EMAs for regime filter
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate Camarilla levels (based on previous day)
-    # Camarilla: H3 = close + 1.1*(high-low)/6, L3 = close - 1.1*(high-low)/6
-    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 6
-    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 6
+    # Align 1d EMAs to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate 1d ADX (14-period)
-    # True Range
-    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d).shift(1)
-    tr2 = abs(pd.Series(high_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr3 = abs(pd.Series(low_1d).shift(1) - pd.Series(close_1d).shift(1))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Load 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return signals
     
-    # Directional Movement
-    plus_dm = pd.Series(high_1d).diff()
-    minus_dm = pd.Series(low_1d).diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+    # Pre-compute 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smoothed values
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean()
-    plus_di_1d = 100 * (pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr_1d)
-    minus_di_1d = 100 * (pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean() / atr_1d)
-    dx_1d = 100 * abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align 1w EMA50 to 6h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d volume SMA (20-period)
-    volume_series = pd.Series(volume_1d)
-    volume_sma_20_1d = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Pre-compute 6h EMA13 for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # High - EMA13
+    bear_power = low - ema_13   # Low - EMA13
+    
+    # Calculate 2-period change for momentum
+    bull_power_change = bull_power - np.roll(bull_power, 2)
+    bear_power_change = bear_power - np.roll(bear_power, 2)
+    # Handle first two values
+    bull_power_change[:2] = 0
+    bear_power_change[:2] = 0
     
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(volume_sma_20_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
-        # Current price data
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
-        volume_current = volume[i]
+        # Regime filters
+        bullish_regime = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
+        bearish_regime = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average (using 1d aligned volume)
-        vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
+        # Trend filter
+        price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
+        price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
         
-        # ADX trend filter: trade only when ADX > 25 (trending market)
-        adx_filter = adx_aligned[i] > 25
+        # Elder Ray signals with momentum
+        bullish_momentum = bull_power[i] > 0 and bull_power_change[i] > 0
+        bearish_momentum = bear_power[i] < 0 and bear_power_change[i] < 0
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: price touches L3 support with volume confirmation and ADX filter
-        if price_low <= camarilla_l3_aligned[i] and vol_confirm and adx_filter:
+        # Long: Bullish momentum + bullish regime + price above weekly EMA
+        if bullish_momentum and bullish_regime and price_above_1w_ema:
             enter_long = True
         
-        # Short: price touches H3 resistance with volume confirmation and ADX filter
-        if price_high >= camarilla_h3_aligned[i] and vol_confirm and adx_filter:
+        # Short: Bearish momentum + bearish regime + price below weekly EMA
+        if bearish_momentum and bearish_regime and price_below_1w_ema:
             enter_short = True
         
-        # Exit conditions: price moves back toward VWAP or opposite Camarilla touch
+        # Exit conditions: opposite momentum or regime change
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price moves back above L3 or touches H3
-            exit_long = (price_close > camarilla_l3_aligned[i]) or (price_high >= camarilla_h3_aligned[i])
+            # Exit long if bearish momentum OR regime turns bearish
+            exit_long = bearish_momentum or (not bullish_regime)
         elif position == -1:
-            # Exit short if price moves back below H3 or touches L3
-            exit_short = (price_close < camarilla_h3_aligned[i]) or (price_low <= camarilla_l3_aligned[i])
+            # Exit short if bullish momentum OR regime turns bullish
+            exit_short = bullish_momentum or (not bearish_regime)
         
         # Trading logic
         if enter_long and position != 1:
