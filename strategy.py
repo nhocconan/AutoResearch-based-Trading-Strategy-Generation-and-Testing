@@ -1,14 +1,10 @@
-# 12h_1w_volatility_breakout_v1
-# Hypothesis: 12-hour volatility breakout using 1-week ATR-based channels with volume confirmation and ADX trend filter.
-# Designed for low trade frequency (~15-25 trades/year) to minimize fee decay and work in both bull and bear markets.
-# Uses weekly ATR for dynamic breakout levels, daily volume confirmation, and weekly ADX to filter trend strength.
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_volatility_breakout_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_volume_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +21,21 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 14:
+    if len(df_1w) < 25:
         return np.zeros(n)
     
-    # Calculate 1-week ATR for volatility-based channels
+    # Calculate 20-day Donchian channels from weekly data
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range for weekly
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1w[0] = tr1[0]
-    atr_period = 6
-    atr_1w = pd.Series(tr_1w).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # 20-period Donchian high and low
+    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Dynamic channels: ATR multiplier based on volatility regime (70th percentile)
-    atr_median = np.nanmedian(atr_1w)
-    atr_mult = np.where(atr_1w > atr_median, 1.8, 1.2)  # Higher mult in high vol
-    
-    # Upper and lower bands (previous week's close ± ATR*mult)
-    upper_band = np.roll(close_1w, 1) + atr_1w * atr_mult
-    lower_band = np.roll(close_1w, 1) - atr_1w * atr_mult
-    
-    # Align bands to 12h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    # Align Donchian channels to daily timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
     
     # Load daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -72,6 +55,13 @@ def generate_signals(prices):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
+    # True Range for weekly
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]
+    
     # Smoothed values
     atr_1w_smooth = pd.Series(tr_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
     plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
@@ -86,16 +76,16 @@ def generate_signals(prices):
     dx = np.where((plus_di + minus_di) == 0, 0, dx)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align ADX to 12h timeframe
+    # Align ADX to daily timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start from index 30 to ensure sufficient data
-    for i in range(30, n):
+    # Start from index 40 to ensure sufficient data
+    for i in range(40, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
             np.isnan(vol_avg_20_aligned[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
@@ -108,19 +98,17 @@ def generate_signals(prices):
         trend_filter = adx_aligned[i] > 25
         
         price = close[i]
-        upper = upper_band_aligned[i]
-        lower = lower_band_aligned[i]
+        upper = donch_high_aligned[i]
+        lower = donch_low_aligned[i]
         
-        # Entry conditions: Breakout of weekly bands with volume and trend confirmation
+        # Entry conditions: Breakout of weekly Donchian channels with volume and trend confirmation
         long_signal = vol_confirm and trend_filter and (price > upper)
         short_signal = vol_confirm and trend_filter and (price < lower)
         
-        # Exit conditions: Return to middle (previous week's close) or opposite extreme
-        prev_close_aligned = align_htf_to_ltf(prices, df_1w, np.roll(close_1w, 1))[i]
-        # Additional exit: if trend weakens (ADX < 20)
-        trend_weak = adx_aligned[i] < 20
-        long_exit = price < prev_close_aligned or trend_weak
-        short_exit = price > prev_close_aligned or trend_weak
+        # Exit conditions: Return to middle of channel or opposite extreme
+        mid_channel = (donch_high_aligned[i] + donch_low_aligned[i]) / 2
+        long_exit = price < mid_channel
+        short_exit = price > mid_channel
         
         if long_signal and position != 1:
             position = 1
