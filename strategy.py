@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-# 4h_1d_williams_alligator_v1
-# Strategy: 4h Williams Alligator crossover with 1d trend filter and volume confirmation
-# Timeframe: 4h
+# 1d_1w_camarilla_pivot_volume_v1
+# Strategy: 1d Camarilla pivot levels with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend phases.
-# Long when Lips > Teeth > Jaw (bullish alignment) with 1d close > 1d EMA50 and volume > 1.5x 20-period average.
-# Short when Lips < Teeth < Jaw (bearish alignment) with 1d close < 1d EMA50 and volume confirmation.
-# Uses Alligator's natural filtering to reduce whipsaw, targeting 20-40 trades/year.
+# Hypothesis: Camarilla pivot levels (L3, L4, H3, H4) act as strong support/resistance.
+# In uptrend (weekly close > weekly open), buy at L3/L4 with volume confirmation.
+# In downtrend (weekly close < weekly open), sell at H3/H4 with volume confirmation.
+# Weekly trend filter reduces whipsaw. Volume confirms institutional interest.
+# Designed for low trade frequency (~10-25/year) to minimize fee drag.
+# Works in bull markets via buying dips and bear markets via selling rallies.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_williams_alligator_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,69 +29,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Williams Alligator on 4h: Jaw (13), Teeth (8), Lips (5) SMAs with future shifts
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Weekly trend: bullish if weekly close > weekly open
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
     
-    # 1d trend filter: EMA50
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Load daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1d volume average (20-period) for confirmation
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Previous day's high, low, close for Camarilla
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla levels
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low)
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low)
+    camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
+    
+    # Align Camarilla levels to daily timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    
-    # Align raw 1d volume for confirmation
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
+    vol_confirm = volume > 1.5 * vol_avg_20_aligned
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after Alligator warmup
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or \
-           np.isnan(vol_1d_aligned[i]):
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or \
+           np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or \
+           np.isnan(weekly_bullish_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-period average
-        vol_confirm = vol_1d_aligned[i] > 1.5 * vol_avg_20_1d_aligned[i]
-        
-        # Williams Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        
-        # 1d trend filter
-        trend_bullish = close[i] > ema_50_1d_aligned[i]
-        trend_bearish = close[i] < ema_50_1d_aligned[i]
-        
-        # Entry conditions
-        # Long: Bullish Alligator alignment AND bullish 1d trend AND volume confirmation
-        if bullish_alignment and trend_bullish and vol_confirm and position != 1:
-            position = 1
-            signals[i] = 0.25
-        # Short: Bearish Alligator alignment AND bearish 1d trend AND volume confirmation
-        elif bearish_alignment and trend_bearish and vol_confirm and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Exit: Opposite Alligator alignment (trend change)
-        elif position == 1 and bearish_alignment:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and bullish_alignment:
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+        # Entry conditions based on weekly trend
+        if weekly_bullish_aligned[i]:  # Weekly uptrend - look for longs at support
+            # Long: price touches L3 or L4 with volume confirmation
+            if (low[i] <= camarilla_l3_aligned[i] or low[i] <= camarilla_l4_aligned[i]) and vol_confirm[i]:
+                if position != 1:
+                    position = 1
+                    signals[i] = 0.25
+                else:
+                    signals[i] = 0.25
+            # Exit long: price reaches H3 (take profit)
+            elif position == 1 and high[i] >= camarilla_h3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.25 if position == 1 else 0.0
+        else:  # Weekly downtrend - look for shorts at resistance
+            # Short: price touches H3 or H4 with volume confirmation
+            if (high[i] >= camarilla_h3_aligned[i] or high[i] >= camarilla_h4_aligned[i]) and vol_confirm[i]:
+                if position != -1:
+                    position = -1
+                    signals[i] = -0.25
+                else:
+                    signals[i] = -0.25
+            # Exit short: price reaches L3 (take profit)
+            elif position == -1 and low[i] <= camarilla_l3_aligned[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25 if position == -1 else 0.0
     
     return signals
