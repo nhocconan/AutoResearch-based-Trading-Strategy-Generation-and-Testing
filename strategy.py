@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot breakout with 1d volume confirmation and ADX trend filter
-# - Long: price breaks above Camarilla H3 level (1d), 4h volume > 1.5x 20-period avg, 1d ADX(14) > 25
-# - Short: price breaks below Camarilla L3 level (1d), 4h volume > 1.5x 20-period avg, 1d ADX(14) > 25
-# - Exit: price returns to Camarilla H4/L4 levels or ATR-based stop (2.0x ATR)
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d regime filter (ADX) and volume confirmation
+# - Bull Power = High - EMA(13); Bear Power = EMA(13) - Low
+# - Regime: Trending (1d ADX > 25) vs Ranging (1d ADX < 20) with hysteresis
+# - In Trending: Trade breakouts in direction of 13-period EMA (momentum)
+# - In Ranging: Fade extremes when Bull/Bear Power diverges from price (mean reversion)
+# - Volume confirmation: Current volume > 1.3x 20-period average
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee drag limits
-# - Camarilla pivots from higher timeframe (1d) provide strong support/resistance levels
-# - Volume confirmation ensures breakout validity, ADX filter avoids choppy markets
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Elder Ray captures both trend and reversal opportunities with clear rules
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "6h_1d_elder_ray_regime_v4"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,31 +30,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 1d data ONCE before loop for Camarilla pivots and ADX (MTF rule compliance)
+    # Load 1d data ONCE before loop for regime filter (MTF rule compliance)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1d OHLC for Camarilla calculations
+    # Pre-compute 1d ADX(14) for regime detection
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot point = (H + L + C) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # Camarilla levels
-    h3_1d = pp_1d + (range_1d * 1.1 / 4)
-    l3_1d = pp_1d - (range_1d * 1.1 / 4)
-    h4_1d = pp_1d + (range_1d * 1.1 / 2)
-    l4_1d = pp_1d - (range_1d * 1.1 / 2)
-    
-    # Pre-compute 1d ADX(14) for trend filter
+    # True Range
     tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
     tr_1d[0] = high_1d[0] - low_1d[0]
     
+    # Directional Movement
     dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
     dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     dm_plus[0] = 0
@@ -72,26 +63,32 @@ def generate_signals(prices):
     dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align 1d indicators to 4h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # Align 1d ADX to 6h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Pre-compute 4h volume confirmation (20-period average)
+    # Pre-compute 6h EMA(13) for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Pre-compute 6h Elder Ray components
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
+    
+    # Pre-compute 6h volume confirmation (20-period average)
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute ATR for stoploss
+    # Pre-compute 6h ATR for stoploss
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Pre-compute 6h price position for divergence detection
+    price_above_ema = close > ema_13
+    price_below_ema = close < ema_13
+    
     for i in range(100, n):  # Start after 100-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or np.isnan(h4_1d_aligned[i]) or
-            np.isnan(l4_1d_aligned[i]) or np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_14[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -99,40 +96,68 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Camarilla levels from 1d
-        h3 = h3_1d_aligned[i]
-        l3 = l3_1d_aligned[i]
-        h4 = h4_1d_aligned[i]
-        l4 = l4_1d_aligned[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume_current > 1.3 * volume_sma_20[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_current > 1.5 * volume_sma_20[i]
+        # Regime detection with hysteresis
+        adx_val = adx_aligned[i]
+        if adx_val > 25:
+            regime = 'trending'  # Strong trend
+        elif adx_val < 20:
+            regime = 'ranging'   # Weak trend/ranging
+        else:
+            regime = regime      # Hold previous regime (hysteresis)
         
-        # Trend filter: 1d ADX > 25 (indicates trending market)
-        adx_trend = adx_aligned[i] > 25
+        # Initialize regime on first valid bar
+        if i == 100:
+            regime = 'trending' if adx_val > 22.5 else 'ranging'
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price above Camarilla H3, volume confirmation, trending
-        if close_price > h3 and vol_confirm and adx_trend:
-            enter_long = True
+        if regime == 'trending':
+            # In trending markets: trade breakouts in direction of momentum
+            # Long: price above EMA and Bull Power increasing (strong buying pressure)
+            # Short: price below EMA and Bear Power increasing (strong selling pressure)
+            if i >= 1:
+                bull_power_rising = bull_power[i] > bull_power[i-1]
+                bear_power_rising = bear_power[i] > bear_power[i-1]
+                
+                enter_long = (close_price > ema_13[i]) and bull_power_rising and vol_confirm
+                enter_short = (close_price < ema_13[i]) and bear_power_rising and vol_confirm
         
-        # Short breakout: price below Camarilla L3, volume confirmation, trending
-        if close_price < l3 and vol_confirm and adx_trend:
-            enter_short = True
+        else:  # regime == 'ranging'
+            # In ranging markets: fade extremes when Elder Power diverges from price
+            # Long: price below EMA but Bull Power rising (bullish divergence)
+            # Short: price above EMA but Bear Power rising (bearish divergence)
+            if i >= 1:
+                bull_power_rising = bull_power[i] > bull_power[i-1]
+                bear_power_rising = bear_power[i] > bear_power[i-1]
+                
+                enter_long = (close_price < ema_13[i]) and bull_power_rising and vol_confirm
+                enter_short = (close_price > ema_13[i]) and bear_power_rising and vol_confirm
         
         # Exit conditions
         exit_long = False
         exit_short = False
         
         if position == 1:
-            # Exit long if price reaches H4 or ATR-based stop
-            exit_long = (close_price >= h4) or (close_price <= entry_price - 2.0 * atr_14[i])
+            # Exit long: momentum weakening or opposite divergence
+            if i >= 1:
+                bull_power_falling = bull_power[i] < bull_power[i-1]
+                bear_power_rising = bear_power[i] > bear_power[i-1]
+                price_below_ema = close_price < ema_13[i]
+                
+                exit_long = bull_power_falling or (bear_power_rising and price_below_ema) or (close_price <= ema_13[i] - 1.5 * atr_14[i])
         elif position == -1:
-            # Exit short if price reaches L4 or ATR-based stop
-            exit_short = (close_price <= l4) or (close_price >= entry_price + 2.0 * atr_14[i])
+            # Exit short: momentum weakening or opposite divergence
+            if i >= 1:
+                bear_power_falling = bear_power[i] < bear_power[i-1]
+                bull_power_rising = bull_power[i] > bull_power[i-1]
+                price_above_ema = close_price > ema_13[i]
+                
+                exit_short = bear_power_falling or (bull_power_rising and price_above_ema) or (close_price >= ema_13[i] + 1.5 * atr_14[i])
         
         # Track entry price for stoploss calculation
         if enter_long or enter_short:
