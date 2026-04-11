@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams %R + 1d EMA trend + volume confirmation.
-# Williams %R measures momentum overbought/oversold levels.
-# Enter long when Williams %R crosses above -80 (oversold) in 1d uptrend with volume expansion.
-# Enter short when Williams %R crosses below -20 (overbought) in 1d downtrend with volume expansion.
-# Uses Williams %R(14) for momentum and EMA(50) for 1d trend filter.
-# Designed for 20-40 trades/year on 4h timeframe with focus on mean reversion in trending markets.
-# Volume filter ensures reversals have conviction, reducing false signals.
-# 1d trend filter prevents counter-trend trading in choppy markets.
+# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + ADX trend filter.
+# Enter long when price touches Camarilla L3 support with volume expansion and ADX > 25 (trending).
+# Enter short when price touches Camarilla H3 resistance with volume expansion and ADX > 25.
+# Exit when price reaches Camarilla H4 (long) or L4 (short) or opposite signal.
+# Camarilla levels provide institutional support/resistance; volume confirms institutional participation.
+# ADX filter ensures we only trade in trending markets, avoiding whipsaws in ranges.
+# Designed for 15-25 trades/year on 12h timeframe with focus on high-probability setups.
 
-name = "4h_1d_williams_r_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,56 +28,91 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate Camarilla levels from previous 1d bar
+    # H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
+    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Calculate Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Align Camarilla levels to 12h timeframe (using previous day's levels)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Calculate volume moving average (20-period)
+    # Calculate ADX(14) for trend filter on 12h timeframe
+    # ADX requires +DI, -DI, and TR
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
+    
+    # Directional movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: prev * (1 - 1/period) + current * (1/period)
+        for i in range(period, len(data)):
+            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
+        return result
+    
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Volume moving average (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after Williams %R period
+    for i in range(20, n):  # Start after warmup period
         # Skip if any required data is invalid
-        if (np.isnan(williams_r[i]) or np.isnan(williams_r[i-1]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume filter: current volume > 1.5 * 20-period average volume
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Determine 1d trend direction
-        is_uptrend = close[i] > ema_50_1d_aligned[i]
-        is_downtrend = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trend_filter = adx[i] > 25
         
-        # Williams %R conditions
-        wr_above_oversold = williams_r[i] > -80
-        wr_below_oversold_prev = williams_r[i-1] <= -80
-        wr_below_overbought = williams_r[i] < -20
-        wr_above_overbought_prev = williams_r[i-1] >= -20
+        # Entry conditions: price touches Camarilla H3/L3 with volume and trend
+        # Use close price for touch detection (more realistic than intrabar)
+        touches_h3 = np.abs(close[i] - camarilla_h3_aligned[i]) < 0.001 * close[i]  # Within 0.1%
+        touches_l3 = np.abs(close[i] - camarilla_l3_aligned[i]) < 0.001 * close[i]  # Within 0.1%
         
-        # Entry conditions
-        bullish_entry = wr_above_oversold and wr_below_oversold_prev and vol_filter and is_uptrend
-        bearish_entry = wr_below_overbought and wr_above_overbought_prev and vol_filter and is_downtrend
+        bullish_entry = touches_l3 and vol_filter and trend_filter
+        bearish_entry = touches_h3 and vol_filter and trend_filter
         
-        # Exit conditions: opposite Williams %R signal
-        exit_long = wr_below_overbought and wr_above_overbought_prev
-        exit_short = wr_above_oversold and wr_below_oversold_prev
+        # Exit conditions: price reaches Camarilla H4/L4 or opposite touch
+        exit_long = close[i] >= camarilla_h4_aligned[i] or touches_h3
+        exit_short = close[i] <= camarilla_l4_aligned[i] or touches_l3
         
         # Priority: entry > exit > hold
         if bullish_entry and position != 1:
