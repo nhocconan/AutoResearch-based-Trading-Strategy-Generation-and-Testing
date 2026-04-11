@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_camarilla_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 100:
         return np.zeros(n)
     
@@ -20,82 +20,96 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate 12h Camarilla pivots
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate daily Camarilla pivots
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Pivot point and levels
-    pivot_12h = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
     # Camarilla levels (standard multipliers)
-    r4_12h = close_12h + range_12h * 1.1 / 2
-    s4_12h = close_12h - range_12h * 1.1 / 2
+    r4_1d = close_1d + range_1d * 1.1 / 2
+    s4_1d = close_1d - range_1d * 1.1 / 2
     
-    # Align 12h pivots to 6h timeframe
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    # Align daily pivots to 4h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Volume confirmation: volume > 1.5x 30-period average
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for dynamic exit
-    atr = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
+    # ATR for stop loss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(vol_ma_30[i]) or np.isnan(atr[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price_close = close[i]
+        price_high = high[i]
+        price_low = low[i]
         volume_current = volume[i]
-        r4 = r4_12h_aligned[i]
-        s4 = s4_12h_aligned[i]
+        r4 = r4_1d_aligned[i]
+        s4 = s4_1d_aligned[i]
+        atr_val = atr[i]
         
         # Volume confirmation
-        volume_confirmed = volume_current > 1.5 * vol_ma_30[i]
+        volume_confirmed = volume_current > 1.5 * vol_ma_20[i]
         
-        # Breakout signals
-        long_signal = price_close > r4 and volume_confirmed
-        short_signal = price_close < s4 and volume_confirmed
+        # Camarilla-based signals
+        long_signal = False
+        short_signal = False
         
-        # Exit conditions: trailing stop at 2x ATR from extreme
-        if position == 1:
-            # Track highest high since entry
-            if i == 100:
-                highest_high = price_close
-            else:
-                highest_high = max(highest_high, price_close)
-            exit_long = price_close < (highest_high - 2 * atr[i])
-        elif position == -1:
-            # Track lowest low since entry
-            if i == 100:
-                lowest_low = price_close
-            else:
-                lowest_low = min(lowest_low, price_close)
-            exit_short = price_close > (lowest_low + 2 * atr[i])
-        else:
-            exit_long = exit_short = False
+        # Long: price breaks above R4 with volume
+        if price_high > r4 and volume_confirmed:
+            long_signal = True
+        
+        # Short: price breaks below S4 with volume
+        if price_low < s4 and volume_confirmed:
+            short_signal = True
+        
+        # Exit conditions: ATR stop loss or return to daily pivot
+        # Calculate daily pivot for exit
+        pivot_1d_val = (high_1d[-1] + low_1d[-1] + close_1d[-1]) / 3 if len(high_1d) > 0 else 0
+        pivot_array = np.full_like(high_1d, pivot_1d_val)
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_array)[i]
+        
+        # Stop loss conditions
+        stop_long = position == 1 and price_low < (entry_price - 1.5 * atr_val) if 'entry_price' in locals() else False
+        stop_short = position == -1 and price_high > (entry_price + 1.5 * atr_val) if 'entry_price' in locals() else False
+        
+        # Exit to pivot
+        exit_long = position == 1 and price_close < pivot_aligned
+        exit_short = position == -1 and price_close > pivot_aligned
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
+            entry_price = price_close
             signals[i] = 0.25
         elif short_signal and position != -1:
             position = -1
+            entry_price = price_close
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        elif position == 1 and (exit_long or stop_long):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and (exit_short or stop_short):
             position = 0
             signals[i] = 0.0
         else:
@@ -104,11 +118,10 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: 6h Camarilla breakout strategy with volume confirmation and ATR trailing stop.
-# Enters long when price breaks above 12h R4 with volume confirmation (>1.5x 30-period average volume).
-# Enters short when price breaks below 12h S4 with volume confirmation.
-# Exits when price retraces 2x ATR from the session extreme (highest high for longs, lowest low for shorts).
-# Uses volume confirmation to ensure institutional participation and reduce false breakouts.
-# ATR trailing stop adapts to volatility, capturing trends while limiting losses in choppy markets.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity with fee efficiency.
-# Works in both bull and bear markets by trading breakouts in either direction with volatility-adjusted exits.
+# Hypothesis: 4h Camarilla breakout strategy with volume confirmation and ATR stop loss.
+# Enters long when price breaks above R4 (strong bullish breakout) with volume confirmation.
+# Enters short when price breaks below S4 (strong bearish breakdown) with volume confirmation.
+# Exits when price returns to daily pivot point or ATR stop loss is hit.
+# Uses volume confirmation (>1.5x 20-period average) to ensure institutional participation.
+# Target: 20-40 trades per year to minimize fee decay while capturing strong directional moves.
+# Works in both bull and bear markets by trading breakouts in either direction.
