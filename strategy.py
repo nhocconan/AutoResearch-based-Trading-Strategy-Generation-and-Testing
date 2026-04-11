@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_adx_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,76 +22,54 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return signals
     
-    # Calculate ADX (14) on daily timeframe
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Previous day's range
+    range_1d = high_1d - low_1d
     
-    # Plus Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    # Minus Directional Movement
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    # Camarilla levels (based on previous close)
+    # L4 = Close - (Range * 1.1000)
+    # L3 = Close - (Range * 1.1000/2)
+    # H3 = Close + (Range * 1.1000/2)
+    # H4 = Close + (Range * 1.1000)
+    l4 = close_1d - (range_1d * 1.1000)
+    l3 = close_1d - (range_1d * 1.1000 / 2)
+    h3 = close_1d + (range_1d * 1.1000 / 2)
+    h4 = close_1d + (range_1d * 1.1000)
     
-    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        smoothed = np.zeros_like(data)
-        smoothed[period-1] = np.nansum(data[:period])  # Initial sum
-        for i in range(period, len(data)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
-        return smoothed
+    # Shift by 1 to use only completed 1d bars
+    l4 = np.roll(l4, 1)
+    l3 = np.roll(l3, 1)
+    h3 = np.roll(h3, 1)
+    h4 = np.roll(h4, 1)
+    l4[0] = np.nan
+    l3[0] = np.nan
+    h3[0] = np.nan
+    h4[0] = np.nan
     
-    tr14 = wilder_smooth(tr, 14)
-    dm_plus_14 = wilder_smooth(dm_plus, 14)
-    dm_minus_14 = wilder_smooth(dm_minus, 14)
+    # Align 1d Camarilla levels to 12h timeframe
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     
-    # DI+ and DI-
-    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = np.zeros_like(dx)
-    adx[27] = np.nanmean(dx[14:28])  # First ADX value (average of first 14 DX)
-    for i in range(28, len(dx)):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    # Align ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # 4h Donchian channel (20-period)
-    def donchian_channel(high, low, period):
-        upper = np.zeros_like(high)
-        lower = np.zeros_like(low)
-        for i in range(len(high)):
-            if i < period - 1:
-                upper[i] = np.nan
-                lower[i] = np.nan
-            else:
-                upper[i] = np.max(high[i-period+1:i+1])
-                lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
-    
-    upper, lower = donchian_channel(high, low, 20)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Trend filter: 20-period EMA on 12h
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(l4_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(h4_aligned[i]) or
+            np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -100,48 +78,55 @@ def generate_signals(prices):
         price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
-        adx_val = adx_aligned[i]
-        
-        # ADX threshold for trending market (ADX > 25)
-        trending = adx_val > 25
         
         # Volume confirmation
         volume_confirmed = volume_current > 1.5 * vol_ma
         
-        # Breakout conditions
-        long_breakout = price_high > upper[i]
-        short_breakout = price_low < lower[i]
+        # Trend direction
+        uptrend = price_close > ema_20[i]
+        downtrend = price_close < ema_20[i]
+        
+        # Long: price breaks above H3/H4 with volume in uptrend
+        long_signal = volume_confirmed and uptrend and (price_high > h3_aligned[i] or price_high > h4_aligned[i])
+        
+        # Short: price breaks below L3/L4 with volume in downtrend
+        short_signal = volume_confirmed and downtrend and (price_low < l3_aligned[i] or price_low < l4_aligned[i])
+        
+        # Exit when price returns to the previous day's close (pivot point)
+        prev_close_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+        if np.isnan(prev_close_aligned[i]):
+            pivot_value = price_close
+        else:
+            pivot_value = prev_close_aligned[i]
+        
+        exit_long = position == 1 and price_close < pivot_value
+        exit_short = position == -1 and price_close > pivot_value
         
         # Trading logic
-        if trending and volume_confirmed:
-            if long_breakout and position != 1:
-                position = 1
-                signals[i] = 0.25
-            elif short_breakout and position != -1:
-                position = -1
-                signals[i] = -0.25
-        else:
-            # Exit positions in non-trending markets
-            if position == 1:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1:
-                position = 0
-                signals[i] = 0.0
-        
-        # Maintain current position if no action taken
-        if position == 1 and signals[i] == 0.0:
+        if long_signal and position != 1:
+            position = 1
             signals[i] = 0.25
-        elif position == -1 and signals[i] == 0.0:
+        elif short_signal and position != -1:
+            position = -1
             signals[i] = -0.25
+        elif position == 1 and exit_long:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and exit_short:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Maintain current position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
 
-# Hypothesis: ADX-filtered Donchian breakout strategy on 4h timeframe.
-# Uses 14-period ADX on daily timeframe to filter for trending markets (ADX > 25).
-# Enters long when price breaks above 20-period Donchian upper band with volume confirmation (>1.5x average volume) in trending markets.
-# Enters short when price breaks below 20-period Donchian lower band with volume confirmation in trending markets.
-# Exits positions when market becomes non-trending (ADX <= 25) to avoid whipsaws in ranging markets.
-# Works in both bull and bear markets by capturing trends while avoiding false breakouts in sideways markets.
-# Volume confirmation reduces false breakouts. ADX filter ensures we only trade during strong trends.
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
+# Hypothesis: Camarilla pivot breakout strategy on 12h timeframe.
+# Uses 1d Camarilla levels (L3, L4, H3, H4) from the previous day's price action.
+# Enters long when price breaks above H3 or H4 with volume confirmation (>1.5x average volume) during uptrend (price > 20 EMA).
+# Enters short when price breaks below L3 or L4 with volume confirmation during downtrend (price < 20 EMA).
+# Exits when price returns to the previous day's close (pivot point).
+# The Camarilla levels identify key support/resistance levels where price often reverses or accelerates.
+# Works in both bull and bear markets by trading breakouts in the direction of the 12h trend.
+# Volume confirmation reduces false breakouts. Trend filter ensures we trade with the higher timeframe momentum.
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
