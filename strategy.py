@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_camarilla_breakout_v2"
+name = "6h_1w_camarilla_mean_reversion_v1"
 timeframe = "6h"
 leverage = 1.0
 
