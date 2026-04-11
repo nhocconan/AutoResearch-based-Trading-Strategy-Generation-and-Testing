@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_v2"
+name = "4h_12h_camarilla_breakout_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return signals
     
     # Calculate Camarilla pivot levels from daily data
@@ -39,17 +39,24 @@ def generate_signals(prices):
     r4 = close_1d + (daily_range * 1.1 / 2)
     s4 = close_1d - (daily_range * 1.1 / 2)
     
-    # Volume confirmation: 4h volume > 2x 50-period average (adjusted for better balance)
-    vol_ma_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Exit levels: R3 and S3
+    r3 = close_1d + (daily_range * 1.1 / 4)
+    s3 = close_1d - (daily_range * 1.1 / 4)
+    
+    # Volume confirmation: 4h volume > 1.8x 80-period average (adjusted for fewer trades)
+    vol_ma_80 = pd.Series(volume).rolling(window=80, min_periods=80).mean().values
     
     # Align daily levels to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma_50[i])):
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_ma_80[i])):
             signals[i] = 0.0
             continue
         
@@ -57,7 +64,7 @@ def generate_signals(prices):
         volume_current = volume[i]
         
         # Volume confirmation
-        vol_confirm = volume_current > 2.0 * vol_ma_50[i]
+        vol_confirm = volume_current > 1.8 * vol_ma_80[i]
         
         # Breakout conditions using Camarilla levels
         breakout_up = price_close > r4_aligned[i]  # Break above R4
@@ -75,13 +82,7 @@ def generate_signals(prices):
         if breakout_down and vol_confirm:
             enter_short = True
         
-        # Exit conditions: opposite Camarilla level (S3 for long, R3 for short)
-        # Calculate S3 and R3 for exit
-        s3 = close_1d - (daily_range * 1.1 / 4)
-        r3 = close_1d + (daily_range * 1.1 / 4)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        
+        # Exit conditions: return to opposite S3/R3 levels
         exit_long = price_close < s3_aligned[i]  # Return to S3 level
         exit_short = price_close > r3_aligned[i]  # Return to R3 level
         
@@ -105,11 +106,11 @@ def generate_signals(prices):
     return signals
 
 # Hypothesis: 4h Camarilla breakout strategy using daily pivot levels with volume confirmation.
-# Enters long when price breaks above R4 with volume > 2x 50-period average.
-# Enters short when price breaks below S4 with volume > 2x 50-period average.
+# Enters long when price breaks above R4 with volume > 1.8x 80-period average.
+# Enters short when price breaks below S4 with volume > 1.8x 80-period average.
 # Exits when price returns to S3/R3 levels respectively.
-# Uses volume threshold (2x) and MA length (50) to balance signal quality and trade frequency.
+# Uses higher volume threshold (1.8x) and longer MA (80) to reduce trade frequency.
 # Position size set to 0.25 to manage risk in volatile markets.
-# Target: 20-30 trades per year (80-120 total over 4 years) to minimize fee drag.
+# Target: 15-25 trades per year (60-100 total over 4 years) to minimize fee drag.
 # Works in both bull and bear markets by capturing significant breakouts in either direction.
 # 4h timeframe provides good balance between signal quality and trade frequency.
