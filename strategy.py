@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_v1"
+name = "4h_12h_kama_rsi_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,49 +25,47 @@ def generate_signals(prices):
     if len(df_12h) < 2:
         return signals
     
-    # Calculate 12h ATR for volatility filter (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 12h KAMA (Kaufman Adaptive Moving Average)
+    # KAMA parameters: ER period=10, Fast SC=2, Slow SC=30
     close_12h = df_12h['close'].values
+    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility = np.abs(np.diff(close_12h))
+    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    volatility_sum = np.concatenate([[np.nan], volatility_sum])  # align with change
     
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr_14_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_14_12h)
+    # Efficiency Ratio (ER)
+    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
+    # Smoothing Constant (SC)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_12h, np.nan)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Calculate 12h ATR MA (20-period) for volatility regime filter
-    atr_ma_20_12h = pd.Series(atr_14_12h_aligned).rolling(window=20, min_periods=20).mean().values
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
     
-    # Calculate 12h ATR ratio (current / MA) for regime detection
-    atr_ratio_12h = np.where(atr_ma_20_12h > 0, atr_14_12h_aligned / atr_ma_20_12h, 1.0)
-    
-    # Calculate Camarilla levels on 12h data (using previous 12h bar's range)
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    # where H,L,C are high, low, close of previous period
-    prev_high_12h = np.roll(high_12h, 1)
-    prev_low_12h = np.roll(low_12h, 1)
-    prev_close_12h = np.roll(close_12h, 1)
-    prev_high_12h[0] = np.nan
-    prev_low_12h[0] = np.nan
-    prev_close_12h[0] = np.nan
-    
-    camarilla_H4 = prev_close_12h + 1.1 * (prev_high_12h - prev_low_12h) / 2
-    camarilla_L4 = prev_close_12h - 1.1 * (prev_high_12h - prev_low_12h) / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_L4)
+    # Calculate 12h RSI (14-period)
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
     
     # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_12h[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(volume_sma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -77,35 +75,21 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20[i]
         
-        # Volatility regime filter: trade only when volatility is elevated (ATR ratio > 0.8)
-        vol_regime = atr_ratio_12h[i] > 0.8
-        
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime
-        if price_close > camarilla_H4_aligned[i] and vol_confirm and vol_regime:
+        # Long: Price above KAMA + RSI > 50 + volume confirmation
+        if price_close > kama_aligned[i] and rsi_aligned[i] > 50 and vol_confirm:
             enter_long = True
         
-        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime
-        if price_close < camarilla_L4_aligned[i] and vol_confirm and vol_regime:
+        # Short: Price below KAMA + RSI < 50 + volume confirmation
+        if price_close < kama_aligned[i] and rsi_aligned[i] < 50 and vol_confirm:
             enter_short = True
         
-        # Exit conditions: price crosses back through the Camarilla mid-point (C level)
-        exit_long = False
-        exit_short = False
-        
-        # Calculate Camarilla C level (close of previous 12h bar)
-        camarilla_C = prev_close_12h
-        camarilla_C_aligned = align_htf_to_ltf(prices, df_12h, camarilla_C)
-        
-        if position == 1:
-            # Exit long if price crosses below Camarilla C level
-            exit_long = price_close < camarilla_C_aligned[i]
-        elif position == -1:
-            # Exit short if price crosses above Camarilla C level
-            exit_short = price_close > camarilla_C_aligned[i]
+        # Exit conditions: opposite signal
+        exit_long = price_close < kama_aligned[i] or rsi_aligned[i] < 50
+        exit_short = price_close > kama_aligned[i] or rsi_aligned[i] > 50
         
         # Trading logic
         if enter_long and position != 1:
