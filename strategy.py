@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# 4h_12h_camarilla_volume_rsi_breakout_v1
-# Strategy: 4-hour Camarilla pivot breakout from 12-hour levels with volume confirmation and RSI filter
-# Timeframe: 4h
+# 1h_4h_1d_camarilla_breakout_volatility_v1
+# Strategy: 1-hour Camarilla breakout with 4-hour trend filter and 1-day volatility filter
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: Combines 12-hour Camarilla levels (wider bands for fewer, stronger signals) with
-# volume spikes and RSI(14) > 50 for longs / < 50 for shorts to filter counter-trend noise.
-# Targets 20-40 trades per year by using higher timeframe pivot levels and multiple confirmations.
-# Works in bull markets via breakout logic and in bear markets via rejection logic at R3/S3 levels.
+# Hypothesis: Uses 1-hour price action for entry timing, filtered by 4-hour trend direction
+# and 1-day volatility regime (low volatility = breakout prone). Designed to capture
+# breakouts during low volatility periods with trend alignment, reducing false signals
+# in choppy markets. Target: 15-35 trades/year (~60-140 total over 4 years).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume_rsi_breakout_v1"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_volatility_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -28,94 +28,93 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 50:
+    if len(df_4h) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h OHLC for Camarilla pivots
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h OHLC for trend (using close for EMA)
+    close_4h = df_4h['close'].values
     
-    # Calculate Camarilla pivot levels for previous 12h bar
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    r4_12h = close_12h + range_12h * 1.1 / 2.0
-    r3_12h = close_12h + range_12h * 1.1 / 4.0
-    s3_12h = close_12h - range_12h * 1.1 / 4.0
-    s4_12h = close_12h - range_12h * 1.1 / 2.0
+    # 1d OHLC for ATR calculation (volatility filter)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # RSI(14) for momentum filter
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align 12h data to 4h timeframe (wait for 12h bar close)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi_values)
+    # 1-day ATR(14) for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align 4h and 1d data to 1h timeframe
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Calculate 1-hour ATR for position sizing/context
+    hl = high - low
+    hc = np.abs(high - np.roll(close, 1))
+    lc = np.abs(low - np.roll(close, 1))
+    tr_1h = np.maximum(hl, np.maximum(hc, lc))
+    atr_10_1h = pd.Series(tr_1h).rolling(window=10, min_periods=10).mean().values
     
     # Volume average (20-period) for confirmation
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)  # Volume spike filter
+    vol_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or 
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_avg[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or
+            np.isnan(atr_10_1h[i]) or np.isnan(vol_avg[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
         
-        # Momentum filter: RSI > 50 for bullish bias, < 50 for bearish bias
-        bullish_momentum = rsi_aligned[i] > 50
-        bearish_momentum = rsi_aligned[i] < 50
+        # Trend filter: price vs 4h EMA20
+        uptrend_4h = price_close > ema_20_4h_aligned[i]
+        downtrend_4h = price_close < ema_20_4h_aligned[i]
         
-        # Camarilla signals (using previous 12h bar's levels)
-        breakout_up = price_close > r4_12h_aligned[i]   # Break above R4
-        breakdown_down = price_close < s4_12h_aligned[i]  # Break below S4
-        reject_at_r3 = price_close < r3_12h_aligned[i] and price_close > r3_12h_aligned[i-1]  # Reject at R3
-        reject_at_s3 = price_close > s3_12h_aligned[i] and price_close < s3_12h_aligned[i-1]  # Reject at S3
+        # Volatility filter: low volatility environment (ATR below 20-period MA)
+        vol_filter = atr_10_1h[i] < (0.8 * atr_14_1d_aligned[i])
+        
+        # Calculate 1-hour ATR-based bands for breakout detection
+        atr_mult = 1.5
+        upper_band = close[i-1] + (atr_mult * atr_10_1h[i-1])
+        lower_band = close[i-1] - (atr_mult * atr_10_1h[i-1])
+        
+        # Breakout signals
+        breakout_up = price_close > upper_band
+        breakdown_down = price_close < lower_band
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: Break above R4 with volume in bullish momentum OR rejection at R3 with volume in bullish momentum
-        long_signal = (breakout_up and vol_confirmed and bullish_momentum) or \
-                      (reject_at_r3 and vol_confirmed and bullish_momentum)
+        # Long: Break above upper band with volume in uptrend AND low volatility
+        long_signal = breakout_up and vol_confirmed and uptrend_4h and vol_filter
         
-        # Short: Break below S4 with volume in bearish momentum OR rejection at S3 with volume in bearish momentum
-        short_signal = (breakdown_down and vol_confirmed and bearish_momentum) or \
-                       (reject_at_s3 and vol_confirmed and bearish_momentum)
+        # Short: Break below lower band with volume in downtrend AND low volatility
+        short_signal = breakdown_down and vol_confirmed and downtrend_4h and vol_filter
         
-        # Exit when price returns to the 12h pivot level or opposite Camarilla level
-        pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-        exit_long = position == 1 and (price_close < pivot_12h_aligned[i] or 
-                                       price_close < s3_12h_aligned[i])
-        exit_short = position == -1 and (price_close > pivot_12h_aligned[i] or 
-                                         price_close > r3_12h_aligned[i])
+        # Exit when price returns to the previous close or opposite band
+        exit_long = position == 1 and price_close < close[i-1]
+        exit_short = position == -1 and price_close > close[i-1]
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -123,6 +122,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
