@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v26
-# Strategy: 4h Camarilla pivot breakout with 1d volume confirmation and chop regime filter
-# Timeframe: 4h
+# 1d_1w_camarilla_pivot_volume_v1
+# Strategy: 1d Camarilla pivot levels with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Camarilla levels provide high-probability reversal/breakout levels.
-# Long: Break above H4 with 1d volume > 1.5x 20-day avg and chop < 61.8.
-# Short: Break below L4 with same conditions.
-# Uses daily timeframe for volume/chop to reduce noise and improve reliability.
-# Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# Hypothesis: Camarilla levels act as strong support/resistance. Long at L3/S1, short at H3/S4.
+# Weekly trend filter ensures trades align with higher timeframe momentum. Volume confirmation
+# filters out low-conviction moves. Designed for low trade frequency (~10-20/year) to minimize
+# fee drag and survive bear markets via selective short entries.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v26"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
@@ -28,86 +27,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels from previous day
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    # Calculate daily Camarilla pivot levels from previous day
+    # Pivot levels based on previous day's OHLC
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # First day has no previous data
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # 1d volume and chop filter
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Choppiness Index (14-period)
-    atr_14 = []
-    for i in range(len(df_1d)):
-        if i < 14:
-            atr_14.append(np.nan)
-        else:
-            tr = np.max([
-                high_1d[i] - low_1d[i],
-                abs(high_1d[i] - close_1d[i-1]),
-                abs(low_1d[i] - close_1d[i-1])
-            ])
-            atr_14.append(tr)
-    atr_14 = np.array(atr_14)
-    atr_sum_14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    # Camarilla levels
+    # L3 = pivot - (range * 1.1 / 4)
+    # H3 = pivot + (range * 1.1 / 4)
+    # L4 = pivot - (range * 1.1 / 2)
+    # H4 = pivot + (range * 1.1 / 2)
+    L3 = pivot - (range_val * 1.1 / 4)
+    H3 = pivot + (range_val * 1.1 / 4)
+    L4 = pivot - (range_val * 1.1 / 2)
+    H4 = pivot + (range_val * 1.1 / 2)
     
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum_14 / (hh_14 - ll_14)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align weekly trend to daily
+    weekly_uptrend = ema_20_1w_aligned > np.roll(ema_20_1w_aligned, 1)
+    weekly_uptrend[0] = False
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(1, n):  # Start from 1 to have previous day data
         # Skip if any required data is invalid
-        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or \
-           np.isnan(vol_avg_20_1d_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(L3[i]) or np.isnan(H3[i]) or \
+           np.isnan(L4[i]) or np.isnan(H4[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x 20-day average
-        vol_1d_current = volume_1d[i] if i < len(volume_1d) else volume_1d[-1]
-        vol_confirm = vol_1d_current > 1.5 * vol_avg_20_1d[i]
-        
-        # Chop regime: chop < 61.8 for trending market
-        chop_filter = chop_aligned[i] < 61.8
-        
-        # Breakout conditions
-        breakout_up = high[i] > camarilla_h4_aligned[i]
-        breakout_down = low[i] < camarilla_l4_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-day average
+        if i >= 20:
+            vol_avg_20 = np.mean(volume[i-20:i])
+            vol_confirm = volume[i] > 1.5 * vol_avg_20
+        else:
+            vol_confirm = False
         
         # Entry conditions
-        # Long: Break above H4 with volume confirmation and trending chop
-        if breakout_up and vol_confirm and chop_filter and position != 1:
+        # Long: Price <= L3 (strong support) AND weekly uptrend AND volume confirmation
+        if close[i] <= L3[i] and weekly_uptrend[i] and vol_confirm and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short: Break below L4 with volume confirmation and trending chop
-        elif breakout_down and vol_confirm and chop_filter and position != -1:
+        # Short: Price >= H3 (strong resistance) AND weekly downtrend AND volume confirmation
+        elif close[i] >= H3[i] and not weekly_uptrend[i] and vol_confirm and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: Opposite breakout (reversion to mean)
-        elif position == 1 and low[i] < camarilla_l4_aligned[i]:
+        # Exit: Price reaches opposite H4/L4 level (failed breakout/reversal)
+        elif position == 1 and close[i] >= H4[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] > camarilla_h4_aligned[i]:
+        elif position == -1 and close[i] <= L4[i]:
             position = 0
             signals[i] = 0.0
         else:
