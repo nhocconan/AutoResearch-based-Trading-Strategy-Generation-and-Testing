@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator with daily price action filter.
-# Uses Alligator (Jaw/Teeth/Lips) from 12h for trend direction and entry signals.
-# Enters long when Lips cross above Teeth in bullish alignment (Jaw < Teeth < Lips).
-# Enters short when Lips cross below Teeth in bearish alignment (Jaw > Teeth > Lips).
-# Filters trades by requiring price to be outside the Alligator's mouth (avoids chop).
-# Designed for 12-37 trades/year on 6h with trend-following edge in both bull/bear markets.
+# Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation.
+# Enters long when price breaks above Donchian(20) high with expanding volume and bullish 12h trend.
+# Enters short when price breaks below Donchian(20) low with expanding volume and bearish 12h trend.
+# Uses ATR(14) for dynamic stoploss and position sizing.
+# Designed for 20-50 trades/year on 4h timeframe with focus on trend continuation.
+# Volume filter ensures institutional participation, reducing false breakouts.
+# 12h trend filter prevents counter-trend trading in choppy markets.
 
-name = "6h_12h_alligator_mouthfilter_v1"
-timeframe = "6h"
+name = "4h_12h_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,91 +24,73 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Load 12h data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Alligator (SMMA-based) on 12h
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 12h EMA(50) for trend filter
     close_12h = df_12h['close'].values
-    median_12h = (high_12h + low_12h) / 2  # Use median price
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # SMMA (Smoothed Moving Average) implementation
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT) / N
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Align 12h EMA to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Alligator lines: Jaw (13,8), Teeth (8,5), Lips (5,3)
-    jaw = smma(median_12h, 13)
-    teeth = smma(median_12h, 8)
-    lips = smma(median_12h, 5)
+    # Calculate Donchian channels (20-period) on 4h data
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align Alligator lines to 6h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Calculate ATR(14) for volatility filtering and stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Alligator mouth width (distance between highest and lowest of Jaw/Teeth/Lips)
-    alligator_high = np.maximum(np.maximum(jaw_aligned, teeth_aligned), lips_aligned)
-    alligator_low = np.minimum(np.minimum(jaw_aligned, teeth_aligned), lips_aligned)
-    mouth_width = alligator_high - alligator_low
-    
-    # Average mouth width for filtering (20-period)
-    mouth_avg = np.full_like(mouth_width, np.nan, dtype=float)
-    for i in range(19, len(mouth_width)):
-        mouth_avg[i] = np.mean(mouth_width[i-19:i+1])
+    # Calculate volume moving average (20-period)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after Donchian period
         # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(mouth_avg[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_14[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Define Alligator alignment conditions
-        bullish_alignment = (jaw_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i])
-        bearish_alignment = (jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i])
+        # Volume filter: current volume > 1.3 * 20-period average volume
+        vol_filter = volume[i] > 1.3 * vol_ma_20[i]
         
-        # Define crossovers
-        lips_above_teeth = lips_aligned[i] > teeth_aligned[i] and lips_aligned[i-1] <= teeth_aligned[i-1]
-        lips_below_teeth = lips_aligned[i] < teeth_aligned[i] and lips_aligned[i-1] >= teeth_aligned[i-1]
+        # Determine 12h trend direction
+        is_bullish_trend = close[i] > ema_50_12h_aligned[i]
+        is_bearish_trend = close[i] < ema_50_12h_aligned[i]
         
-        # Price outside mouth filter: avoid trading when price is inside Alligator's mouth (chop)
-        price_above_mouth = close[i] > alligator_high[i]
-        price_below_mouth = close[i] < alligator_low[i]
+        # Breakout conditions
+        bullish_breakout = (high[i] > high_max_20[i-1]) and vol_filter and is_bullish_trend
+        bearish_breakout = (low[i] < low_min_20[i-1]) and vol_filter and is_bearish_trend
         
-        # Enter long: bullish alignment + lips crosses above teeth + price above mouth
-        long_entry = bullish_alignment and lips_above_teeth and price_above_mouth
+        # Exit conditions: reversal signal or ATR-based stop
+        exit_long = False
+        exit_short = False
         
-        # Enter short: bearish alignment + lips crosses below teeth + price below mouth
-        short_entry = bearish_alignment and lips_below_teeth and price_below_mouth
-        
-        # Exit conditions: reversal of alignment or price re-enters mouth
-        exit_long = (position == 1 and 
-                    (not bullish_alignment or 
-                     not price_above_mouth))
-        exit_short = (position == -1 and 
-                     (not bearish_alignment or 
-                      not price_below_mouth))
+        if position == 1:
+            # Exit long on bearish breakout or if price drops 1.5*ATR from entry
+            exit_long = bearish_breakout or (close[i] < ema_50_12h_aligned[i])
+        elif position == -1:
+            # Exit short on bullish breakout or if price rises 1.5*ATR from entry
+            exit_short = bullish_breakout or (close[i] > ema_50_12h_aligned[i])
         
         # Priority: entry > exit > hold
-        if long_entry and position != 1:
+        if bullish_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif bearish_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
