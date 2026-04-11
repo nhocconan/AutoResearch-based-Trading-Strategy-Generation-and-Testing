@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla pivot levels from 1d + volume spike + ADX trend filter.
-# Enter long when price touches Camarilla L3 support with volume expansion and ADX > 25 (trending).
-# Enter short when price touches Camarilla H3 resistance with volume expansion and ADX > 25.
-# Exit when price reaches Camarilla H4 (long) or L4 (short) or opposite signal.
-# Camarilla levels provide institutional support/resistance; volume confirms institutional participation.
-# ADX filter ensures we only trade in trending markets, avoiding whipsaws in ranges.
-# Designed for 15-25 trades/year on 12h timeframe with focus on high-probability setups.
+# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation.
+# Bullish fractal (bearish fractal above price) breakout when price > recent bearish fractal high with 1d uptrend and volume expansion.
+# Bearish fractal (bullish fractal below price) breakdown when price < recent bullish fractal low with 1d downtrend and volume expansion.
+# Williams fractals require 5-bar pattern (highest high/lowest low in center) and are confirmed with 2-bar delay.
+# This strategy captures institutional breakouts with trend alignment, avoiding false signals in choppy markets.
+# Target: 15-30 trades/year on 6h timeframe with focus on significant market moves.
 
-name = "12h_1d_camarilla_volume_adx_v1"
-timeframe = "12h"
+name = "6h_1d_williams_fractal_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,97 +27,72 @@ def generate_signals(prices):
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # H4 = close + 1.5*(high-low), H3 = close + 1.125*(high-low), L3 = close - 1.125*(high-low), L4 = close - 1.5*(high-low)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d EMA to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Williams Fractals on 1d data
+    # Bearish fractal: high[n-2] is highest of [n-4, n-3, n-2, n-1, n]
+    # Bullish fractal: low[n-2] is lowest of [n-4, n-3, n-2, n-1, n]
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)
-    camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)
-    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    bearish_fractal = np.full(len(high_1d), np.nan)
+    bullish_fractal = np.full(len(low_1d), np.nan)
     
-    # Align Camarilla levels to 12h timeframe (using previous day's levels)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    for i in range(2, len(high_1d) - 2):
+        # Bearish fractal: current high is highest in window
+        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and 
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        # Bullish fractal: current low is lowest in window
+        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and 
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
     
-    # Calculate ADX(14) for trend filter on 12h timeframe
-    # ADX requires +DI, -DI, and TR
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    # Align fractals to 6h timeframe with 2-bar confirmation delay (required for fractals)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Directional movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: prev * (1 - 1/period) + current * (1/period)
-        for i in range(period, len(data)):
-            result[i] = result[i-1] * (1 - 1/period) + data[i] * (1/period)
-        return result
-    
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Volume moving average (20-period)
+    # Calculate volume moving average (20-period)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after warmup period
+    for i in range(50, n):  # Start after sufficient data
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume filter: current volume > 1.5 * 20-period average volume
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
         
-        # Trend filter: ADX > 25 indicates trending market
-        trend_filter = adx[i] > 25
+        # Determine 1d trend direction
+        is_uptrend = close[i] > ema_50_1d_aligned[i]
+        is_downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Entry conditions: price touches Camarilla H3/L3 with volume and trend
-        # Use close price for touch detection (more realistic than intrabar)
-        touches_h3 = np.abs(close[i] - camarilla_h3_aligned[i]) < 0.001 * close[i]  # Within 0.1%
-        touches_l3 = np.abs(close[i] - camarilla_l3_aligned[i]) < 0.001 * close[i]  # Within 0.1%
+        # Breakout conditions
+        bullish_breakout = (close[i] > bearish_fractal_aligned[i]) and vol_filter and is_uptrend
+        bearish_breakout = (close[i] < bullish_fractal_aligned[i]) and vol_filter and is_downtrend
         
-        bullish_entry = touches_l3 and vol_filter and trend_filter
-        bearish_entry = touches_h3 and vol_filter and trend_filter
-        
-        # Exit conditions: price reaches Camarilla H4/L4 or opposite touch
-        exit_long = close[i] >= camarilla_h4_aligned[i] or touches_h3
-        exit_short = close[i] <= camarilla_l4_aligned[i] or touches_l3
+        # Exit conditions: opposite fractal breakout or trend failure
+        exit_long = (close[i] < bullish_fractal_aligned[i]) or (close[i] < ema_50_1d_aligned[i])
+        exit_short = (close[i] > bearish_fractal_aligned[i]) or (close[i] > ema_50_1d_aligned[i])
         
         # Priority: entry > exit > hold
-        if bullish_entry and position != 1:
+        if bullish_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_entry and position != -1:
+        elif bearish_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and exit_long:
