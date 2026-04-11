@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""
-4h_1d_camarilla_pivot_volume_trend_v1
-Strategy: 4h Camarilla pivot levels from 1d with volume confirmation and trend filter
-Timeframe: 4h
-Leverage: 1.0
-Hypothesis: Combines Camarilla pivot levels (R4/H4 and S4/L4) from daily timeframe as strong support/resistance levels, requiring volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend alignment. Works in both bull and bear markets by following the higher timeframe trend. Targets 20-50 trades over 4 years to minimize fee drag.
-"""
+# 4h_1d_camarilla_pivot_volume_trend_v1
+# Strategy: 4h Camarilla pivot levels from 1d with volume confirmation and trend filter
+# Timeframe: 4h
+# Leverage: 1.0
+# Hypothesis: Combines Camarilla pivot levels (R4/H4 and S4/L4) from daily timeframe as strong support/resistance levels, requiring volume confirmation (>1.5x average volume) and filtered by 1d EMA50 trend alignment. Works in both bull and bear markets by following the higher timeframe trend. Targets 20-50 trades over 4 years to minimize fee drag.
 
 import numpy as np
 import pandas as pd
