@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_camarilla_pivot_volume_v1
-Strategy: 4h Camarilla pivot levels with volume confirmation and 1d trend filter
-Timeframe: 4h
+12h_1d_ari_consecutive_highs_lows_v1
+Strategy: 12h Consecutive Higher Highs/Lows breakout with volume confirmation and 1d trend filter
+Timeframe: 12h
 Leverage: 1.0
-Hypothesis: Uses daily Camarilla pivot levels (H4, L4, H6, L6) as key support/resistance levels.
-Enters long when price breaks above H4 with volume confirmation in a 1d uptrend, and short when price breaks below L4 with volume confirmation in a 1d downtrend.
-Exits when price returns to the pivot point (P). Uses volume spike (>1.5x average) to filter false breakouts.
-Designed to work in both bull and bear markets by following the 1d trend direction.
-Target: 50-150 total trades over 4 years.
+Hypothesis: Uses 12h price breaking above 3 consecutive higher highs or below 3 consecutive lower lows confirmed by volume spike (>1.5x average volume) and filtered by 1d EMA50 trend direction. Designed to capture strong momentum moves while filtering out false breakouts in choppy markets. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pivot_volume_v1"
-timeframe = "4h"
+name = "12h_1d_ari_consecutive_highs_lows_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,57 +29,35 @@ def generate_signals(prices):
     # Load higher timeframe data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA20 for dynamic exit (optional, can use pivot point)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 12h Consecutive Higher Highs (3-bar)
+    hh1 = high > np.roll(high, 1)
+    hh2 = hh1 & np.roll(hh1, 1)
+    consec_hh = hh2 & np.roll(hh2, 1)
+    
+    # 12h Consecutive Lower Lows (3-bar)
+    ll1 = low < np.roll(low, 1)
+    ll2 = ll1 & np.roll(ll1, 1)
+    consec_ll = ll2 & np.roll(ll2, 1)
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
-    # Calculate daily Camarilla pivot levels from previous day
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H6 = Close + 2.0 * (High - Low)
-    # L6 = Close - 2.0 * (High - Low)
-    # P = (High + Low + Close) / 3
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
-    camarilla_p = (high_1d + low_1d + close_1d) / 3.0
-    
-    # Align to 4h timeframe (wait for daily bar to close)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
-    
     # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_20[i]) if i >= 20 else True) or \
-           np.isnan(camarilla_h4_aligned[i]) or \
-           np.isnan(camarilla_l4_aligned[i]) or \
-           np.isnan(camarilla_p_aligned[i]) or \
-           np.isnan(vol_avg[i]) or \
-           np.isnan(ema_50_1d_aligned[i]):
-            # Hold current position if valid, otherwise flat
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
+        if (np.isnan(vol_avg[i]) or np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         price_close = close[i]
@@ -92,9 +66,9 @@ def generate_signals(prices):
         uptrend_1d = price_close > ema_50_1d_aligned[i]
         downtrend_1d = price_close < ema_50_1d_aligned[i]
         
-        # Breakout conditions using Camarilla levels
-        breakout_up = price_close > camarilla_h4_aligned[i-1]  # Use previous bar's level
-        breakout_down = price_close < camarilla_l4_aligned[i-1]  # Use previous bar's level
+        # Breakout conditions
+        breakout_up = consec_hh[i-1]  # Use previous bar's signal
+        breakout_down = consec_ll[i-1]  # Use previous bar's signal
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
@@ -105,9 +79,14 @@ def generate_signals(prices):
         # Short: downward breakout with volume in downtrend
         short_signal = breakout_down and vol_confirmed and downtrend_1d
         
-        # Exit when price returns to pivot point (P)
-        exit_long = position == 1 and price_close < camarilla_p_aligned[i]
-        exit_short = position == -1 and price_close > camarilla_p_aligned[i]
+        # Exit when price returns to middle of recent range (simple mean of last 5 closes)
+        if i >= 5:
+            recent_mean = np.mean(close[i-5:i])
+            exit_long = position == 1 and price_close < recent_mean
+            exit_short = position == -1 and price_close > recent_mean
+        else:
+            exit_long = False
+            exit_short = False
         
         # Trading logic
         if long_signal and position != 1:
