@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_breakout_volume_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,31 +22,53 @@ def generate_signals(prices):
     
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return signals
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper/lower bands (20-period high/low)
-    # Using pandas rolling for efficiency
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Previous day's values (Camarilla uses previous day's OHLC)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # Set first day to NaN (no previous day)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Camarilla levels for previous day
+    # Resistance levels
+    R4 = prev_close + (prev_high - prev_low) * 1.500
+    R3 = prev_close + (prev_high - prev_low) * 1.250
+    R2 = prev_close + (prev_high - prev_low) * 1.166
+    R1 = prev_close + (prev_high - prev_low) * 1.083
+    # Support levels
+    S1 = prev_close - (prev_high - prev_low) * 1.083
+    S2 = prev_close - (prev_high - prev_low) * 1.166
+    S3 = prev_close - (prev_high - prev_low) * 1.250
+    S4 = prev_close - (prev_high - prev_low) * 1.500
     
-    # Volume confirmation: 6h volume > 1.5x 20-period average
+    # Align to 4h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume confirmation: 4h volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     for i in range(100, n):
         # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(R4_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(R2_aligned[i]) or
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(S2_aligned[i]) or
+            np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
@@ -56,25 +78,15 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirm = volume_current > 1.5 * vol_ma_20[i]
         
-        # Donchian breakout conditions
-        breakout_long = price_close > donchian_high_aligned[i]
-        breakout_short = price_close < donchian_low_aligned[i]
+        # Camarilla breakout conditions
+        # Long: price breaks above R3 with volume
+        enter_long = (price_close > R3_aligned[i]) and vol_confirm
+        # Short: price breaks below S3 with volume
+        enter_short = (price_close < S3_aligned[i]) and vol_confirm
         
-        # Entry conditions
-        enter_long = False
-        enter_short = False
-        
-        # Long: Breakout above Donchian high + volume confirmation
-        if breakout_long and vol_confirm:
-            enter_long = True
-        
-        # Short: Breakout below Donchian low + volume confirmation
-        if breakout_short and vol_confirm:
-            enter_short = True
-        
-        # Exit conditions: price crosses back through the opposite band
-        exit_long = price_close < donchian_low_aligned[i]
-        exit_short = price_close > donchian_high_aligned[i]
+        # Exit conditions: price returns to median (close to previous day's close)
+        exit_long = price_close < prev_close[i] if not np.isnan(prev_close[i]) else False
+        exit_short = price_close > prev_close[i] if not np.isnan(prev_close[i]) else False
         
         # Trading logic
         if enter_long and position != 1:
@@ -95,8 +107,9 @@ def generate_signals(prices):
     
     return signals
 
-# Hypothesis: Daily Donchian breakout (20-period) with volume confirmation on 6h timeframe.
-# Captures strong momentum moves when price breaks out of daily range with increased volume.
-# Works in both bull and bear markets by capturing breakouts in either direction.
-# Volume confirmation reduces false breakouts. Position size 0.25 manages risk.
-# Target: 50-150 trades over 4 years (12-37/year).
+# Hypothesis: Camarilla pivot breakouts on daily timeframe with 4h execution.
+# Camarilla levels identify key support/resistance levels based on previous day's range.
+# Breakouts above R3 or below S3 with volume confirmation indicate strong momentum.
+# Returns to previous day's close act as natural profit targets/reversal points.
+# Works in both bull and bear markets as it captures breakout moves in either direction.
+# Position size 0.25 limits drawdown. Target: 20-50 trades per year.
