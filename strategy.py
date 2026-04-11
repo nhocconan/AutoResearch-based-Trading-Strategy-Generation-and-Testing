@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-# 1d_1w_rsi_divergence_volume_v1
-# Strategy: Daily RSI divergence with weekly trend filter and volume confirmation
-# Timeframe: 1d
+# 6h_1d_adx_breakout_v1
+# Strategy: 6-hour breakout with ADX trend strength filter and 1-day directional bias
+# Timeframe: 6h
 # Leverage: 1.0
-# Hypothesis: RSI divergence (price makes new high/low but RSI does not) signals exhaustion.
-# Bullish: bullish divergence (higher low in price, lower low in RSI) + price above weekly EMA50 + volume > 1.5x avg.
-# Bearish: bearish divergence (lower high in price, higher high in RSI) + price below weekly EMA50 + volume > 1.5x avg.
-# Works in bull markets by catching pullbacks and in bear markets by catching bounces.
+# Hypothesis: ADX > 25 indicates strong trend; breakouts in direction of 1-day trend have higher success.
+# Works in bull markets by capturing upward breakouts with ADX confirmation.
+# Works in bear markets by capturing downward breakouts when 1-day trend is down.
 # Uses tight entry conditions to limit trades (~15-30/year) and avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_rsi_divergence_volume_v1"
-timeframe = "1d"
+name = "6h_1d_adx_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,82 +27,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 60:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA(50) for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Daily trend: close vs open (bullish/bearish day)
+    daily_bullish = df_1d['close'].values > df_1d['open'].values
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
     
-    # Daily RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # 6h ADX (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])  # align with original index
     
-    # Daily volume confirmation: current volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg_20)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # RSI divergence detection (requires 3-day lookback for swing points)
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
+    period = 14
+    tr_sum = wilder_smooth(tr, period)
+    plus_dm_smooth = wilder_smooth(plus_dm, period)
+    minus_dm_smooth = wilder_smooth(minus_dm, period)
     
-    for i in range(2, n):
-        # Bullish divergence: higher low in price, lower low in RSI
-        if low[i] < low[i-1] and low[i-1] > low[i-2]:  # recent low at i-1
-            if rsi[i] < rsi[i-1] and rsi[i-1] > rsi[i-2]:  # RSI making lower low
-                # Check if current price low is higher than prior swing low
-                j = i-2
-                while j >= 0 and low[j] > low[i-1]:
-                    j -= 1
-                if j >= 0 and low[i] > low[j]:
-                    bullish_div[i] = True
-        
-        # Bearish divergence: lower high in price, higher high in RSI
-        if high[i] > high[i-1] and high[i-1] < high[i-2]:  # recent high at i-1
-            if rsi[i] > rsi[i-1] and rsi[i-1] < rsi[i-2]:  # RSI making higher high
-                # Check if current price high is lower than prior swing high
-                j = i-2
-                while j >= 0 and high[j] < high[i-1]:
-                    j -= 1
-                if j >= 0 and high[i] < high[j]:
-                    bearish_div[i] = True
+    plus_di = 100 * plus_dm_smooth / tr_sum
+    minus_di = 100 * minus_dm_smooth / tr_sum
+    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, period)
+    
+    # 6h Donchian breakout (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):  # Start after RSI warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is invalid
-        if np.isnan(ema_50_1w_aligned[i]):
+        if (np.isnan(adx[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(daily_bullish_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # ADX trend strength filter
+        strong_trend = adx[i] > 25
         
-        # Entry logic: RSI divergence + volume + trend alignment
-        if bullish_div[i] and vol_confirm[i] and uptrend and position != 1:
+        # Breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # break above prior 20-period high
+        breakout_down = close[i] < lowest_low[i-1]   # break below prior 20-period low
+        
+        # Entry logic: breakout + strong trend + daily bias alignment
+        if breakout_up and strong_trend and daily_bullish_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        elif bearish_div[i] and vol_confirm[i] and downtrend and position != -1:
+        elif breakout_down and strong_trend and not daily_bullish_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: opposite divergence with volume confirmation
-        elif position == 1 and bearish_div[i] and vol_confirm[i]:
+        # Exit: opposite breakout
+        elif position == 1 and breakout_down:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bullish_div[i] and vol_confirm[i]:
+        elif position == -1 and breakout_up:
             position = 0
             signals[i] = 0.0
         else:
