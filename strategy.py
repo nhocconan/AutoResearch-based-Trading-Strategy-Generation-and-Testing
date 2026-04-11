@@ -3,18 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w volume confirmation and ATR-based stoploss
-# - Long: Price breaks above Donchian upper channel (20-period high) + weekly volume > 1.5x 20-period average
-# - Short: Price breaks below Donchian lower channel (20-period low) + weekly volume > 1.5x 20-period average
-# - Exit: ATR-based trailing stop (2.0 ATR from extreme) or opposite Donchian breakout
+# Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation
+# - Uses 1d Camarilla pivot levels (R3, R4, S3, S4) for breakout/fade logic
+# - Long: Price breaks above R4 with volume > 1.5x 20-period 1d average volume
+# - Short: Price breaks below S4 with volume > 1.5x 20-period 1d average volume
+# - Fade trades: Long at S3 with volume confirmation, Short at R3 with volume confirmation
+# - Exit: Opposite Camarilla level (R3 for long exits, S3 for short exits) or ATR trailing stop
 # - Uses discrete position sizing: ±0.25 to limit drawdown and reduce fee churn
-# - Target: 7-25 trades/year (30-100 total over 4 years) to stay within fee drag limits
-# - Donchian channels provide clear structure for breakouts in both bull and bear markets
-# - Weekly volume confirmation filters out weak breakouts and increases signal quality
-# - ATR stoploss manages risk during volatile periods
+# - Target: 12-37 trades/year (50-150 total over 4 years) to stay within fee drag limits
+# - Camarilla pivots work well in both ranging and trending markets
+# - Volume confirmation filters out weak breakouts and increases signal quality
+# - 6h timeframe balances trade frequency and responsiveness for BTC/ETH
 
-name = "1d_1w_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,29 +35,47 @@ def generate_signals(prices):
     long_stop = 0.0
     short_stop = 0.0
     
-    # Load 1w data ONCE before loop for volume confirmation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load 1d data ONCE before loop for Camarilla pivots and volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return signals
     
-    # Pre-compute 1w volume confirmation (20-period average)
-    volume_1w = df_1w['volume'].values
-    volume_sma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1w, volume_sma_20_1w)
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pre-compute Donchian channels on 1d timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Pivot point (PP) = (High + Low + Close) / 3
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Range = High - Low
+    range_1d = high_1d - low_1d
     
-    # Pre-compute ATR for stoploss (1d timeframe)
+    # Camarilla levels
+    r3 = pp + range_1d * 1.1 / 4.0
+    r4 = pp + range_1d * 1.1 / 2.0
+    s3 = pp - range_1d * 1.1 / 4.0
+    s4 = pp - range_1d * 1.1 / 2.0
+    
+    # Pre-compute 1d volume confirmation (20-period average)
+    volume_1d = df_1d['volume'].values
+    volume_sma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_sma_20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma_20_1d)
+    
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Pre-compute ATR for stoploss (6h timeframe)
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
     tr[0] = high[0] - low[0]
     atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     for i in range(50, n):  # Start after 50-bar warmup
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_sma_20_aligned[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(volume_sma_20_aligned[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
@@ -63,23 +83,33 @@ def generate_signals(prices):
         close_price = close[i]
         volume_current = volume[i]
         
-        # Donchian levels
-        upper_channel = highest_high[i]
-        lower_channel = lowest_low[i]
+        # Camarilla levels
+        r3_level = r3_aligned[i]
+        r4_level = r4_aligned[i]
+        s3_level = s3_aligned[i]
+        s4_level = s4_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x 20-period average (from 1w data)
+        # Volume confirmation: current volume > 1.5x 20-period average
         vol_confirm = volume_current > 1.5 * volume_sma_20_aligned[i]
         
         # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long breakout: price closes above upper Donchian channel with volume confirmation
-        if close_price > upper_channel and vol_confirm:
+        # Breakout entries
+        # Long breakout: price closes above R4 with volume confirmation
+        if close_price > r4_level and vol_confirm:
             enter_long = True
+        # Short breakout: price closes below S4 with volume confirmation
+        if close_price < s4_level and vol_confirm:
+            enter_short = True
         
-        # Short breakout: price closes below lower Donchian channel with volume confirmation
-        if close_price < lower_channel and vol_confirm:
+        # Fade entries (mean reversion at extreme levels)
+        # Long fade: price touches S3 with volume confirmation (only when not already long)
+        if close_price <= s3_level and vol_confirm and position != 1:
+            enter_long = True
+        # Short fade: price touches R3 with volume confirmation (only when not already short)
+        if close_price >= r3_level and vol_confirm and position != -1:
             enter_short = True
         
         # Exit conditions
@@ -87,11 +117,11 @@ def generate_signals(prices):
         exit_short = False
         
         if position == 1:
-            # Exit long if price hits ATR stoploss or breaks below lower channel
-            exit_long = (close_price <= long_stop) or (close_price < lower_channel)
+            # Exit long if price hits ATR stoploss, breaks below S3, or reaches R3 (profit target)
+            exit_long = (close_price <= long_stop) or (close_price < s3_level) or (close_price >= r3_level)
         elif position == -1:
-            # Exit short if price hits ATR stoploss or breaks above upper channel
-            exit_short = (close_price >= short_stop) or (close_price > upper_channel)
+            # Exit short if price hits ATR stoploss, breaks above R3, or reaches S3 (profit target)
+            exit_short = (close_price >= short_stop) or (close_price > r3_level) or (close_price <= s3_level)
         
         # Update stoploss levels when entering a position
         if enter_long:
