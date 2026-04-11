@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_pullback_v3
-# Strategy: 4h Camarilla pivot pullback with 1d volume confirmation and ADX trend filter
+# 4h_1d_volume_breakout_v1
+# Strategy: 4h breakout with 1d volume confirmation and ADX trend filter
 # Timeframe: 4h
 # Leverage: 1.0
-# Hypothesis: Price often pulls back to Camarilla pivot levels (H3/L3) before continuing the trend.
-# In strong trends (ADX > 25), buying near L3 in uptrends or selling near H3 in downtrends
-# with above-average 1d volume offers high-probability entries. Works in bull markets
-# (buy pullbacks in uptrends) and bear markets (sell rallies in downtrends).
+# Hypothesis: Breakouts above 4h resistance (or below support) with above-average daily volume
+# and strong trend (ADX > 25) have higher follow-through. Works in bull markets (breakout longs)
+# and bear markets (breakdown shorts) by capturing momentum after consolidation.
 # Target: 20-40 trades/year to avoid overtrading.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_pullback_v3"
+name = "4h_1d_volume_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close
-    c = close + (range_val * 1.1 / 12)
-    d = close - (range_val * 1.1 / 12)
-    h3 = close + (range_val * 1.1 / 6)
-    l3 = close - (range_val * 1.1 / 6)
-    h4 = close + (range_val * 1.1 / 2)
-    l4 = close - (range_val * 1.1 / 2)
-    return h3, l3, h4, l4
+def calculate_atr(high, low, close, period=14):
+    """Calculate Average True Range"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = np.zeros_like(tr)
+    if len(tr) < period:
+        return atr
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -98,63 +99,37 @@ def generate_signals(prices):
     vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
     
-    # Calculate daily Camarilla levels
-    h3_1d = np.zeros(len(df_1d))
-    l3_1d = np.zeros(len(df_1d))
-    h4_1d = np.zeros(len(df_1d))
-    l4_1d = np.zeros(len(df_1d))
-    
-    for i in range(len(df_1d)):
-        h3, l3, h4, l4 = calculate_camarilla(
-            df_1d['high'].iloc[i],
-            df_1d['low'].iloc[i],
-            df_1d['close'].iloc[i]
-        )
-        h3_1d[i] = h3
-        l3_1d[i] = l3
-        h4_1d[i] = h4
-        l4_1d[i] = l4
-    
-    # Align Camarilla levels to 4h
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    # 4h resistance/support levels (20-period high/low)
+    resistance = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    support = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
         if (np.isnan(adx_aligned[i]) or np.isnan(vol_avg_20_aligned[i]) or 
-            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i])):
+            np.isnan(resistance[i]) or np.isnan(support[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Current 1d volume (aligned)
         vol_1d_current = align_htf_to_ltf(prices, df_1d, vol_1d)[i]
-        vol_confirm = vol_1d_current > 1.3 * vol_avg_20_aligned[i]
+        vol_confirm = vol_1d_current > 1.5 * vol_avg_20_aligned[i]
         
         # Trend filter: ADX > 25 indicates strong trend
         trend_filter = adx_aligned[i] > 25
         
-        # Pullback to Camarilla levels
-        # Long: pullback to L3 in uptrend (price near L3 and rising)
-        # Short: pullback to H3 in downtrend (price near H3 and falling)
-        near_l3 = abs(close[i] - l3_aligned[i]) < (h4_aligned[i] - l4_aligned[i]) * 0.02
-        near_h3 = abs(close[i] - h3_aligned[i]) < (h4_aligned[i] - l4_aligned[i]) * 0.02
+        # Breakout conditions
+        breakout_up = close[i] > resistance[i-1]  # break above previous resistance
+        breakout_down = close[i] < support[i-1]   # break below previous support
         
-        # Price momentum confirmation
-        price_up = close[i] > close[i-3]  # rising over 3 periods
-        price_down = close[i] < close[i-3]  # falling over 3 periods
+        long_signal = breakout_up and vol_confirm and trend_filter
+        short_signal = breakout_down and vol_confirm and trend_filter
         
-        long_signal = near_l3 and price_up and vol_confirm and trend_filter
-        short_signal = near_h3 and price_down and vol_confirm and trend_filter
-        
-        # Exit conditions: opposite Camarilla level or trend weakening
-        long_exit = (close[i] > h3_aligned[i]) or (adx_aligned[i] < 20)
-        short_exit = (close[i] < l3_aligned[i]) or (adx_aligned[i] < 20)
+        # Exit conditions: opposite breakout or trend weakening
+        long_exit = close[i] < support[i-1] or adx_aligned[i] < 20
+        short_exit = close[i] > resistance[i-1] or adx_aligned[i] < 20
         
         if long_signal and position != 1:
             position = 1
