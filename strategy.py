@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_volume_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,28 +55,18 @@ def generate_signals(prices):
     camarilla_H4 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
     camarilla_L4 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
     camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
     
-    # Volume confirmation: 20-period average on 12h
+    # Volume confirmation: 20-period average on 4h
     volume_sma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Price momentum filter: close above/below 20-period SMA on 12h
-    close_sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Track consecutive triggers to prevent whipsaw
-    consecutive_long_trigger = 0
-    consecutive_short_trigger = 0
     
     for i in range(100, n):
         # Skip if any required data is invalid
         if (np.isnan(camarilla_H4_aligned[i]) or np.isnan(camarilla_L4_aligned[i]) or
-            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i]) or
-            np.isnan(close_sma_20[i])):
+            np.isnan(volume_sma_20[i]) or np.isnan(atr_ratio_1d[i])):
             signals[i] = 0.0
-            consecutive_long_trigger = 0
-            consecutive_short_trigger = 0
             continue
         
         price_close = close[i]
@@ -88,33 +78,19 @@ def generate_signals(prices):
         # Volatility regime filter: trade only when volatility is elevated (ATR ratio > 0.8)
         vol_regime = atr_ratio_1d[i] > 0.8
         
-        # Price momentum filter: price above SMA for longs, below SMA for shorts
-        mom_filter_long = price_close > close_sma_20[i]
-        mom_filter_short = price_close < close_sma_20[i]
-        
-        # Entry conditions with consecutive trigger requirement
+        # Entry conditions
         enter_long = False
         enter_short = False
         
-        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime + momentum filter
+        # Long: Price breaks above Camarilla H4 level + volume confirmation + volatility regime
         price_above_H4 = price_close > camarilla_H4_aligned[i]
-        if price_above_H4 and vol_confirm and vol_regime and mom_filter_long:
-            consecutive_long_trigger += 1
-            consecutive_short_trigger = 0
-            if consecutive_long_trigger >= 2:  # Require 2 consecutive triggers
-                enter_long = True
-        else:
-            consecutive_long_trigger = 0
+        if price_above_H4 and vol_confirm and vol_regime:
+            enter_long = True
         
-        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime + momentum filter
+        # Short: Price breaks below Camarilla L4 level + volume confirmation + volatility regime
         price_below_L4 = price_close < camarilla_L4_aligned[i]
-        if price_below_L4 and vol_confirm and vol_regime and mom_filter_short:
-            consecutive_short_trigger += 1
-            consecutive_long_trigger = 0
-            if consecutive_short_trigger >= 2:  # Require 2 consecutive triggers
-                enter_short = True
-        else:
-            consecutive_short_trigger = 0
+        if price_below_L4 and vol_confirm and vol_regime:
+            enter_short = True
         
         # Exit conditions: price crosses back through the Camarilla mid-point (C level)
         exit_long = False
