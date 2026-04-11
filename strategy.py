@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v21
-# Strategy: 4h breakout at Camarilla levels calculated from 1d close, with volume confirmation and ADX trend filter
-# Timeframe: 4h
-# Leverage: 1.0
-# Hypothesis: Camarilla levels from daily price action provide strong support/resistance.
-# Breakouts above resistance or below support with above-average volume and trending market (ADX>25) capture momentum.
-# Works in both bull and bear markets by following the direction of the breakout. Target: 20-40 trades/year.
+ # 4h_1d_camarilla_breakout_v22
+ # Strategy: 4h breakout at Camarilla levels calculated from 1d close, with volume confirmation and ADX trend filter
+ # Timeframe: 4h
+ # Leverage: 1.0
+ # Hypothesis: Camarilla levels from daily price action provide strong support/resistance.
+ # Breakouts above resistance or below support with above-average volume and trending market (ADX>25) capture momentum.
+ # Works in both bull and bear markets by following the direction of the breakout. Target: 20-40 trades/year.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v21"
+name = "4h_1d_camarilla_breakout_v22"
 timeframe = "4h"
 leverage = 1.0
 
