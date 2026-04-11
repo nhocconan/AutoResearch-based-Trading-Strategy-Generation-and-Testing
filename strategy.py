@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1w_momentum_reversal_v1
-Strategy: 6h momentum reversal with weekly trend filter and volume confirmation
-Timeframe: 6h
+1d_1w_camarilla_breakout_volume_v1
+Strategy: 1d Camarilla pivot breakout with volume confirmation and weekly trend filter
+Timeframe: 1d
 Leverage: 1.0
-Hypothesis: Combines 6h RSI momentum extremes (oversold/overbought) with weekly trend direction to capture reversals in trending markets. Uses volume spike confirmation to filter false signals. Designed to work in both bull (buy oversold in uptrend) and bear (sell overbought in downtrend) markets by aligning with higher timeframe momentum. Target: 50-150 total trades over 4 years.
+Hypothesis: Uses daily Camarilla pivot levels (H3/L3) for breakout entries confirmed by volume spike (>1.5x average volume) and filtered by weekly EMA20 trend direction. Designed to capture strong momentum moves in trending markets while avoiding false breakouts in chop. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered out). Target: 20-50 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_momentum_reversal_v1"
-timeframe = "6h"
+name = "1d_1w_camarilla_breakout_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,63 +29,62 @@ def generate_signals(prices):
     # Load higher timeframe data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 6h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily range for Camarilla calculation (use previous day's range)
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
+    prev_close = np.concatenate([[np.nan], close[:-1]])
     
-    # Weekly RSI(14) for trend filter
-    close_1w = df_1w['close'].values
-    delta_1w = np.diff(close_1w, prepend=close_1w[0])
-    gain_1w = np.where(delta_1w > 0, delta_1w, 0)
-    loss_1w = np.where(delta_1w < 0, -delta_1w, 0)
-    avg_gain_1w = pd.Series(gain_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1w = pd.Series(loss_1w).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1w = avg_gain_1w / (avg_loss_1w + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate Camarilla levels for each day using previous day's data
+    # H3 = Close + 1.1 * (High - Low) / 2
+    # L3 = Close - 1.1 * (High - Low) / 2
+    daily_range = prev_high - prev_low
+    h3 = prev_close + 1.1 * daily_range / 2.0
+    l3 = prev_close - 1.1 * daily_range / 2.0
     
     # Volume average (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
+    # Weekly EMA20 for trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
+            np.isnan(vol_avg[i]) or np.isnan(ema_20_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Weekly trend: RSI > 50 = uptrend, < 50 = downtrend
-        weekly_uptrend = rsi_1w_aligned[i] > 50
-        weekly_downtrend = rsi_1w_aligned[i] < 50
+        price_close = close[i]
         
-        # 6h momentum extremes
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Trend filter: price above/below weekly EMA20
+        uptrend_1w = price_close > ema_20_1w_aligned[i]
+        downtrend_1w = price_close < ema_20_1w_aligned[i]
+        
+        # Breakout conditions using Camarilla H3/L3
+        breakout_up = price_close > h3[i]   # Break above H3
+        breakout_down = price_close < l3[i] # Break below L3
         
         # Volume confirmation
         vol_confirmed = vol_spike[i]
         
-        # Long: oversold + volume spike in weekly uptrend
-        long_signal = rsi_oversold and vol_confirmed and weekly_uptrend
+        # Long: upward breakout with volume in uptrend
+        long_signal = breakout_up and vol_confirmed and uptrend_1w
         
-        # Short: overbought + volume spike in weekly downtrend
-        short_signal = rsi_overbought and vol_confirmed and weekly_downtrend
+        # Short: downward breakout with volume in downtrend
+        short_signal = breakout_down and vol_confirmed and downtrend_1w
         
-        # Exit when RSI returns to neutral zone (40-60)
-        exit_long = position == 1 and rsi[i] > 40
-        exit_short = position == -1 and rsi[i] < 60
+        # Exit when price returns to previous day's close (mean reversion to pivot area)
+        exit_long = position == 1 and price_close < prev_close[i]
+        exit_short = position == -1 and price_close > prev_close[i]
         
         # Trading logic
         if long_signal and position != 1:
