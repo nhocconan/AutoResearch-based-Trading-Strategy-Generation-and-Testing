@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_volume_v1
-# Strategy: 4h Camarilla pivot breakout with daily volume confirmation
-# Timeframe: 4h
+# 1d_1w_camarilla_pivot_volume_v1
+# Strategy: 1d Camarilla pivot levels with weekly trend filter and volume confirmation
+# Timeframe: 1d
 # Leverage: 1.0
-# Hypothesis: Camarilla pivot levels derived from daily price action act as
-# institutional support/resistance. Breakouts with volume confirmation capture
-# institutional flow. Works in bull (breakouts) and bear (mean reversion at H3/L3).
-# Target: 20-30 trades/year to minimize fee drag.
+# Hypothesis: Camarilla pivot levels provide strong support/resistance. Long at L3/S3 bounce with weekly uptrend, short at H3/H4 rejection with weekly downtrend. Volume spike confirms institutional interest. Designed for low frequency (10-25 trades/year) to minimize fee drag in all market regimes.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_pivot_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,72 +24,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # H4 = C + 1.5*(H-L), L4 = C - 1.5*(H-L)
-    # H3 = C + 1.0*(H-L), L3 = C - 1.0*(H-L)
-    # H2 = C + 0.5*(H-L), L2 = C - 0.5*(H-L)
-    # H1 = C + 0.25*(H-L), L1 = C - 0.25*(H-L)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Avoid look-ahead: use previous day's data
-    H_L = prev_high - prev_low
-    H4 = prev_close + 1.5 * H_L
-    L4 = prev_close - 1.5 * H_L
-    H3 = prev_close + 1.0 * H_L
-    L3 = prev_close - 1.0 * H_L
-    H2 = prev_close + 0.5 * H_L
-    L2 = prev_close - 0.5 * H_L
-    H1 = prev_close + 0.25 * H_L
-    L1 = prev_close - 0.25 * H_L
-    
-    # Align to 4h timeframe (use previous day's levels)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_spike = volume > (vol_ma_20 * 1.8)
+    # Weekly EMA(21) for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any required data is invalid
-        if (np.isnan(H4_aligned[i]) or np.isnan(L3_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(30, n):  # Start after warmup period
+        # Calculate daily Camarilla pivot levels
+        # Based on previous day's OHLC
+        if i < 1:
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
+            
+        prev_close = close[i-1]
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_range = prev_high - prev_low
         
-        # Long breakout above H4 with volume
-        if close[i] > H4_aligned[i] and volume_spike[i] and position != 1:
+        if prev_range <= 0:
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            continue
+            
+        # Camarilla levels
+        # H4 = close + 1.5 * range * 1.1
+        # H3 = close + 1.25 * range * 1.1
+        # L3 = close - 1.1 * range * 1.1
+        # L4 = close - 2 * range * 1.1
+        h4 = prev_close + 1.5 * prev_range * 1.1
+        h3 = prev_close + 1.25 * prev_range * 1.1
+        l3 = prev_close - 1.1 * prev_range * 1.1
+        l4 = prev_close - 2.0 * prev_range * 1.1
+        
+        # Volume spike: current volume > 1.8x 20-day average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
+            volume_spike = volume[i] > (vol_ma_20 * 1.8)
+        else:
+            volume_spike = False
+        
+        # Trend filter: price above/below weekly EMA21
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
+        
+        # Entry logic: Camarilla bounce/rejection + volume + trend
+        long_signal = (close[i] <= l3 * 1.002 and close[i] >= l4 * 0.998 and 
+                      volume_spike and uptrend and position != 1)
+        short_signal = (close[i] >= h3 * 0.998 and close[i] <= h4 * 1.002 and 
+                       volume_spike and downtrend and position != -1)
+        
+        if long_signal:
             position = 1
             signals[i] = 0.25
-        # Short breakdown below L4 with volume
-        elif close[i] < L4_aligned[i] and volume_spike[i] and position != -1:
+        elif short_signal:
             position = -1
             signals[i] = -0.25
-        # Mean reversion: long at L3, short at H3
-        elif close[i] < L3_aligned[i] and position != 1:
-            position = 1
-            signals[i] = 0.25
-        elif close[i] > H3_aligned[i] and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Exit: opposite Camarilla level touch
-        elif position == 1 and close[i] > H3_aligned[i]:
+        # Exit: price moves to opposite side of pivot point
+        elif position == 1 and close[i] >= (prev_high + prev_low) / 2:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] < L3_aligned[i]:
+        elif position == -1 and close[i] <= (prev_high + prev_low) / 2:
             position = 0
             signals[i] = 0.0
         else:
