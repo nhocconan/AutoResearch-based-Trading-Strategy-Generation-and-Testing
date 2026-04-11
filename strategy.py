@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_12h_camarilla_volume_trend_v1
-Strategy: 4h Camarilla pivot breakout with 12h volume confirmation and trend filter
-Timeframe: 4h
+1h_4d_roc_extreme_v1
+Strategy: 1h ROC(12) extreme reversal with 4h trend filter
+Timeframe: 1h
 Leverage: 1.0
-Hypothesis: Long when price breaks above Camarilla H3 with 12h volume above average and 12h close > open (uptrend); short when price breaks below L3 with 12h volume above average and 12h close < open (downtrend). Uses 12h trend filter to avoid counter-trend trades. Designed for low-frequency, high-conviction trades in both bull and bear markets. Target: 20-50 trades per year.
+Hypothesis: Uses ROC(12) extremes (>5% for short, <-5% for long) on 1h combined with 4h EMA50 trend filter. Designed to capture short-term mean reversals while following the 4h trend. Works in both bull/bear markets by following the higher timeframe trend. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_volume_trend_v1"
-timeframe = "4h"
+name = "1h_4d_roc_extreme_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,88 +24,58 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
     # Load higher timeframe data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
     
-    if len(df_12h) < 20:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Using daily high/low/close from 1d data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 1h ROC(12)
+    roc = np.zeros_like(close)
+    roc[12:] = (close[12:] - close[:-12]) / close[:-12] * 100.0
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Align daily data to 4h timeframe
-    prev_high_4h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_4h = align_htf_to_ltf(prices, df_1d, prev_low)
-    prev_close_4h = align_htf_to_ltf(prices, df_1d, prev_close)
-    
-    # Calculate Camarilla levels
-    # H4 = Close + 1.5*(High-Low)
-    # H3 = Close + 1.1*(High-Low)
-    # L3 = Close - 1.1*(High-Low)
-    # L4 = Close - 1.5*(High-Low)
-    rang = prev_high_4h - prev_low_4h
-    h3 = prev_close_4h + 1.1 * rang
-    l3 = prev_close_4h - 1.1 * rang
-    
-    # 12h trend filter: bullish if close > open, bearish if close < open
-    close_12h = df_12h['close'].values
-    open_12h = df_12h['open'].values
-    bullish_12h = close_12h > open_12h
-    bearish_12h = close_12h < open_12h
-    bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_12h)
-    bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_12h)
-    
-    # 12h volume confirmation: volume above 20-period average
-    vol_12h = df_12h['volume'].values
-    vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-    vol_above_avg = vol_12h > vol_ma_20
-    vol_above_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_above_avg)
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(bullish_12h_aligned[i]) or np.isnan(bearish_12h_aligned[i]) or
-            np.isnan(vol_above_avg_aligned[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if np.isnan(roc[i]) or np.isnan(ema_50_4h_aligned[i]):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         
-        # Breakout conditions
-        breakout_long = price_high > h3[i]  # Price breaks above H3
-        breakout_short = price_low < l3[i]  # Price breaks below L3
+        # Trend filter
+        uptrend_4h = price_close > ema_50_4h_aligned[i]
+        downtrend_4h = price_close < ema_50_4h_aligned[i]
         
-        # Entry conditions with confirmation
-        long_signal = breakout_long and bullish_12h_aligned[i] and vol_above_avg_aligned[i]
-        short_signal = breakout_short and bearish_12h_aligned[i] and vol_above_avg_aligned[i]
+        # ROC extreme conditions
+        roc_overbought = roc[i] > 5.0
+        roc_oversold = roc[i] < -5.0
         
-        # Exit when price returns to median (Camarilla C3-C4 level)
-        # Simplified: exit when price crosses back below H3 for longs or above L3 for shorts
-        exit_long = position == 1 and price_close < h3[i]
-        exit_short = position == -1 and price_close > l3[i]
+        # Long: ROC oversold in uptrend
+        long_signal = roc_oversold and uptrend_4h
+        
+        # Short: ROC overbought in downtrend
+        short_signal = roc_overbought and downtrend_4h
+        
+        # Exit when ROC returns to neutral zone
+        exit_long = position == 1 and roc[i] > -1.0
+        exit_short = position == -1 and roc[i] < 1.0
         
         # Trading logic
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and exit_long:
             position = 0
             signals[i] = 0.0
@@ -113,6 +83,8 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
+
+# Hypothesis: Uses ROC(12) extremes (>5% for short, <-5% for long) on 1h combined with 4h EMA50 trend filter. Designed to capture short-term mean reversals while following the 4h trend. Works in both bull/bear markets by following the higher timeframe trend. Target: 60-150 total trades over 4 years.
