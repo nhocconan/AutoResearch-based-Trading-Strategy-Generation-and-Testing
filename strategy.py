@@ -1,92 +1,103 @@
 #!/usr/bin/env python3
-# 12h_1d_alligator_trend_v1
-# Strategy: 12h Williams Alligator (3 SMAs) with 1d trend filter and volume confirmation
-# Timeframe: 12h
+# 1h_4h_1d_camarilla_breakout_v1
+# Strategy: 1h Camarilla breakout with 4h/1d trend filter and session filter
+# Timeframe: 1h
 # Leverage: 1.0
-# Hypothesis: Williams Alligator identifies trends when jaws (13-period SMA) are above/below teeth (8-period SMA) and lips (5-period SMA).
-# In bull markets: go long when lips > teeth > jaws (bullish alignment).
-# In bear markets: go short when lips < teeth < jaws (bearish alignment).
-# Uses 1d close > SMA50 for bullish trend filter and < SMA50 for bearish filter to avoid counter-trend trades.
-# Volume confirmation: 12h volume > 1.5x 20-period average to ensure institutional participation.
-# Designed for low trade frequency (~15-30/year) to minimize fee drag.
+# Hypothesis: Camarilla pivot levels act as strong intraday support/resistance.
+# Breakouts above H3 or below L3 with 4h/1d trend alignment capture momentum moves.
+# Session filter (08-20 UTC) reduces noise. Designed for 15-30 trades/year to avoid fee drag.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_alligator_trend_v1"
-timeframe = "12h"
+name = "1h_4h_1d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
     
     # Load 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Williams Alligator on 12h: Jaw (13), Teeth (8), Lips (5) SMAs
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # 1d trend filter: close vs SMA50
+    # 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
-    
-    # Volume confirmation: 12h volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any required data is invalid
-        if np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or \
-           np.isnan(sma_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+    for i in range(100, n):  # Warmup for EMA calculations
+        # Skip if any required data is invalid or outside session
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or not in_session[i]:
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_avg_20[i]
+        # Calculate Camarilla levels for previous candle
+        ph = high[i-1]
+        pl = low[i-1]
+        pc = close[i-1]
+        rang = ph - pl
         
-        # Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        if rang <= 0:
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            continue
         
-        # 1d trend filter
-        bullish_trend = close_1d[i//12] > sma_50_1d[i//12] if i//12 < len(close_1d) else False
-        bearish_trend = close_1d[i//12] < sma_50_1d[i//12] if i//12 < len(close_1d) else False
+        # Camarilla levels
+        h3 = pc + (rang * 1.1 / 6)
+        l3 = pc - (rang * 1.1 / 6)
+        h4 = pc + (rang * 1.1 / 2)
+        l4 = pc - (rang * 1.1 / 2)
+        
+        # Trend filters
+        uptrend_4h = close[i] > ema_50_4h_aligned[i]
+        uptrend_1d = close[i] > ema_200_1d_aligned[i]
+        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        downtrend_1d = close[i] < ema_200_1d_aligned[i]
         
         # Entry conditions
-        # Long: Alligator bullish AND 1d bullish trend AND volume confirmation
-        if bullish_alignment and bullish_trend and vol_confirm and position != 1:
+        # Long: Price breaks above H3 with 4h/1d uptrend
+        if close[i] > h3 and uptrend_4h and uptrend_1d and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short: Alligator bearish AND 1d bearish trend AND volume confirmation
-        elif bearish_alignment and bearish_trend and vol_confirm and position != -1:
+            signals[i] = 0.20
+        # Short: Price breaks below L3 with 4h/1d downtrend
+        elif close[i] < l3 and downtrend_4h and downtrend_1d and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit: Opposite Alligator alignment (trend change)
-        elif position == 1 and bearish_alignment:
+            signals[i] = -0.20
+        # Exit: Opposite break of H3/L3
+        elif position == 1 and close[i] < l3:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bullish_alignment:
+        elif position == -1 and close[i] > h3:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
