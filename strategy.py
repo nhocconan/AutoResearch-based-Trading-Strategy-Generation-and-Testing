@@ -1,15 +1,21 @@
+# 12h_1w_engulfing_pattern_volume_filter_v1
+# Hypothesis: On 12h timeframe, weekly bullish/bearish engulfing patterns combined with volume confirmation (>1.5x average volume) and ADX filter (>25) capture high-probability trend continuations.
+# Weekly engulfing patterns identify strong weekly reversals/continuations. Volume confirms institutional interest. ADX>25 ensures trades only in strong trends, reducing whipsaw.
+# Target: 15-25 trades per year to minimize fee drag while capturing strong weekly moves.
+# Works in bull markets (captures continuations) and bear markets (captures trend continuations during rallies/sell-offs).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_keltner_breakout_volume_trend_v2"
+name = "12h_1w_engulfing_pattern_volume_filter_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,42 +25,32 @@ def generate_signals(prices):
     
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly OHLC for Keltner channel calculation
+    # Weekly OHLC for engulfing pattern detection
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    open_1w = df_1w['open'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA(20) and ATR(10) for Keltner channel
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate weekly bullish and bearish engulfing patterns
+    # Bullish engulfing: current week closes above prior week's open AND opens below prior week's close
+    bullish_engulf = (close_1w > open_1w) & (open_1w < close_1w) & \
+                     (close_1w > open_1w[:-1]) & (open_1w < close_1w[:-1]) & \
+                     (close_1w > close_1w[:-1]) & (open_1w < open_1w[:-1])
+    # Bearish engulfing: current week closes below prior week's open AND opens above prior week's close
+    bearish_engulf = (close_1w < open_1w) & (open_1w > close_1w) & \
+                     (close_1w < open_1w[:-1]) & (open_1w > close_1w[:-1]) & \
+                     (close_1w < close_1w[:-1]) & (open_1w > open_1w[:-1])
     
-    # Keltner channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Handle first week (no prior week)
+    bullish_engulf[0] = False
+    bearish_engulf[0] = False
     
-    # Shift by 1 to use only completed weekly bars (previous week's levels)
-    keltner_upper = np.roll(keltner_upper, 1)
-    keltner_lower = np.roll(keltner_lower, 1)
-    keltner_upper[0] = np.nan
-    keltner_lower[0] = np.nan
-    
-    # Align weekly Keltner levels to 12h timeframe
-    upper_12h = align_htf_to_ltf(prices, df_1w, keltner_upper)
-    lower_12h = align_htf_to_ltf(prices, df_1w, keltner_lower)
-    
-    # 12h ATR for volatility filter (14 period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly engulfing signals to 12h timeframe (use signal from prior week's close)
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bullish_engulf.astype(float))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bearish_engulf.astype(float))
     
     # 12h volume filter: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,7 +58,7 @@ def generate_signals(prices):
     # 12h ADX for trend strength (14 period)
     plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
     minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr_dm = tr[1:]
+    tr_dm = np.concatenate([[np.nan], np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))])
     plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
     minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / pd.Series(tr_dm).rolling(window=14, min_periods=14).mean().values
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
@@ -71,16 +67,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
+        if (np.isnan(bullish_engulf_aligned[i]) or np.isnan(bearish_engulf_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        price_close = close[i]
-        price_high = high[i]
-        price_low = low[i]
         volume_current = volume[i]
         vol_ma = vol_ma_20[i]
         
@@ -90,16 +83,15 @@ def generate_signals(prices):
         # Trend filter: ADX > 25 (strong trend filter to reduce trades)
         trend_filter = adx[i] > 25
         
-        # Long conditions: price breaks above upper Keltner with volume and trend
-        long_signal = volume_confirmed and trend_filter and (price_high > upper_12h[i])
+        # Long conditions: weekly bullish engulfing with volume and trend
+        long_signal = volume_confirmed and trend_filter and bullish_engulf_aligned[i] > 0.5
         
-        # Short conditions: price breaks below lower Keltner with volume and trend
-        short_signal = volume_confirmed and trend_filter and (price_low < lower_12h[i])
+        # Short conditions: weekly bearish engulfing with volume and trend
+        short_signal = volume_confirmed and trend_filter and bearish_engulf_aligned[i] > 0.5
         
-        # Exit when price returns to the opposite side of the EMA (mean reversion)
-        ema_12h = align_htf_to_ltf(prices, df_1w, ema_20)
-        exit_long = position == 1 and price_close < ema_12h[i]
-        exit_short = position == -1 and price_close > ema_12h[i]
+        # Exit when opposite engulfing pattern appears (pattern completion)
+        exit_long = position == 1 and bearish_engulf_aligned[i] > 0.5
+        exit_short = position == -1 and bullish_engulf_aligned[i] > 0.5
         
         # Trading logic
         if long_signal and position != 1:
@@ -118,13 +110,3 @@ def generate_signals(prices):
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
-
-# Hypothesis: Weekly Keltner breakout strategy for 12h timeframe with ADX filter (>25) and volume confirmation (>1.5x average volume).
-# Enters long when 12h price breaks above weekly upper Keltner band (EMA20 + 2*ATR10) with volume >1.5x average and ADX>25.
-# Enters short when price breaks below weekly lower Keltner band (EMA20 - 2*ATR10) with same conditions.
-# Exits when price returns to the weekly EMA20 (mean reversion within the week's range).
-# Higher ADX threshold reduces trade frequency to avoid overtrading while maintaining edge in strong trends.
-# Target: 15-25 trades per year to minimize fee drift while capturing strong weekly trends.
-# Keltner channels adapt better to volatility changes than fixed percentage channels, making them suitable for both bull and bear markets.
-# The 12h timeframe provides a balance between capturing weekly moves and reducing noise compared to lower timeframes.
-# Weekly timeframe is used to capture longer-term trends and avoid noise from shorter-term fluctuations.
