@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1w_ema_trend_with_volume_and_atr
-# Hypothesis: 12-hour trend following using weekly EMA trend filter, with price crossing above/below EMA as entry signal.
-# Volume confirmation and ATR volatility filter reduce false signals. Works in bull/bear by only taking trades in direction of higher timeframe trend.
-# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
+"""
+1d_1w_camarilla_breakout_with_volume_and_atr
+Hypothesis: Daily Camarilla breakout with volume confirmation and ATR volatility filter.
+Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
+Targets weekly timeframe for trend context, daily for execution. Designed for 7-25 trades/year.
+"""
 
-name = "12h_1w_ema_trend_with_volume_and_atr"
-timeframe = "12h"
+name = "1d_1w_camarilla_breakout_with_volume_and_atr"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,65 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA trend filter
+    # Get weekly data for trend context
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Get daily data for ATR calculation
+    # Get daily data for Camarilla and ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily ATR(14) for volatility filter
+    # Previous day's range (for Camarilla)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    
+    # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
+    # Resistance levels
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
+    # Support levels
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
+    
+    # ATR for volatility filter (14-day ATR)
     tr1 = np.abs(np.subtract(high_1d, low_1d))
     tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
     tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align weekly EMA and daily ATR to 12h timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Weekly trend: price above/below 20-period EMA
+    close_1w = df_1w['close'].values
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    
+    # Align daily levels to daily timeframe (no alignment needed as we're already on 1d)
+    # But we still use the helper for consistency and proper handling
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Volume confirmation: volume > 1.3x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr_aligned[i]) or np.isnan(ema_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price crosses above weekly EMA with volume and volatility filter
-        if (close[i] > ema_50_1w_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: close breaks above R4 with volume, volatility filter, and weekly uptrend
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and close[i] > ema_20_aligned[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price crosses below weekly EMA with volume and volatility filter
-        elif (close[i] < ema_50_1w_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: close breaks below S4 with volume, volatility filter, and weekly downtrend
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and close[i] < ema_20_aligned[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal
-        elif position == 1 and close[i] < ema_50_1w_aligned[i]:
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ema_50_1w_aligned[i]:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
