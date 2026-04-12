@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_pivot_volume
-Uses 12h price with 1d Camarilla pivot levels, volume confirmation, and trend filter.
-Long when price > H4 and above EMA200, short when price < L4 and below EMA200.
-Exit when price returns to Pivot or reverses at H3/L3.
-Designed for low trade frequency (target: 12-30 trades/year) to minimize fee drift.
-Works in both trending and ranging markets by combining pivot levels with trend filter.
+4h_1d_donchian_breakout_volume
+Uses Donchian channel breakout on 4h with volume confirmation and 1d trend filter.
+Long when price breaks above 20-period high with volume and 1d close > SMA50.
+Short when price breaks below 20-period low with volume and 1d close < SMA50.
+Exit when price crosses the 20-period opposite band.
+Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
+Works in both trending and ranging markets by combining breakout logic with trend filter.
 """
 
-name = "12h_1d_camarilla_pivot_volume"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,66 +27,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla pivot levels
-    # Pivot = (High + Low + Close) / 3
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H3 = Close + 1.25 * (High - Low)
-    # L3 = Close - 1.25 * (High - Low)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
-    h4 = close_1d + 1.5 * range_hl
-    l4 = close_1d - 1.5 * range_hl
-    h3 = close_1d + 1.25 * range_hl
-    l3 = close_1d - 1.25 * range_hl
+    # Donchian Channel (20) on 4h
+    dc_length = 20
+    upper_dc = pd.Series(high).rolling(window=dc_length, min_periods=dc_length).max().values
+    lower_dc = pd.Series(low).rolling(window=dc_length, min_periods=dc_length).min().values
     
-    # Align Camarilla levels to 12h (using previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    # 1d trend filter: SMA50
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
-    # Trend filter: EMA200 on 12h
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation on 4h: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(h4_aligned[i]) or 
-            np.isnan(l4_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(ema200[i])):
+        if (np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or 
+            np.isnan(sma50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price > H4 and above EMA200, with volume confirmation
-        if close[i] > h4_aligned[i] and close[i] > ema200[i] and vol_confirm[i] and position != 1:
+        # Long entry: price breaks above upper DC with volume and 1d trend up
+        if close[i] > upper_dc[i] and vol_confirm[i] and close_1d[i // 24] > sma50_1d[i // 24] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short entry: price < L4 and below EMA200, with volume confirmation
-        elif close[i] < l4_aligned[i] and close[i] < ema200[i] and vol_confirm[i] and position != -1:
+        # Short entry: price breaks below lower DC with volume and 1d trend down
+        elif close[i] < lower_dc[i] and vol_confirm[i] and close_1d[i // 24] < sma50_1d[i // 24] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions
-        elif position == 1 and (close[i] <= pivot_aligned[i] or close[i] >= h3_aligned[i]):
+        elif position == 1 and close[i] < lower_dc[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] >= pivot_aligned[i] or close[i] <= l3_aligned[i]):
+        elif position == -1 and close[i] > upper_dc[i]:
             position = 0
             signals[i] = 0.0
         else:
