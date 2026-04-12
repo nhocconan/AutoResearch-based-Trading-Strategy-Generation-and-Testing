@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_rsi_divergence_v1
-# Uses daily RSI divergence with 4h price action for entries.
-# Bullish divergence: price makes lower low, RSI makes higher low → long
-# Bearish divergence: price makes higher high, RSI makes lower high → short
-# Volume confirmation and ADX > 25 filter to ensure momentum.
-# Designed to work in both bull (catching bounces) and bear (fading rallies) markets.
-# Target: 20-40 trades/year per symbol.
+# Hypothesis: 4h_1d_kama_rsi_v1
+# Uses KAMA direction as primary trend filter, RSI(14) for mean-reversion entries,
+# and volume confirmation. In bull markets, buy dips when RSI<30 with rising KAMA.
+# In bear markets, sell rallies when RSI>70 with falling KAMA.
+# Volume > 1.5x 20-period average confirms institutional participation.
+# Target: 40-80 trades/year per symbol for balanced frequency and edge.
 
-name = "4h_1d_rsi_divergence_v1"
+name = "4h_1d_kama_rsi_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,142 +24,123 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI calculation
+    # Get 1d data for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily RSI(14)
+    # Calculate KAMA on daily closes
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    kama = calculate_kama(close_1d, 10, 2, 30)
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Wilder's smoothing for RSI
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # KAMA direction: 1=rising, -1=falling, 0=flat
+    kama_dir = np.where(kama_aligned > np.roll(kama_aligned, 1), 1, 
+                        np.where(kama_aligned < np.roll(kama_aligned, 1), -1, 0))
+    kama_dir[0] = 0  # first value
     
-    avg_gain = wilders_smooth(gain, 14)
-    avg_loss = wilders_smooth(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # RSI(14) on 4h closes
+    rsi = calculate_rsi(close, 14)
     
-    # Align RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
-    
-    # ADX trend filter: only trade when ADX > 25 (strong trend)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    
-    atr = wilders_smooth(tr, 14)
-    plus_dm_smooth = wilders_smooth(plus_dm, 14)
-    minus_dm_smooth = wilders_smooth(minus_dm, 14)
-    
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 25
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Track daily highs/lows for divergence detection
-    # We'll look for divergences over the last 3 days
-    lookback_days = 3
-    
-    for i in range(50, n):  # start after warmup
-        # Skip if data not ready
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(adx_filter[i]):
+    for i in range(30, n):  # start after warmup
+        # Skip if values not ready
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_confirm[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and trend filters
-        if not (vol_confirm[i] and adx_filter[i]):
-            # Hold current position if filters fail
+        # Check volume filter
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check for RSI divergence (requires looking back at least 3 days)
-        if i >= lookback_days * 6:  # 6 four-hour bars per day
-            # Get current day's index in daily data
-            current_day_idx = i // 6
-            
-            # Need at least 3 days of data
-            if current_day_idx >= lookback_days:
-                # Get RSI and price for last 3 days
-                rsi_day1 = rsi_1d_aligned[(current_day_idx - 2) * 6 + 5]  # last 4h bar of day-2
-                rsi_day2 = rsi_1d_aligned[(current_day_idx - 1) * 6 + 5]  # last 4h bar of day-1
-                rsi_day3 = rsi_1d_aligned[current_day_idx * 6 + 5]       # last 4h bar of current day
-                
-                price_day1 = close[(current_day_idx - 2) * 6 + 5]
-                price_day2 = close[(current_day_idx - 1) * 6 + 5]
-                price_day3 = close[current_day_idx * 6 + 5]
-                
-                # Bullish divergence: price lower low, RSI higher low
-                if (price_day3 < price_day1 and 
-                    rsi_day3 > rsi_day1 and 
-                    rsi_day3 < 50):  # not overbought
-                    if position != 1:
-                        position = 1
-                        signals[i] = 0.20
-                
-                # Bearish divergence: price higher high, RSI lower high
-                elif (price_day3 > price_day1 and 
-                      rsi_day3 < rsi_day1 and 
-                      rsi_day3 > 50):  # not oversold
-                    if position != -1:
-                        position = -1
-                        signals[i] = -0.20
-            else:
-                # Not enough days yet, hold or flat
-                if position == 1:
-                    signals[i] = 0.20
-                elif position == -1:
-                    signals[i] = -0.20
-                else:
-                    signals[i] = 0.0
+        # Long signal: RSI < 30 (oversold) AND KAMA rising (bullish bias)
+        if rsi[i] < 30 and kama_dir[i] == 1 and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short signal: RSI > 70 (overbought) AND KAMA falling (bearish bias)
+        elif rsi[i] > 70 and kama_dir[i] == -1 and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit conditions: opposite RSI extreme
+        elif rsi[i] > 70 and position == 1:
+            position = 0
+            signals[i] = 0.0
+        elif rsi[i] < 30 and position == -1:
+            position = 0
+            signals[i] = 0.0
         else:
-            # Not enough data for divergence check, hold or flat
+            # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
-            
-        # Exit on opposite divergence or extreme RSI
-        if position == 1 and (rsi_1d_aligned[i] > 70 or 
-                              (i >= lookback_days * 6 and 
-                               price_day3 > price_day1 and 
-                               rsi_day3 < rsi_day1)):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (rsi_1d_aligned[i] < 30 or 
-                                 (i >= lookback_days * 6 and 
-                                  price_day3 < price_day1 and 
-                                  rsi_day3 > rsi_day1)):
-            position = 0
-            signals[i] = 0.0
     
     return signals
+
+def calculate_rsi(prices, period=14):
+    """Calculate RSI with proper Wilder's smoothing"""
+    delta = np.diff(prices)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.full_like(prices, np.nan, dtype=float)
+    avg_loss = np.full_like(prices, np.nan, dtype=float)
+    
+    if len(gain) < period:
+        return avg_gain  # all NaN
+    
+    # First values: simple average
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    # Subsequent values: Wilder's smoothing
+    for i in range(period + 1, len(prices)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    
+    # Avoid division by zero
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_kama(close, fast=2, slow=30, er_period=10):
+    """Calculate Kaufman Adaptive Moving Average"""
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # needs fixing
+    
+    # Correct volatility calculation
+    volatility = np.full_like(change, np.nan, dtype=float)
+    for i in range(len(change)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i:i+er_period+1])))
+    
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = np.square(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[er_period] = close[er_period]  # start with close
+    
+    for i in range(er_period + 1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
