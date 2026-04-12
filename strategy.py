@@ -1,17 +1,18 @@
+#1. State your hypothesis in a comment at the top (strategy type, timeframe, why it should work in BOTH bull AND bear)
+# Hypothesis: 1d_1w_donchian_breakout_v2
+# Weekly Donchian channel breakout with volume confirmation on daily chart.
+# In bull markets: buy breakouts above weekly high with volume surge.
+# In bear markets: sell breakdowns below weekly low with volume surge.
+# Uses weekly trend filter to avoid counter-trend trades.
+# Target: 15-25 trades/year per symbol for low friction and high win rate.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v38
-# Camarilla pivot levels from 1-day chart with volume confirmation and chop regime filter.
-# Uses 4h primary timeframe for optimal trade frequency (target: 20-40 trades/year).
-# Long when price breaks above H4 with volume confirmation in trending market.
-# Short when price breaks below L4 with volume confirmation in trending market.
-# Exit on opposite breakout. Designed to work in both bull and bear markets by
-# capturing institutional breakouts while avoiding chop.
-name = "4h_1d_camarilla_breakout_v38"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,75 +25,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Donchian calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate weekly Donchian channels (20-period high/low)
+    weekly_high = df_1w['high'].rolling(window=20, min_periods=20).max().values
+    weekly_low = df_1w['low'].rolling(window=20, min_periods=20).min().values
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    # Align to daily timeframe (waits for weekly close)
+    donchian_high = align_htf_to_ltf(prices, df_1w, weekly_high)
+    donchian_low = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Align to 4h timeframe
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average on daily
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
+    # Weekly trend filter: price above/below weekly 50-period SMA
+    weekly_close = df_1w['close'].values
+    weekly_sma50 = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    weekly_sma50_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma50)
+    uptrend = close > weekly_sma50_aligned
+    downtrend = close < weekly_sma50_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price breaks above H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: price breaks above weekly Donchian high with volume and uptrend
+        if close[i] > donchian_high[i] and vol_confirm[i] and uptrend[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+        # Short signal: price breaks below weekly Donchian low with volume and downtrend
+        elif close[i] < donchian_low[i] and vol_confirm[i] and downtrend[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
+        # Exit conditions: opposite breakout or trend reversal
+        elif (close[i] < donchian_low[i] and position == 1) or \
+             (close[i] > donchian_high[i] and position == -1) or \
+             (position == 1 and not uptrend[i]) or \
+             (position == -1 and not downtrend[i]):
             position = 0
             signals[i] = 0.0
         else:
