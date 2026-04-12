@@ -21,9 +21,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily ATR for volatility measurement
+    # Calculate daily ATR for volatility measurement (period 14)
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
@@ -40,31 +39,25 @@ def generate_signals(prices):
         high_20[i] = np.max(high_1d[i-19:i+1])
         low_20[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate daily volume moving average
-    vol_ma_20 = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        vol_ma_20[i] = np.mean(volume_1d[i-19:i+1])
-    
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
     low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # Calculate 12-period RSI for momentum filter
+    # Calculate 14-period RSI for momentum filter
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
     avg_gain = np.full(n, np.nan)
     avg_loss = np.full(n, np.nan)
-    for i in range(13, n):
-        if i == 13:
-            avg_gain[i] = np.mean(gain[0:14])
-            avg_loss[i] = np.mean(loss[0:14])
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[0:15])
+            avg_loss[i] = np.mean(loss[0:15])
         else:
-            avg_gain[i] = (avg_gain[i-1] * 12 + gain[i]) / 13
-            avg_loss[i] = (avg_loss[i-1] * 12 + loss[i]) / 13
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
     rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
@@ -75,12 +68,15 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(rsi[i])):
+            np.isnan(atr_1d_aligned[i]) or np.isnan(rsi[i])):
             signals[i] = 0.0
             continue
         
         # Volatility filter: ATR > 0.5 * ATR MA (avoid low volatility choppy periods)
-        vol_filter = volume[i] > vol_ma_20_aligned[i]
+        atr_ma = np.full(n, np.nan)
+        for j in range(29, n):
+            atr_ma[j] = np.nanmean(atr_1d_aligned[j-29:j+1])
+        vol_filter = atr_1d_aligned[i] > 0.5 * atr_ma[i] if not np.isnan(atr_ma[i]) else False
         
         # Momentum filter: RSI between 30 and 70 (avoid extremes)
         mom_filter = (rsi[i] >= 30) and (rsi[i] <= 70)
@@ -116,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_volume_rsi_filter_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_rsi_filter_v1"
+timeframe = "4h"
 leverage = 1.0
