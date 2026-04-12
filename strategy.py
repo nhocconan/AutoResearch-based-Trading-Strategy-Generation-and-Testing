@@ -1,14 +1,11 @@
-# 12h_1d_williams_alligator_v1
-# Hypothesis: Use Williams Alligator (13,8,5 SMAs) on 1d timeframe to determine trend direction and phase (sleeping/awakening/feeding).
-# Enter long when price is above Alligator's lips (13 SMA) and jaws-teeth-lips are properly aligned (bullish alignment: jaws < teeth < lips).
-# Enter short when price is below lips and bearish alignment (jaws > teeth > lips).
-# Add volume confirmation (volume > 1.5x 20-period average) to avoid false signals.
-# Exit on opposite alignment or price crossing the teeth (8 SMA).
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drift.
-# Williams Alligator works in both bull and bear markets by identifying trending vs ranging phases.
+#!/usr/bin/env python3
+# 4h_1d_keltner_breakout_volume_trend_v1
+# Hypothesis: 4-hour strategy using 1-day EMA100 for trend direction and 1-day Keltner breakout for entries, with volume confirmation.
+# Works in bull/bear by requiring alignment with the 1d trend and confirming with volume to avoid false breakouts.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "12h_1d_williams_alligator_v1"
-timeframe = "12h"
+name = "4h_1d_keltner_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,61 +22,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator
+    # Get 1d data for trend and Keltner
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Alligator: SMAs of median price (typical price = (H+L+C)/3)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    # 1d EMA100 for trend direction
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Jaws: 13-period SMMA, teeth: 8-period, lips: 5-period
-    # Using SMA as approximation (SMMA would require Wilder's smoothing)
-    jaws_1d = pd.Series(typical_price_1d).rolling(window=13, min_periods=13).mean().values
-    teeth_1d = pd.Series(typical_price_1d).rolling(window=8, min_periods=8).mean().values
-    lips_1d = pd.Series(typical_price_1d).rolling(window=5, min_periods=5).mean().values
+    # Previous 1d bar's data for Keltner
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
     
-    # Align Alligator lines to 12h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws_1d)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    # ATR(20) for Keltner channels
+    tr1 = np.abs(prev_high_1d - prev_low_1d)
+    tr2 = np.abs(prev_high_1d - prev_close_1d)
+    tr3 = np.abs(prev_low_1d - prev_close_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Keltner channels (2x ATR)
+    upper_keltner = prev_close_1d + 2 * atr20
+    lower_keltner = prev_close_1d - 2 * atr20
+    
+    # Align to 4h timeframe
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i])):
+        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
+            np.isnan(lower_keltner_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Bullish alignment: jaws < teeth < lips (Alligator waking up to eat)
-        bullish_align = jaws_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]
-        # Bearish alignment: jaws > teeth > lips (Alligator waking up to hunt)
-        bearish_align = jaws_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
-        
-        # Long entry: price above lips, bullish alignment, volume confirmation
-        if (close[i] > lips_aligned[i] and bullish_align and vol_confirm[i] and position != 1):
+        # Long entry: price > EMA100 (uptrend) AND close breaks above upper Keltner with volume
+        if (close[i] > ema100_1d_aligned[i] and close[i] > upper_keltner_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price below lips, bearish alignment, volume confirmation
-        elif (close[i] < lips_aligned[i] and bearish_align and vol_confirm[i] and position != -1):
+        # Short entry: price < EMA100 (downtrend) AND close breaks below lower Keltner with volume
+        elif (close[i] < ema100_1d_aligned[i] and close[i] < lower_keltner_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: opposite alignment or price crosses teeth
-        elif position == 1 and (not bullish_align or close[i] < teeth_aligned[i]):
+        # Exit: reverse signal or close crosses back to opposite Keltner band
+        elif position == 1 and close[i] < lower_keltner_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (not bearish_align or close[i] > teeth_aligned[i]):
+        elif position == -1 and close[i] > upper_keltner_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
