@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Reversal_Strategy
-Hypothesis: Kaufman Adaptive Moving Average (KAMA) on daily timeframe filters trend direction.
-Weekly timeframe provides higher timeframe trend filter (EMA50).
-Entries occur when price crosses KAMA with volume confirmation and price is near weekly EMA50 (mean reversion).
-Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
-Low trade frequency (~15-25/year) minimizes fee fade while capturing mean reversion moves.
+12h_1d_RSI_Streak_Reversal_Strategy
+Hypothesis: RSI streaks on daily timeframe identify overextended moves. 
+Three consecutive RSI closes above 70 (overbought) or below 30 (oversold) 
+signal reversals. Enter on close of third candle with volume confirmation 
+and 12h trend filter (price vs 20-period EMA). Exit on RSI mean reversion 
+(to 50) or opposite streak. Designed for low frequency (15-25 trades/year) 
+to minimize fee drag while capturing mean reversion in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_Reversal_Strategy"
-timeframe = "1d"
+name = "12h_1d_RSI_Streak_Reversal_Strategy"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,60 +27,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY KAMA FOR TREND FILTER ===
+    # === DAILY RSI CALCULATION ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # KAMA parameters: ER period=10, Fast EMA=2, Slow EMA=30
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align KAMA to daily timeframe (already aligned as it's daily data)
-    kama_aligned = kama
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # === WEEKLY EMA50 FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:13] = np.nan  # Not enough data
     
-    # === VOLUME CONFIRMATION (DAILY) ===
+    # === RSI STREAK DETECTION ===
+    # Streak of 3+ consecutive closes above 70 (overbought) or below 30 (oversold)
+    rsi_above_70 = rsi > 70
+    rsi_below_30 = rsi < 30
+    
+    # Count consecutive days
+    streak_above = np.zeros_like(rsi)
+    streak_below = np.zeros_like(rsi)
+    
+    for i in range(1, len(rsi)):
+        if rsi_above_70[i]:
+            streak_above[i] = streak_above[i-1] + 1
+        else:
+            streak_above[i] = 0
+            
+        if rsi_below_30[i]:
+            streak_below[i] = streak_below[i-1] + 1
+        else:
+            streak_below[i] = 0
+    
+    # Signal when streak reaches 3
+    overbought_signal = streak_above >= 3
+    oversold_signal = streak_below >= 3
+    
+    # Align to 12h timeframe
+    overbought_aligned = align_htf_to_ltf(prices, df_1d, overbought_signal.astype(float))
+    oversold_aligned = align_htf_to_ltf(prices, df_1d, oversold_signal.astype(float))
+    
+    # === 12h TREND FILTER (EMA 20) ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(overbought_aligned[i]) or np.isnan(oversold_aligned[i]) or 
+            np.isnan(ema20[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price crosses above KAMA (bullish reversal) in weekly uptrend
-        long_signal = (close[i] > kama_aligned[i]) and (close[i-1] <= kama_aligned[i-1]) and \
-                      (close[i] > ema50_1w_aligned[i]) and (vol_ratio[i] > 1.3)
+        # Entry conditions
+        # Long: RSI streak oversold (3+ days <30) + volume + price above EMA20
+        long_signal = (oversold_aligned[i] > 0.5) and (vol_ratio[i] > 1.5) and (close[i] > ema20[i])
         
-        # Short: price crosses below KAMA (bearish reversal) in weekly downtrend
-        short_signal = (close[i] < kama_aligned[i]) and (close[i-1] >= kama_aligned[i-1]) and \
-                       (close[i] < ema50_1w_aligned[i]) and (vol_ratio[i] > 1.3)
+        # Short: RSI streak overbought (3+ days >70) + volume + price below EMA20
+        short_signal = (overbought_aligned[i] > 0.5) and (vol_ratio[i] > 1.5) and (close[i] < ema20[i])
         
-        # Exit when price returns to KAMA (mean reversion)
-        exit_long = close[i] < kama_aligned[i] and position == 1
-        exit_short = close[i] > kama_aligned[i] and position == -1
+        # Exit: RSI returns to neutral zone (40-60) or opposite streak
+        # Need current day's RSI for exit (use previous day's aligned value)
+        rsi_prev = align_htf_to_ltf(prices, df_1d, rsi)
+        exit_long = (rsi_prev[i] > 40) and (rsi_prev[i] < 60) and position == 1
+        exit_short = (rsi_prev[i] > 40) and (rsi_prev[i] < 60) and position == -1
         
         # Execute trades
         if long_signal and position != 1:
