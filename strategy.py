@@ -8,97 +8,110 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Bollinger Band squeeze breakout with 1d volume confirmation
-    # - Squeeze: BB width < 20th percentile of last 50 bars → low volatility
-    # - Breakout: price closes outside BB(20,2) → volatility expansion
-    # - Volume: 1d volume > 1.5x 20-period average → institutional participation
-    # - Direction: 1d close > 1d EMA50 for longs, < EMA50 for shorts
-    # Works in bull/bear: squeeze breakouts capture volatility expansion in any regime
-    # Discrete sizing 0.25 to minimize fee churn. Target: 15-25 trades/year.
+    # Hypothesis: 6h Bollinger Band squeeze breakout + 12h ADX trend filter
+    # Only trade breakouts when volatility is low (BB width < 20th percentile) and 12h ADX > 25
+    # Direction: breakout above upper band = long, below lower band = short
+    # Uses discrete sizing 0.25 to minimize fee churn. Target: 15-35 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 6h Bollinger Bands (20,2)
+    # Get 6h Bollinger Bands (20, 2.0)
     bb_period = 20
-    bb_std = 2
+    bb_std = 2.0
     sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
     std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + (bb_std * std)
-    lower = sma - (bb_std * std)
-    bb_width = upper - lower
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bb_width = (upper - lower) / sma * 100  # percentage
     
-    # Calculate BB width percentile (20th) over last 50 bars
-    bb_width_percentile = np.zeros(n)
-    for i in range(bb_period + 50, n):
-        window_start = max(0, i - 50)
-        window_end = i
-        if window_end - window_start >= bb_period:
-            bb_width_window = bb_width[window_start:window_end]
-            if len(bb_width_window) > 0 and not np.all(np.isnan(bb_width_window)):
-                valid_widths = bb_width_window[~np.isnan(bb_width_window)]
-                if len(valid_widths) > 0:
-                    percentile_20 = np.percentile(valid_widths, 20)
-                    bb_width_percentile[i] = percentile_20
+    # Calculate 6h BB width percentile (lookback 50 periods for regime)
+    def calculate_percentile(arr, lookback=50):
+        n = len(arr)
+        percentile = np.full(n, np.nan)
+        for i in range(lookback, n):
+            window = arr[i-lookback:i]
+            if not np.all(np.isnan(window)):
+                percentile[i] = np.percentile(window[~np.isnan(window)], 20)  # 20th percentile
+        return percentile
     
-    # Squeeze condition: BB width < 20th percentile
-    squeeze = bb_width < bb_width_percentile
+    bb_width_20th = calculate_percentile(bb_width, 50)
+    squeeze = bb_width < bb_width_20th  # low volatility regime
     
-    # Breakout conditions
-    breakout_up = close > upper
-    breakout_down = close < lower
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 1d volume average (20-period) for volume confirmation
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Calculate 12h ADX(14)
+    def calculate_adx(high, low, close, period=14):
+        n = len(high)
+        tr = np.zeros(n)
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
+        
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+        
+        # Wilder's smoothing
+        atr = np.zeros(n)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, n):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros(n)
+        minus_di = np.zeros(n)
+        dx = np.zeros(n)
+        
+        for i in range(period, n):
+            if atr[i] > 0:
+                plus_di[i] = 100 * (np.mean(plus_dm[i-period+1:i+1]) / atr[i])
+                minus_di[i] = 100 * (np.mean(minus_dm[i-period+1:i+1]) / atr[i])
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros(n)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, n):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Volume confirmation: current 1d volume > 1.5x 20-period average
-    volume_confirm = volume_1d_aligned > (1.5 * vol_avg_1d_aligned)
-    
-    # Trend filter: 1d close > EMA50 for longs, < EMA50 for shorts
-    bullish_trend = close_1d > ema50_1d
-    bearish_trend = close_1d < ema50_1d
-    bullish_trend_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend)
-    bearish_trend_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend)
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(bb_period + 50, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(sma[i]) or np.isnan(std[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or
-            np.isnan(volume_1d_aligned[i])):
+            np.isnan(bb_width_20th[i]) or np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Check for squeeze breakout with volume and trend confirmation
-        long_breakout = squeeze[i-1] and breakout_up[i] and volume_confirm[i] and bullish_trend_aligned[i]
-        short_breakout = squeeze[i-1] and breakout_down[i] and volume_confirm[i] and bearish_trend_aligned[i]
+        # Trend filter: only trade when 12h ADX > 25 (strong trend)
+        strong_trend = adx_12h_aligned[i] > 25
         
-        # Exit conditions: opposite breakout or loss of squeeze (volatility contraction)
-        long_exit = breakout_down[i] or not squeeze[i]
-        short_exit = breakout_up[i] or not squeeze[i]
+        # Breakout conditions
+        long_breakout = close[i] > upper[i-1] and squeeze[i-1]  # break above upper band after squeeze
+        short_breakout = close[i] < lower[i-1] and squeeze[i-1]  # break below lower band after squeeze
         
-        if long_breakout and position != 1:
+        # Exit conditions: opposite breakout or loss of squeeze (volatility expansion)
+        long_exit = short_breakout or not squeeze[i]
+        short_exit = long_breakout or not squeeze[i]
+        
+        if long_breakout and strong_trend and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_breakout and strong_trend and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -118,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_bb_squeeze_breakout_volume_v1"
+name = "6h_12h_bb_squeeze_breakout_adx_v1"
 timeframe = "6h"
 leverage = 1.0
