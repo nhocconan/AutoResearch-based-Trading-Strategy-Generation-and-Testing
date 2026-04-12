@@ -1,11 +1,12 @@
-# 4h_1d_camarilla_breakout_volume_v2
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation and momentum filter.
-# Works in bull/bear by targeting breakouts from daily key levels with volume confirmation
-# to avoid false signals. Uses momentum to filter weak breakouts.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+# 12h_1d_camarilla_breakout_volume
+# Hypothesis: 12-hour Camarilla breakout with volume confirmation and volatility filter
+# Uses daily Camarilla levels (based on previous day) on 12h timeframe
+# Works in bull/bear by requiring volume > 1.5x 20-period average and ATR > 0
+# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag
 
-name = "4h_1d_camarilla_breakout_volume_v2"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -45,15 +46,19 @@ def generate_signals(prices):
     s3 = prev_close - range_ * 1.1 / 2
     s4 = prev_close - range_ * 1.1
     
-    # Momentum filter: ROC(10) > 0 for long, < 0 for short
-    roc = np.zeros_like(close)
-    roc[10:] = (close[10:] - close[:-10]) / close[:-10]
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels and ATR to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,16 +70,19 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and momentum confirmation
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and roc[i] > 0 and position != 1):
+        # Long entry: close breaks above R4 with volume and volatility filter
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and momentum confirmation
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and roc[i] < 0 and position != -1):
+        # Short entry: close breaks below S4 with volume and volatility filter
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
         # Exit: reverse signal or close crosses back to opposite S3/R3
