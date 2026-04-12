@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_Regime_v2
-Hypothesis: On 4h timeframe, buy breakouts above Camarilla H3 with 1d uptrend filter and volume confirmation,
-sell breakdowns below L3 with 1d downtrend and volume confirmation. Exit at H4/L4 levels.
-Uses daily volatility regime filter to avoid choppy markets. Designed for low trade frequency
-(20-40/year) by requiring multiple confluence factors. Works in bull/bear via 1d trend filter
-and mean-reversion exit at Camarilla levels.
+4h_1d_Advanced_Camarilla_Breakout_v1
+Hypothesis: Uses exact Camarilla pivot formula with prior day close, volume confirmation (2x avg), and ADX trend filter (ADX>25).
+Exits at H4/L4 levels. Designed for low trade frequency (20-40/year) by requiring multiple confluence factors.
+Works in bull/bear via ADX trend filter and mean-reversion exit at Camarilla levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_Regime_v2"
+name = "4h_1d_Advanced_Camarilla_Breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,10 +33,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot levels
-    close_prev = close_1d  # using same day's close as approximation
+    # Exact Camarilla: use prior day's close
+    close_prev = np.concatenate([[close_1d[0]], close_1d[:-1]])
     range_1d = high_1d - low_1d
     
+    # Camarilla levels
     h5 = close_prev + (range_1d * 1.1 / 2)
     h4 = close_prev + (range_1d * 1.1)
     h3 = close_prev + (range_1d * 1.1 / 4)
@@ -46,36 +45,52 @@ def generate_signals(prices):
     l4 = close_prev - (range_1d * 1.1)
     l5 = close_prev - (range_1d * 1.1 / 2)
     
-    # === DAILY VOLATILITY REGIME FILTER ===
-    # Daily ATR(14) for volatility measurement
+    # === ADX TREND FILTER (14-period) ===
+    # True Range
     tr1 = np.abs(high_1d[1:] - low_1d[:-1])
     tr2 = np.abs(high_1d[1:] - close_1d[:-1])
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = np.zeros_like(tr)
-    for i in range(len(tr)):
-        if i < 14:
-            atr_14[i] = np.nan
-        elif i == 14:
-            atr_14[i] = np.nanmean(tr[1:i+1])
-        else:
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
-    # Volatility regime: low volatility = trending market
-    vol_ma = np.zeros_like(atr_14)
-    for i in range(len(atr_14)):
-        if i < 30:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.mean(atr_14[i-29:i+1])
-    # Low volatility regime (trending) when current ATR < MA
-    vol_regime = atr_14 < vol_ma
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    
+    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nanmean(data[1:period+1])
+        # Rest: Wilder smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Trend filter: ADX > 25 indicates strong trend
+    trend_filter = adx > 25
     
     # Align data to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
+    trend_filter_aligned = align_htf_to_ltf(prices, df_1d, trend_filter.astype(float))
     
     # Volume average (20-period for 4h = ~5 days) for confirmation
     vol_avg = np.zeros(n)
@@ -99,15 +114,15 @@ def generate_signals(prices):
         # Skip if indicators not available
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
-            np.isnan(vol_regime_aligned[i]) or vol_avg[i] == 0.0):
+            np.isnan(trend_filter_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        # Volume confirmation: at least 2x average
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # Only trade in low volatility (trending) regime
-        in_trend_regime = vol_regime_aligned[i] > 0.5
+        # Only trade in strong trend regime (ADX > 25)
+        in_trend_regime = trend_filter_aligned[i] > 0.5
         
         # Entry conditions
         long_setup = (close[i] > h3_aligned[i]) and vol_confirm and in_trend_regime
