@@ -1,99 +1,79 @@
 #!/usr/bin/env python3
 """
-6h_1d_Ichimoku_Signal_v1
-Hypothesis: Use Ichimoku components from 1d timeframe for trend direction and 6s for entry timing.
-Long when Tenkan > Kijun and price above Kumo cloud, short when opposite.
-Kumo cloud acts as dynamic support/resistance. Tenkan/Kijun cross provides momentum signal.
-Works in bull via trend continuation, in bear via counter-trend bounces off cloud.
-Target: 50-150 total trades over 4 years to minimize fee drag.
+12h_1w_24h_Volume_Spike_Breakout_v1
+Hypothesis: Use weekly high/low as breakout levels with volume spike confirmation on 12h timeframe.
+Long when price breaks above weekly high with volume > 2x 24-period average,
+short when breaks below weekly low with volume > 2x 24-period average.
+Weekly high/low provides strong institutional levels; volume confirms breakout strength.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
+Works in bull via breakouts above weekly high, in bear via breakdowns below weekly low.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Ichimoku_Signal_v1"
-timeframe = "6h"
+name = "12h_1w_24h_Volume_Spike_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Weekly data for high/low levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
+    # Previous week's high and low
+    prev_high = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
+    prev_low = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
     
-    # Calculate Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period).max() + 
-                  pd.Series(low).rolling(window=tenkan_period).min()) / 2
+    # Weekly high and low arrays
+    weekly_high_array = np.full(len(df_1w), prev_high)
+    weekly_low_array = np.full(len(df_1w), prev_low)
     
-    # Calculate Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high).rolling(window=kijun_period).max() + 
-                 pd.Series(low).rolling(window=kijun_period).min()) / 2
+    # Align weekly levels to 12h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_array)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_array)
     
-    # Calculate Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun_period)
-    
-    # Calculate Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_span_b = ((pd.Series(high).rolling(window=senkou_span_b_period).max() + 
-                      pd.Series(low).rolling(window=senkou_span_b_period).min()) / 2).shift(kijun_period)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou_span = pd.Series(close).shift(-kijun_period)
-    
-    # Align all Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    # Volume confirmation: current volume > 2x 24-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=24, min_periods=24).mean()
+    vol_ratio = volume_series / vol_ma
+    vol_ratio = vol_ratio.fillna(1.0).values  # default to 1.0 if no MA
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine if price is above or below Kumo cloud
-        top_kumo = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        bottom_kumo = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        # Breakout conditions with volume filter
+        long_breakout = close[i] > weekly_high_aligned[i] and vol_ratio[i] > 2.0
+        short_breakout = close[i] < weekly_low_aligned[i] and vol_ratio[i] > 2.0
         
-        price_above_kumo = close[i] > top_kumo
-        price_below_kumo = close[i] < bottom_kumo
-        
-        # Tenkan/Kijun cross signals
-        tenkan_above_kijun = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-        tenkan_below_kijun = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-        
-        # Entry conditions
-        long_entry = price_above_kumo and tenkan_above_kijun
-        short_entry = price_below_kumo and tenkan_below_kijun
-        
-        # Exit conditions: price crosses back into Kumo or Tenkan/Kijun reverse
-        long_exit = price_below_kumo or tenkan_below_kijun
-        short_exit = price_above_kumo or tenkan_above_kijun
+        # Exit conditions: return to opposite weekly level (mean reversion)
+        long_exit = close[i] < weekly_low_aligned[i]
+        short_exit = close[i] > weekly_high_aligned[i]
         
         # Signal logic
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
