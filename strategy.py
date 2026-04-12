@@ -1,23 +1,22 @@
+# 6h_1d_1w_camarilla_breakout_v1
+# Hypothesis: Use weekly high/low to calculate daily Camarilla levels, then apply to 6h chart.
+# Buy when price breaks above daily H3 with volume confirmation, short when below daily L3.
+# Use ADX > 25 on daily chart to filter for strong trends.
+# Works in bull markets (continuation breakouts) and bear markets (continuation breakdowns).
+# Target: 12-37 trades/year on 6h timeframe.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_breakout_v1
-# Uses daily pivot-based Camarilla levels for 12h timeframe entries.
-# Buys when price breaks above H3 with volume confirmation, shorts below L3.
-# Uses ADX > 20 to filter for trending markets, avoiding range-bound false signals.
-# Designed for low trade frequency (target: 12-37/year) to minimize fee drag.
-# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
-# Focus on BTC/ETH as primary targets.
-
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "6h_1d_1w_camarilla_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation (HTF)
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -40,15 +39,15 @@ def generate_signals(prices):
     camarilla_h3 = close_prev + range_prev * 1.1 / 4
     camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to 12h timeframe (daily levels update only after daily bar closes)
+    # Align to 6h timeframe (daily levels update only after daily bar closes)
     h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 1.5 * 30-period average (adjusted for 12h)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 2.0 * 50-period average (strict for 6h)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
-    # ADX trend filter: only trade when ADX > 20 (trending market)
+    # ADX trend filter: only trade when ADX > 25 on daily chart
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -80,18 +79,18 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 20  # trending market only
+    adx_filter = adx > 25  # strong trend only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if levels not ready
         if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and trend filters
+        # Require both volume and strong trend filters
         if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
