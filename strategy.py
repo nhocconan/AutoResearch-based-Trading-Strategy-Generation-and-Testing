@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_trix_volume_surge_v1"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for TRIX calculation and volume context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 18:  # Need enough for EMA(12) triple
+    # Daily trend filter: EMA(50) - long-term trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 12h TRIX calculation (triple EMA)
-    close_12h = df_12h['close'].values
-    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    trix = trix.fillna(0).values
+    # Daily 4-period volatility for CAMARILLA calculation
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    H_minus_L_1d = prev_high_1d - prev_low_1d
     
-    # 12h TRIX signal line (EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # CAMARILLA LEVELS (daily)
+    R3 = prev_close_1d + H_minus_L_1d * 1.1 / 4  # Strong resistance
+    S3 = prev_close_1d - H_minus_L_1d * 1.1 / 4  # Strong support
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # 12h volume average for surge detection
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume filter: current 1h volume > 24h average volume (1 day)
+    vol_1d_avg = pd.Series(df_1d['volume']).rolling(window=1, min_periods=1).mean().values
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_avg)
+    volume_filter = volume > vol_1d_aligned
     
-    # Align 12h indicators to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_12h, trix_signal)
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    
-    # Volume surge: current 4h volume > 1.5 * 12h volume MA
-    volume_surge = volume > (1.5 * vol_ma_12h_aligned)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(trix_aligned[i]) or np.isnan(trix_signal_aligned[i]) or 
-            np.isnan(volume_surge[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
-        # Long: TRIX crosses above signal line with volume surge
-        long_signal = (trix_aligned[i] > trix_signal_aligned[i] and 
-                      trix_aligned[i-1] <= trix_signal_aligned[i-1] and
-                      volume_surge[i])
+        # Apply session filter
+        if not session_filter[i]:
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+            continue
         
-        # Short: TRIX crosses below signal line with volume surge
-        short_signal = (trix_aligned[i] < trix_signal_aligned[i] and 
-                       trix_aligned[i-1] >= trix_signal_aligned[i-1] and
-                       volume_surge[i])
+        # Long: price breaks above daily R3 with volume and above daily EMA50
+        long_signal = (close[i] > R3_aligned[i] and volume_filter[i] and close[i] > ema_50_1d_aligned[i])
         
-        # Exit: TRIX crosses back through signal line
-        exit_long = (position == 1 and trix_aligned[i] < trix_signal_aligned[i])
-        exit_short = (position == -1 and trix_aligned[i] > trix_signal_aligned[i])
+        # Short: price breaks below daily S3 with volume and below daily EMA50
+        short_signal = (close[i] < S3_aligned[i] and volume_filter[i] and close[i] < ema_50_1d_aligned[i])
+        
+        # Exit: price returns to midpoint between daily R4/S4 (stronger reversal)
+        R4 = prev_close_1d + H_minus_L_1d * 1.1 / 2
+        S4 = prev_close_1d - H_minus_L_1d * 1.1 / 2
+        R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+        S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+        midpoint = (R4_aligned + S4_aligned) / 2
+        
+        exit_long = (position == 1 and close[i] < midpoint[i])
+        exit_short = (position == -1 and close[i] > midpoint[i])
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -84,6 +91,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
