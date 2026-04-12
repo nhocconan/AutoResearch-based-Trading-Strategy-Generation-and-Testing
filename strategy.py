@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1d_trix_volume_trend
-Hypothesis: 12-hour strategy using TRIX momentum on daily timeframe for trend direction, 
-with volume confirmation and 12-hour price action for entries. TRIX filters noise and 
-identifies sustained momentum, working in both bull and bear markets by capturing 
-medium-term trends. Volume confirmation avoids false signals. Target: 15-30 trades/year 
-(60-120 total over 4 years) to minimize fee drag.
+1d_1w_keltner_reversion_v1
+Hypothesis: Daily mean reversion at Keltner Channel extremes with weekly trend filter.
+Buy when price touches lower KC(20,2) in weekly uptrend, sell when touches upper KC in weekly downtrend.
+Uses volume confirmation to avoid false signals. Designed for low trade frequency (10-30/year).
+Works in bull/bear by aligning with weekly trend direction.
 """
 
 import numpy as np
@@ -22,51 +21,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for TRIX trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend and Keltner
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate TRIX: triple EMA of 15-period
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    # Weekly EMA20 for trend and KC center
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Weekly ATR for KC width
+    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]))
+    tr1 = np.maximum(tr1, np.abs(low_1w[1:] - close_1w[:-1]))
+    tr1 = np.concatenate([[np.nan], tr1])
+    atr_1w = pd.Series(tr1).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
-    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix = trix_raw.fillna(0).values
+    # Weekly Keltner Channels
+    upper_1w = ema20_1w + 2 * atr_1w
+    lower_1w = ema20_1w - 2 * atr_1w
     
-    # Align TRIX to 12h timeframe (wait for daily close)
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Align to daily
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
-    # Volume confirmation: volume > 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Daily volume confirmation: volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if np.isnan(trix_aligned[i]):
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(upper_1w_aligned[i]) or 
+            np.isnan(lower_1w_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: positive TRIX (bullish momentum) AND price above prior close with volume
-        if (trix_aligned[i] > 0 and close[i] > close[i-1] and vol_confirm[i] and position != 1):
+        # Long entry: price touches lower KC in weekly uptrend with volume
+        if (low[i] <= lower_1w_aligned[i] and close[i] > ema20_1w_aligned[i] and 
+            vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: negative TRIX (bearish momentum) AND price below prior close with volume
-        elif (trix_aligned[i] < 0 and close[i] < close[i-1] and vol_confirm[i] and position != -1):
+        # Short entry: price touches upper KC in weekly downtrend with volume
+        elif (high[i] >= upper_1w_aligned[i] and close[i] < ema20_1w_aligned[i] and 
+              vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: TRIX crosses zero or price reverses against position
-        elif position == 1 and trix_aligned[i] < 0:
+        # Exit: price returns to weekly EMA20 or opposite KC touch
+        elif position == 1 and high[i] >= upper_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and trix_aligned[i] > 0:
+        elif position == -1 and low[i] <= lower_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
@@ -80,6 +89,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_trix_volume_trend"
-timeframe = "12h"
+name = "1d_1w_keltner_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
