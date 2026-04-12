@@ -1,18 +1,73 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1
-Hypothesis: 12h timeframe with 1d Camarilla pivot levels, volume confirmation, and 1d EMA trend filter.
-Designed for fewer trades (target 12-37/year) by requiring breakouts of H3/L3 levels with volume > 1.5x average
-and price aligned with 1d EMA trend. Works in bull/bear markets by only taking trend-aligned breakouts.
+6h_1w_21_EMA_Supertrend_Swing_V1
+Hypothesis: Uses weekly 21 EMA trend filter and 6h Supertrend for entries. Only takes trades aligned with weekly trend.
+Supertrend provides dynamic stop and entry signals. Weekly EMA filter avoids counter-trend trades in chop.
+Designed for low trade frequency (target 15-30/year) with high win rate by requiring trend alignment.
+Works in bull (follows uptrend) and bear (follows downtrend) by only trading in direction of weekly trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1"
-timeframe = "12h"
+name = "6h_1w_21_EMA_Supertrend_Swing_V1"
+timeframe = "6h"
 leverage = 1.0
+
+def supertrend(high, low, close, period=10, multiplier=3.0):
+    """Calculate Supertrend indicator"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR
+    atr = np.zeros_like(close)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(close)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + multiplier * atr
+    basic_lb = (high + low) / 2 - multiplier * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close)
+    final_lb = np.zeros_like(close)
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    
+    for i in range(1, len(close)):
+        if close[i-1] <= final_ub[i-1]:
+            final_ub[i] = min(basic_ub[i], final_ub[i-1])
+        else:
+            final_ub[i] = basic_ub[i]
+            
+        if close[i-1] >= final_lb[i-1]:
+            final_lb[i] = max(basic_lb[i], final_lb[i-1])
+        else:
+            final_lb[i] = basic_lb[i]
+    
+    # Supertrend
+    supertrend_val = np.zeros_like(close)
+    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close)):
+        if close[i] > final_ub[i-1]:
+            direction[i] = 1
+        elif close[i] < final_lb[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            
+        if direction[i] == 1:
+            supertrend_val[i] = final_lb[i]
+        else:
+            supertrend_val[i] = final_ub[i]
+    
+    return supertrend_val, direction, atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,66 +78,45 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for Camarilla pivots and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data ONCE before loop for EMA filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate weekly 21 EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Calculate pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    H3 = pivot + range_hl * 1.1 / 4
-    L3 = pivot - range_hl * 1.1 / 4
-    H4 = pivot + range_hl * 1.1 / 2
-    L4 = pivot - range_hl * 1.1 / 2
-    
-    # Align to 12h timeframe
-    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
-    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Calculate 1d EMA (21 period) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume average (20 period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Supertrend on 6h data
+    st, st_dir, atr = supertrend(high, low, close, period=10, multiplier=3.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):  # Warmup for EMA and Supertrend
         # Skip if any required data is invalid
-        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(st[i]) or 
+            np.isnan(st_dir[i]) or np.isnan(atr[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = volume[i] > vol_ma[i] * 1.5
+        # Trend filter: price relative to weekly 21 EMA
+        above_weekly_ema = close[i] > ema_21_1w_aligned[i]
+        below_weekly_ema = close[i] < ema_21_1w_aligned[i]
         
-        # Trend filter: price above/below 1d EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Supertrend direction
+        uptrend = st_dir[i] == 1
+        downtrend = st_dir[i] == -1
         
-        # Entry conditions: breakout of H3/L3 with volume and trend
-        long_entry = (close[i] > H3_12h[i]) and volume_spike and above_ema
-        short_entry = (close[i] < L3_12h[i]) and volume_spike and below_ema
+        # Entry conditions: Supertrend signal aligned with weekly trend
+        long_entry = uptrend and above_weekly_ema
+        short_entry = downtrend and below_weekly_ema
         
-        # Exit conditions: return to H4/L4 levels or trend reversal
-        long_exit = (close[i] < H4_12h[i]) or (close[i] < ema_1d_aligned[i])
-        short_exit = (close[i] > L4_12h[i]) or (close[i] > ema_1d_aligned[i])
+        # Exit conditions: Supertrend reversal or weekly trend violation
+        long_exit = not uptrend or not above_weekly_ema
+        short_exit = not downtrend or not below_weekly_ema
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
