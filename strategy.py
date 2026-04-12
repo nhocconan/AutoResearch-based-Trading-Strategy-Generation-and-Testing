@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v33"
-timeframe = "4h"
+name = "1d_1w_keltner_reversion_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -15,73 +15,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for Keltner channel (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Use previous 1d bar's data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    # Calculate Keltner channel on 1w data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from previous 1d data
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
+    # ATR on 1w
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).ewm(span=20, min_periods=20).mean().values
     
-    # Camarilla levels (H4 and L4 - breakout levels)
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    # EMA on 1w
+    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20).mean().values
     
-    # Align levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
+    # Keltner bands on 1w
+    upper_1w = ema_1w + 2 * atr_1w
+    lower_1w = ema_1w - 2 * atr_1w
     
-    # Volume filter - 20-period average on 4h data
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    # Align to daily timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Trend filter: 50-period SMA on 4h data
-    close_series = pd.Series(close)
-    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
-    trend_up = close > sma_50
-    trend_down = close < sma_50
-    
-    # Choppiness regime filter (14-period on 4h)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series_pd = pd.Series(close)
-    atr_series = (high_series.rolling(14).max() - low_series.rolling(14).min()).rolling(14).mean()
-    atr = atr_series.values
-    true_range = np.maximum(high - low, np.maximum(abs(high - close_series_pd.shift(1)), abs(low - close_series_pd.shift(1))))
-    sum_tr14 = pd.Series(true_range).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr14 / (14 * atr)) / np.log10(14)
-    chop_sideways = chop > 61.8  # ranging market
+    # RSI on daily close
+    delta = np.diff(close, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(chop_sideways[i])):
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(ema_aligned[i]) or np.isnan(rsi[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H4 with volume confirmation, uptrend, and sideways market
-        long_signal = close[i] > h4_aligned[i] and volume_ok[i] and trend_up[i] and chop_sideways[i]
-        # Short: price breaks below L4 with volume confirmation, downtrend, and sideways market
-        short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_down[i] and chop_sideways[i]
+        # Mean reversion: price touches Keltner bands with RSI confirmation
+        touch_upper = close[i] >= upper_aligned[i]
+        touch_lower = close[i] <= lower_aligned[i]
+        rsi_overbought = rsi[i] > 70
+        rsi_oversold = rsi[i] < 30
         
-        # Exit when price returns to pivot (mean reversion)
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Long: touches lower band in oversold conditions
+        long_signal = touch_lower and rsi_oversold
+        # Short: touches upper band in overbought conditions
+        short_signal = touch_upper and rsi_overbought
+        
+        # Exit when price returns to EMA
+        exit_long = close[i] < ema_aligned[i]
+        exit_short = close[i] > ema_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
