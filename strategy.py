@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+name = "12h_1w_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +22,7 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate previous week's Camarilla levels (no look-ahead: shift by 1)
+    # Calculate previous week's Camarilla levels
     prev_close = df_1w['close'].shift(1).values
     prev_high = df_1w['high'].shift(1).values
     prev_low = df_1w['low'].shift(1).values
@@ -33,7 +33,7 @@ def generate_signals(prices):
     S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map weekly Camarilla levels to each daily bar (using proper alignment)
+    # Map weekly Camarilla levels to each 12h bar using proper alignment
     R4_mapped = align_htf_to_ltf(prices, df_1w, R4)
     R3_mapped = align_htf_to_ltf(prices, df_1w, R3)
     S3_mapped = align_htf_to_ltf(prices, df_1w, S3)
@@ -45,23 +45,21 @@ def generate_signals(prices):
     tr3 = np.abs(df_1w['low'].values[1:] - df_1w['close'].values[:-1])
     tr_weekly = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_weekly = pd.Series(tr_weekly).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Map ATR to daily timeframe
     atr_weekly_mapped = align_htf_to_ltf(prices, df_1w, atr_weekly)
     
-    # Volume filter: current daily volume > 20-period average of weekly volume
+    # Volume confirmation: current 12h volume > 20-period average of weekly volume
     vol_1w_mapped = align_htf_to_ltf(prices, df_1w, df_1w['volume'].values)
     vol_ma = pd.Series(vol_1w_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
     
-    # Chop index for regime filter (daily)
+    # Chop index for regime filter (12h)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    atr_daily = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_raw = 100 * np.log10(tr_sum / (atr_daily * 14)) / np.log10(14)
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    chop_raw = 100 * np.log10(tr_sum / (atr_12h * 14)) / np.log10(14)
     chop = np.where(tr_sum > 0, chop_raw, 50)
     
     signals = np.zeros(n)
