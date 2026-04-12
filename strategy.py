@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+"""
+12h_1w_donchian_breakout_volume
+Hypothesis: 12-hour Donchian breakout with 1-week trend filter and volume confirmation.
+Works in bull/bear by using long-term trend direction (1w) to filter breakouts,
+reducing false signals in ranging markets. Volume confirms breakout strength.
+Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
+"""
 
-# 12h_1d_camarilla_breakout_volume_regime
-# Hypothesis: 12-hour Camarilla breakout with volume confirmation and ADX regime filter.
-# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
-# ADX > 25 indicates trending market (use breakout), ADX < 20 indicates ranging (avoid false breakouts).
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
-
-name = "12h_1d_camarilla_breakout_volume_regime"
+name = "12h_1w_donchian_breakout_volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,100 +25,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ADX calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter and Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Weekly Donchian channels (20-period)
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Weekly EMA for trend filter (50-period)
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align weekly indicators to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Directional Movement
-    up_move = np.subtract(high_1d, np.roll(high_1d, 1))
-    down_move = np.subtract(np.roll(low_1d, 1), low_1d)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm14 / tr14
-    minus_di = 100 * minus_dm14 / tr14
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align Camarilla levels and ADX to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    # Volume confirmation: volume > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in trending markets (ADX > 25)
-        if adx_aligned[i] <= 25:
-            # In ranging markets, stay flat
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long entry: close breaks above R4 with volume confirmation
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
+        # Long entry: price breaks above weekly Donchian high with volume and uptrend
+        if (close[i] > high_20_aligned[i] and vol_confirm[i] and 
+            close[i] > ema_50_aligned[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume confirmation
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
+        # Short entry: price breaks below weekly Donchian low with volume and downtrend
+        elif (close[i] < low_20_aligned[i] and vol_confirm[i] and 
+              close[i] < ema_50_aligned[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: reverse signal or price crosses back to opposite Donchian level
+        elif position == 1 and close[i] < low_20_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and close[i] > high_20_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
