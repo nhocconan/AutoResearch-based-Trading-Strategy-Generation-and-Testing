@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume_regime_v2"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,63 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Load weekly data for Camarilla levels (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate previous 1d bar's Camarilla levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate previous weekly bar's Camarilla levels
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
     H_minus_L = prev_high - prev_low
-    # Camarilla levels
     R4 = prev_close + H_minus_L * 1.1 / 2
     R3 = prev_close + H_minus_L * 1.1 / 4
     S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map 1d Camarilla levels to each 4h bar using vectorized approach
-    prices_dt = pd.to_datetime(prices['open_time'])
-    df_1d_start = pd.to_datetime(df_1d['open_time'])
-    df_1d_end = df_1d_start + pd.Timedelta(days=1)
+    # Map weekly Camarilla levels to daily bars
+    R4_mapped = align_htf_to_ltf(prices, df_1w, R4)
+    R3_mapped = align_htf_to_ltf(prices, df_1w, R3)
+    S3_mapped = align_htf_to_ltf(prices, df_1w, S3)
+    S4_mapped = align_htf_to_ltf(prices, df_1w, S4)
     
-    R4_mapped = np.full(n, np.nan)
-    R3_mapped = np.full(n, np.nan)
-    S3_mapped = np.full(n, np.nan)
-    S4_mapped = np.full(n, np.nan)
+    # Volume confirmation: current daily volume > 20-day EMA of volume
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ema
     
-    for i in range(n):
-        current_time = prices_dt.iloc[i]
-        mask = (df_1d_start <= current_time) & (current_time < df_1d_end)
-        if mask.any():
-            j = mask.argmax()
-            R4_mapped[i] = R4[j]
-            R3_mapped[i] = R3[j]
-            S3_mapped[i] = S3[j]
-            S4_mapped[i] = S4[j]
-    
-    # Volume confirmation: current 4h volume > 20-period average of 1d volume
-    vol_1d_mapped = np.full(n, np.nan)
-    for i in range(n):
-        current_time = prices_dt.iloc[i]
-        mask = (df_1d_start <= current_time) & (current_time < df_1d_end)
-        if mask.any():
-            j = mask.argmax()
-            vol_1d_mapped[i] = df_1d.iloc[j]['volume']
-    
-    vol_ma = pd.Series(vol_1d_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
-    
-    # Chop index for regime filter (4h)
+    # Chop index for regime filter (daily)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    atr_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    chop_raw = 100 * np.log10(tr_sum / (atr_4h * 14)) / np.log10(14)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    chop_raw = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
     chop = np.where(tr_sum > 0, chop_raw, 50)
     
     signals = np.zeros(n)
