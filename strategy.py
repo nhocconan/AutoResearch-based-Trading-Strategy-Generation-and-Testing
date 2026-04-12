@@ -1,12 +1,9 @@
-# 1d_1w_camarilla_breakout_with_volume_and_trend
-# Hypothesis: Daily Camarilla breakout with weekly trend filter and volume confirmation
-# Uses weekly EMA to filter direction (long only in uptrend, short only in downtrend)
-# Daily Camarilla levels from previous day for entry/exit
-# Volume > 1.5x 20-day average for confirmation
-# Target: 10-25 trades/year (40-100 total over 4 years) to minimize fee drift
+#!/usr/bin/env python3
+# 4h_1d_camarilla_breakout_with_volume_and_atr_v3
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter, optimized for lower trade frequency (<300 total trades) to reduce fee drag. Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals. Uses 1d HTF for context.
 
-name = "1d_1w_camarilla_breakout_with_volume_and_trend"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_with_volume_and_atr_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,17 +20,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA(20) for trend filter
-    ema_20w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
-    
     # Get daily data for Camarilla and ATR calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
@@ -43,7 +29,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range (for today's Camarilla levels)
+    # Previous day's range
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
@@ -57,15 +43,23 @@ def generate_signals(prices):
     s3 = prev_close - range_ * 1.1 / 2
     s4 = prev_close - range_ * 1.1
     
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to daily timeframe (no shift needed as they're based on prev day)
+    # Align Camarilla levels and ATR to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,22 +68,18 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema_20w_aligned[i])):
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: price > weekly EMA20 (uptrend) + break above R4 + volume
-        if (close[i] > ema_20w_aligned[i] and 
-            close[i] > r4_aligned[i] and 
-            vol_confirm[i] and 
-            position != 1):
+        # Long entry: close breaks above R4 with volume and volatility filter
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short conditions: price < weekly EMA20 (downtrend) + break below S4 + volume
-        elif (close[i] < ema_20w_aligned[i] and 
-              close[i] < s4_aligned[i] and 
-              vol_confirm[i] and 
-              position != -1):
+        # Short entry: close breaks below S4 with volume and volatility filter
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
         # Exit: reverse signal or close crosses back to opposite S3/R3
