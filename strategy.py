@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_3level_Trend_Filter
-Hypothesis: On 4h timeframe, take long positions when price touches Camarilla L3 support in uptrend,
-and short positions when price touches Camarilla H3 resistance in downtrend.
-Use 12h EMA21 for trend filter and volume > 1.3x average for confirmation.
-Exit when price reaches opposite H3/L3 level or trend reverses.
-Designed for mean-reversion within trend with low trade frequency.
-Target: 50-150 total trades over 4 years (12-37/year) on 4h timeframe.
+4h_12h_KAMA_Trend_Reversal
+Hypothesis: On 4h timeframe, take long when KAMA turns upward from oversold (RSI<30) in uptrend,
+and short when KAMA turns downward from overbought (RSI>70) in downtrend.
+Use 12h ADX>25 for trend strength filter and volume > 1.5x average for confirmation.
+Exit when RSI reaches opposite extreme or trend weakens (ADX<20).
+Designed to capture mean-reversion within strong trends with low trade frequency.
 Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
 """
 
@@ -14,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_3level_Trend_Filter"
+name = "4h_12h_KAMA_Trend_Reversal"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,80 +27,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR TREND FILTER ===
+    # === 12H DATA FOR TREND STRENGTH (ADX) ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    if len(df_12h) < 30:
         return np.zeros(n)
     
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
     
-    # === DAILY DATA FOR CAMARILLA LEVELS ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate ADX
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    plus_dm = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Calculate Camarilla levels for each day
-    camarilla_h3 = []
-    camarilla_l3 = []
-    for i in range(len(df_1d)):
-        if i == 0:
-            # For first day, use same values (will be filtered by alignment delay)
-            camarilla_h3.append(high_1d[i])
-            camarilla_l3.append(low_1d[i])
+    atr = np.convolve(tr, np.ones(14)/14, mode='same')
+    atr[:13] = np.nan
+    
+    plus_di = 100 * np.convolve(plus_dm, np.ones(14)/14, mode='same') / atr
+    minus_di = 100 * np.convolve(minus_dm, np.ones(14)/14, mode='same') / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = np.convolve(dx, np.ones(14)/14, mode='same')
+    
+    adx[:27] = np.nan
+    adx_12h = adx
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # === KAMA CALCULATION ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) >= 10 else np.full_like(close, np.nan)
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    
+    # KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start after 10 periods
+    for i in range(10, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
         else:
-            # Camarilla H3/L3 from previous day
-            range_prev = high_1d[i-1] - low_1d[i-1]
-            close_prev = close_1d[i-1]
-            h3 = close_prev + range_prev * 1.1 / 6
-            l3 = close_prev - range_prev * 1.1 / 6
-            camarilla_h3.append(h3)
-            camarilla_l3.append(l3)
+            kama[i] = kama[i-1]
     
-    camarilla_h3 = np.array(camarilla_h3)
-    camarilla_l3 = np.array(camarilla_l3)
+    kama_slope = np.diff(kama, prepend=kama[0])
     
-    # Align Camarilla levels to 4h timeframe
-    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # === RSI CALCULATION ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.convolve(gain, np.ones(14)/14, mode='same')
+    avg_loss = np.convolve(loss, np.ones(14)/14, mode='same')
+    avg_gain[:13] = np.nan
+    avg_loss[:13] = np.nan
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # === VOLUME FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma[:19] = np.nan
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(ema21_12h_aligned[i]) or np.isnan(h3_4h[i]) or 
-            np.isnan(l3_4h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(kama_slope[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend from 12h EMA21
-        close_12h_arr = df_12h['close'].values
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h_arr)
-        trend_up = close_12h_aligned[i] > ema21_12h_aligned[i]
-        trend_down = close_12h_aligned[i] < ema21_12h_aligned[i]
+        # Trend strength filter
+        strong_trend = adx_12h_aligned[i] > 25
+        weak_trend = adx_12h_aligned[i] < 20
         
-        # Entry conditions: price near Camarilla level + trend + volume
-        near_h3 = abs(high[i] - h3_4h[i]) / h3_4h[i] < 0.002  # Within 0.2% of H3
-        near_l3 = abs(low[i] - l3_4h[i]) / l3_4h[i] < 0.002   # Within 0.2% of L3
+        # KAMA direction
+        kama_up = kama_slope[i] > 0
+        kama_down = kama_slope[i] < 0
         
-        long_signal = near_l3 and trend_up and vol_ratio[i] > 1.3
-        short_signal = near_h3 and trend_down and vol_ratio[i] > 1.3
+        # RSI extremes
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Exit conditions: reach opposite level or trend reversal
-        exit_long = (position == 1 and 
-                    (near_h3 or not trend_up))
-        exit_short = (position == -1 and 
-                     (near_l3 or not trend_down))
+        # Entry conditions
+        long_signal = kama_up and rsi_oversold and strong_trend and vol_ratio[i] > 1.5
+        short_signal = kama_down and rsi_overbought and strong_trend and vol_ratio[i] > 1.5
+        
+        # Exit conditions
+        exit_long = (position == 1 and (rsi[i] > 70 or weak_trend))
+        exit_short = (position == -1 and (rsi[i] < 30 or weak_trend))
         
         # Execute trades
         if long_signal and position != 1:
