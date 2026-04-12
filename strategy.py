@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""
-6h_1w_pivot_trend_v1
-Hypothesis: Use 1-week pivot points (PP, R1, S1) to determine trend direction on 6h chart.
-In bull markets, price stays above weekly PP; in bear markets, below weekly PP.
-Enter long when 6h close crosses above weekly R1 with volume confirmation.
-Enter short when 6h close crosses below weekly S1 with volume confirmation.
-Exit on opposite cross or trend reversal.
-Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-"""
+# 12h_1d_kama_rsi_chop_v1
+# Hypothesis: 12-hour strategy using KAMA trend direction, RSI overbought/oversold levels, and Choppiness Index regime filter.
+# KAMA adapts to market noise, reducing whipsaws in ranging markets. RSI provides mean-reversion signals.
+# Choppiness Index filters trades: only take mean-reversion signals in high-chop (ranging) markets.
+# Works in bull/bear by adapting to market conditions via KAMA and avoiding trend-following in chop.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "6h_1w_pivot_trend_v1"
-timeframe = "6h"
+name = "12h_1d_kama_rsi_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,65 +24,123 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for RSI and Choppiness Index
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous 1w bar's pivot points
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
+    # KAMA (Kaufman Adaptive Moving Average) on 12h close
+    def calculate_kama(close, length=10, fast=2, slow=30):
+        # Calculate efficiency ratio
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        # Smoothing constant
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # Initialize KAMA
+        kama = np.full_like(close, np.nan, dtype=float)
+        kama[length] = close[length]
+        for i in range(length + 1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    pivot = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    r1 = 2 * pivot - prev_low_1w
-    s1 = 2 * pivot - prev_high_1w
+    kama = calculate_kama(close, length=10, fast=2, slow=30)
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # RSI on 1d close
+    def calculate_rsi(close, length=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        for i in range(length + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    rsi = calculate_rsi(close_1d, length=14)
+    
+    # Choppiness Index on 1d data
+    def calculate_choppiness(high, low, close, length=14):
+        atr = np.zeros_like(close)
+        for i in range(1, len(close)):
+            atr[i] = max(
+                high[i] - low[i],
+                np.abs(high[i] - close[i-1]),
+                np.abs(low[i] - close[i-1])
+            )
+        # Sum of true range over period
+        sum_atr = np.zeros_like(close)
+        for i in range(length, len(close)):
+            sum_atr[i] = np.sum(atr[i-length+1:i+1])
+        # Highest high and lowest low over period
+        highest_high = np.zeros_like(close)
+        lowest_low = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            highest_high[i] = np.max(high[i-length+1:i+1])
+            lowest_low[i] = np.min(low[i-length+1:i+1])
+        # Choppiness formula
+        chop = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            if highest_high[i] != lowest_low[i]:
+                chop[i] = 100 * np.log10(sum_atr[i] / (highest_high[i] - lowest_low[i])) / np.log10(length)
+            else:
+                chop[i] = 50  # Avoid division by zero
+        return chop
+    
+    chop = calculate_choppiness(high_1d, low_1d, close_1d, length=14)
+    
+    # Align indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)  # Using 1d data for alignment base
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close crosses above R1 with volume
-        if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and vol_confirm[i] and position != 1):
-            position = 1
-            signals[i] = 0.25
-        # Short entry: close crosses below S1 with volume
-        elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and vol_confirm[i] and position != -1):
-            position = -1
-            signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite level
-        elif position == 1 and close[i] < s1_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and close[i] > r1_aligned[i]:
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
-            if position == 1:
+        # Only trade in high-chop (ranging) markets: Choppiness > 61.8
+        if chop_aligned[i] > 61.8:
+            # Long signal: RSI oversold (< 30) and price above KAMA (bullish bias)
+            if rsi_aligned[i] < 30 and close[i] > kama_aligned[i] and position != 1:
+                position = 1
                 signals[i] = 0.25
-            elif position == -1:
+            # Short signal: RSI overbought (> 70) and price below KAMA (bearish bias)
+            elif rsi_aligned[i] > 70 and close[i] < kama_aligned[i] and position != -1:
+                position = -1
                 signals[i] = -0.25
-            else:
+            # Exit: RSI returns to neutral zone (40-60)
+            elif position == 1 and rsi_aligned[i] > 40:
+                position = 0
                 signals[i] = 0.0
+            elif position == -1 and rsi_aligned[i] < 60:
+                position = 0
+                signals[i] = 0.0
+            else:
+                # Hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        else:
+            # In trending markets (low chop), stay flat to avoid whipsaws
+            position = 0
+            signals[i] = 0.0
     
     return signals
