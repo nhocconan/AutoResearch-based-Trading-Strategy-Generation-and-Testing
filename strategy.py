@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Reversal_With_Trend
-Hypothesis: Use daily Camarilla pivot levels (H3/L3) on 12h timeframe for mean-reversion entries, 
-filtered by 1-day trend (EMA50) and volume confirmation (>1.5x 30-period average). 
-Long near L3 in uptrend, short near H3 in downtrend. Designed for 12h to reduce trade frequency 
-and avoid fee drag, targeting 50-150 total trades over 4 years.
+6h_12h_1d_Camarilla_Pullback_With_Flow
+Hypothesis: Pullback to Camarilla pivot levels (H3/L3) on 1-day data with 12h trend filter and volume surge confirmation.
+Long when price pulls back to L3 in uptrend (12h close > 12h EMA20) with volume spike; short when pulls back to H3 in downtrend.
+Uses Camarilla levels from daily timeframe for institutional-grade support/resistance.
+Designed for 6h timeframe to capture mean-reversion bounces in both bull and bear markets.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Reversal_With_Trend"
-timeframe = "12h"
+name = "6h_12h_1d_Camarilla_Pullback_With_Flow"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,7 +26,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY CAMARILLA PIVOT LEVELS ===
+    # === 1-DAY CAMARILLA LEVELS ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -34,49 +35,80 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Camarilla levels for each day
+    camarilla_h3 = np.zeros(len(close_1d))
+    camarilla_l3 = np.zeros(len(close_1d))
+    camarilla_h4 = np.zeros(len(close_1d))
+    camarilla_l4 = np.zeros(len(close_1d))
     
-    # Camarilla levels: H3, L3 (most significant for reversals)
-    h3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    l3_1d = close_1d - (range_1d * 1.1 / 4.0)
+    for i in range(len(close_1d)):
+        if i == 0 or np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            camarilla_h3[i] = camarilla_l3[i] = camarilla_h4[i] = camarilla_l4[i] = np.nan
+            continue
+            
+        range_val = high_1d[i] - low_1d[i]
+        camarilla_h3[i] = close_1d[i] + range_val * 1.1 / 6
+        camarilla_l3[i] = close_1d[i] - range_val * 1.1 / 6
+        camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
+        camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
     
-    # Align to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_12h = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # Align Camarilla levels to 6h timeframe
+    h3_6h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_6h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_6h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_6h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # === DAILY TREND FILTER (EMA50) ===
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # === 12-HOUR TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # === VOLUME CONFIRMATION ===
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    close_12h = df_12h['close'].values
+    # Calculate EMA20 of 12-hour close
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_6h = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    
+    # === VOLUME SURGE FILTER ===
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
-            np.isnan(ema50_12h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(h3_6h[i]) or np.isnan(l3_6h[i]) or np.isnan(ema20_12h_6h[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price near L3 in uptrend (price > EMA50) with volume
-        near_l3 = low[i] <= l3_12h[i] * 1.005  # within 0.5% of L3
-        uptrend = close[i] > ema50_12h[i]
-        long_signal = near_l3 and uptrend and (vol_ratio[i] > 1.5)
+        # Determine 12h trend: up if close > EMA20, down if close < EMA20
+        # Get current 12h close aligned to 6h
+        if len(df_12h) >= 2:
+            close_12h_arr = df_12h['close'].values
+            close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h_arr)
+            trend_up = close_12h_aligned[i] > ema20_12h_6h[i]
+            trend_down = close_12h_aligned[i] < ema20_12h_6h[i]
+        else:
+            trend_up = trend_down = False
         
-        # Short: price near H3 in downtrend (price < EMA50) with volume
-        near_h3 = high[i] >= h3_12h[i] * 0.995  # within 0.5% of H3
-        downtrend = close[i] < ema50_12h[i]
-        short_signal = near_h3 and downtrend and (vol_ratio[i] > 1.5)
+        # Long: pullback to L3 in uptrend with volume surge
+        long_signal = (trend_up and 
+                      close[i] <= l3_6h[i] * 1.005 and  # Allow small tolerance
+                      close[i] >= l4_6h[i] * 0.995 and  # But above L4 to avoid breakdown
+                      vol_ratio[i] > 1.8)
         
-        # Exit: opposite signal or trend change
-        exit_long = (position == 1) and (close[i] < ema50_12h[i])
-        exit_short = (position == -1) and (close[i] > ema50_12h[i])
+        # Short: pullback to H3 in downtrend with volume surge
+        short_signal = (trend_down and 
+                       close[i] >= h3_6h[i] * 0.995 and  # Allow small tolerance
+                       close[i] <= h4_6h[i] * 1.005 and  # But below H4 to avoid breakout
+                       vol_ratio[i] > 1.8)
+        
+        # Exit conditions: reversal of trend or price moves past H4/L4
+        exit_long = (position == 1 and 
+                    (not trend_up or close[i] >= h4_6h[i]))
+        exit_short = (position == -1 and 
+                     (not trend_down or close[i] <= l4_6h[i]))
         
         # Execute trades
         if long_signal and position != 1:
