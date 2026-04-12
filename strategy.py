@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Momentum_v1
-Hypothesis: 4-hour breakout of daily Camarilla H4/L4 levels with momentum confirmation (price > 50-period SMA) and volume filter (>1.5x 20-period average). Uses discrete position sizing (0.25) to minimize churn. Designed for low-frequency, high-probability trades in both bull and bear markets. Target: 20-50 total trades over 4 years (5-12/year) to avoid fee drag while capturing significant moves.
+1d_1w_Keltner_CCI_Breakout_v1
+Hypothesis: Daily breakout of Keltner Channel (2x ATR) with CCI(20) momentum confirmation and weekly trend filter (price > weekly SMA50). Designed to capture sustained trends in both bull and bear markets with low frequency (target: 30-100 trades over 4 years). Uses discrete position sizing (0.25) to minimize churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Momentum_v1"
-timeframe = "4h"
+name = "1d_1w_Keltner_CCI_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,79 +20,61 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === DAILY CAMARILLA PIVOT CALCULATION ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === WEEKLY TREND FILTER (SMA50) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
+    weekly_close = df_1w['close'].values
+    sma_50_1w = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === DAILY KELTNER CHANNEL (2x ATR) ===
+    # Calculate ATR(14)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla H4/L4 levels for each day
-    H4 = np.zeros(len(df_1d))
-    L4 = np.zeros(len(df_1d))
+    # Calculate EMA(20) of close for Keltner middle
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    for i in range(len(df_1d)):
-        range_ = high_1d[i] - low_1d[i]
-        if range_ <= 0:
-            H4[i] = L4[i] = close_1d[i]
-        else:
-            H4[i] = close_1d[i] + range_ * 1.1 / 2
-            L4[i] = close_1d[i] - range_ * 1.1 / 2
+    # Keltner Upper/Lower bands
+    keltner_upper = ema_20 + 2.0 * atr
+    keltner_lower = ema_20 - 2.0 * atr
     
-    # Align Camarilla levels to 4h timeframe
-    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # === MOMENTUM FILTER (50-period SMA) ===
-    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
-    
-    # === VOLUME FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    # === CCI(20) MOMENTUM ===
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (typical_price - sma_tp) / (0.015 * mad)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(H4_4h[i]) or np.isnan(L4_4h[i]) or 
-            np.isnan(sma_50[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or np.isnan(cci[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        # Long: Price breaks above H4 with volume + price above SMA50
-        long_breakout = (close[i] > H4_4h[i]) and (vol_ratio[i] > 1.5) and (close[i] > sma_50[i])
+        # Long: Close above Keltner Upper + CCI > 100 + price above weekly SMA50
+        long_signal = (close[i] > keltner_upper[i]) and (cci[i] > 100) and (close[i] > sma_50_1w_aligned[i])
         
-        # Short: Price breaks below L4 with volume + price below SMA50
-        short_breakout = (close[i] < L4_4h[i]) and (vol_ratio[i] > 1.5) and (close[i] < sma_50[i])
+        # Short: Close below Keltner Lower + CCI < -100 + price below weekly SMA50
+        short_signal = (close[i] < keltner_lower[i]) and (cci[i] < -100) and (close[i] < sma_50_1w_aligned[i])
         
-        # Exit: Price returns to opposite H3/L3 level
-        # Calculate H3/L3 for exit
-        H3 = np.zeros(len(df_1d))
-        L3 = np.zeros(len(df_1d))
-        for i_1d in range(len(df_1d)):
-            range_ = high_1d[i_1d] - low_1d[i_1d]
-            if range_ <= 0:
-                H3[i_1d] = L3[i_1d] = close_1d[i_1d]
-            else:
-                H3[i_1d] = close_1d[i_1d] + range_ * 1.1 / 4
-                L3[i_1d] = close_1d[i_1d] - range_ * 1.1 / 4
-        H3_4h = align_htf_to_ltf(prices, df_1d, H3)
-        L3_4h = align_htf_to_ltf(prices, df_1d, L3)
-        
-        exit_long = (position == 1) and (close[i] < L3_4h[i])
-        exit_short = (position == -1) and (close[i] > H3_4h[i])
+        # Exit: CCI crosses back through zero (mean reversion)
+        exit_long = (position == 1) and (cci[i] < 0)
+        exit_short = (position == -1) and (cci[i] > 0)
         
         # Execute trades
-        if long_breakout and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
