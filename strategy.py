@@ -1,15 +1,22 @@
+# 12h_1d_camarilla_breakout_v2
+# Hypothesis: 12h timeframe with 1d Camarilla pivot levels, volume confirmation, and ADX trend filter.
+# Uses discrete position sizing (0.25) to limit trade frequency and reduce fee drag.
+# Designed to work in both bull and bear markets by requiring strong trend (ADX>25) for breakouts,
+# avoiding false signals in ranging conditions. Targets 20-50 trades per year to avoid overtrading.
+# Focuses on BTC/ETH as primary assets, with volume and trend filters to reduce false breakouts.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_camarilla_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_breakout_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data for Camarilla pivot calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from weekly data
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    # Calculate Camarilla pivot levels from daily data
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # Camarilla levels (using standard multipliers)
-    h3 = pivot + (range_1w * 1.1 / 4)   # Resistance 3
-    l3 = pivot - (range_1w * 1.1 / 4)   # Support 3
-    h4 = pivot + (range_1w * 1.1 / 2)   # Resistance 4
-    l4 = pivot - (range_1w * 1.1 / 2)   # Support 4
+    h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
     
-    # Align Camarilla levels to 6h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume filter - 20-period average on 6h data
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -73,17 +76,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if not ready
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(trend_strong[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(trend_strong[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H4 with volume confirmation and strong trend
-        long_signal = close[i] > h4_aligned[i] and volume_ok[i] and trend_strong[i]
-        # Short: price breaks below L4 with volume confirmation and strong trend
-        short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_strong[i]
+        # Long: price breaks above H3 with volume confirmation and strong trend
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and trend_strong[i]
+        # Short: price breaks below L3 with volume confirmation and strong trend
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and trend_strong[i]
         
         # Exit when price returns to pivot
         exit_long = close[i] < pivot_aligned[i]
