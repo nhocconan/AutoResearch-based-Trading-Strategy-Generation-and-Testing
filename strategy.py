@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_funding_rate_mean_reversion
-Uses funding rate z-score for mean-reversion contrarian signals:
-- Long when funding rate z-score < -2.0 (extremely negative)
-- Short when funding rate z-score > +2.0 (extremely positive)
-- Exit when z-score returns to zero or reverses
-Designed for low trade frequency (<20/year) to exploit funding extremes in BTC/ETH.
-Works in both bull and bear markets as funding extremes precede reversals.
+6h_1d_camarilla_breakout_volume
+Uses Camarilla pivot levels from daily timeframe to identify key support/resistance.
+Breakouts above R4 or below S4 with volume confirmation indicate strong momentum.
+Fade trades at R3/S3 when price shows rejection signals.
+Combines trend following and mean reversion for robust performance in bull/bear markets.
 """
 
-name = "4h_1d_funding_rate_mean_reversion"
-timeframe = "4h"
+name = "6h_1d_camarilla_breakout_volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,61 +17,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load funding rate data from parquet files
-    try:
-        funding_path = "/mnt/shared/funding/binance_funding_rate_1h.parquet"
-        funding_df = pd.read_parquet(funding_path)
-        # Align funding rate timestamp to price data
-        funding_series = funding_df.set_index('timestamp')['funding_rate']
-        # Reindex to match price index
-        funding_aligned = funding_series.reindex(prices.index, method='ffill').values
-    except:
-        # Fallback: simulate funding rate based on price momentum (for testing)
-        returns = pd.Series(close).pct_change(periods=8)  # 8-period returns ~ funding proxy
-        funding_aligned = (returns.rolling(window=96, min_periods=96).mean().values)  # daily avg
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate z-score of funding rate (30-day lookback)
-    funding_series_pd = pd.Series(funding_aligned)
-    funding_mean = funding_series_pd.rolling(window=720, min_periods=720).mean().values  # 30d * 24h
-    funding_std = funding_series_pd.rolling(window=720, min_periods=720).std().values
-    funding_zscore = (funding_aligned - funding_mean) / (funding_std + 1e-8)
+    # Calculate Camarilla levels from previous day's OHLC
+    # Using close of previous day as base (standard Camarilla)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Smooth z-score to reduce noise
-    funding_zscore_smooth = pd.Series(funding_zscore).rolling(window=3, min_periods=1).mean().values
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day will have invalid data, handled by checks later
+    
+    # Camarilla calculations
+    range_ = prev_high - prev_low
+    # Avoid division by zero
+    range_ = np.where(range_ == 0, 1e-10, range_)
+    
+    # Camarilla levels
+    r4 = prev_close + range_ * 1.1 / 2
+    r3 = prev_close + range_ * 1.1 / 4
+    s3 = prev_close - range_ * 1.1 / 4
+    s4 = prev_close - range_ * 1.1 / 2
+    
+    # Align Camarilla levels to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
+    
+    # Price rejection signals at R3/S3 (wick rejection)
+    # Bearish rejection at R3: long upper wick
+    upper_wick = high - np.maximum(close, open_) if 'open_' in locals() else high - close
+    open_ = prices['open'].values
+    upper_wick = high - np.maximum(close, open_)
+    lower_wick = np.minimum(close, open_) - low
+    
+    # Rejection at R3: close below open and long upper wick
+    rejection_r3 = (close < open_) & (upper_wick > 2 * (open_ - close))
+    # Rejection at S3: close above open and long lower wick
+    rejection_s3 = (close > open_) & (lower_wick > 2 * (close - open_))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(720, n):  # Wait for z-score warmup
-        z = funding_zscore_smooth[i]
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            signals[i] = 0.0
+            continue
         
-        # Long entry: extremely negative funding (expect reversion to mean)
-        if z < -2.0 and position != 1:
+        # Long breakout: price breaks above R4 with volume
+        if close[i] > r4_aligned[i] and vol_confirm[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short entry: extremely positive funding (expect reversion to mean)
-        elif z > 2.0 and position != -1:
+        # Short breakdown: price breaks below S4 with volume
+        elif close[i] < s4_aligned[i] and vol_confirm[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: funding returns to neutral or reverses
-        elif position == 1 and (z > -0.5 or z > funding_zscore_smooth[i-1]):
-            position = 0
-            signals[i] = 0.0
-        elif position == -1 and (z < 0.5 or z < funding_zscore_smooth[i-1]):
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
+        # Fade long at S3 rejection: price shows bullish rejection at support
+        elif close[i] <= s3_aligned[i] and rejection_s3[i] and position != 1:
+            position = 1
+            signals[i] = 0.20
+        # Fade short at R3 rejection: price shows bearish rejection at resistance
+        elif close[i] >= r3_aligned[i] and rejection_r3[i] and position != -1:
+            position = -1
+            signals[i] = -0.20
+        # Exit conditions: return to midpoint or opposite rejection
+        elif position == 1:
+            # Exit long if price returns to midpoint or shows rejection at R3
+            midpoint = (r4_aligned[i] + s4_aligned[i]) / 2
+            if close[i] <= midpoint or rejection_r3[i]:
+                position = 0
                 signals[i] = 0.0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short if price returns to midpoint or shows rejection at S3
+            midpoint = (r4_aligned[i] + s4_aligned[i]) / 2
+            if close[i] >= midpoint or rejection_s3[i]:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
