@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_With_Volume_Filter_v2
-Hypothesis: Trade daily Camarilla H3/L3 breakouts only with volume > 2x 20-period average and price >1% beyond level.
-Use 50 EMA for trend filter: long only in uptrend, short only in downtrend.
-Exit on trend reversal or opposite level touch. Designed for low trade frequency (~20-40/year) with high conviction.
-Works in bull markets (continuation breaks) and bear markets (mean reversion from extremes).
+1d_1w_Momentum_Confluence_Strategy
+Hypothesis: Trade weekly momentum confluences on daily timeframe.
+Enter long when price > weekly VWAP AND daily RSI < 30 (oversold bounce).
+Enter short when price < weekly VWAP AND daily RSI > 70 (overbought rejection).
+Use volume confirmation (>1.5x 20-day average) and ATR-based stoploss.
+Designed for low trade frequency (~10-20/year) with high conviction in mean reversion.
+Works in bull markets (buying dips) and bear markets (selling rallies).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_With_Volume_Filter_v2"
-timeframe = "4h"
+name = "1d_1w_Momentum_Confluence_Strategy"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,73 +27,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOTS ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === WEEKLY DATA FOR VWAP ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    pivot = typical_price
-    range_1d = high_1d - low_1d
+    # Calculate VWAP for each weekly bar
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3
+    vwap_numerator = np.cumsum(typical_price_1w * volume_1w)
+    vwap_denominator = np.cumsum(volume_1w)
+    vwap_1w = vwap_numerator / vwap_denominator
     
-    h3 = pivot + (range_1d * 1.1 / 4)
-    l3 = pivot - (range_1d * 1.1 / 4)
-    h4 = pivot + (range_1d * 1.1 / 2)
-    l4 = pivot - (range_1d * 1.1 / 2)
+    # Align VWAP to daily timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # === DAILY INDICATORS ===
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === TREND FILTER: 50 EMA ON 4H CHART ===
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # === VOLUME FILTER ===
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(ema50[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vwap_1w_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend
-        uptrend = close[i] > ema50[i]
-        downtrend = close[i] < ema50[i]
+        # Volume strength
+        strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Volume strength (must be significantly above average)
-        strong_volume = volume[i] > (vol_ma[i] * 2.0)
-        
-        # Price must be beyond the level by at least 1% to avoid false breakouts
-        level_buffer = 0.01
-        
-        # Long: price breaks H3 with strong volume in uptrend
-        long_signal = (close[i] > h3_aligned[i] * (1 + level_buffer) and 
-                      uptrend and 
+        # Long: price > weekly VWAP + RSI oversold + volume
+        long_signal = (close[i] > vwap_1w_aligned[i] and 
+                      rsi[i] < 30 and 
                       strong_volume)
         
-        # Short: price breaks L3 with strong volume in downtrend
-        short_signal = (close[i] < l3_aligned[i] * (1 - level_buffer) and 
-                       downtrend and 
+        # Short: price < weekly VWAP + RSI overbought + volume
+        short_signal = (close[i] < vwap_1w_aligned[i] and 
+                       rsi[i] > 70 and 
                        strong_volume)
         
-        # Exit: opposite H3/L3 level or trend reversal
+        # Exit: RSI mean reversion or opposite VWAP touch
         exit_long = (position == 1 and 
-                    (close[i] < l3_aligned[i] or not uptrend))
+                    (rsi[i] > 50 or close[i] < vwap_1w_aligned[i]))
         exit_short = (position == -1 and 
-                     (close[i] > h3_aligned[i] or not downtrend))
+                     (rsi[i] < 50 or close[i] > vwap_1w_aligned[i]))
         
         # Execute trades
         if long_signal and position != 1:
