@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v40"
-timezone = "UTC"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla breakout with 1d volume spike and ADX trend filter
+# Works in bull/bear: breakouts capture trends, volume confirms institutional interest,
+# ADX filter avoids whipsaws in ranging markets. Target: 20-40 trades/year.
+name = "4h_1d_camarilla_breakout_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,7 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (HTF)
+    # Get 1d data for Camarilla pivots and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -34,16 +36,17 @@ def generate_signals(prices):
     h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
     l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
     
-    # Volume confirmation: volume > 2.0x 50-period average (stricter to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # 1d volume spike: volume > 2.5x 20-day average (stricter to reduce trades)
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_spike = df_1d['volume'] > (vol_ma_1d * 2.5)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # ATR filter: avoid low volatility periods
-    atr_period = 14
+    # ADX trend filter on 4h (avoid ranging markets)
+    # Calculate True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -51,24 +54,62 @@ def generate_signals(prices):
     tr2[0] = np.abs(high[0] - close[0])
     tr3[0] = np.abs(low[0] - close[0])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_ratio = atr / atr_ma
-    vol_filter = vol_ratio > 0.8  # Avoid extremely low volatility
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    atr = np.zeros(n)
+    dm_plus_smooth = np.zeros(n)
+    dm_minus_smooth = np.zeros(n)
+    
+    # Initial values
+    atr[period-1] = np.mean(tr[:period])
+    dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
+    dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
+    
+    # Wilder smoothing
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period - 1) + dm_plus[i]) / period
+        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period - 1) + dm_minus[i]) / period
+    
+    # DI and DX
+    di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
+    di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    dx = np.where((di_plus + di_minus) != 0, 
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    
+    # ADX: smoothed DX
+    adx = np.zeros(n)
+    adx[2*period-1] = np.mean(dx[period-1:2*period-1])
+    for i in range(2*period, n):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    # ADX filter: trend present when ADX > 25
+    adx_filter = adx > 25
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(150, n):
+    for i in range(200, n):
         if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(vol_confirm[i]) or np.isnan(vol_filter[i])):
+            np.isnan(vol_spike_aligned[i]) or np.isnan(adx_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above H3 with volume confirmation and vol filter
-        long_signal = close[i] > h3_aligned[i] and vol_confirm[i] and vol_filter[i]
-        # Short: break below L3 with volume confirmation and vol filter
-        short_signal = close[i] < l3_aligned[i] and vol_confirm[i] and vol_filter[i]
+        # Long: break above H3 with volume spike and ADX trend filter
+        long_signal = close[i] > h3_aligned[i] and vol_spike_aligned[i] and adx_filter[i]
+        # Short: break below L3 with volume spike and ADX filter
+        short_signal = close[i] < l3_aligned[i] and vol_spike_aligned[i] and adx_filter[i]
         
         # Exit when price returns to pivot level
         pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
