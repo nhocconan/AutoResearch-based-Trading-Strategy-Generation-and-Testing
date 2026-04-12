@@ -1,12 +1,10 @@
-#!/usr/bin/env python3
-"""
-4h_1d_camarilla_breakout_with_volume_and_vwap
-Hypothesis: 4-hour Camarilla breakout with volume confirmation and VWAP trend filter.
-Works in bull/bear by using volume to confirm breakouts and VWAP to filter trend direction.
-Targets 20-50 trades/year (80-200 total) to minimize fee drag.
-"""
-name = "4h_1d_camarilla_breakout_with_volume_and_vwap"
-timeframe = "4h"
+# 12h_1d_camarilla_breakout_volume_regime
+# Hypothesis: 12-hour Camarilla breakout with volume confirmation and choppiness regime filter. 
+# Uses 1-day Camarilla levels, volume > 1.5x MA, and 1-day choppiness > 61.8 (range) for mean reversion or < 38.2 (trend) for trend following.
+# Designed for low trade frequency (12-37/year) to avoid fee drag. Works in bull/bear via regime adaptation.
+
+name = "12h_1d_camarilla_breakout_volume_regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and VWAP
+    # Get daily data for Camarilla and choppiness
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,7 +29,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
     # Previous day's range
     prev_high = np.roll(high_1d, 1)
@@ -40,26 +37,28 @@ def generate_signals(prices):
     
     # Camarilla levels (based on previous day)
     range_ = prev_high - prev_low
-    # Resistance levels
     r3 = prev_close + range_ * 1.1 / 2
     r4 = prev_close + range_ * 1.1
-    # Support levels
     s3 = prev_close - range_ * 1.1 / 2
     s4 = prev_close - range_ * 1.1
     
-    # VWAP for daily trend filter
-    vwap_num = (high_1d + low_1d + close_1d) * volume_1d
-    vwap_den = volume_1d
-    vwap = np.cumsum(vwap_num) / np.cumsum(vwap_den)
-    # Handle division by zero
-    vwap = np.where(np.cumsum(vwap_den) != 0, vwap, close_1d)
+    # Choppiness Index (14-day) for regime detection
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = chop.values
     
-    # Align Camarilla levels and VWAP to 4h timeframe
+    # Align Camarilla levels and choppiness to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,25 +71,45 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vwap_aligned[i])):
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and above VWAP
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            close[i] > vwap_aligned[i] and position != 1):
+        # Long conditions: chop > 61.8 (range) for mean reversion OR chop < 38.2 (trend) for trend following
+        is_range = chop_aligned[i] > 61.8
+        is_trend = chop_aligned[i] < 38.2
+        
+        # Long entry logic
+        long_signal = False
+        if is_range and close[i] > s3_aligned[i] and close[i] < s4_aligned[i]:
+            # Mean reversion in range: buy near support (S3-S4)
+            long_signal = vol_confirm[i]
+        elif is_trend and close[i] > r4_aligned[i]:
+            # Trend following: break above resistance
+            long_signal = vol_confirm[i]
+        
+        # Short entry logic
+        short_signal = False
+        if is_range and close[i] < r3_aligned[i] and close[i] > r4_aligned[i]:
+            # Mean reversion in range: sell near resistance (R3-R4)
+            short_signal = vol_confirm[i]
+        elif is_trend and close[i] < s4_aligned[i]:
+            # Trend following: break below support
+            short_signal = vol_confirm[i]
+        
+        # Update position
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and below VWAP
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              close[i] < vwap_aligned[i] and position != -1):
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        elif position == 1 and (close[i] < s3_aligned[i] or (is_range and close[i] > r3_aligned[i])):
+            # Exit long: break below support or reversion to resistance in range
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (close[i] > r4_aligned[i] or (is_range and close[i] < s4_aligned[i])):
+            # Exit short: break above resistance or reversion to support in range
             position = 0
             signals[i] = 0.0
         else:
