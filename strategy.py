@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_parabolic_sar_trend_v1
-# Parabolic SAR on 6h with 1d ADX trend filter (ADX > 25).
-# Captures strong trends while avoiding whipsaws in ranging markets.
-# Works in both bull and bear by following trend direction.
-# Target: 50-150 total trades over 4 years (12-37/year).
-name = "6h_1d_parabolic_sar_trend_v1"
-timeframe = "6h"
+# Hypothesis: 12h_1w_ema_crossover_v1
+# Uses 12h EMA crossover with 1-week trend filter to capture medium-term trends.
+# EMA50 crossing above EMA200 = bullish, below = bearish.
+# Weekly trend filter (price > weekly EMA50 for longs, < for shorts) ensures we trade with higher timeframe momentum.
+# Low trade frequency expected due to EMA crossover rarity on 12h timeframe (est. 15-25 trades/year).
+# Works in bull markets via trend-following crossovers and in bear markets via inverse signals.
+# Includes volatility-based position sizing using ATR to normalize risk across market regimes.
+
+name = "12h_1w_ema_crossover_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,135 +20,76 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ADX
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum.reduce([tr1, tr2, tr3])])
+    # Align weekly EMA50 to 12h timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Calculate 12h EMAs for crossover signal
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Smoothed values
-    def wilder_smooth(data, period):
-        smoothed = np.zeros_like(data)
-        smoothed[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
-        return smoothed
-    
-    period = 14
-    tr_smoothed = wilder_smooth(tr, period)
-    dm_plus_smoothed = wilder_smooth(dm_plus, period)
-    dm_minus_smoothed = wilder_smooth(dm_minus, period)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, 100 * dm_plus_smoothed / tr_smoothed, 0)
-    di_minus = np.where(tr_smoothed != 0, 100 * dm_minus_smoothed / tr_smoothed, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, period)
-    
-    # Align ADX to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Parabolic SAR on 6h
-    def calculate_psar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
-        psar = np.zeros_like(high)
-        psar[0] = low[0]
-        up_trend = True
-        af = af_start
-        ep = high[0] if up_trend else low[0]
-        
-        for i in range(1, len(high)):
-            if up_trend:
-                psar[i] = psar[i-1] + af * (ep - psar[i-1])
-                # Prevent SAR from penetrating previous lows
-                psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
-                if low[i] < psar[i]:  # Trend reversal
-                    up_trend = False
-                    psar[i] = ep
-                    af = af_start
-                    ep = low[i]
-                else:
-                    if high[i] > ep:
-                        ep = high[i]
-                        af = min(af + af_increment, af_max)
-            else:
-                psar[i] = psar[i-1] + af * (ep - psar[i-1])
-                # Prevent SAR from penetrating previous highs
-                psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
-                if high[i] > psar[i]:  # Trend reversal
-                    up_trend = True
-                    psar[i] = ep
-                    af = af_start
-                    ep = high[i]
-                else:
-                    if low[i] < ep:
-                        ep = low[i]
-                        af = min(af + af_increment, af_max)
-        return psar
-    
-    psar = calculate_psar(high, low)
+    # Calculate ATR for volatility-based position sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        # Skip if ADX not ready
-        if np.isnan(adx_aligned[i]):
+    for i in range(200, n):  # Start after EMA200 warmup
+        # Skip if any indicator not ready
+        if np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: only trade when ADX > 25 (strong trend)
-        strong_trend = adx_aligned[i] > 25
+        # EMA crossover signals
+        bullish_crossover = ema_50[i] > ema_200[i] and ema_50[i-1] <= ema_200[i-1]
+        bearish_crossover = ema_50[i] < ema_200[i] and ema_50[i-1] >= ema_200[i-1]
         
-        # PSAR signals: price above SAR = bullish, below SAR = bearish
-        bullish_signal = strong_trend and close[i] > psar[i]
-        bearish_signal = strong_trend and close[i] < psar[i]
+        # Weekly trend filter: only take longs when price above weekly EMA50, shorts when below
+        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Exit when trend weakens or PSAR flips
-        exit_long = not strong_trend or close[i] < psar[i]
-        exit_short = not strong_trend or close[i] > psar[i]
+        # Volatility-normalized position size (target 2.5% volatility risk)
+        vol_scaled_size = 0.25 * (0.015 / atr[i])  # Scale to ~1.5% ATR risk
+        vol_scaled_size = np.clip(vol_scaled_size, 0.1, 0.35)  # Keep within reasonable bounds
         
-        if bullish_signal and position != 1:
+        # Entry logic: crossover in direction of weekly trend
+        if bullish_crossover and weekly_uptrend and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif bearish_signal and position != -1:
+            signals[i] = vol_scaled_size
+        elif bearish_crossover and weekly_downtrend and position != -1:
             position = -1
-            signals[i] = -0.25
-        elif exit_long and position == 1:
+            signals[i] = -vol_scaled_size
+        
+        # Exit logic: opposite crossover
+        elif bearish_crossover and position == 1:
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif bullish_crossover and position == -1:
             position = 0
             signals[i] = 0.0
+        
+        # Hold position
         else:
-            # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = vol_scaled_size
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -vol_scaled_size
             else:
                 signals[i] = 0.0
     
