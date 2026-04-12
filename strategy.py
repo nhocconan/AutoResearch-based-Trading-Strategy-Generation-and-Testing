@@ -8,68 +8,77 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter + volume confirmation
-    # Uses 1w EMA50 for trend filter: only take breakouts in direction of 1w trend
-    # Volume confirmation: volume > 2.0 * 20-period average to filter false breakouts
-    # Discrete sizing 0.25 to minimize fee churn. Target: 10-25 trades/year per symbol.
+    # Hypothesis: 12h Camarilla pivot breakout with 1d volume confirmation
+    # Uses 1d Camarilla levels (H4, L4) for structure-based entries
+    # Volume filter: volume > 1.5 * 20-period average to confirm breakout strength
+    # Trend filter: price > 1d EMA50 for long, price < 1d EMA50 for short
+    # Discrete sizing 0.25 to minimize fee churn. Target: 12-25 trades/year per symbol.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for HTF indicators
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1w EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Calculate 1d Camarilla levels (H4, L4) from previous day
+    # H4 = Close + 1.1 * (High - Low) / 2
+    # L4 = Close - 1.1 * (High - Low) / 2
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    for i in range(1, len(df_1d)):
+        camarilla_h4[i] = close_1d[i-1] + 1.1 * (high_1d[i-1] - low_1d[i-1]) / 2
+        camarilla_l4[i] = close_1d[i-1] - 1.1 * (high_1d[i-1] - low_1d[i-1]) / 2
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1w trend
-        bullish_trend = close[i] > ema50_1w_aligned[i]
-        bearish_trend = close[i] < ema50_1w_aligned[i]
+        # Determine trend from 1d EMA50
+        bullish_trend = close[i] > ema50_1d_aligned[i]
+        bearish_trend = close[i] < ema50_1d_aligned[i]
         
-        # Entry logic: Donchian breakout with volume and trend filter
+        # Entry logic: Camarilla breakout with volume and trend filter
         long_entry = False
         short_entry = False
         
-        # Long breakout: price breaks above Donchian high in bullish trend
+        # Long breakout: price breaks above Camarilla H4 in bullish trend
         if bullish_trend:
-            long_entry = (close[i] > donchian_high[i]) and volume_spike[i]
-        # Short breakout: price breaks below Donchian low in bearish trend
+            long_entry = (close[i] > camarilla_h4_aligned[i]) and volume_spike[i]
+        # Short breakout: price breaks below Camarilla L4 in bearish trend
         elif bearish_trend:
-            short_entry = (close[i] < donchian_low[i]) and volume_spike[i]
+            short_entry = (close[i] < camarilla_l4_aligned[i]) and volume_spike[i]
         
-        # Exit logic: opposite Donchian level or trend reversal
-        long_exit = (bearish_trend and close[i] < donchian_low[i]) or (not bullish_trend and not bearish_trend)
-        short_exit = (bullish_trend and close[i] > donchian_high[i]) or (not bullish_trend and not bearish_trend)
+        # Exit logic: opposite Camarilla level or trend reversal
+        long_exit = (bearish_trend and close[i] < camarilla_l4_aligned[i]) or (not bullish_trend and not bearish_trend)
+        short_exit = (bullish_trend and close[i] > camarilla_h4_aligned[i]) or (not bullish_trend and not bearish_trend)
         
         if long_entry and position != 1:
             position = 1
@@ -94,6 +103,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_trend_volume_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
