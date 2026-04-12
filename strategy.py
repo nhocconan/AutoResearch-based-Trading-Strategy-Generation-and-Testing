@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_breakout_v1"
+name = "12h_1w_donchian_breakout_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,27 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots (HTF)
+    # Get weekly data for Donchian channels (HTF)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Use previous weekly bar's data to avoid look-ahead
-    high_1w_prev = df_1w['high'].shift(1).values
-    low_1w_prev = df_1w['low'].shift(1).values
-    close_1w_prev = df_1w['close'].shift(1).values
+    # Calculate 20-period Donchian channels on weekly data
+    high_20w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    low_20w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla pivot levels from previous weekly data
-    pivot_prev = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
-    range_1w_prev = high_1w_prev - low_1w_prev
-    
-    # Camarilla levels (H4 and L4 - breakout levels)
-    h4_prev = pivot_prev + (range_1w_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1w_prev * 1.1 / 2)
-    
-    # Align levels to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4_prev)
+    # Align Donchian channels to 12h timeframe (shifted by 1 to avoid look-ahead)
+    high_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
+    low_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
     
     # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
@@ -55,21 +46,20 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+        if (np.isnan(high_20w_aligned[i]) or np.isnan(low_20w_aligned[i]) or
             np.isnan(volume_ok[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H4 with volume confirmation and uptrend
-        long_signal = close[i] > h4_aligned[i] and volume_ok[i] and trend_up[i]
-        # Short: price breaks below L4 with volume confirmation and downtrend
-        short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_down[i]
+        # Long: price breaks above upper Donchian with volume confirmation and uptrend
+        long_signal = close[i] > high_20w_aligned[i] and volume_ok[i] and trend_up[i]
+        # Short: price breaks below lower Donchian with volume confirmation and downtrend
+        short_signal = close[i] < low_20w_aligned[i] and volume_ok[i] and trend_down[i]
         
-        # Exit when price returns to pivot (mean reversion)
-        pivot_prev_val = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Exit when price returns to middle of channel (mean reversion)
+        mid_20w = (high_20w_aligned[i] + low_20w_aligned[i]) / 2.0
+        exit_long = close[i] < mid_20w
+        exit_short = close[i] > mid_20w
         
         # Execute trades
         if long_signal and position != 1:
