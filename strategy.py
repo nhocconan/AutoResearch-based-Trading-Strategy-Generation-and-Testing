@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_1d_limited_range_breakout_v1
-Hypothesis: In BTC/ETH, price often consolidates in tight ranges (low volatility) before explosive moves.
-We detect tight ranges using 24-period ATR% (ATR/Close) on 1d timeframe. When volatility contracts below
-the 20th percentile, we wait for a breakout of the prior 20-period high/low on 6s timeframe with volume
-confirmation. This avoids whipsaws in high volatility and captures momentum after consolidation.
-Works in bull/bear because it trades breakouts regardless of direction, using volatility regime filter.
-Target: 20-40 trades/year (80-160 total over 4 years).
+4h_1d_kama_rsi_volatility_breakout_v2
+Hypothesis: KAMA trend direction combined with RSI momentum and volume confirmation on 4h.
+Uses 1-day KAMA for trend filter, 4-hour RSI for entry timing, and volume spike for confirmation.
+Designed to work in both bull and bear markets by filtering trades with trend alignment.
+Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 """
 
-name = "6h_1d_limited_range_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_kama_rsi_volatility_breakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,68 +25,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volatility and range calculation
+    # Get daily data for KAMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 24-period ATR on daily
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_24 = pd.Series(tr).rolling(window=24, min_periods=24).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    # Parameters: ER length=10, Fast=2, Slow=30
+    change = np.abs(np.subtract(close_1d[10:], close_1d[:-10]))
+    volatility = np.sum(np.abs(np.diff(close_1d.reshape(-1, 10), axis=1)), axis=1)
+    volatility = np.concatenate([np.full(9, np.nan), volatility])  # align lengths
     
-    # ATR as percentage of price (volatility measure)
-    atr_pct = atr_24 / close_1d
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = np.power(er * (2/2 - 2/30) + 2/30, 2)
     
-    # 20-period high/low for breakout levels
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # seed
+    for i in range(10, len(close_1d)):
+        if np.isnan(kama[i-1]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Volatility regime: low volatility when ATR% < 20th percentile (lookback 100 days)
-    atr_pct_series = pd.Series(atr_pct)
-    vol_percentile = atr_pct_series.rolling(window=100, min_periods=50).quantile(0.20).values
-    low_vol_regime = atr_pct < vol_percentile
+    # Align KAMA to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Align all daily indicators to 6s timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
+    # RSI on 4h close (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation on 6s: volume > 1.8x 20-period average
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(low_vol_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: break above 20-period high in low volatility regime with volume
-        if (close[i] > high_20_aligned[i] and low_vol_aligned[i] > 0.5 and 
-            vol_confirm[i] and position != 1):
+        # Long entry: price > KAMA (uptrend) + RSI > 55 + volume spike
+        if (close[i] > kama_aligned[i] and rsi[i] > 55 and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: break below 20-period low in low volatility regime with volume
-        elif (close[i] < low_20_aligned[i] and low_vol_aligned[i] > 0.5 and 
-              vol_confirm[i] and position != -1):
+        # Short entry: price < KAMA (downtrend) + RSI < 45 + volume spike
+        elif (close[i] < kama_aligned[i] and rsi[i] < 45 and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or volatility expands (exit consolidation breakout)
-        elif position == 1 and (low_vol_aligned[i] < 0.5 or close[i] < low_20_aligned[i]):
+        # Exit: trend reversal or RSI mean reversion
+        elif position == 1 and (close[i] < kama_aligned[i] or rsi[i] < 50):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (low_vol_aligned[i] < 0.5 or close[i] > high_20_aligned[i]):
+        elif position == -1 and (close[i] > kama_aligned[i] or rsi[i] > 50):
             position = 0
             signals[i] = 0.0
         else:
