@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:  # Reduced minimum to ensure sufficient data for warmup
         return np.zeros(n)
     
     # Precompute hour filter for 08-20 UTC
@@ -17,132 +17,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly pivot
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get 1d data for daily pivot and trend context
+    # Get 1d data for trend context and signal generation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using previous week's OHLC)
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
-    
-    # Classic pivot point formula
-    pivot_1w = (prev_week_high + prev_week_low + prev_week_close) / 3
-    r1_1w = 2 * pivot_1w - prev_week_low
-    s1_1w = 2 * pivot_1w - prev_week_high
-    r2_1w = pivot_1w + (prev_week_high - prev_week_low)
-    s2_1w = pivot_1w - (prev_week_high - prev_week_low)
-    
-    # Calculate daily pivot points
-    prev_day_high = df_1d['high'].shift(1).values
-    prev_day_low = df_1d['low'].shift(1).values
-    prev_day_close = df_1d['close'].shift(1).values
-    
-    pivot_1d = (prev_day_high + prev_day_low + prev_day_close) / 3
-    r1_1d = 2 * pivot_1d - prev_day_low
-    s1_1d = 2 * pivot_1d - prev_day_high
-    r2_1d = pivot_1d + (prev_day_high - prev_day_low)
-    s2_1d = pivot_1d - (prev_day_high - prev_day_low)
-    r3_1d = pivot_1d + 2 * (prev_day_high - prev_day_low)
-    s3_1d = pivot_1d - 2 * (prev_day_high - prev_day_low)
-    r4_1d = pivot_1d + 3 * (prev_day_high - prev_day_low)
-    s4_1d = pivot_1d - 3 * (prev_day_high - prev_day_low)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    
-    # Align daily pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Calculate 1d ADX for trend strength
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # True Range
+    # Calculate 1d Donchian(20) channels
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d ATR(14)
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Directional Movement
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    plus_dm[0] = minus_dm[0] = np.nan
+    # Calculate 1d volume moving average (20)
+    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Smooth TR and DM
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period]) if not np.isnan(arr[1:period]).all() else np.nan
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Align 1d indicators to 12h timeframe
+    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
+    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    volume_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_20_1d)
     
-    atr_1d = smooth_wilder(tr, 14)
-    plus_di_1d = 100 * smooth_wilder(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * smooth_wilder(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = smooth_wilder(dx_1d, 14)
+    # Get 1w data for regime filter (choppiness)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Align ADX to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate 14-period ATR for choppiness
+    tr1w = np.abs(high_1w - low_1w)
+    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1w[0] = tr2w[0] = tr3w[0] = np.nan
+    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
+    atr_1w = np.full(len(df_1w), np.nan)
+    for i in range(14, len(df_1w)):
+        atr_1w[i] = np.mean(trw[i-14:i+1])
+    
+    # Calculate 14-period high-low range for choppiness
+    max_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    min_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(sum(ATR14) / (max_high - min_low)) / log10(14)
+    sum_atr_14 = np.full(len(df_1w), np.nan)
+    range_hl_14 = np.full(len(df_1w), np.nan)
+    chop = np.full(len(df_1w), 50.0)  # Default to neutral
+    
+    for i in range(14, len(df_1w)):
+        sum_atr_14[i] = np.sum(trw[i-14:i+1])
+        range_hl_14[i] = max_high_14[i] - min_low_14[i]
+        if range_hl_14[i] > 0:
+            chop[i] = 100 * np.log10(sum_atr_14[i] / range_hl_14[i]) / np.log10(14)
+    
+    # Align chop to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):  # Start from 200 to ensure all indicators are ready
         if not in_session[i]:
             signals[i] = 0.0
             continue
         
         # Skip if data not ready
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
-            np.isnan(s2_1w_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
-            np.isnan(s4_1d_aligned[i])):
+        if (np.isnan(high_20_1d_aligned[i]) or np.isnan(low_20_1d_aligned[i]) or 
+            np.isnan(atr_1d_aligned[i]) or np.isnan(volume_ma_20_1d_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 20 for trending market
-        trending = adx_1d_aligned[i] > 20
+        # Volatility filter: 1d ATR > 0.3 * its 20-period MA (avoid low volatility)
+        atr_ma_20_1d = np.full(len(df_1d), np.nan)
+        for j in range(34, len(df_1d)):  # 14 + 19 for 20-period MA
+            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
+                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
+        atr_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_20_1d)
+        vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
+                     atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
         
-        # Weekly bias: price above/below weekly pivot
-        weekly_bullish = close[i] > pivot_1w_aligned[i]
-        weekly_bearish = close[i] < pivot_1w_aligned[i]
+        # Volume filter: current volume > 1.5 * 20-period average
+        vol_spike = volume[i] > 1.5 * volume_ma_20_1d_aligned[i]
         
-        # Entry conditions: break of daily R4/S4 with weekly bias + trend
-        long_entry = (close[i] > r4_1d_aligned[i]) and weekly_bullish and trending
-        short_entry = (close[i] < s4_1d_aligned[i]) and weekly_bearish and trending
+        # Regime filter: choppiness < 50 (trending market)
+        trending_regime = chop_aligned[i] < 50
         
-        # Exit conditions: return to daily pivot or trend weakening
-        long_exit = (close[i] < pivot_1d_aligned[i]) or (adx_1d_aligned[i] < 15)
-        short_exit = (close[i] > pivot_1d_aligned[i]) or (adx_1d_aligned[i] < 15)
+        # Trend filter: price above/below 1d Donchian mid
+        mid_1d = (high_20_1d_aligned[i] + low_20_1d_aligned[i]) / 2
+        uptrend = close[i] > mid_1d
+        downtrend = close[i] < mid_1d
+        
+        # Entry conditions: 12h breakout of 1d Donchian in trend direction + volatility + volume + regime
+        long_entry = (close[i] > high_20_1d_aligned[i]) and uptrend and vol_filter and vol_spike and trending_regime
+        short_entry = (close[i] < low_20_1d_aligned[i]) and downtrend and vol_filter and vol_spike and trending_regime
+        
+        # Exit conditions: opposite 12h breakout of 1d Donchian or volatility drop or regime change
+        long_exit = (close[i] < low_20_1d_aligned[i]) or (not vol_filter) or (not trending_regime)
+        short_exit = (close[i] > high_20_1d_aligned[i]) or (not vol_filter) or (not trending_regime)
         
         if long_entry and position != 1:
             position = 1
@@ -167,6 +153,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_pivot_adx_breakout_v1"
-timeframe = "6h"
+name = "12h_1d_1w_donchian_vol_vol_chop"
+timeframe = "12h"
 leverage = 1.0
