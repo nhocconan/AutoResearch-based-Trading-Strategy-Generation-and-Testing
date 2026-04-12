@@ -76,10 +76,10 @@ def generate_signals(prices):
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -89,14 +89,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_donchian_ema10_breakout_vol_filter_v1"
-timeframe = "4h"
+name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
