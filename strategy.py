@@ -1,21 +1,24 @@
-#/usr/bin/env python3
-# 12h_1d_Camarilla_Breakout_Volume_v2
-# Hypothesis: Breakouts above/below daily Camarilla L4/H4 levels with volume confirmation
-# capture momentum from key daily support/resistance. Works in both bull and bear markets
-# by filtering with 1w EMA trend (only trade in trend direction) to avoid false breakouts
-# in ranging markets. Target: 12-30 trades per year (48-120 total over 4 years).
+#!/usr/bin/env python3
+"""
+6h_1d_Chaikin_Momentum_Pullback
+Hypothesis: On 6h timeframe, buy pullbacks to the 21-period EMA during strong bullish momentum 
+(Chaikin Money Flow > 0.25 on daily) and sell rallies to EMA during bearish momentum (CMF < -0.25).
+Uses daily CMF as regime filter and 6x EMA pullback for entry. Works in bull (buy dips) and 
+bear (sell rallies) by fading to the trend-defining EMA when institutional flow confirms direction.
+Target: 20-50 trades over 4 years (5-12/year).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Volume_v2"
-timeframe = "12h"
+name = "6h_1d_Chaikin_Momentum_Pullback"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,100 +26,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivots
+    # === 6H INDICATORS: 21-period EMA ===
+    # EMA with proper min_periods
+    close_series = pd.Series(close)
+    ema_21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
+    # === 1D INDICATOR: Chaikin Money Flow (20-period) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate CMF for daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Get 1W data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Money Flow Multiplier
+    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d)
+    mfm = np.where((high_1d - low_1d) == 0, 0, mfm)  # avoid div by zero
     
-    weekly_close = df_1w['close'].values
+    # Money Flow Volume
+    mfv = mfm * volume_1d
     
-    # === CAMARILLA PIVOT LEVELS (based on previous 1d bar) ===
-    # Calculate from previous 1d bar's OHLC
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_close = np.roll(daily_close, 1)
+    # 20-period CMF
+    cmf_20 = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        mfv_sum = np.sum(mfv[:20])
+        vol_sum = np.sum(volume_1d[:20])
+        cmf_20[19] = mfv_sum / vol_sum if vol_sum != 0 else 0
+        for i in range(20, len(volume_1d)):
+            mfv_sum = mfv_sum - mfv[i-20] + mfv[i]
+            vol_sum = vol_sum - volume_1d[i-20] + volume_1d[i]
+            cmf_20[i] = mfv_sum / vol_sum if vol_sum != 0 else 0
     
-    # First bar will have invalid data, but we'll handle with valid check
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    l3 = pivot + (range_val * 1.1 / 4)
-    l4 = pivot + (range_val * 1.1 / 2)
-    h3 = pivot - (range_val * 1.1 / 4)
-    h4 = pivot - (range_val * 1.1 / 2)
-    
-    # Align to 12h timeframe (these levels are valid for the entire 1d bar)
-    l3_12h = align_htf_to_ltf(prices, df_1d, l3)
-    l4_12h = align_htf_to_ltf(prices, df_1d, l4)
-    h3_12h = align_htf_to_ltf(prices, df_1d, h3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, h4)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # === WEEKLY EMA TREND FILTER (50-period) ===
-    weekly_ema = np.full(n, np.nan)
-    if n >= 50:
-        k = 2 / (50 + 1)
-        weekly_ema[49] = weekly_close[:50].mean()
-        for i in range(50, n):
-            weekly_ema[i] = weekly_close[i] * k + weekly_ema[i-1] * (1 - k)
-    
-    # Weekly EMA aligned to 12h
-    weekly_ema_12h = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    
-    # === VOLUME SPIKE (2x 20-period average on 12h) ===
-    vol_ma = np.full(n, np.nan)
-    if n >= 20:
-        vol_sum = np.sum(volume[:20])
-        vol_ma[19] = vol_sum / 20
-        for i in range(20, n):
-            vol_sum = vol_sum - volume[i-20] + volume[i]
-            vol_ma[i] = vol_sum / 20
-    vol_spike = volume > (vol_ma * 2.0)
+    # Align CMF to 6h timeframe (wait for daily close)
+    cmf_20_aligned = align_htf_to_ltf(prices, df_1d, cmf_20)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any data invalid
-        if (np.isnan(l3_12h[i]) or np.isnan(l4_12h[i]) or 
-            np.isnan(h3_12h[i]) or np.isnan(h4_12h[i]) or
-            np.isnan(weekly_ema_12h[i]) or np.isnan(vol_ma[i])):
+    for i in range(21, n):  # start after EMA warmup
+        # Skip if CMF not available
+        if np.isnan(cmf_20_aligned[i]) or np.isnan(ema_21[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price breaks through Camarilla levels with volume confirmation
-        break_long = high[i] > l4_12h[i] and vol_spike[i]  # Break above L4
-        break_short = low[i] < h4_12h[i] and vol_spike[i]  # Break below H4
+        # Bullish regime: CMF > 0.25, buy pullbacks to EMA
+        bull_regime = cmf_20_aligned[i] > 0.25
+        # Bearish regime: CMF < -0.25, sell rallies to EMA
+        bear_regime = cmf_20_aligned[i] < -0.25
         
-        # Trend filter: only take longs above weekly EMA, shorts below
-        trend_long = close[i] > weekly_ema_12h[i]
-        trend_short = close[i] < weekly_ema_12h[i]
+        # Long signal: price at or below EMA in bull regime
+        long_signal = bull_regime and low[i] <= ema_21[i]
+        # Short signal: price at or above EMA in bear regime  
+        short_signal = bear_regime and high[i] >= ema_21[i]
         
-        # Exit when price returns to pivot level
-        # Signal logic
-        if break_long and trend_long and position != 1:
+        # Exit conditions: reverse regime or opposing signal
+        exit_long = bear_regime or (position == 1 and high[i] >= ema_21[i] * 1.015)  # take profit at 1.5%
+        exit_short = bull_regime or (position == -1 and low[i] <= ema_21[i] * 0.985)   # take profit at 1.5%
+        
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif break_short and trend_short and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and low[i] <= pivot_12h[i]:
+        elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and high[i] >= pivot_12h[i]:
+        elif exit_short and position == -1:
             position = 0
             signals[i] = 0.0
         else:
+            # Hold current position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
