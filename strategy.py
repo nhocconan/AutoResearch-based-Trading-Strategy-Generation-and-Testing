@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_vwap_breakout_v1
-# Uses daily VWAP from previous day to identify institutional support/resistance.
-# Long when price breaks above daily VWAP with volume surge (2x 20-period avg) and ADX > 20.
-# Short when price breaks below daily VWAP with volume surge and ADX > 20.
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
-# VWAP acts as a dynamic fair value level; breaks indicate institutional participation.
+# Hypothesis: 1d_1w_camarilla_breakout_v2
+# Uses weekly high/low to calculate daily Camarilla levels for the next week.
+# Buys when price breaks above weekly H3 with volume confirmation and RSI > 60.
+# Shorts when price breaks below weekly L3 with volume confirmation and RSI < 40.
+# Uses ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
+# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
-name = "4h_1d_vwap_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,25 +25,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate typical price and VWAP for each day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    # Shift by 1 to use previous day's VWAP (only known after day close)
-    vwap_prev = vwap.shift(1).values
+    # Calculate Camarilla levels from previous week
+    high_prev = df_1w['high'].shift(1).values
+    low_prev = df_1w['low'].shift(1).values
+    close_prev = df_1w['close'].shift(1).values
     
-    # Align to 4h timeframe (daily VWAP updates only after daily bar closes)
-    vwap_level = align_htf_to_ltf(prices, df_1d, vwap_prev)
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align to daily timeframe (weekly levels update only after weekly bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    
+    # Volume confirmation: volume > 2.0 * 50-period average (strict for daily)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     vol_confirm = volume > (vol_ma * 2.0)
     
-    # ADX trend filter: only trade when ADX > 20 (trending market)
+    # RSI filter: avoid overbought/oversold extremes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_long = rsi > 60  # bullish momentum
+    rsi_short = rsi < 40  # bearish momentum
+    
+    # ADX trend filter: only trade when ADX > 25 (strong trend)
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -75,18 +91,18 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 20  # trending market only
+    adx_filter = adx > 25  # strong trend only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(vwap_level[i]) or np.isnan(adx_filter[i]):
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]) or np.isnan(rsi_long[i]) or np.isnan(rsi_short[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and trend filters
+        # Require volume, strong trend, and RSI filters
         if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
@@ -97,19 +113,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily VWAP with volume
-        if close[i] > vwap_level[i] and position != 1:
+        # Long signal: price breaks above weekly H3 with volume and RSI > 60
+        if close[i] > h3_level[i] and rsi_long[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below daily VWAP with volume
-        elif close[i] < vwap_level[i] and position != -1:
+        # Short signal: price breaks below weekly L3 with volume and RSI < 40
+        elif close[i] < l3_level[i] and rsi_short[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif close[i] < vwap_level[i] and position == 1:
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > vwap_level[i] and position == -1:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
