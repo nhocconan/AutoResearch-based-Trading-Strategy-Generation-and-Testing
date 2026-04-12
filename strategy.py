@@ -1,71 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Volume_TF
-Hypothesis: Trade breakouts from daily Camarilla pivot levels with volume confirmation and 1-week ADX trend filter. 
-Designed for 12-25 trades/year with strict entry conditions to avoid overtrading. 
-Works in bull markets (breakouts continue) and bear markets (breakouts fail, reverse) by using trend filter to avoid false breakouts.
+4h_12h_CCI_Trend_Filter_v1
+Hypothesis: Use 12-hour CCI(20) to filter 4-hour breakout signals. Long when price breaks above upper Keltner Channel (EMA20 + 2*ATR(10)) with 12h CCI > 100 and volume > 1.5x average. Short when price breaks below lower Keltner Channel with 12h CCI < -100 and volume > 1.5x average. Exit when price returns to EMA20 or CCI crosses zero. Designed for 20-40 trades/year with strong trend filtering to avoid whipsaws in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Volume_TF"
-timeframe = "12h"
+name = "4h_12h_CCI_Trend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close arrays."""
-    typical = (high + low + close) / 3
-    range_ = high - low
-    
-    # Camarilla levels
-    H5 = close + range_ * 1.1 / 2
-    H4 = close + range_ * 1.1
-    H3 = close + range_ * 1.1 * 0.5
-    L3 = close - range_ * 1.1 * 0.5
-    L4 = close - range_ * 1.1
-    L5 = close - range_ * 1.1 / 2
-    
-    return H5, H4, H3, L3, L4, L5
-
-def wilders_smooth(data, period):
-    """Wilder's smoothing (same as RSI smoothing)."""
-    result = np.full_like(data, np.nan)
-    if len(data) < period:
-        return result
-    result[period-1] = np.nansum(data[:period])
-    for i in range(period, len(data)):
-        result[i] = result[i-1] - (result[i-1] / period) + data[i]
-    return result
-
-def calculate_adx(high, low, close, period=14):
-    """Calculate ADX indicator."""
-    plus_dm = np.zeros_like(high)
-    minus_dm = np.zeros_like(low)
-    tr = np.zeros_like(high)
-    
-    for i in range(1, len(high)):
-        plus_dm[i] = max(high[i] - high[i-1], 0)
-        minus_dm[i] = max(low[i-1] - low[i], 0)
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
-    
-    tr_smooth = wilders_smooth(tr, period)
-    plus_dm_smooth = wilders_smooth(plus_dm, period)
-    minus_dm_smooth = wilders_smooth(minus_dm, period)
-    
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, period)
-    
-    return adx
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -73,75 +22,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA AND VOLUME ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # === 12H DATA FOR CCI TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for each day
-    H5_1d, H4_1d, H3_1d, L3_1d, L4_1d, L5_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Calculate CCI(20)
+    typical_price = (high_12h + low_12h + close_12h) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (typical_price - sma_tp) / (0.015 * mad)
+    cci = np.where(mad != 0, cci, 0.0)
     
-    # Calculate volume average (20-day)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Align CCI to 4h timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_12h, cci)
     
-    # === WEEKLY DATA FOR ADX TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
+    # === 4H INDICATORS: KELTNER CHANNEL ===
+    # EMA20 for Keltner middle
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # ATR(10) for Keltner width
+    atr_period = 10
+    tr_4h = np.zeros_like(high)
+    for i in range(1, len(high)):
+        tr_4h[i] = max(high[i] - low[i], 
+                      abs(high[i] - close[i-1]), 
+                      abs(low[i] - close[i-1]))
+    atr_10 = pd.Series(tr_4h).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate ADX (14-period) on weekly
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, period=14)
+    # Keltner Bands
+    kc_upper = ema20 + 2 * atr_10
+    kc_lower = ema20 - 2 * atr_10
     
-    # Align all indicators to 12h timeframe
-    H5_1d_aligned = align_htf_to_ltf(prices, df_1d, H5_1d)
-    H4_1d_aligned = align_htf_to_ltf(prices, df_1d, H4_1d)
-    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
-    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
-    L4_1d_aligned = align_htf_to_ltf(prices, df_1d, L4_1d)
-    L5_1d_aligned = align_htf_to_ltf(prices, df_1d, L5_1d)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Volume filter
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if not ready
-        if (np.isnan(H5_1d_aligned[i]) or np.isnan(L5_1d_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_1w_aligned[i])):
+        if (np.isnan(ema20[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(cci_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trending = adx_1w_aligned[i] > 25
-        
         # Volume strength
-        strong_volume = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
+        strong_volume = volume[i] > (vol_ma[i] * 1.5)
         
-        # Long: price breaks above H4 with volume and trend
-        long_signal = (close[i] > H4_1d_aligned[i] and 
-                      strong_volume and 
-                      trending)
+        # Long: price breaks above Keltner Upper with strong CCI and volume
+        long_signal = (close[i] > kc_upper[i] and 
+                      cci_aligned[i] > 100 and 
+                      strong_volume)
         
-        # Short: price breaks below L4 with volume and trend
-        short_signal = (close[i] < L4_1d_aligned[i] and 
-                       strong_volume and 
-                       trending)
+        # Short: price breaks below Keltner Lower with strong CCI and volume
+        short_signal = (close[i] < kc_lower[i] and 
+                       cci_aligned[i] < -100 and 
+                       strong_volume)
         
-        # Exit: price returns to H3/L3 or trend weakens
+        # Exit: price returns to middle (EMA20) or CCI crosses zero
         exit_long = (position == 1 and 
-                    (close[i] < H3_1d_aligned[i] or adx_1w_aligned[i] < 20))
+                    (close[i] < ema20[i] or cci_aligned[i] < 0))
         exit_short = (position == -1 and 
-                     (close[i] > L3_1d_aligned[i] or adx_1w_aligned[i] < 20))
+                     (close[i] > ema20[i] or cci_aligned[i] > 0))
         
         # Execute trades
         if long_signal and position != 1:
