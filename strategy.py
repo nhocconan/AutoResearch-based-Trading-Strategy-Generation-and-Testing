@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_Filter_RSI
-Hypothesis: On daily timeframe, use KAMA to filter trend direction and RSI(14) for mean-reversion entries.
-Long when price > KAMA and RSI < 30, short when price < KAMA and RSI > 70. Exit when RSI crosses 50.
-Uses 1-week trend filter to avoid counter-trend trades in strong trends. Designed for low trade frequency
-(10-20/year) by requiring trend alignment and extreme RSI readings. Works in bull/bear via weekly trend filter.
+4h_12h_TRIX_Volume_Regime_v1
+Hypothesis: On 4h timeframe, use TRIX momentum with 12h trend filter and volume confirmation.
+Long when TRIX crosses above zero with 12h bullish trend and volume spike.
+Short when TRIX crosses below zero with 12h bearish trend and volume spike.
+Exit when TRIX crosses back in opposite direction.
+Designed for low trade frequency (20-40/year) by requiring multiple confluence factors.
+Works in bull/bear via 12h trend filter and momentum confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_Trend_Filter_RSI"
-timeframe = "1d"
+name = "4h_12h_TRIX_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,101 +25,73 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === 12h TRIX INDICATOR ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA(20) for trend
-    ema_20 = np.zeros_like(close_1w)
-    ema_sum = 0.0
-    ema_count = 0
-    alpha = 2.0 / (20 + 1)
-    for i in range(len(close_1w)):
-        if i == 0:
-            ema_20[i] = close_1w[i]
-        else:
-            ema_20[i] = alpha * close_1w[i] + (1 - alpha) * ema_20[i-1]
+    close_12h = df_12h['close'].values
+    # TRIX: triple exponential moving average
+    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    # Calculate TRIX: (ema3 - ema3_prev) / ema3_prev * 100
+    ema3_prev = np.roll(ema3, 1)
+    ema3_prev[0] = 0
+    trix = np.where(ema3_prev != 0, (ema3 - ema3_prev) / ema3_prev * 100, 0)
     
-    # Align weekly trend to daily
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # === 12h TREND FILTER (EMA CROSSOVER) ===
+    ema_fast = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean()
+    ema_slow = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean()
+    trend_bullish = ema_fast > ema_slow
+    trend_bearish = ema_fast < ema_slow
     
-    # === DAILY KAMA (ER=10) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute correctly below
-    # Correct volatility calculation: sum of absolute changes over ER period
-    er_period = 10
-    volatility_sum = np.zeros(n)
+    # === 4h VOLUME CONFIRMATION ===
+    vol_avg = np.zeros(n)
+    vol_sum = 0.0
+    vol_count = 0
     for i in range(n):
-        if i < er_period:
-            volatility_sum[i] = np.nan
+        vol_sum += volume[i]
+        vol_count += 1
+        if i >= 20:
+            vol_sum -= volume[i-20]
+            vol_count -= 1
+        if vol_count > 0:
+            vol_avg[i] = vol_sum / vol_count
         else:
-            volatility_sum[i] = np.sum(np.abs(np.diff(close[i-er_period+1:i+1])))
-    # Avoid division by zero
-    er = np.where(volatility_sum != 0, change / volatility_sum, 0)
-    # Smoothing constants
-    sc = (er * (2.0/(2+1) - 2.0/(30+1)) + 2.0/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+            vol_avg[i] = 0.0
     
-    # === DAILY RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    rsi = np.zeros(n)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            avg_gain[i] = np.nan
-            avg_loss[i] = np.nan
-            rsi[i] = 50.0  # neutral
-        elif i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-            if avg_loss[i] == 0:
-                rsi[i] = 100.0
-            else:
-                rsi[i] = 100 - (100 / (1 + avg_gain[i] / avg_loss[i]))
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-            if avg_loss[i] == 0:
-                rsi[i] = 100.0
-            else:
-                rsi[i] = 100 - (100 / (1 + avg_gain[i] / avg_loss[i]))
+    # Align 12h indicators to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(trend_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(trend_bullish_aligned[i]) or 
+            np.isnan(trend_bearish_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend alignment: price should be on same side of weekly EMA
-        bullish_trend = close[i] > trend_1w_aligned[i]
-        bearish_trend = close[i] < trend_1w_aligned[i]
+        # Volume confirmation: at least 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        
+        # TRIX crossover signals
+        trix_cross_up = trix_aligned[i] > 0 and (i == 50 or trix_aligned[i-1] <= 0)
+        trix_cross_down = trix_aligned[i] < 0 and (i == 50 or trix_aligned[i-1] >= 0)
         
         # Entry conditions
-        long_setup = bullish_trend and (close[i] > kama[i]) and (rsi[i] < 30)
-        short_setup = bearish_trend and (close[i] < kama[i]) and (rsi[i] > 70)
+        long_setup = trix_cross_up and trend_bullish_aligned[i] > 0.5 and vol_confirm
+        short_setup = trix_cross_down and trend_bearish_aligned[i] > 0.5 and vol_confirm
         
-        # Exit conditions: RSI crosses 50
-        exit_long = rsi[i] > 50
-        exit_short = rsi[i] < 50
+        # Exit conditions: TRIX crosses back in opposite direction
+        exit_long = trix_aligned[i] < 0 and (i == 50 or trix_aligned[i-1] >= 0)
+        exit_short = trix_aligned[i] > 0 and (i == 50 or trix_aligned[i-1] <= 0)
         
         if long_setup and position != 1:
             position = 1
