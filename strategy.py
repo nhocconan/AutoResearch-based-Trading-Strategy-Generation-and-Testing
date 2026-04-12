@@ -1,19 +1,17 @@
-#!/usr/bin/env python3
-"""
-4h_1d_Camarilla_Breakout_VolumeFilter_v3
-Hypothesis: Daily Camarilla H3/L3 breakouts with 4h EMA trend filter and volume confirmation.
-Enter long when price breaks above daily H3 in uptrend (4h close > EMA20) with volume > 2x average.
-Enter short when price breaks below daily L3 in downtrend (4h close < EMA20) with volume > 2x average.
-Exit on trend reversal or price retracement to H4/L4 levels. Uses 0.25 position sizing.
-Designed to capture strong directional moves in both bull and bear markets while avoiding whipsaws.
-Target: 150-250 total trades over 4 years (38-63/year) on 4h timeframe.
-"""
+# 4h_1d_Camarilla_Breakout_Tight
+# Hypothesis: Use daily Camarilla H3/L3 breakouts with 4h EMA trend filter and volume confirmation.
+# Enter long when price breaks above daily H3 in uptrend (4h close > EMA20) with volume > 2x average.
+# Enter short when price breaks below daily L3 in downtrend (4h close < EMA20) with volume > 2x average.
+# Exit on trend reversal or price retracement to H4/L4 levels. Uses 0.25 position sizing.
+# Designed to capture strong directional moves in both bull and bear markets while avoiding whipsaws.
+# Target: 15-35 trades/year on 4h timeframe to avoid fee drag.
+# Strategy uses tight entry conditions and proper multi-timeframe alignment.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_VolumeFilter_v3"
+name = "4h_1d_Camarilla_Breakout_Tight"
 timeframe = "4h"
 leverage = 1.0
 
@@ -58,25 +56,34 @@ def generate_signals(prices):
     l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # === 4H TREND FILTER ===
-    close_4h = close  # Already 4h timeframe
-    ema20 = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # === VOLUME SURGE FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
+    # === SESSION FILTER (08-20 UTC) ===
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
-        # Skip if not ready
-        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema20[i]) or 
-            np.isnan(vol_ratio[i])):
+        # Skip if not ready or outside session
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(ema20_4h[i]) or 
+            np.isnan(vol_ratio[i]) or not session_mask[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        trend_up = close_4h[i] > ema20[i]
-        trend_down = close_4h[i] < ema20[i]
+        # Trend direction
+        trend_up = close[i] > ema20_4h[i]
+        trend_down = close[i] < ema20_4h[i]
         
         # Long: break above H3 in uptrend with volume surge
         long_signal = (trend_up and 
