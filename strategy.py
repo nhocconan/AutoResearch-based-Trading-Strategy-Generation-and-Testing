@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Pivot_Fade_v1
-Hypothesis: On 6h timeframe, fade price moves that reach daily pivot extremes (R4/S4) with volume confirmation, 
-using 12h trend filter to avoid counter-trend trades in strong trends. Works in both bull and bear markets 
-by fading extremes in ranging conditions while respecting higher timeframe trend.
+4h_1d_Camarilla_Pivot_Breakout_v1
+Hypothesis: Use daily Camarilla pivot levels with breakout momentum on 4h timeframe.
+Long when price breaks above R3 with volume confirmation, short when breaks below S3.
+Incorporates weekly trend filter (ADX) to align with higher timeframe momentum.
+Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+Works in bull via breakouts above resistance, in bear via breakdowns below support.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Pivot_Fade_v1"
-timeframe = "6h"
+name = "4h_1d_Camarilla_Pivot_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,56 +27,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA50 for trend filter
-    close_12h = pd.Series(df_12h['close'].values)
-    ema_50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for pivot levels (once before loop)
+    # Daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot levels from previous day
+    # Previous day's OHLC for Camarilla calculation
     prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
     prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
     prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
     
-    pivot = (prev_high + prev_low + prev_close) / 3
+    # Calculate Camarilla pivot levels
     range_val = prev_high - prev_low
+    if range_val <= 0:
+        return np.zeros(n)
     
-    # Calculate support/resistance levels
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pivot - prev_low)
-    s3 = prev_low - 2 * (prev_high - pivot)
-    r4 = prev_high + 3 * (prev_high - prev_low)
-    s4 = prev_low - 3 * (prev_high - prev_low)
+    # Camarilla levels: R3, S3
+    camarilla_r3 = prev_close + range_val * 1.1 / 2
+    camarilla_s3 = prev_close - range_val * 1.1 / 2
     
-    # Create arrays for each level and align to 6h timeframe
-    def create_aligned_array(value):
-        arr = np.full(len(df_1d), value)
-        return align_htf_to_ltf(prices, df_1d, arr)
+    # Align daily levels to 4h timeframe
+    camarilla_r3_array = np.full(len(df_1d), camarilla_r3)
+    camarilla_s3_array = np.full(len(df_1d), camarilla_s3)
     
-    r1_aligned = create_aligned_array(r1)
-    s1_aligned = create_aligned_array(s1)
-    r2_aligned = create_aligned_array(r2)
-    s2_aligned = create_aligned_array(s2)
-    r3_aligned = create_aligned_array(r3)
-    s3_aligned = create_aligned_array(s3)
-    r4_aligned = create_aligned_array(r4)
-    s4_aligned = create_aligned_array(s4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_array)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_array)
     
-    # Volume filter: current volume > 1.5x 30-period average
+    # Weekly ADX for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX (14-period)
+    plus_dm = np.zeros(len(high_1w))
+    minus_dm = np.zeros(len(high_1w))
+    tr = np.zeros(len(high_1w))
+    
+    for i in range(1, len(high_1w)):
+        plus_dm[i] = max(high_1w[i] - high_1w[i-1], 0)
+        minus_dm[i] = max(low_1w[i-1] - low_1w[i], 0)
+        tr[i] = max(high_1w[i] - low_1w[i], 
+                   abs(high_1w[i] - close_1w[i-1]), 
+                   abs(low_1w[i] - close_1w[i-1]))
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    period = 14
+    tr14 = wilder_smooth(tr, period)
+    plus_dm14 = wilder_smooth(plus_dm, period)
+    minus_dm14 = wilder_smooth(minus_dm, period)
+    
+    # Avoid division by zero
+    divisor = np.where(tr14 != 0, tr14, 1e-10)
+    plus_di14 = 100 * plus_dm14 / divisor
+    minus_di14 = 100 * minus_dm14 / divisor
+    
+    dx = np.where((plus_di14 + minus_di14) != 0, 
+                  100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14), 
+                  0)
+    adx = wilder_smooth(dx, period)
+    
+    # Align weekly ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=30, min_periods=30).mean()
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = volume_series / vol_ma
     vol_ratio = vol_ratio.fillna(1.0).values
     
@@ -83,26 +113,24 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if any data invalid
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: only trade counter to 12h trend when at extremes
-        # In uptrend (price > EMA50), only allow shorts at resistance
-        # In downtrend (price < EMA50), only allow longs at support
-        is_uptrend = close[i] > ema_50_12h_aligned[i]
-        is_downtrend = close[i] < ema_50_12h_aligned[i]
+        # Breakout conditions with volume and trend filter
+        long_setup = (high[i] > camarilla_r3_aligned[i] and 
+                     vol_ratio[i] > 1.5 and 
+                     adx_aligned[i] > 25)
+        short_setup = (low[i] < camarilla_s3_aligned[i] and 
+                      vol_ratio[i] > 1.5 and 
+                      adx_aligned[i] > 25)
         
-        # Fade at S4/R4 with volume confirmation
-        long_setup = (low[i] <= s4_aligned[i] and vol_ratio[i] > 1.5 and is_downtrend)
-        short_setup = (high[i] >= r4_aligned[i] and vol_ratio[i] > 1.5 and is_uptrend)
-        
-        # Exit at midpoint (S1/R1) or opposite extreme
-        long_exit = (close[i] >= (s1_aligned[i] + r1_aligned[i]) / 2) or (high[i] >= r4_aligned[i])
-        short_exit = (close[i] <= (r1_aligned[i] + s1_aligned[i]) / 2) or (low[i] <= s4_aligned[i])
+        # Exit conditions: return to opposite Camarilla level or trend weakening
+        long_exit = (low[i] < camarilla_s3_aligned[i] or 
+                    adx_aligned[i] < 20)
+        short_exit = (high[i] > camarilla_r3_aligned[i] or 
+                     adx_aligned[i] < 20)
         
         # Signal logic
         if long_setup and position != 1:
