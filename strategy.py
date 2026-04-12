@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""
-4h_1d_camarilla_breakout_volume_regime_v3
-Hypothesis: Combine Camarilla breakouts with volume confirmation and a 1d Choppiness regime filter.
-In chop (CHOP > 61.8), mean-revert at S3/R3; in trend (CHOP < 38.2), breakout at S4/R4.
-Uses 1d data for context, 4h for execution. Target: 20-50 trades/year.
-"""
 
-name = "4h_1d_camarilla_breakout_volume_regime_v3"
-timeframe = "4h"
+# 1d_1w_camarilla_breakout_with_volume_and_atr
+# Hypothesis: Daily chart Camarilla breakout with weekly trend filter, volume confirmation, and ATR volatility filter.
+# Uses weekly trend direction to filter trades (only long in weekly uptrend, short in weekly downtrend) to avoid counter-trend trades.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag while maintaining edge.
+
+name = "1d_1w_camarilla_breakout_with_volume_and_atr"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,7 +23,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for context
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Weekly EMA21 for trend direction
+    close_1w = df_1w['close'].values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_uptrend = close_1w > ema21_1w  # True when in weekly uptrend
+    weekly_downtrend = close_1w < ema21_1w  # True when in weekly downtrend
+    
+    # Align weekly trend to daily
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
+    
+    # Get daily data for Camarilla and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -33,39 +47,33 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for Camarilla
+    # Previous day's range (for Camarilla calculation)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Calculate true range for ATR (used in Choppiness)
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Choppiness Index (14-day)
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(14)
-    
-    # Previous day's range for Camarilla levels
-    prev_range = prev_high - prev_low
+    # Camarilla levels (based on previous day)
+    range_ = prev_high - prev_low
     # Resistance levels
-    r3 = prev_close + prev_range * 1.1 / 2
-    r4 = prev_close + prev_range * 1.1
+    r3 = prev_close + range_ * 1.1 / 2
+    r4 = prev_close + range_ * 1.1
     # Support levels
-    s3 = prev_close - prev_range * 1.1 / 2
-    s4 = prev_close - prev_range * 1.1
+    s3 = prev_close - range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1
     
-    # Align all 1d data to 4h
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align Camarilla levels and ATR to daily timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,58 +86,35 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+            np.isnan(atr_aligned[i]) or np.isnan(weekly_uptrend_aligned[i]) or
+            np.isnan(weekly_downtrend_aligned[i])):
             signals[i] = 0.0
             continue
         
-        chop_val = chop_aligned[i]
-        
-        if chop_val > 61.8:  # Choppy market - mean reversion
-            # Long at S3, exit at R3
-            if close[i] <= s3_aligned[i] and vol_confirm[i] and position != 1:
-                position = 1
+        # Long entry: close breaks above R4 with volume, volatility filter, and weekly uptrend
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and weekly_uptrend_aligned[i] and position != 1):
+            position = 1
+            signals[i] = 0.25
+        # Short entry: close breaks below S4 with volume, volatility filter, and weekly downtrend
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and weekly_downtrend_aligned[i] and position != -1):
+            position = -1
+            signals[i] = -0.25
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and close[i] > r3_aligned[i]:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
                 signals[i] = 0.25
-            elif close[i] >= r3_aligned[i] and position == 1:
-                position = 0
-                signals[i] = 0.0
-            # Short at R3, exit at S3
-            elif close[i] >= r3_aligned[i] and vol_confirm[i] and position != -1:
-                position = -1
+            elif position == -1:
                 signals[i] = -0.25
-            elif close[i] <= s3_aligned[i] and position == -1:
-                position = 0
-                signals[i] = 0.0
             else:
-                # Hold
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
-        else:  # Trending market - breakout
-            # Long breakout above R4
-            if close[i] > r4_aligned[i] and vol_confirm[i] and position != 1:
-                position = 1
-                signals[i] = 0.25
-            # Short breakdown below S4
-            elif close[i] < s4_aligned[i] and vol_confirm[i] and position != -1:
-                position = -1
-                signals[i] = -0.25
-            # Exit on opposite touch
-            elif position == 1 and close[i] < s3_aligned[i]:
-                position = 0
                 signals[i] = 0.0
-            elif position == -1 and close[i] > r3_aligned[i]:
-                position = 0
-                signals[i] = 0.0
-            else:
-                # Hold
-                if position == 1:
-                    signals[i] = 0.25
-                elif position == -1:
-                    signals[i] = -0.25
-                else:
-                    signals[i] = 0.0
     
     return signals
