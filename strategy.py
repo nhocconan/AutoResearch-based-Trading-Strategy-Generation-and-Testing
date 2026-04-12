@@ -8,12 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian breakout with 1d volume spike and chop regime filter
-    # Donchian channels from 12h provide clear breakout levels
+    # Hypothesis: 4h Camarilla pivot breakout with 1d volume spike and chop regime filter
+    # Camarilla levels from 1d provide institutional support/resistance
     # Volume spike confirms institutional participation
     # Chop regime filter avoids whipsaws in ranging markets
     # Works in bull/bear by fading extremes in range and following breakouts in trend
-    # Target: 12-37 trades/year per symbol (50-150 total over 4 years)
+    # Target: 20-50 trades/year per symbol.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -24,27 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Calculate 12h Donchian channels (20-period)
-    upper_20 = np.full(len(df_12h), np.nan)
-    lower_20 = np.full(len(df_12h), np.nan)
-    
-    for i in range(19, len(df_12h)):
-        upper_20[i] = np.max(high_12h[i-19:i+1])
-        lower_20[i] = np.min(low_12h[i-19:i+1])
-    
-    # Align 12h Donchian levels to primary timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower_20)
-    
-    # Get 1d data for volume and chop regime
+    # Get 1d data for Camarilla pivots and volume context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -54,6 +34,50 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
+    # Calculate 1d Camarilla levels (using previous day's range)
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    camarilla_h3 = np.full(len(df_1d), np.nan)
+    camarilla_l3 = np.full(len(df_1d), np.nan)
+    camarilla_h2 = np.full(len(df_1d), np.nan)
+    camarilla_l2 = np.full(len(df_1d), np.nan)
+    camarilla_h1 = np.full(len(df_1d), np.nan)
+    camarilla_l1 = np.full(len(df_1d), np.nan)
+    camarilla_pivot = np.full(len(df_1d), np.nan)
+    
+    for i in range(1, len(df_1d)):
+        # Previous day's OHLC
+        phigh = high_1d[i-1]
+        plow = low_1d[i-1]
+        pclose = close_1d[i-1]
+        
+        # Pivot point
+        camarilla_pivot[i] = (phigh + plow + 2 * pclose) / 4
+        
+        # Range
+        rng = phigh - plow
+        
+        # Camarilla levels
+        camarilla_h4[i] = camarilla_pivot[i] + rng * 1.1 / 2
+        camarilla_l4[i] = camarilla_pivot[i] - rng * 1.1 / 2
+        camarilla_h3[i] = camarilla_pivot[i] + rng * 1.1 / 4
+        camarilla_l3[i] = camarilla_pivot[i] - rng * 1.1 / 4
+        camarilla_h2[i] = camarilla_pivot[i] + rng * 1.1 / 6
+        camarilla_l2[i] = camarilla_pivot[i] - rng * 1.1 / 6
+        camarilla_h1[i] = camarilla_pivot[i] + rng * 1.1 / 12
+        camarilla_l1[i] = camarilla_pivot[i] - rng * 1.1 / 12
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
+    l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
+    h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
     # 1d volume spike filter (current volume > 1.5 * 20-day average)
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
     for i in range(19, len(df_1d)):
@@ -62,8 +86,8 @@ def generate_signals(prices):
     volume_spike = volume > 1.5 * vol_ma_20_1d_aligned
     
     # Chop regime filter (using 1d data)
-    # Chop > 61.8 = ranging (mean revert at Donchian upper/lower)
-    # Chop < 38.2 = trending (follow breakouts)
+    # Chop > 61.8 = ranging (mean revert at Camarilla H3/L3)
+    # Chop < 38.2 = trending (follow breakouts at H4/L4)
     atr_1d = np.full(len(df_1d), np.nan)
     for i in range(14, len(df_1d)):
         tr = np.max([
@@ -112,25 +136,26 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Regime-based logic
-        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at Donchian levels
-            # Long near lower band, short near upper band
-            long_entry = close[i] <= lower_aligned[i] and volume_spike[i]
-            short_entry = close[i] >= upper_aligned[i] and volume_spike[i]
-            long_exit = close[i] >= (upper_aligned[i] + lower_aligned[i]) / 2  # midpoint
-            short_exit = close[i] <= (upper_aligned[i] + lower_aligned[i]) / 2  # midpoint
-        else:  # Trending market - follow breakouts
+        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at H3/L3
+            # Long near L3, short near H3
+            long_entry = close[i] <= l3_aligned[i] and volume_spike[i]
+            short_entry = close[i] >= h3_aligned[i] and volume_spike[i]
+            long_exit = close[i] >= pivot_aligned[i]
+            short_exit = close[i] <= pivot_aligned[i]
+        else:  # Trending market - follow breakouts at H4/L4
             # Breakout entries
-            long_entry = close[i] > upper_aligned[i] and volume_spike[i]
-            short_entry = close[i] < lower_aligned[i] and volume_spike[i]
-            # Exit on opposite test of bands or volume dropout
-            long_exit = close[i] < lower_aligned[i] or (not volume_spike[i])
-            short_exit = close[i] > upper_aligned[i] or (not volume_spike[i])
+            long_entry = close[i] > h4_aligned[i] and volume_spike[i]
+            short_entry = close[i] < l4_aligned[i] and volume_spike[i]
+            # Exit on opposite test of H4/L4 or volume dropout
+            long_exit = close[i] < l4_aligned[i] or (not volume_spike[i])
+            short_exit = close[i] > h4_aligned[i] or (not volume_spike[i])
         
         if long_entry and position != 1:
             position = 1
@@ -155,6 +180,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_vol_chop_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
