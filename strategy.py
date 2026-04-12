@@ -3,13 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_volatility_filter_v2"
-timeframe = "1d"
+# Hypothesis: 6h Donchian(20) breakout with 1d volatility filter and volume confirmation
+# Works in bull/bear: Breakouts capture trends, volatility filter avoids chop, volume confirms institutional participation
+name = "6h_1d_donchian_breakout_vol_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +19,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly ATR and volatility
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1d data for volatility filter and Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
     
-    # Calculate weekly ATR (14-period)
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # Calculate 20-period Donchian channels on 1d data
+    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 1d ATR for volatility filter
+    tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
+    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
+    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
-    atr_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly ATR ratio (current ATR / 20-period ATR mean)
-    atr_ma_20 = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1w / atr_ma_20
+    # Calculate 1d ATR ratio (current ATR / 50-period ATR mean) for volatility filter
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_ma_50
     
-    # Align ATR ratio to 1d timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
+    # Align 1d indicators to 6h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Calculate ATR-based position size (inverse volatility scaling)
-    # Higher volatility = smaller position, capped at 0.30
-    vol_scaling = np.clip(1.0 / (atr_ratio_aligned + 0.001), 0.5, 1.5)  # Scale between 0.5x and 1.5x
-    base_size = 0.25
-    position_size = base_size * vol_scaling
-    position_size = np.clip(position_size, 0.10, 0.30)  # Keep within reasonable bounds
-    
-    # Get 1d data for Camarilla calculation (using previous day's data)
-    camarilla_high = np.full(len(close), np.nan)
-    camarilla_low = np.full(len(close), np.nan)
-    
-    for i in range(1, len(close)):
-        H = high[i-1]
-        L = low[i-1]
-        C = close[i-1]
-        camarilla_high[i] = C + ((H - L) * 1.1 / 2)
-        camarilla_low[i] = C - ((H - L) * 1.1 / 2)
-    
-    # Volume filter: current volume > 20-period average (on 1d data)
+    # Volume filter: 6h volume > 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -66,40 +53,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # warmup
+    for i in range(50, n):  # warmup
         # Skip if not ready
-        if (np.isnan(camarilla_high[i]) or np.isnan(camarilla_low[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
-            signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(volume_ok[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume confirmation
-        breakout_up = close[i] > camarilla_high[i]
-        breakout_down = close[i] < camarilla_low[i]
+        # Volatility filter: only trade when volatility is elevated (avoid chop)
+        vol_filter = atr_ratio_aligned[i] > 1.2
+        
+        # Breakout conditions
+        breakout_up = close[i] > high_20_aligned[i]
+        breakout_down = close[i] < low_20_aligned[i]
         vol_ok = volume_ok[i]
         
-        # Entry signals
-        long_signal = breakout_up and vol_ok
-        short_signal = breakout_down and vol_ok
+        # Entry signals with all conditions
+        long_signal = breakout_up and vol_filter and vol_ok
+        short_signal = breakout_down and vol_filter and vol_ok
         
-        # Exit when price returns to the Camarilla pivot (close of previous day)
-        pivot_point = np.full(len(close), np.nan)
-        for j in range(1, len(close)):
-            H = high[j-1]
-            L = low[j-1]
-            C = close[j-1]
-            pivot_point[j] = (H + L + C) / 3
+        # Exit when price returns to the middle of the Donchian channel
+        mid_point = (high_20_aligned[i] + low_20_aligned[i]) / 2
+        exit_long = close[i] < mid_point
+        exit_short = close[i] > mid_point
         
-        exit_long = close[i] < pivot_point[i]
-        exit_short = close[i] > pivot_point[i]
+        # Fixed position size
+        position_size = 0.25
         
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = position_size[i]
+            signals[i] = position_size
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -position_size[i]
+            signals[i] = -position_size
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -107,11 +94,11 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position with dynamic sizing
+            # Hold position
             if position == 1:
-                signals[i] = position_size[i]
+                signals[i] = position_size
             elif position == -1:
-                signals[i] = -position_size[i]
+                signals[i] = -position_size
             else:
                 signals[i] = 0.0
     
