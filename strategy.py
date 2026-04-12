@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
-# 12h_1d_camarilla_breakout_with_volume_and_atr
-# Hypothesis: 12-hour Camarilla breakout with volume confirmation and ATR volatility filter
+# 4h_1d_camarilla_breakout_volume_filter_v3
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation and volatility filter
+# Uses 1d Camarilla levels from prior day, requires volume > 1.5x 20-period average and ATR > 0
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 # Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
 
-name = "12h_1d_camarilla_breakout_with_volume_and_atr"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_filter_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,11 +38,6 @@ def generate_signals(prices):
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Handle first value
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
     # Camarilla levels (based on previous day)
     range_ = prev_high - prev_low
     # Resistance levels
@@ -56,10 +52,9 @@ def generate_signals(prices):
     tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
     tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 12h timeframe
+    # Align Camarilla levels and ATR to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -73,7 +68,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
