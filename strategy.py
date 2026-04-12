@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1D_Ichimoku_Trend_With_Cloud_Breakout_v1
-Hypothesis: On 12h timeframe, use Ichimoku cloud (Tenkan/Kijun/Senkou) from 1d timeframe to identify trend direction and dynamic support/resistance. Enter long when price breaks above Kumo cloud with price above Kijun (bullish alignment), enter short when price breaks below Kumo cloud with price below Kijun (bearish alignment). Uses cloud breakout for institutional trend confirmation, works in bull markets via upside breaks and in bear markets via downside breaks. Designed for 12-30 trades/year by requiring clear cloud breaks with trend alignment.
+1d_1w_KAMA_Trend_RSI_Momentum_v1
+Hypothesis: On 1d timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction and RSI for momentum confirmation. Enter long when KAMA turns up and RSI > 50, enter short when KAMA turns down and RSI < 50. Use 1w timeframe to filter trades: only take long when price > 1w KAMA, short when price < 1w KAMA. Designed for low trade frequency (<25/year) with trend-following logic that works in both bull and bear markets by adapting to volatility.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1D_Ichimoku_Trend_With_Cloud_Breakout_v1"
-timeframe = "12h"
+name = "1d_1w_KAMA_Trend_RSI_Momentum_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,70 +19,78 @@ def generate_signals(prices):
     
     # Price arrays
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Load 1d data ONCE for Ichimoku calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Senkou B
+    # KAMA calculation function
+    def kama(close, er_len=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change.shape) > 0 else np.sum(np.abs(np.diff(close)))
+        # For simplicity, we'll compute volatility as rolling sum of absolute changes
+        volatility = pd.Series(change).rolling(window=er_len, min_periods=1).sum().values
+        # Avoid division by zero
+        er = np.where(volatility != 0, np.abs(np.diff(close, prepend=close[0])) / volatility, 0)
+        # Handle first element
+        er[0] = 0
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
+    
+    # Calculate KAMA on 1d
+    kama_1d = kama(close, er_len=10, fast=2, slow=30)
+    
+    # Calculate KAMA on 1w for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+    kama_1w = kama(close_1w, er_len=10, fast=2, slow=30)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Calculate Ichimoku components on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # RSI calculation
+    def rsi(close, period=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(window=period, min_periods=period).mean().values
+        avg_loss = pd.Series(loss).rolling(window=period, min_periods=period).mean().values
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        # Handle first period values
+        rsi[:period] = 50
+        return rsi
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    rsi_14 = rsi(close, period=14)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 12h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # KAMA direction: 1 if rising, -1 if falling, 0 if flat
+    kama_dir = np.zeros_like(kama_1d)
+    kama_dir[1:] = np.where(kama_1d[1:] > kama_1d[:-1], 1, np.where(kama_1d[1:] < kama_1d[:-1], -1, 0))
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(52, n):  # Start after Senkou B is available
+    for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i])):
+        if (np.isnan(kama_1d[i]) or np.isnan(kama_1w_aligned[i]) or 
+            np.isnan(rsi_14[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine cloud boundaries (Senkou A and B)
-        upper_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        lower_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        # Entry conditions
+        kama_up = kama_dir[i] == 1
+        kama_down = kama_dir[i] == -1
+        rsi_bull = rsi_14[i] > 50
+        rsi_bear = rsi_14[i] < 50
+        price_above_1wkama = close[i] > kama_1w_aligned[i]
+        price_below_1wkama = close[i] < kama_1w_aligned[i]
         
-        # Cloud breakout conditions with trend alignment
-        bullish_alignment = close[i] > kijun_aligned[i]  # Price above base line
-        bearish_alignment = close[i] < kijun_aligned[i]  # Price below base line
+        long_entry = kama_up and rsi_bull and price_above_1wkama
+        short_entry = kama_down and rsi_bear and price_below_1wkama
         
-        # Breakout above cloud (bullish)
-        long_entry = (close[i] > upper_cloud) and bullish_alignment
-        
-        # Breakout below cloud (bearish)
-        short_entry = (close[i] < lower_cloud) and bearish_alignment
-        
-        # Exit conditions: price returns to Kijun (base line)
-        long_exit = close[i] < kijun_aligned[i]
-        short_exit = close[i] > kijun_aligned[i]
+        # Exit conditions: opposite KAMA turn
+        long_exit = kama_down
+        short_exit = kama_up
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
