@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Combines 1d Bollinger Band mean reversion with volume confirmation and trend filter on 4h.
-# Works in bull markets by buying pullbacks to lower BB in uptrend, and in bear markets by selling rallies to upper BB in downtrend.
-# Uses tight entry conditions to limit trades (<50/year) and avoid fee drag.
-name = "4h_1d_bb_meanrev_trend_v1"
-timeframe = "4h"
+name = "1d_1w_cci_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,24 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands
+    # Get daily data for CCI calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    lower_bb = sma_20 - 2 * std_20
-    upper_bb = sma_20 + 2 * std_20
     
-    # Align BB to 4h timeframe
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
+    # Calculate CCI(20) on daily data
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
     
-    # Get 1w data for trend filter (EMA 50)
+    # Align CCI to daily timeframe (same timeframe, no shift needed)
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -46,7 +45,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter: 20-period average on 4h data
+    # Volume filter - 20-period average on daily data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -54,27 +53,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(lower_bb_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(sma_20_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from 1w EMA
+        # Trend from weekly EMA
         uptrend = close[i] > ema_50_1w_aligned[i]
         downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Mean reversion signals with volume confirmation
-        # Long: price touches or goes below lower BB in uptrend
-        long_signal = close[i] <= lower_bb_aligned[i] and uptrend and volume_ok[i]
-        # Short: price touches or goes above upper BB in downtrend
-        short_signal = close[i] >= upper_bb_aligned[i] and downtrend and volume_ok[i]
+        # CCI signals with volume confirmation
+        # Long: CCI > -100 (emerging bullish) in uptrend
+        long_signal = cci_1d_aligned[i] > -100 and uptrend and volume_ok[i]
+        # Short: CCI < 100 (emerging bearish) in downtrend
+        short_signal = cci_1d_aligned[i] < 100 and downtrend and volume_ok[i]
         
-        # Exit when price returns to SMA (mean reversion complete)
-        exit_long = close[i] >= sma_20_aligned[i]
-        exit_short = close[i] <= sma_20_aligned[i]
+        # Exit when CCI reverses
+        exit_long = cci_1d_aligned[i] < -100
+        exit_short = cci_1d_aligned[i] > 100
         
         # Execute trades
         if long_signal and position != 1:
