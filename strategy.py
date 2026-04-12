@@ -1,11 +1,10 @@
-# 12h_1w_1d_camarilla_breakout_volume
-# Hypothesis: 12-hour trading using weekly and daily timeframe confluence. 
-# Uses weekly high/low for major trend bias and daily Camarilla levels for precise entries.
-# Volume confirmation filters false breakouts. Designed for lower frequency (12-37 trades/year)
-# to minimize fee drag while capturing major moves in both bull and bear markets.
+# 4h_1d_camarilla_breakout_volume_regime_v2
+# Hypothesis: 4-hour Camarilla breakout with volume confirmation and regime filter (ADX) to reduce false signals
+# Works in bull/bear by using volatility-adjusted breakouts (ATR) and volume to avoid false signals.
+# Target: 25-35 trades/year (100-140 total over 4 years) to minimize fee drag.
 
-name = "12h_1w_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,21 +21,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly trend bias: price above/below weekly midpoint
-    weekly_mid = (high_1w + low_1w) / 2
-    weekly_bias_above = close_1w > weekly_mid
-    weekly_bias_below = close_1w < weekly_mid
-    
-    # Get daily data for Camarilla levels
+    # Get daily data for Camarilla and ATR calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -45,17 +30,12 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range for Camarilla calculation
+    # Previous day's range
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Handle first value
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Calculate Camarilla levels
+    # Camarilla levels (based on previous day)
     range_ = prev_high - prev_low
     # Resistance levels
     r3 = prev_close + range_ * 1.1 / 2
@@ -64,19 +44,44 @@ def generate_signals(prices):
     s3 = prev_close - range_ * 1.1 / 2
     s4 = prev_close - range_ * 1.1
     
-    # Align weekly bias to 12h timeframe
-    weekly_bias_above_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_above.astype(float))
-    weekly_bias_below_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_below.astype(float))
+    # ATR for volatility filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels and ATR to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
+    
+    # ADX for regime filter (trending vs ranging)
+    # Calculate ADX on 4h data
+    tr_l = np.abs(np.subtract(high, low))
+    tr_h = np.abs(np.subtract(high, np.roll(close, 1)))
+    tr_l2 = np.abs(np.subtract(low, np.roll(close, 1)))
+    tr_l = np.maximum(tr_l, np.maximum(tr_h, tr_l2))
+    
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    tr14 = pd.Series(tr_l).rolling(window=14, min_periods=14).sum().values
+    plus_dm14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    plus_di = np.where(tr14 > 0, 100 * plus_dm14 / tr14, 0)
+    minus_di = np.where(tr14 > 0, 100 * minus_dm14 / tr14, 0)
+    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,20 +90,28 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(weekly_bias_above_aligned[i]) or np.isnan(weekly_bias_below_aligned[i])):
+            np.isnan(atr_aligned[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: weekly bullish bias + price breaks above R4 with volume
-        if (weekly_bias_above_aligned[i] > 0.5 and 
-            close[i] > r4_aligned[i] and vol_confirm[i] and 
-            position != 1):
+        # Only trade in trending markets (ADX > 25)
+        if adx[i] <= 25:
+            # In ranging markets, stay flat
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Long entry: close breaks above R4 with volume and volatility filter
+        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
+            atr_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: weekly bearish bias + price breaks below S4 with volume
-        elif (weekly_bias_below_aligned[i] > 0.5 and 
-              close[i] < s4_aligned[i] and vol_confirm[i] and 
-              position != -1):
+        # Short entry: close breaks below S4 with volume and volatility filter
+        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
+              atr_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
         # Exit: reverse signal or close crosses back to opposite S3/R3
