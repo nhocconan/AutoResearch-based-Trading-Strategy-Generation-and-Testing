@@ -1,33 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_1w_Alligator_Momentum_v1
-Hypothesis: Williams Alligator on weekly timeframe defines trend direction (bull/bear). 
-On daily timeframe, enter long when price crosses above Alligator teeth (SMMA8) in bullish weekly trend, 
-and short when price crosses below teeth in bearish weekly trend. Use volume confirmation (volume > 1.5x 20-day average) 
-to avoid false breakouts. Exit when price crosses back over teeth or when weekly trend changes.
-Designed for low trade frequency (10-25/year) to minimize fee drag. Works in bull (follow weekly trend) 
-and bear (fade counter-trend moves at weekly extremes).
+1d_1w_Camarilla_Pivot_With_Volume_Filter_v1
+Hypothesis: Use weekly Camarilla pivot levels (from 1w data) on 1d chart.
+Trade long when price touches S1 level with volume > 1.5x average, short when touches R1 level.
+Only trade in direction of 1w EMA20 trend to avoid counter-trend whipsaws.
+Targets 10-30 trades/year to minimize fee flood. Works in bull (trend pullbacks to S1) and bear (fades at R1).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Alligator_Momentum_v1"
+name = "1d_1w_Camarilla_Pivot_With_Volume_Filter_v1"
 timeframe = "1d"
 leverage = 1.0
-
-def smma(data, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    result = np.full_like(data, np.nan, dtype=float)
-    # First value is SMA
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,33 +26,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Alligator (trend definition)
+    # Weekly data for Camarilla pivot and trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
+    # === WEEKLY CAMARILLA PIVOT LEVELS ===
     weekly_high = df_1w['high'].values
     weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # === WEEKLY ALLIGATOR ===
-    # Jaw: SMMA(13, 8)
-    jaw = smma(weekly_close, 13)
-    # Teeth: SMMA(8, 5) 
-    teeth = smma(weekly_close, 8)
-    # Lips: SMMA(5, 3)
-    lips = smma(weekly_close, 5)
+    # Calculate pivot point and ranges
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    range_ = weekly_high - weekly_low
     
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    # Camarilla levels: S1, S2, S3, S4 and R1, R2, R3, R4
+    # S1 = C - (H-L)*1.1/12
+    # R1 = C + (H-L)*1.1/12
+    s1 = pivot - 1.1 * range_ / 12.0
+    r1 = pivot + 1.1 * range_ / 12.0
     
-    # Weekly trend: bullish when Lips > Teeth > Jaw, bearish when Lips < Teeth < Jaw
-    weekly_bullish = lips_aligned > teeth_aligned
-    weekly_bearish = lips_aligned < teeth_aligned
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1)
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1)
     
-    # === DAILY ENTRY CONDITIONS ===
-    # Volume confirmation: volume > 1.5x 20-day average
+    # === WEEKLY EMA20 TREND FILTER ===
+    ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d = align_htf_to_ltf(prices, df_1w, ema20)
+    
+    # === VOLUME FILTER (20-period average) ===
     vol_ma = np.full(n, np.nan)
     if n >= 20:
         vol_sum = np.sum(volume[:20])
@@ -78,23 +65,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(s1_1d[i]) or np.isnan(r1_1d[i]) or 
+            np.isnan(ema20_1d[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation
+        # Volume confirmation: current volume > 1.5x average
         vol_confirm = volume[i] > vol_ma[i] * 1.5
         
-        # Entry conditions based on weekly Alligator alignment
-        long_entry = vol_confirm and weekly_bullish[i] and close[i] > teeth_aligned[i]
-        short_entry = vol_confirm and weekly_bearish[i] and close[i] < teeth_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        trend_up = close[i] > ema20_1d[i]
         
-        # Exit conditions: price crosses back over teeth OR weekly trend changes
-        long_exit = not weekly_bullish[i] or close[i] < teeth_aligned[i]
-        short_exit = not weekly_bearish[i] or close[i] > teeth_aligned[i]
+        # Entry conditions: price touches S1 (long) or R1 (short) with volume
+        # Use high for S1 touch, low for R1 touch
+        long_entry = (low[i] <= s1_1d[i]) and vol_confirm and trend_up
+        short_entry = (high[i] >= r1_1d[i]) and vol_confirm and not trend_up
+        
+        # Exit conditions: reverse signal or price returns to weekly pivot
+        pivot_1d = align_htf_to_ltf(prices, df_1w, pivot)
+        long_exit = not long_entry or close[i] >= pivot_1d[i]
+        short_exit = not short_entry or close[i] <= pivot_1d[i]
         
         # Signal logic
         if long_entry and position != 1:
