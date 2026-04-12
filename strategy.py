@@ -1,18 +1,14 @@
-# 4h_1d_KAMA_Trend_Signal_v1
-# Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 1d to detect trend direction.
-# Long when 4h price closes above 1d KAMA, short when below, with volume confirmation.
-# KAMA adapts to market noise - slows in ranging markets, speeds in trending markets.
-# This should reduce whipsaws in ranging markets while capturing trends.
-# Volume confirmation ensures breakouts have institutional participation.
-# Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-# Works in bull via trend following, in bear via avoiding false signals during ranging periods.
+# 1d_1w_Camarilla_Touch_V1
+# Hypothesis: Daily Camarilla pivot touch with weekly trend filter. Long when price touches daily S3/S4 in weekly uptrend, short when touches R3/R4 in weekly downtrend.
+# Weekly trend uses EMA(8) vs EMA(21) to avoid whipsaw. Target low trade frequency: ~60 total over 4 years (~15/year) to minimize fee drag.
+# Works in bull via buying dips in uptrend, in bear via selling rallies in downtrend.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_KAMA_Trend_Signal_v1"
-timeframe = "4h"
+name = "1d_1w_Camarilla_Touch_V1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,73 +20,90 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for KAMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Parameters: ER length = 10, Fast SC = 2/(2+1), Slow SC = 2/(30+1)
-    close_1d = df_1d['close'].values
-    direction = np.abs(np.diff(close_1d, n=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=1)  # 10-period sum of abs changes
-    volatility = np.append(np.full(9, np.nan), volatility)  # align with direction
+    # Weekly EMA trend: fast EMA(8) > slow EMA(21) = uptrend
+    close_1w = df_1w['close'].values
+    ema_fast = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_slow = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_uptrend = ema_fast > ema_slow
     
-    # Efficiency Ratio
-    er = np.where(volatility > 0, direction / volatility, 0)
-    # Smoothing Constants
-    fast_sc = 2 / (2 + 1)      # EMA(2)
-    slow_sc = 2 / (30 + 1)     # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Align weekly trend to daily
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
     
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
+    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
     
-    # Volume confirmation: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = volume_series / vol_ma
-    vol_ratio = vol_ratio.fillna(1.0).values
+    # Calculate Camarilla levels (standard formula)
+    range_val = prev_high - prev_low
+    if range_val <= 0:
+        return np.zeros(n)
+    
+    # Camarilla levels: H5, H4, H3, L3, L4, L5
+    camarilla_h4 = prev_close + range_val * 1.1 / 2
+    camarilla_l4 = prev_close - range_val * 1.1 / 2
+    camarilla_h3 = prev_close + range_val * 1.1 / 4
+    camarilla_l3 = prev_close - range_val * 1.1 / 4
+    
+    # Align Camarilla levels to daily (already daily, but use for consistency)
+    camarilla_h4_array = np.full(len(df_1d), camarilla_h4)
+    camarilla_l4_array = np.full(len(df_1d), camarilla_l4)
+    camarilla_h3_array = np.full(len(df_1d), camarilla_h3)
+    camarilla_l3_array = np.full(len(df_1d), camarilla_l3)
+    
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_array)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_array)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3_array)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3_array)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any data invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
+            np.isnan(weekly_uptrend_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions: price vs KAMA with volume filter
-        long_signal = close[i] > kama_aligned[i] and vol_ratio[i] > 1.3
-        short_signal = close[i] < kama_aligned[i] and vol_ratio[i] > 1.3
+        # Trend filter
+        is_uptrend = weekly_uptrend_aligned[i]
         
-        # Exit conditions: reverse signal
-        exit_long = close[i] < kama_aligned[i]
-        exit_short = close[i] > kama_aligned[i]
+        # Entry conditions: touch Camarilla levels in direction of trend
+        # Long: touch L3/L4 in uptrend
+        # Short: touch H3/H4 in downtrend
+        long_touch = (low[i] <= camarilla_l3_aligned[i] or low[i] <= camarilla_l4_aligned[i]) and is_uptrend
+        short_touch = (high[i] >= camarilla_h3_aligned[i] or high[i] >= camarilla_h4_aligned[i]) and not is_uptrend
+        
+        # Exit conditions: opposite touch or reversal to midline
+        # Midline approximated as (H4 + L4)/2
+        midline = (camarilla_h4_aligned[i] + camarilla_l4_aligned[i]) / 2
+        long_exit = high[i] >= midline and position == 1
+        short_exit = low[i] <= midline and position == -1
         
         # Signal logic
-        if long_signal and position != 1:
+        if long_touch and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_touch and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and exit_long:
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and exit_short:
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
