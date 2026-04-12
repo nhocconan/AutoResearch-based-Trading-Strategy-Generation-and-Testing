@@ -45,49 +45,19 @@ def generate_signals(prices):
     S3 = prev_close - H_minus_L * 1.1 / 4
     S4 = prev_close - H_minus_L * 1.1 / 2
     
-    # Map 1d Camarilla levels to each 12h bar
-    R4_mapped = np.full(n, np.nan)
-    R3_mapped = np.full(n, np.nan)
-    S3_mapped = np.full(n, np.nan)
-    S4_mapped = np.full(n, np.nan)
+    # Map 1d Camarilla levels to each 12h bar using align_htf_to_ltf
+    R4_mapped = align_htf_to_ltf(prices, df_1d, R4)
+    R3_mapped = align_htf_to_ltf(prices, df_1d, R3)
+    S3_mapped = align_htf_to_ltf(prices, df_1d, S3)
+    S4_mapped = align_htf_to_ltf(prices, df_1d, S4)
     
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        # Find the 1d bar that ended before this 12h bar
-        for j in range(len(df_1d)):
-            bar_start = pd.Timestamp(df_1d.iloc[j]['open_time'])
-            bar_end = bar_start + pd.Timedelta(days=1)
-            if bar_start <= current_time < bar_end:
-                R4_mapped[i] = R4[j]
-                R3_mapped[i] = R3[j]
-                S3_mapped[i] = S3[j]
-                S4_mapped[i] = S4[j]
-                break
-    
-    # Map weekly trend to each 12h bar
-    weekly_uptrend_mapped = np.full(n, False)
-    weekly_downtrend_mapped = np.full(n, False)
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        # Find the 1w bar that ended before this 12h bar
-        for j in range(len(df_1w)):
-            bar_start = pd.Timestamp(df_1w.iloc[j]['open_time'])
-            bar_end = bar_start + pd.Timedelta(weeks=1)
-            if bar_start <= current_time < bar_end:
-                weekly_uptrend_mapped[i] = weekly_uptrend[j]
-                weekly_downtrend_mapped[i] = weekly_downtrend[j]
-                break
+    # Map weekly trend to each 12h bar using align_htf_to_ltf
+    weekly_uptrend_mapped = align_htf_to_ltf(prices, df_1d, weekly_uptrend.astype(float)) > 0.5
+    weekly_downtrend_mapped = align_htf_to_ltf(prices, df_1d, weekly_downtrend.astype(float)) > 0.5
     
     # Volume confirmation: current 12h volume > 20-period average of 1d volume
-    vol_1d_mapped = np.full(n, np.nan)
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        for j in range(len(df_1d)):
-            bar_start = pd.Timestamp(df_1d.iloc[j]['open_time'])
-            bar_end = bar_start + pd.Timedelta(days=1)
-            if bar_start <= current_time < bar_end:
-                vol_1d_mapped[i] = df_1d.iloc[j]['volume']
-                break
+    vol_1d = df_1d['volume'].values
+    vol_1d_mapped = align_htf_to_ltf(prices, df_1d, vol_1d)
     vol_ma = pd.Series(vol_1d_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
     
