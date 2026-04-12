@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_Momentum_Reversal_v2
-Hypothesis: In both bull and bear markets, price reverses sharply after touching 1-day Bollinger Bands with RSI divergence and volume spike.
-Long when price touches lower BB with RSI<30 and volume spike; short when touches upper BB with RSI>70.
-Use 4h for entry timing and 1d for regime (BB/RSI). Target 20-40 trades/year.
-Works in bull (momentum continuation) and bear (mean reversion at extremes).
+4h_1d_Camarilla_Breakout_Trend_v1
+Hypothesis: In both bull and bear markets, price breaks Camarilla H3/L3 levels with 1-day trend (EMA50) and volume confirmation. 
+Long when price > H3 and close > EMA50; short when price < L3 and close < EMA50. 
+Uses 4h for entry timing and 1d for Camarilla levels and trend filter. Target 20-40 trades/year.
+Works in bull (breakout continuation) and bear (mean reversion failure at H3/L3).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Momentum_Reversal_v2"
+name = "4h_1d_Camarilla_Breakout_Trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,35 +25,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for BB, RSI
+    # Get 1D data for Camarilla and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     
-    # === 1D BOLLINGER BANDS (20, 2.0) ===
-    sma20 = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2.0 * std20
-    lower_bb = sma20 - 2.0 * std20
+    # === 1D CAMARILLA LEVELS (based on previous day) ===
+    # H3 = close + 1.1*(high-low), L3 = close - 1.1*(high-low)
+    prev_close = np.roll(daily_close, 1)
+    prev_high = np.roll(daily_high, 1)
+    prev_low = np.roll(daily_low, 1)
+    # First day: use same day's values (no look-ahead as we use previous day's data)
+    prev_close[0] = daily_close[0]
+    prev_high[0] = daily_high[0]
+    prev_low[0] = daily_low[0]
     
-    upper_bb_4h = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_4h = align_htf_to_ltf(prices, df_1d, lower_bb)
+    cam_h3 = prev_close + 1.1 * (prev_high - prev_low)
+    cam_l3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # === 1D RSI(14) ===
-    delta = pd.Series(daily_close).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
+    cam_h3_4h = align_htf_to_ltf(prices, df_1d, cam_h3)
+    cam_l3_4h = align_htf_to_ltf(prices, df_1d, cam_l3)
     
-    # === VOLUME SPIKE (2x) ===
+    # === 1D EMA50 TREND FILTER ===
+    ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50)
+    
+    # === VOLUME SPIKE (1.5x) ===
     vol_ma = np.full(n, np.nan)
     if n >= 20:
         vol_sum = np.sum(volume[:20])
@@ -61,34 +62,31 @@ def generate_signals(prices):
         for i in range(20, n):
             vol_sum = vol_sum - volume[i-20] + volume[i]
             vol_ma[i] = vol_sum / 20
-    vol_spike = volume > (vol_ma * 2.0)  # Volume > 2x average
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(60, n):
         # Skip if any data invalid
-        if (np.isnan(upper_bb_4h[i]) or np.isnan(lower_bb_4h[i]) or 
-            np.isnan(rsi_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(cam_h3_4h[i]) or np.isnan(cam_l3_4h[i]) or 
+            np.isnan(ema50_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Reversal signals at Bollinger Bands
-        touch_lower = low[i] <= lower_bb_4h[i]
-        touch_upper = high[i] >= upper_bb_4h[i]
-        
-        # RSI extremes for reversal confirmation
-        rsi_oversold = rsi_4h[i] < 30
-        rsi_overbought = rsi_4h[i] > 70
+        # Breakout conditions with trend filter
+        breakout_up = high[i] > cam_h3_4h[i]
+        breakout_down = low[i] < cam_l3_4h[i]
+        trend_up = close[i] > ema50_4h[i]
+        trend_down = close[i] < ema50_4h[i]
         
         # Entry conditions
-        long_entry = touch_lower and rsi_oversold and vol_spike[i]
-        short_entry = touch_upper and rsi_overbought and vol_spike[i]
+        long_entry = breakout_up and trend_up and vol_spike[i]
+        short_entry = breakout_down and trend_down and vol_spike[i]
         
-        # Exit: reverse signal or price returns to SMA20 (middle BB)
-        sma20_4h = align_htf_to_ltf(prices, df_1d, sma20)
-        long_exit = not touch_lower or close[i] >= sma20_4h[i]
-        short_exit = not touch_upper or close[i] <= sma20_4h[i]
+        # Exit: opposite breakout or trend fails
+        long_exit = not breakout_up or not trend_up
+        short_exit = not breakout_down or not trend_down
         
         # Signal logic
         if long_entry and position != 1:
