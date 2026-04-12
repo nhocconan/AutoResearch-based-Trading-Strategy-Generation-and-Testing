@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_v1
-Hypothesis: Use daily Camarilla H3/L3 breakouts with 12h EMA trend filter and volume spike confirmation. 
-Enter long when price breaks above H3 in uptrend (12h close > EMA20) with volume > 2x average.
-Enter short when price breaks below L3 in downtrend (12h close < EMA20) with volume > 2x average.
-Exit on trend reversal or price retracement to H4/L4 levels. Uses 0.25 position sizing to limit drawdown.
-Designed to capture strong directional moves in both bull and bear markets while avoiding whipsaws.
-Target: 80-160 total trades over 4 years (20-40/year).
+12h_1d_Camarilla_Breakout_Plus_TIPS_v2
+Hypothesis: Use daily Camarilla H3/L3 breakouts with 12h EMA trend filter and volume spike confirmation.
+Adds TIPS (Treasury Inflation-Protected Securities) as a macro regime filter to improve performance in both bull and bear markets.
+TIPS data is sourced from the 'tips' macro dataset, representing real yields. Rising real yields (TIPS up) often correlate with risk-off environments, while falling real yields support risk assets.
+In bull markets (falling/rising TIPS with price strength), we allow longs. In bear markets (rising TIPS with price weakness), we favor shorts.
+This macro filter should reduce whipsaws and improve trend fidelity.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from macro_data import get_macro_data, align_macro_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_v1"
+name = "12h_1d_Camarilla_Breakout_Plus_TIPS_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -70,13 +70,30 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
+    # === TIPS MACRO FILTER ===
+    # TIPS (Treasury Inflation-Protected Securities) - real yields
+    # Rising real yields = risk-off, Falling real yields = risk-on
+    df_tips = get_macro_data(prices, 'tips')
+    if len(df_tips) < 2:
+        return np.zeros(n)
+    
+    tips_close = df_tips['close'].values
+    # Use 20-period EMA of TIPS to determine trend
+    tips_ema20 = pd.Series(tips_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tips_ema20_aligned = align_macro_to_ltf(prices, df_tips, tips_ema20)
+    
+    # TIPS trend: rising = 1, falling = -1
+    tips_trend = np.where(tips_ema20_aligned > np.roll(tips_ema20_aligned, 1), 1, -1)
+    # Handle first element
+    tips_trend[0] = 0
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if not ready
         if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or np.isnan(ema20_12h_12h[i]) or 
-            np.isnan(vol_ratio[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(tips_ema20_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -86,15 +103,21 @@ def generate_signals(prices):
         trend_up = close_12h_aligned[i] > ema20_12h_12h[i]
         trend_down = close_12h_aligned[i] < ema20_12h_12h[i]
         
-        # Long: break above H3 in uptrend with volume surge
+        # TIPS filter: allow longs when TIPS falling or flat (risk-on), shorts when TIPS rising (risk-off)
+        tips_risk_on = tips_trend[i] <= 0  # TIPS falling or flat = good for risk assets
+        tips_risk_off = tips_trend[i] > 0   # TIPS rising = risk-off
+        
+        # Long: break above H3 in uptrend with volume surge and TIPS risk-on
         long_signal = (trend_up and 
                       close[i] > h3_12h[i] * 1.001 and  # Break above H3
-                      vol_ratio[i] > 2.0)
+                      vol_ratio[i] > 2.0 and
+                      tips_risk_on)
         
-        # Short: break below L3 in downtrend with volume surge
+        # Short: break below L3 in downtrend with volume surge and TIPS risk-off
         short_signal = (trend_down and 
                        close[i] < l3_12h[i] * 0.999 and  # Break below L3
-                       vol_ratio[i] > 2.0)
+                       vol_ratio[i] > 2.0 and
+                       tips_risk_off)
         
         # Exit: trend reversal or retracement to H4/L4
         exit_long = (position == 1 and 
