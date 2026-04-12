@@ -1,18 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_Breakout_Trend_V3
-Hypothesis: 12h close above/below weekly and daily Camarilla R4/S4 levels with weekly EMA(13) trend filter and volume confirmation. 
-Designed for low trade frequency (<30/year) by requiring multi-timeframe confluence (1w+1d+12h). 
-Weekly EMA(13) filters trend direction, daily/weekly Camarilla R4/S4 provide strong breakout levels, volume confirms momentum. 
-Exit at weekly pivot for mean reversion. Works in bull/bear via trend filter and defined exit.
+4h_1d_4h_breakout_v1
+Hypothesis: 4h price breaking above/below daily Donchian(20) high/low with 4h EMA(21) trend filter and volume confirmation (1.5x). Exits on opposite Donchian break. Designed for low trade frequency (<30/year) by requiring strong breakouts, trend alignment, and volume surge. Works in bull/bear via EMA trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_Breakout_Trend_V3"
-timeframe = "12h"
+name = "4h_1d_4h_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,68 +22,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot calculation
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    
-    # Weekly Camarilla levels (R4/S4 for stronger breakouts)
-    r4_1w = close_1w + range_1w * 1.5
-    s4_1w = close_1w - range_1w * 1.5
-    
-    # === DAILY DATA ===
+    # === DAILY DONCHIAN(20) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Daily pivot calculation
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Daily Donchian channels (20-period)
+    donch_high_1d = np.full_like(high_1d, np.nan)
+    donch_low_1d = np.full_like(low_1d, np.nan)
     
-    # Daily Camarilla levels (R4/S4 for stronger breakouts)
-    r4_1d = close_1d + range_1d * 1.5
-    s4_1d = close_1d - range_1d * 1.5
+    for i in range(20, len(high_1d)):
+        donch_high_1d[i] = np.max(high_1d[i-20:i])
+        donch_low_1d[i] = np.min(low_1d[i-20:i])
     
-    # === WEEKLY EMA(13) FOR TREND FILTER ===
-    if len(close_1w) >= 13:
-        ema_13_1w = np.zeros_like(close_1w)
-        ema_13_1w[0] = close_1w[0]
-        alpha = 2.0 / (13 + 1)
-        for i in range(1, len(close_1w)):
-            ema_13_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_13_1w[i-1]
+    # === 4H EMA(21) FOR TREND FILTER ===
+    if len(close) >= 21:
+        ema_21 = np.zeros_like(close)
+        ema_21[0] = close[0]
+        alpha = 2.0 / (21 + 1)
+        for i in range(1, len(close)):
+            ema_21[i] = alpha * close[i] + (1 - alpha) * ema_21[i-1]
     else:
-        ema_13_1w = np.full_like(close_1w, np.nan)
+        ema_21 = np.full_like(close, np.nan)
     
-    # Align weekly and daily data to 12h timeframe
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    ema_13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_13_1w)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Align daily Donchian to 4h timeframe
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Volume average (30-period for 12h = ~15 days) for confirmation
+    # Volume average (20-period for 4h = ~1.3 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 30:
-            vol_sum -= volume[i-30]
+        if i >= 20:
+            vol_sum -= volume[i-20]
             vol_count -= 1
         if vol_count > 0:
             vol_avg[i] = vol_sum / vol_count
@@ -98,27 +72,25 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(ema_13_1w_aligned[i]) or
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or 
+            np.isnan(ema_21[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 2.0x average (adjusted for 12h)
-        vol_confirm = volume[i] > 2.0 * vol_avg[i]
+        # Volume confirmation: at least 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend filter: price above/below weekly EMA(13)
-        price_above_ema = close[i] > ema_13_1w_aligned[i]
-        price_below_ema = close[i] < ema_13_1w_aligned[i]
+        # Trend filter: price above/below 4h EMA(21)
+        price_above_ema = close[i] > ema_21[i]
+        price_below_ema = close[i] < ema_21[i]
         
-        # Breakout entries require BOTH weekly AND daily S4/R4 with volume and trend filters
-        long_setup = ((close[i] > r4_1w_aligned[i]) and (close[i] > r4_1d_aligned[i])) and vol_confirm and price_above_ema
-        short_setup = ((close[i] < s4_1w_aligned[i]) and (close[i] < s4_1d_aligned[i])) and vol_confirm and price_below_ema
+        # Breakout entries at daily Donchian with volume and trend filters
+        long_setup = (close[i] > donch_high_1d_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < donch_low_1d_aligned[i]) and vol_confirm and price_below_ema
         
-        # Exit when price returns to weekly pivot (mean reversion)
-        exit_long = close[i] < pivot_1w_aligned[i]
-        exit_short = close[i] > pivot_1w_aligned[i]
+        # Exit on opposite Donchian break
+        exit_long = close[i] < donch_low_1d_aligned[i]
+        exit_short = close[i] > donch_high_1d_aligned[i]
         
         if long_setup and position != 1:
             position = 1
