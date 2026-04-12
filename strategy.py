@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,122 +13,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for context (1d)
+    # Get daily data for context (HTF = 1d)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily Williams Alligator components
-    # Jaw (blue): 13-period SMA, shifted 8 bars forward
-    # Teeth (red): 8-period SMA, shifted 5 bars forward
-    # Lips (green): 5-period SMA, shifted 3 bars forward
-    close_1d_series = pd.Series(close_1d)
-    jaw_1d = close_1d_series.rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth_1d = close_1d_series.rolling(window=8, min_periods=8).mean().shift(5).values
-    lips_1d = close_1d_series.rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate daily RSI(14) for momentum filter
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    for i in range(14, len(close_1d)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Align Alligator lines to 6h timeframe
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    
-    # Calculate daily ADX for trend strength
-    # Calculate True Range
+    # Calculate daily ATR(14) for volatility
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = np.full_like(tr, np.nan)
+    for i in range(14, len(tr)):
+        atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate Directional Movement
-    up_move = np.diff(high_1d, prepend=np.nan)
-    down_move = -np.diff(low_1d, prepend=np.nan)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm[0] = minus_dm[0] = 0
+    # Calculate daily EMA(50) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smooth TR and DM with Wilder's smoothing (using EMA as approximation)
-    tr_period = 14
-    tr_smooth = np.full(len(tr), np.nan)
-    plus_dm_smooth = np.full(len(tr), np.nan)
-    minus_dm_smooth = np.full(len(tr), np.nan)
+    # Calculate daily Bollinger Bands (20, 2)
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + 2 * std_20_1d
+    lower_bb_1d = sma_20_1d - 2 * std_20_1d
     
-    # Initial values
-    if len(tr) >= tr_period:
-        tr_smooth[tr_period-1] = np.nansum(tr[1:tr_period+1])
-        plus_dm_smooth[tr_period-1] = np.nansum(plus_dm[1:tr_period+1])
-        minus_dm_smooth[tr_period-1] = np.nansum(minus_dm[1:tr_period+1])
+    # Align daily indicators to 4h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
-    # Wilder smoothing
-    for i in range(tr_period, len(tr)):
-        if not np.isnan(tr_smooth[i-1]):
-            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / tr_period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / tr_period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / tr_period) + minus_dm[i]
-    
-    # Calculate DI and DX
-    plus_di = np.full(len(tr), np.nan)
-    minus_di = np.full(len(tr), np.nan)
-    dx = np.full(len(tr), np.nan)
-    
-    for i in range(tr_period, len(tr)):
-        if not np.isnan(tr_smooth[i]) and tr_smooth[i] != 0:
-            plus_di[i] = 100 * (plus_dm_smooth[i] / tr_smooth[i])
-            minus_di[i] = 100 * (minus_dm_smooth[i] / tr_smooth[i])
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    # Calculate ADX (smoothed DX)
-    adx_period = 14
-    adx = np.full(len(tr), np.nan)
-    
-    if len(dx) >= 2 * adx_period:
-        # Initial ADX value
-        valid_dx = dx[adx_period:2*adx_period]
-        if not np.all(np.isnan(valid_dx)):
-            adx[2*adx_period-1] = np.nanmean(valid_dx)
-        
-        # Smooth ADX
-        for i in range(2*adx_period, len(tr)):
-            if not np.isnan(adx[i-1]) and not np.isnan(dx[i]):
-                adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
-    
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # 4h Bollinger Bands for entry timing
+    sma_20_4h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20_4h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb_4h = sma_20_4h + 2 * std_20_4h
+    lower_bb_4h = sma_20_4h - 2 * std_20_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
-            np.isnan(lips_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(upper_bb_4h[i]) or np.isnan(lower_bb_4h[i])):
             signals[i] = 0.0
             continue
         
-        # Williams Alligator conditions: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        alligator_uptrend = lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i]
-        alligator_downtrend = lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i]
+        # Entry conditions: price touches Bollinger Band + RSI extreme + EMA trend
+        long_condition = (close[i] <= lower_bb_4h[i] and 
+                         rsi_1d_aligned[i] < 30 and 
+                         close[i] > ema_50_1d_aligned[i])
+        short_condition = (close[i] >= upper_bb_4h[i] and 
+                          rsi_1d_aligned[i] > 70 and 
+                          close[i] < ema_50_1d_aligned[i])
         
-        # ADX filter: trend strength > 25
-        strong_trend = adx_aligned[i] > 25
+        # Exit conditions: mean reversion back to middle band or trend change
+        middle_bb_4h = sma_20_4h[i]
+        long_exit = close[i] >= middle_bb_4h
+        short_exit = close[i] <= middle_bb_4h
         
-        # Entry conditions
-        long_entry = alligator_uptrend and strong_trend
-        short_entry = alligator_downtrend and strong_trend
-        
-        # Exit conditions: trend weakens or Alligator reverses
-        long_exit = not (alligator_uptrend and strong_trend)
-        short_exit = not (alligator_downtrend and strong_trend)
-        
-        if long_entry and position != 1:
+        if long_condition and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -148,6 +118,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_alligator_adx_trend_v1"
-timeframe = "6h"
+name = "4h_1d_bb_rsi_ema_mean_reversion_v1"
+timeframe = "4h"
 leverage = 1.0
