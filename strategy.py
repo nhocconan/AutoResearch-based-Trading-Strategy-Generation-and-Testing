@@ -1,11 +1,12 @@
-# 4h_1d_camarilla_breakout_with_volume_and_atr_v3
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter
-# Uses daily Camarilla levels (more relevant than 6h) and volume/volatility filters to reduce false signals.
-# Designed for 15-30 trades/year (60-120 total over 4 years) to minimize fee drag and improve generalization.
-# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
+#!/usr/bin/env python3
+# 6h_1d_elder_ray_reversal_with_volume
+# Hypothesis: Elder Ray (Bull/Bear Power) with volume confirmation on 6h timeframe.
+# Uses daily EMA(13) as trend filter and Elder Ray to detect exhaustion/reversal.
+# Works in bull/bear by only taking counter-trend moves when Elder Ray diverges from price.
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_camarilla_breakout_with_volume_and_atr_v3"
-timeframe = "4h"
+name = "6h_1d_elder_ray_reversal_with_volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,42 +23,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ATR calculation
+    # Get daily data for EMA and Elder Ray calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Daily EMA(13) for trend filter
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema13
+    bear_power = low_1d - ema13
     
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align Camarilla levels and ATR to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Align daily indicators to 6h timeframe
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,29 +51,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and volatility filter
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: price below EMA (downtrend) but Bull Power rising (bulls gaining strength)
+        if (close[i] < ema13_aligned[i] and 
+            bull_power_aligned[i] > bull_power_aligned[i-1] and
+            bull_power_aligned[i-1] <= bull_power_aligned[i-2] and  # turning up from recent low
+            vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and volatility filter
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: price above EMA (uptrend) but Bear Power falling (bears gaining strength)
+        elif (close[i] > ema13_aligned[i] and 
+              bear_power_aligned[i] < bear_power_aligned[i-1] and
+              bear_power_aligned[i-1] >= bear_power_aligned[i-2] and  # turning down from recent high
+              vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: Elder Ray confirms trend resumption or reverse signal
+        elif position == 1 and (bull_power_aligned[i] < 0 or close[i] > ema13_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (bear_power_aligned[i] > 0 or close[i] < ema13_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
