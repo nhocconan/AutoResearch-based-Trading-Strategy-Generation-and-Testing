@@ -8,11 +8,12 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Donchian(20) breakout with 1w ATR volatility filter
-    # Works in bull/bear by capturing breakouts only when volatility is expanding
-    # (avoids false breakouts in chop). 1w ATR filter ensures we only trade
-    # during high volatility regimes, reducing whipsaws in ranging markets.
-    # Target: 7-25 trades/year per symbol.
+    # Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation
+    # Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) derived from 1d OHLC
+    # Trade breakouts at R4/S4 with volume spike confirmation (>1.5x 20-period avg volume)
+    # Use R3/S3 for mean reversion exits to avoid giving back profits in chop
+    # Works in bull/bear by adapting to volatility via volume confirmation
+    # Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -23,70 +24,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for context (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla pivots and volume context (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w ATR(14) for volatility filter and stop
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = np.full(len(df_1w), np.nan)
-    for i in range(14, len(df_1w)):
-        atr_1w[i] = np.mean(tr[i-14:i+1])
+    # Calculate Camarilla pivot levels for each 1d bar
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Align 1w ATR to 1d timeframe
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Align 1d Camarilla levels to 6h timeframe (wait for completed 1d bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # 1d Donchian(20) for breakout signals
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
+    # Volume confirmation: current volume > 1.5x 20-period average volume
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(20, n):
         if not in_session[i]:
             signals[i] = 0.0
             continue
         
         # Skip if data not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(atr_1w_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR > 0.4 * its 20-period average
-        atr_ma_20_1w = np.full(len(df_1w), np.nan)
-        for j in range(33, len(df_1w)):
-            if not np.isnan(np.mean(atr_1w[j-19:j+1])):
-                atr_ma_20_1w[j] = np.mean(atr_1w[j-19:j+1])
-        atr_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_20_1w)
-        vol_filter = (not np.isnan(atr_ma_20_1w_aligned[i]) and 
-                     atr_1w_aligned[i] > 0.4 * atr_ma_20_1w_aligned[i])
+        # Breakout conditions at R4/S4
+        breakout_long = close[i] > r4_aligned[i]
+        breakout_short = close[i] < s4_aligned[i]
         
-        # Breakout conditions
-        breakout_long = close[i] > donch_high[i]
-        breakout_short = close[i] < donch_low[i]
+        # Mean reversion conditions at R3/S3 (for exits)
+        mean_revert_long = close[i] < r3_aligned[i]  # Exit long when price drops below R3
+        mean_revert_short = close[i] > s3_aligned[i]  # Exit short when price rises above S3
         
-        # Entry conditions
-        long_entry = breakout_long and vol_filter
-        short_entry = breakout_short and vol_filter
+        # Entry conditions: breakout with volume confirmation
+        long_entry = breakout_long and volume_filter[i]
+        short_entry = breakout_short and volume_filter[i]
         
-        # Exit conditions: opposite breakout or volatility collapse
-        long_exit = (close[i] < donch_low[i]) or (not vol_filter)
-        short_exit = (close[i] > donch_high[i]) or (not vol_filter)
+        # Exit conditions: opposite breakout OR mean reversion at R3/S3
+        long_exit = (close[i] < s4_aligned[i]) or mean_revert_long
+        short_exit = (close[i] > r4_aligned[i]) or mean_revert_short
         
         if long_entry and position != 1:
             position = 1
@@ -111,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_donchian_breakout_vol_filter_v1"
-timeframe = "1d"
+name = "6h_1d_camarilla_breakout_vol_filter_v1"
+timeframe = "6h"
 leverage = 1.0
