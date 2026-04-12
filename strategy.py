@@ -3,14 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v2
-# Uses daily Camarilla pivot levels (H3/L3) with volume confirmation and ADX trend filter.
-# In bull markets, buys breakouts above H3 resistance with volume.
-# In bear markets, shorts breakdowns below L3 support with volume.
-# ADX > 20 ensures we only trade in trending markets, avoiding false signals in ranges.
-# Target: 30-60 trades/year per symbol for low friction and high edge.
+# Hypothesis: 4h_1d_camarilla_breakout_v3
+# Uses daily Camarilla pivot levels (H4/L4) with volume confirmation and ADX trend filter.
+# Targets H4 (stronger breakout) and L4 levels for higher probability trades.
+# In bull markets: buy breakouts above H4 with volume.
+# In bear markets: sell breakdowns below L4 with volume.
+# ADX > 25 ensures trading only in strong trends, avoiding false signals in weak/choppy markets.
+# Volume > 2.0 * 20-period average ensures institutional participation.
+# Target: 20-40 trades/year per symbol for low friction and high edge.
 
-name = "4h_1d_camarilla_breakout_v2"
+name = "4h_1d_camarilla_breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,20 +36,20 @@ def generate_signals(prices):
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     
-    # Camarilla formulas
+    # Camarilla formulas (H4/L4 levels)
     range_prev = high_prev - low_prev
-    camarilla_h3 = close_prev + range_prev * 1.1 / 4
-    camarilla_l3 = close_prev - range_prev * 1.1 / 4
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
     # Align to 4h timeframe (already delayed by 1 day due to shift)
-    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 2.0)
     
-    # ADX trend filter: only trade when ADX > 20 (trending market)
+    # ADX trend filter: only trade when ADX > 25 (strong trending market)
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -79,14 +81,14 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 20  # trending market
+    adx_filter = adx > 25  # strong trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
@@ -101,19 +103,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H3 with volume
-        if close[i] > h3_level[i] and position != 1:
+        # Long signal: price breaks above H4 with volume
+        if close[i] > h4_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L3 with volume
-        elif close[i] < l3_level[i] and position != -1:
+        # Short signal: price breaks below L4 with volume
+        elif close[i] < l4_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
         # Exit conditions: opposite breakout
-        elif close[i] < l3_level[i] and position == 1:
+        elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h3_level[i] and position == -1:
+        elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
