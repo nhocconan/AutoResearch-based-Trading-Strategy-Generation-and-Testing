@@ -1,18 +1,15 @@
-# 12h 1d Camarilla Breakout with Volume Confirmation and Chop Filter
-# Uses 12h primary timeframe and 1d Camarilla levels for breakout detection
-# Volume spike (>1.5x 20-period MA) confirms institutional participation
-# Chop filter (CHOP < 61.8) avoids false signals in ranging markets
-# Target: 12-37 trades/year per symbol, focusing on clean breakouts
-# Works in bull markets (breakouts above H4) and bear markets (breakdowns below L4)
-# Designed to avoid overtrading and fee drag while maintaining edge
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+# Hypothesis: 1h_4h_1d_camarilla_breakout_v1
+# Use 1h timeframe for entry timing, but signal direction from 4h and 1d confluence.
+# Long when: 4h close > 1d H4 level + 1h close > 4h EMA20 + volume spike + session filter
+# Short when: 4h close < 1d L4 level + 1h close < 4h EMA20 + volume spike + session filter
+# Target: 15-35 trades/year per symbol with low friction.
+name = "1h_4h_1d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,72 +22,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (ONCE before loop)
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's range
+    # Calculate Camarilla levels from previous day
     high_prev = df_1d['high'].shift(1).values
     low_prev = df_1d['low'].shift(1).values
     close_prev = df_1d['close'].shift(1).values
     
     range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2  # H4 resistance
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2  # L4 support
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe (properly delayed)
+    # Align Camarilla levels to 1h timeframe
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # 4h EMA20 for trend filter
+    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: CHOP = 100 * log10((HH - LL) / (ATR * sqrt(14))) / log10(14)
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # Trending market condition
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup period
-        # Skip if Camarilla levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+    for i in range(20, n):
+        # Skip if levels not ready
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(ema_20_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
+        # Apply session and volume filters
+        if not (session_filter[i] and vol_confirm[i]):
             # Hold current position if filters fail
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume confirmation
-        if close[i] > h4_level[i] and position != 1:
+        # Long signal: 4h close above 1d H4 AND 1h close above 4h EMA20
+        if close[i] > h4_level[i] and close[i] > ema_20_4h_aligned[i] and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume confirmation
-        elif close[i] < l4_level[i] and position != -1:
+            signals[i] = 0.20
+        # Short signal: 4h close below 1d L4 AND 1h close below 4h EMA20
+        elif close[i] < l4_level[i] and close[i] < ema_20_4h_aligned[i] and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         # Exit conditions: opposite breakout
         elif close[i] < l4_level[i] and position == 1:
             position = 0
@@ -101,9 +95,9 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
