@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,7 +13,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points (1d timeframe)
+    # Get daily data for pivot points and moving averages
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -34,11 +34,11 @@ def generate_signals(prices):
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     
-    # Align levels to 4h timeframe (matching strategy timeframe)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    # Align levels to daily timeframe
+    s1_daily = align_htf_to_ltf(prices, df_1d, s1)
+    r1_daily = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Volume filter: 20-period EMA
+    # Volume filter: 20-period EMA (daily)
     vol_ema = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -57,9 +57,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(s1_4h[i]) or np.isnan(r1_4h[i]) or 
+        if (np.isnan(s1_daily[i]) or np.isnan(r1_daily[i]) or 
             np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -74,14 +74,14 @@ def generate_signals(prices):
         vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
         # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
-        long_entry = (low[i] <= s1_4h[i]) and volume_filter and vol_filter
-        short_entry = (high[i] >= r1_4h[i]) and volume_filter and vol_filter
+        long_entry = (low[i] <= s1_daily[i]) and volume_filter and vol_filter
+        short_entry = (high[i] >= r1_daily[i]) and volume_filter and vol_filter
         
         # Exit conditions: Return to pivot
         pivot = (prev_high + prev_low + prev_close) / 3
-        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-        long_exit = close[i] > pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
-        short_exit = close[i] < pivot_4h[i] if not np.isnan(pivot_4h[i]) else False
+        pivot_daily = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] > pivot_daily[i] if not np.isnan(pivot_daily[i]) else False
+        short_exit = close[i] < pivot_daily[i] if not np.isnan(pivot_daily[i]) else False
         
         if long_entry and position != 1:
             position = 1
@@ -106,6 +106,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
-timeframe = "4h"
+name = "1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
+timeframe = "1d"
 leverage = 1.0
