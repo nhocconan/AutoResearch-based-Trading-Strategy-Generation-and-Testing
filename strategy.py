@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_volume_regime_v1"
+name = "4h_12h_camarilla_breakout_volume_regime_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -85,10 +85,10 @@ def generate_signals(prices):
         # Execute trades
         if long_signal and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30  # Increased from 0.25 to 0.30 for better performance
         elif short_signal and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -97,6 +97,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold position
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.30 if position == 1 else (-0.30 if position == -1 else 0.0)
     
     return signals
