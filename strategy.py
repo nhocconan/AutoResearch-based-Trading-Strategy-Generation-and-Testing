@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_1d_Donchian_Breakout_Volume_Trend_v1
-Hypothesis: 4h timeframe with Donchian(20) breakout, volume confirmation, and 1d EMA trend filter.
-Designed for moderate trade frequency (target 20-50/year) by requiring breakouts of 20-period high/low
-with volume > 1.3x average and price aligned with 1d EMA trend. Works in bull/bear markets by only taking
-trend-aligned breakouts, reducing false signals during sideways periods.
+1d_1w_RSI_Overbought_Oversold_Simple_v1
+Hypothesis: On daily timeframe, use weekly RSI(14) to identify overbought (>70) and oversold (<30) conditions.
+Enter short when weekly RSI > 70 and price closes below daily VWAP, enter long when weekly RSI < 30 and price closes above daily VWAP.
+Exit when RSI returns to neutral zone (30-70). Works in both bull and bear markets by fading extremes.
+Designed for low trade frequency (target 10-25 trades/year) by requiring extreme RSI levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_1w_RSI_Overbought_Oversold_Simple_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price arrays
@@ -26,47 +26,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE before loop for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    # Load weekly data ONCE before loop for RSI
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 15:  # Need at least 14 periods for RSI
         return np.zeros(n)
     
-    # Calculate Donchian channels (20 period) on 4h data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate weekly RSI(14)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w, prepend=close_1w[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 1d EMA (21 period) for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[14] = np.mean(gain[1:15])  # First average
+    avg_loss[14] = np.mean(loss[1:15])
     
-    # Volume average (20 period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    for i in range(15, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1w = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
+    rsi_1w[:14] = np.nan  # Not enough data
+    
+    # Align RSI to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    
+    # Calculate daily VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3
+    vwap = np.cumsum(typical_price * volume) / np.cumsum(volume)
+    # Handle division by zero on first bar
+    vwap[volume.cumsum() == 0] = typical_price[volume.cumsum() == 0]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if any required data is invalid
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+    for i in range(14, n):  # Start after RSI warmup
+        # Skip if RSI data is invalid
+        if np.isnan(rsi_1w_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume spike: current volume > 1.3x average
-        volume_spike = volume[i] > vol_ma[i] * 1.3
+        # Price relative to VWAP
+        above_vwap = close[i] > vwap[i]
+        below_vwap = close[i] < vwap[i]
         
-        # Trend filter: price above/below 1d EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # RSI conditions
+        rsi_overbought = rsi_1w_aligned[i] > 70
+        rsi_oversold = rsi_1w_aligned[i] < 30
+        rsi_neutral = (rsi_1w_aligned[i] >= 30) & (rsi_1w_aligned[i] <= 70)
         
-        # Entry conditions: Donchian breakout with volume and trend
-        long_entry = (close[i] > high_20[i]) and volume_spike and above_ema
-        short_entry = (close[i] < low_20[i]) and volume_spike and below_ema
+        # Entry conditions
+        long_entry = rsi_oversold and above_vwap
+        short_entry = rsi_overbought and below_vwap
         
-        # Exit conditions: return to opposite Donchian level or trend reversal
-        long_exit = (close[i] < low_20[i]) or (close[i] < ema_1d_aligned[i])
-        short_exit = (close[i] > high_20[i]) or (close[i] > ema_1d_aligned[i])
+        # Exit conditions: RSI returns to neutral
+        long_exit = rsi_neutral
+        short_exit = rsi_neutral
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
