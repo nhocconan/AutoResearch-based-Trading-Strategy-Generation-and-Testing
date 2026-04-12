@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volume"
-timeframe = "4h"
+name = "6h_1d_keltner_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,47 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
+    # Get 1d data for Keltner bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels for today based on yesterday's range
-    # H4 = close + 1.1 * (high - low) / 2
-    # L4 = close - 1.1 * (high - low) / 2
-    # H3 = close + 1.1 * (high - low) / 4
-    # L3 = close - 1.1 * (high - low) / 4
-    # H2 = close + 1.1 * (high - low) / 6
-    # L2 = close - 1.1 * (high - low) / 6
-    # H1 = close + 1.1 * (high - low) / 12
-    # L1 = close - 1.1 * (high - low) / 12
+    # Calculate Keltner Channels on daily data (20, 2)
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_1d = pd.Series(high_1d - low_1d).rolling(window=20, min_periods=20).mean().values
+    upper_keltner = ema_20 + 2 * atr_1d
+    lower_keltner = ema_20 - 2 * atr_1d
     
-    range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + 1.1 * range_1d / 2
-    camarilla_l4 = close_1d - 1.1 * range_1d / 2
-    camarilla_h3 = close_1d + 1.1 * range_1d / 4
-    camarilla_l3 = close_1d - 1.1 * range_1d / 4
-    camarilla_h2 = close_1d + 1.1 * range_1d / 6
-    camarilla_l2 = close_1d - 1.1 * range_1d / 6
-    camarilla_h1 = close_1d + 1.1 * range_1d / 12
-    camarilla_l1 = close_1d - 1.1 * range_1d / 12
+    # Align Keltner bands to 6h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h2_4h = align_htf_to_ltf(prices, df_1d, camarilla_h2)
-    camarilla_l2_4h = align_htf_to_ltf(prices, df_1d, camarilla_l2)
-    camarilla_h1_4h = align_htf_to_ltf(prices, df_1d, camarilla_h1)
-    camarilla_l1_4h = align_htf_to_ltf(prices, df_1d, camarilla_l1)
-    
-    # Volume filter: 20-period average on 4h data
+    # Volume filter - 20-period average on 6h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -65,28 +45,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # Start after volume MA warmup
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(camarilla_h4_4h[i]) or np.isnan(camarilla_l4_4h[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Breakout signals with volume confirmation
-        # Long: price breaks above H3 or H4
-        long_breakout = (close[i] > camarilla_h3_4h[i] or close[i] > camarilla_h4_4h[i]) and volume_ok[i]
-        # Short: price breaks below L3 or L4
-        short_breakout = (close[i] < camarilla_l3_4h[i] or close[i] < camarilla_l4_4h[i]) and volume_ok[i]
+        # Long: price breaks above upper Keltner band
+        long_signal = close[i] > upper_keltner_aligned[i] and volume_ok[i]
+        # Short: price breaks below lower Keltner band
+        short_signal = close[i] < lower_keltner_aligned[i] and volume_ok[i]
         
-        # Exit when price returns to opposite side
-        exit_long = close[i] < camarilla_l1_4h[i]  # Return to L1 area
-        exit_short = close[i] > camarilla_h1_4h[i]  # Return to H1 area
+        # Exit when price returns to middle (EMA20)
+        exit_long = close[i] < ema_20_aligned[i]
+        exit_short = close[i] > ema_20_aligned[i]
         
         # Execute trades
-        if long_breakout and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
