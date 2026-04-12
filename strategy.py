@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_v1
+4h_1d_Camarilla_Breakout_Volume_v2
 Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation (volume > 1.5x average), enter short when price breaks below daily Camarilla S3 with volume confirmation. Uses daily Camarilla levels for structure and volume filter to avoid false breakouts. Designed for moderate trade frequency (target 20-50/year) to balance opportunity and cost, effective in both bull and bear markets by requiring strong volume-backed breakouts.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_v1"
+name = "4h_1d_Camarilla_Breakout_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
