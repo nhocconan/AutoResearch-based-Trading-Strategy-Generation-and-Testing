@@ -1,16 +1,15 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_camarilla_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_keltner_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,56 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend direction
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for Keltner Channel (trend filter)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h EMA50 trend
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Weekly EMA20 and ATR(10) for Keltner Channel
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr10_1w = pd.Series(high_1w - low_1w).rolling(window=10, min_periods=10).mean().values
     
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    upper_keltner = ema20_1w + (2.0 * atr10_1w)
+    lower_keltner = ema20_1w - (2.0 * atr10_1w)
     
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Align to 4h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Daily volume confirmation: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_confirm[i])):
+    for i in range(50, n):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_confirm[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        long_signal = close[i] > h4_aligned[i] and ema50_12h_aligned[i] > close[i] * 0.98 and vol_confirm[i]
-        short_signal = close[i] < l4_aligned[i] and ema50_12h_aligned[i] < close[i] * 1.02 and vol_confirm[i]
+        # Long breakout above upper Keltner with weekly uptrend and volume
+        long_signal = (close[i] > upper_keltner_aligned[i] and 
+                      ema20_1w_aligned[i] > ema20_1w_aligned[max(0, i-1)] and
+                      vol_confirm[i])
         
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Short breakdown below lower Keltner with weekly downtrend and volume
+        short_signal = (close[i] < lower_keltner_aligned[i] and 
+                       ema20_1w_aligned[i] < ema20_1w_aligned[max(0, i-1)] and
+                       vol_confirm[i])
+        
+        # Exit when price crosses back through the 20 EMA
+        exit_long = close[i] < ema20_1w_aligned[i]
+        exit_short = close[i] > ema20_1w_aligned[i]
         
         if long_signal and position != 1:
             position = 1
