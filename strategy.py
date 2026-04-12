@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""
-12h_1w_camarilla_breakout_volume_regime
-Hypothesis: Weekly Camarilla levels on 12h chart with volume confirmation and chop regime filter.
-Works in bull/bear by using weekly structure (more robust than daily) and volume to confirm breakouts.
-Chop filter avoids whipsaws in ranging markets. Target: 15-30 trades/year (60-120 total over 4 years).
-"""
 
-name = "12h_1w_camarilla_breakout_volume_regime"
-timeframe = "12h"
+# 4h_1d_trix_volume_regime
+# Hypothesis: 4-hour TRIX momentum with volume spike confirmation and choppiness regime filter
+# Works in bull/bear by using TRIX for momentum direction, volume spikes for institutional interest,
+# and choppiness filter to avoid ranging markets. Target: 25-50 trades/year (100-200 total) to minimize fee drag.
+
+name = "4h_1d_trix_volume_regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,86 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for more robust structure
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for TRIX and choppiness calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Previous week's range
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
+    # TRIX calculation (15-period triple EMA)
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix_values = trix.fillna(0).values
     
-    # Weekly Camarilla levels
-    range_ = prev_high - prev_low
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Choppiness Index (14-period) - range detection
+    atr_period = 14
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).sum()
     
-    # Chop regime filter (14-period)
-    high_low = high_1w - low_1w
-    high_close = np.abs(high_1w - np.roll(close_1w, 1))
-    low_close = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    true_range = pd.Series(tr)
-    chop = 100 * np.log10(atr_sum / true_range.rolling(window=14, min_periods=14).sum()) / np.log10(14)
-    chop = chop.values
+    highest_high = pd.Series(high_1d).rolling(window=atr_period, min_periods=atr_period).max()
+    lowest_low = pd.Series(low_1d).rolling(window=atr_period, min_periods=atr_period).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(atr_period)
+    chop_values = chop.fillna(50).values  # neutral when not enough data
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume spike detection (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
-    # Align weekly levels to 12h
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Align indicators to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+    for i in range(60, n):
+        # Skip if data not ready
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in low chop (trending market)
-        if chop_aligned[i] > 61.8:  # choppy range
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long: break above weekly R4 with volume
-        if close[i] > r4_aligned[i] and vol_confirm[i] and position != 1:
+        # Long entry: TRIX positive + volume spike + trending market (CHOP < 38.2)
+        if (trix_aligned[i] > 0 and vol_spike[i] and chop_aligned[i] < 38.2 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short: break below weekly S4 with volume
-        elif close[i] < s4_aligned[i] and vol_confirm[i] and position != -1:
+        # Short entry: TRIX negative + volume spike + trending market (CHOP < 38.2)
+        elif (trix_aligned[i] < 0 and vol_spike[i] and chop_aligned[i] < 38.2 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: TRIX crosses zero OR choppy market detected (CHOP > 61.8)
+        elif position == 1 and (trix_aligned[i] <= 0 or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (trix_aligned[i] >= 0 or chop_aligned[i] > 61.8):
             position = 0
             signals[i] = 0.0
         else:
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
