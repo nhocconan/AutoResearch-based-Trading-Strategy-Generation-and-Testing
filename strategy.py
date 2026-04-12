@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Signal_v1
-Hypothesis: Camarilla pivot levels from daily chart act as strong support/resistance on 12h timeframe.
-Price tends to reverse or bounce from these levels with confluence from volume spike and RSI filter.
-Works in both bull and bear markets as pivot levels represent key institutional price levels.
+4h_12h_Camarilla_Volume_Filter_v1
+Hypothesis: Camarilla pivot levels from 12h chart act as strong support/resistance on 4h timeframe.
+Price tends to reverse or bounce from these levels with confirmation from volume spike and RSI filter.
+Uses 12h for structure (reduced noise) and 4h for timely entries. Works in both bull and bear markets.
 Target: 20-30 trades per year (80-120 total over 4 years).
 """
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Pivot_Signal_v1"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Volume_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,22 +25,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12H data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    daily_high = df_12h['high'].values
+    daily_low = df_12h['low'].values
+    daily_close = df_12h['close'].values
     
-    # === CAMARILLA PIVOT LEVELS (based on previous day) ===
-    # Calculate from previous day's OHLC
+    # === CAMARILLA PIVOT LEVELS (based on previous 12h bar) ===
+    # Calculate from previous 12h bar's OHLC
     prev_high = np.roll(daily_high, 1)
     prev_low = np.roll(daily_low, 1)
     prev_close = np.roll(daily_close, 1)
     
-    # First day will have invalid data, but we'll handle with valid check
+    # First bar will have invalid data, but we'll handle with valid check
     pivot = (prev_high + prev_low + prev_close) / 3.0
     range_val = prev_high - prev_low
     
@@ -50,13 +50,13 @@ def generate_signals(prices):
     h3 = pivot - (range_val * 1.1 / 4)
     h4 = pivot - (range_val * 1.1 / 2)
     
-    # Align to 12h timeframe (these levels are valid for the entire day)
-    l3_12h = align_htf_to_ltf(prices, df_1d, l3)
-    l4_12h = align_htf_to_ltf(prices, df_1d, l4)
-    h3_12h = align_htf_to_ltf(prices, df_1d, h3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, h4)
+    # Align to 4h timeframe (these levels are valid for the entire 12h bar)
+    l3_4h = align_htf_to_ltf(prices, df_12h, l3)
+    l4_4h = align_htf_to_ltf(prices, df_12h, l4)
+    h3_4h = align_htf_to_ltf(prices, df_12h, h3)
+    h4_4h = align_htf_to_ltf(prices, df_12h, h4)
     
-    # === RSI FILTER (14-period on 1d) ===
+    # === RSI FILTER (14-period on 12h) ===
     delta = pd.Series(daily_close).diff().values
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -64,9 +64,9 @@ def generate_signals(prices):
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
+    rsi_4h = align_htf_to_ltf(prices, df_12h, rsi)
     
-    # === VOLUME SPIKE (2x 20-period average) ===
+    # === VOLUME SPIKE (2x 20-period average on 4h) ===
     vol_ma = np.full(n, np.nan)
     if n >= 20:
         vol_sum = np.sum(volume[:20])
@@ -80,31 +80,31 @@ def generate_signals(prices):
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if any data invalid (first day roll will have NaN)
-        if (np.isnan(l3_12h[i]) or np.isnan(l4_12h[i]) or 
-            np.isnan(h3_12h[i]) or np.isnan(h4_12h[i]) or
-            np.isnan(rsi_12h[i]) or np.isnan(vol_ma[i])):
+        # Skip if any data invalid (first bar roll will have NaN)
+        if (np.isnan(l3_4h[i]) or np.isnan(l4_4h[i]) or 
+            np.isnan(h3_4h[i]) or np.isnan(h4_4h[i]) or
+            np.isnan(rsi_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price near Camarilla levels (within 0.1% tolerance)
-        near_l3 = abs(low[i] - l3_12h[i]) / l3_12h[i] < 0.001
-        near_l4 = abs(low[i] - l4_12h[i]) / l4_12h[i] < 0.001
-        near_h3 = abs(high[i] - h3_12h[i]) / h3_12h[i] < 0.001
-        near_h4 = abs(high[i] - h4_12h[i]) / h4_12h[i] < 0.001
+        # Price near Camarilla levels (within 0.15% tolerance)
+        near_l3 = abs(low[i] - l3_4h[i]) / l3_4h[i] < 0.0015
+        near_l4 = abs(low[i] - l4_4h[i]) / l4_4h[i] < 0.0015
+        near_h3 = abs(high[i] - h3_4h[i]) / h3_4h[i] < 0.0015
+        near_h4 = abs(high[i] - h4_4h[i]) / h4_4h[i] < 0.0015
         
         # RSI conditions for reversal
-        rsi_oversold = rsi_12h[i] < 30
-        rsi_overbought = rsi_12h[i] > 70
+        rsi_oversold = rsi_4h[i] < 30
+        rsi_overbought = rsi_4h[i] > 70
         
         # Entry conditions with volume confirmation
         long_entry = (near_l3 or near_l4) and rsi_oversold and vol_spike[i]
         short_entry = (near_h3 or near_h4) and rsi_overbought and vol_spike[i]
         
         # Exit conditions: price moves back toward pivot or opposite signal
-        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-        long_exit = close[i] >= pivot_12h[i]  # Exit long when price reaches pivot
-        short_exit = close[i] <= pivot_12h[i]  # Exit short when price reaches pivot
+        pivot_4h = align_htf_to_ltf(prices, df_12h, pivot)
+        long_exit = close[i] >= pivot_4h[i]  # Exit long when price reaches pivot
+        short_exit = close[i] <= pivot_4h[i]  # Exit short when price reaches pivot
         
         # Signal logic
         if long_entry and position != 1:
