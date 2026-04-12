@@ -1,55 +1,62 @@
 #!/usr/bin/env python3
 """
-1d_1w_AntiTrend_Reversion_v1
-Hypothesis: Mean reversion at weekly extremes in 1d timeframe using Bollinger Bands and RSI.
-Works in both bull and bear markets by fading extreme moves when price touches Bollinger Bands
-with RSI confirmation, avoiding trend-following whipsaw. Target: 10-25 trades/year.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1
+Hypothesis: 12h timeframe with 1d Camarilla pivot levels, volume confirmation, and 1d EMA trend filter.
+Designed for fewer trades (target 12-37/year) by requiring breakouts of H3/L3 levels with volume > 1.5x average
+and price aligned with 1d EMA trend. Works in bull/bear markets by only taking trend-aligned breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_AntiTrend_Reversion_v1"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Load 1d data ONCE before loop for Camarilla pivots and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Bollinger Bands (20, 2.0)
-    close_1w = df_1w['close'].values
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
+    # Calculate Camarilla levels from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align Bollinger Bands to daily
-    upper_bb_daily = align_htf_to_ltf(prices, df_1w, upper_bb)
-    lower_bb_daily = align_htf_to_ltf(prices, df_1w, lower_bb)
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Calculate daily RSI (14) for confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla levels
+    H3 = pivot + range_hl * 1.1 / 4
+    L3 = pivot - range_hl * 1.1 / 4
+    H4 = pivot + range_hl * 1.1 / 2
+    L4 = pivot - range_hl * 1.1 / 2
     
-    # Volume filter: avoid low-volume false signals
+    # Align to 12h timeframe
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Calculate 1d EMA (21 period) for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume average (20 period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -57,27 +64,25 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if any required data is invalid
-        if (np.isnan(upper_bb_daily[i]) or np.isnan(lower_bb_daily[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume filter: require above-average volume
-        volume_ok = volume[i] > vol_ma[i] * 0.8
+        # Volume spike: current volume > 1.5x average
+        volume_spike = volume[i] > vol_ma[i] * 1.5
         
-        # Entry conditions: touch Bollinger Band with RSI extreme
-        touch_upper = close[i] >= upper_bb_daily[i]
-        touch_lower = close[i] <= lower_bb_daily[i]
-        rsi_overbought = rsi[i] > 70
-        rsi_oversold = rsi[i] < 30
+        # Trend filter: price above/below 1d EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
-        long_entry = touch_lower and rsi_oversold and volume_ok
-        short_entry = touch_upper and rsi_overbought and volume_ok
+        # Entry conditions: breakout of H3/L3 with volume and trend
+        long_entry = (close[i] > H3_12h[i]) and volume_spike and above_ema
+        short_entry = (close[i] < L3_12h[i]) and volume_spike and below_ema
         
-        # Exit conditions: RSI returns to neutral range or opposite band touch
-        rsi_neutral = (rsi[i] >= 30) and (rsi[i] <= 70)
-        long_exit = rsi_neutral or touch_upper
-        short_exit = rsi_neutral or touch_lower
+        # Exit conditions: return to H4/L4 levels or trend reversal
+        long_exit = (close[i] < H4_12h[i]) or (close[i] < ema_1d_aligned[i])
+        short_exit = (close[i] > L4_12h[i]) or (close[i] > ema_1d_aligned[i])
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
