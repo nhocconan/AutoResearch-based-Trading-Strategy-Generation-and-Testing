@@ -4,18 +4,17 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12h_1d_camarilla_breakout_v1
-# Camarilla pivot levels from 1-day chart with volume confirmation and chop regime filter.
-# Uses 12h timeframe for lower trade frequency (~15-30/year) and reduced fee drag.
-# Works in bull markets by capturing breakouts above H4 resistance, and in bear markets
-# by shorting breakdowns below L4 support. Volume confirms institutional participation,
-# chop filter avoids false signals in ranging markets.
+# Uses 1-day Camarilla levels on 12h timeframe with volume confirmation and volatility filter.
+# Targets breakouts from institutional levels with lower trade frequency (~20-30 trades/year).
+# Works in bull markets via breakouts above H4 and bear markets via breakdowns below L4.
+# Includes volatility filter to avoid false signals during low volatility periods.
 name = "12h_1d_camarilla_breakout_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -42,35 +41,31 @@ def generate_signals(prices):
     h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 1.3 * 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
-    atr_period = 14
+    # Volatility filter: avoid low volatility periods
+    # Calculate 24-period ATR
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
+    atr = pd.Series(tr).rolling(window=24, min_periods=24).mean().values
+    atr_ma = pd.Series(atr).rolling(window=24, min_periods=24).mean().values
+    vol_filter = atr > atr_ma * 0.8  # Ensure sufficient volatility
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
+    for i in range(30, n):  # start after warmup
         # Skip if levels not ready
         if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
+        # Check filters
+        if not (vol_confirm[i] and vol_filter[i]):
             # Hold current position if filters fail
             if position == 1:
                 signals[i] = 0.25
