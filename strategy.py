@@ -3,20 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_12h_camarilla_reversion_v1
-# Uses 12h Camarilla levels for mean reversion on 6b timeframe.
-# Fades at R3/S3 levels (mean reversion) and breaks out at R4/S4 (trend continuation).
-# Uses 6h volume confirmation and ADX filter to distinguish between ranging and trending markets.
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
-# Works in both bull and bear markets by adapting to regime (reversion in range, breakout in trend).
+# Hypothesis: 4h_1d_camarilla_breakout_volume_v3
+# Uses daily Camarilla levels from previous day for 4h entries.
+# Long when price breaks above daily H3 with volume confirmation.
+# Short when price breaks below daily L3 with volume confirmation.
+# Uses ADX > 20 on 4h to filter for momentum, avoiding false signals in weak trends.
+# Designed for moderate trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
-name = "6h_12h_camarilla_reversion_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,34 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 12h bar
-    high_prev = df_12h['high'].shift(1).values
-    low_prev = df_12h['low'].shift(1).values
-    close_prev = df_12h['close'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
     # Camarilla formulas
     range_prev = high_prev - low_prev
-    camarilla_r3 = close_prev + range_prev * 1.1 / 2
-    camarilla_s3 = close_prev - range_prev * 1.1 / 2
-    camarilla_r4 = close_prev + range_prev * 1.1
-    camarilla_s4 = close_prev - range_prev * 1.1
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
     
-    # Align to 6h timeframe (12h levels update only after 12h bar closes)
-    r3_level = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    s3_level = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    r4_level = align_htf_to_ltf(prices, df_12h, camarilla_r4)
-    s4_level = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    # Align to 4h timeframe (daily levels update only after daily bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # ADX trend filter: distinguish between trending and ranging markets
+    # ADX trend filter: only trade when ADX > 20 on 4h
     # Calculate True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -83,80 +80,49 @@ def generate_signals(prices):
     minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, 14)
-    
-    # Regime filter: ADX < 25 = ranging (favor mean reversion), ADX > 25 = trending (favor breakout)
-    ranging_market = adx < 25
-    trending_market = adx >= 25
+    adx_filter = adx > 20  # momentum filter
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if levels not ready
-        if np.isnan(r3_level[i]) or np.isnan(s3_level[i]) or np.isnan(r4_level[i]) or np.isnan(s4_level[i]) or np.isnan(vol_confirm[i]):
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Mean reversion in ranging markets: fade at R3/S3
-        if ranging_market[i]:
-            # Long when price touches S3 and shows rejection
-            if close[i] <= s3_level[i] and low[i] < s3_level[i] and close[i] > low[i]:
-                if position != 1:
-                    position = 1
-                    signals[i] = 0.25
-            # Short when price touches R3 and shows rejection
-            elif close[i] >= r3_level[i] and high[i] > r3_level[i] and close[i] < high[i]:
-                if position != -1:
-                    position = -1
-                    signals[i] = -0.25
-            # Exit mean reversion position at midpoint
-            elif position == 1 and close[i] >= (r3_level[i] + s3_level[i]) / 2:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] <= (r3_level[i] + s3_level[i]) / 2:
-                position = 0
-                signals[i] = 0.0
-            # Hold position
-            elif position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-        
-        # Breakout continuation in trending markets: break at R4/S4
-        elif trending_market[i]:
-            # Long breakout: price closes above R4
-            if close[i] > r4_level[i] and position != 1:
-                position = 1
-                signals[i] = 0.25
-            # Short breakdown: price closes below S4
-            elif close[i] < s4_level[i] and position != -1:
-                position = -1
-                signals[i] = -0.25
-            # Exit on opposite breakout
-            elif position == 1 and close[i] < s4_level[i]:
-                position = 0
-                signals[i] = 0.0
-            elif position == -1 and close[i] > r4_level[i]:
-                position = 0
-                signals[i] = 0.0
-            # Hold position
-            elif position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-        
-        # Transition between regimes: close positions
-        else:
+        # Require both volume and momentum filters
+        if not (vol_confirm[i] and adx_filter[i]):
+            # Hold current position if filters fail
             if position == 1:
-                position = 0
-                signals[i] = 0.0
+                signals[i] = 0.25
             elif position == -1:
-                position = 0
+                signals[i] = -0.25
+            else:
                 signals[i] = 0.0
+            continue
+        
+        # Long signal: price breaks above daily H3 with volume
+        if close[i] > h3_level[i] and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short signal: price breaks below daily L3 with volume
+        elif close[i] < l3_level[i] and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit conditions: opposite breakout
+        elif close[i] < l3_level[i] and position == 1:
+            position = 0
+            signals[i] = 0.0
+        elif close[i] > h3_level[i] and position == -1:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
