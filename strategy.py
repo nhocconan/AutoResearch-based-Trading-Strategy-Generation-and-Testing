@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v3
-# Uses daily Camarilla pivot levels (H4/L4) as support/resistance on 4h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg) AND close above 200-period EMA.
-# Short when price breaks below L4 with volume confirmation AND close below 200-period EMA.
-# Exits when price returns to daily pivot point (PP).
-# EMA200 filter ensures alignment with long-term trend, reducing false breakouts in choppy markets.
-# Designed for low trade frequency (target: 20-40 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
+# Hypothesis: 12h_1d_1w_camarilla_breakout_v4
+# Uses daily and weekly Camarilla pivot levels (H4/L4) as support/resistance on 12h chart.
+# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg).
+# Short when price breaks below L4 with volume confirmation.
+# Exits when price returns to daily pivot point (PP) for longs or weekly pivot point for shorts.
+# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drift.
+# Combines daily and weekly confluence for stronger signals, reducing whipsaw in choppy markets.
 
-name = "4h_1d_camarilla_breakout_v3"
-timeframe = "4h"
+name = "12h_1d_1w_camarilla_breakout_v4"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,48 +25,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily and weekly data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's OHLC
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate pivot point and Camarilla levels for each day
-    pp = (high_1d + low_1d + close_1d) / 3.0
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
+    h4_1d = pp_1d + (1.1 / 2) * range_1d
+    l4_1d = pp_1d - (1.1 / 2) * range_1d
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4 = pp + (1.1 / 2) * range_1d
-    l4 = pp - (1.1 / 2) * range_1d
+    # Calculate weekly Camarilla levels (based on previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    h4_1w = pp_1w + (1.1 / 2) * range_1w
+    l4_1w = pp_1w - (1.1 / 2) * range_1w
     
-    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Align weekly and daily levels to 12h timeframe
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    h4_1w_aligned = align_htf_to_ltf(prices, df_1w, h4_1w)
+    l4_1w_aligned = align_htf_to_ltf(prices, df_1w, l4_1w)
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
     
-    # EMA200 filter (4h timeframe)
-    close_s = pd.Series(close)
-    ema200 = close_s.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(ema200[i]):
+        if (np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or np.isnan(pp_1d_aligned[i]) or
+            np.isnan(h4_1w_aligned[i]) or np.isnan(l4_1w_aligned[i]) or np.isnan(pp_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation and EMA200 filter for new entries
+        # Require volume confirmation for new entries
         if not vol_confirm[i]:
             # Hold current position if volume filter fails
             if position == 1:
@@ -78,19 +82,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 AND close above EMA200
-        if close[i] > h4_aligned[i] and close[i] > ema200[i] and position != 1:
+        # Long signal: price breaks above both daily and weekly H4 (confluence)
+        if close[i] > h4_1d_aligned[i] and close[i] > h4_1w_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 AND close below EMA200
-        elif close[i] < l4_aligned[i] and close[i] < ema200[i] and position != -1:
+        # Short signal: price breaks below both daily and weekly L4 (confluence)
+        elif close[i] < l4_1d_aligned[i] and close[i] < l4_1w_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to daily pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_aligned[i]:
+        # Exit conditions: price returns to respective pivot point
+        elif position == 1 and close[i] <= pp_1d_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_aligned[i]:
+        elif position == -1 and close[i] >= pp_1w_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
