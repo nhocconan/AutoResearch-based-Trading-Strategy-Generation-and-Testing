@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,78 +13,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Ichimoku components
+    # Get daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate daily pivot points using previous day's data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components (Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou Span)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_a = ((tenkan + kijun) / 2)
+    # Key levels: S1, R1 (Camarilla) - tighter range for fewer trades
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
+    # Align levels to 12h timeframe
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Align Ichimoku components to 6h timeframe (with proper look-ahead prevention)
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Volume filter: 20-period EMA on 6b volume
+    # Volume filter: 20-period EMA
     vol_ema = np.full(n, np.nan)
     vol_series = pd.Series(volume)
     vol_ema_values = vol_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_ema[:] = vol_ema_values
     
+    # ATR for volatility filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.nanmean(tr[i-14:i+1])
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
-            np.isnan(vol_ema[i])):
+        if (np.isnan(s1_12h[i]) or np.isnan(r1_12h[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.3x EMA
-        volume_filter = volume[i] > vol_ema[i] * 1.3
+        # Volume filter: current volume > 1.5x EMA
+        volume_filter = volume[i] > vol_ema[i] * 1.5
         
-        # Cloud condition: price above/below cloud
-        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
+        # Volatility filter: ATR > 0.5 * 20-period ATR mean
+        atr_ma = np.full(n, np.nan)
+        if i >= 34:
+            atr_ma[i] = np.nanmean(atr[i-20:i])
+        vol_filter = atr[i] > atr_ma[i] * 0.5 if not np.isnan(atr_ma[i]) else True
         
-        # TK Cross conditions
-        tk_cross_bull = tenkan_6h[i] > kijun_6h[i]
-        tk_cross_bear = tenkan_6h[i] < kijun_6h[i]
+        # Entry conditions: Touch of S1/R1 with volume and volatility (mean reversion)
+        long_entry = (low[i] <= s1_12h[i]) and volume_filter and vol_filter
+        short_entry = (high[i] >= r1_12h[i]) and volume_filter and vol_filter
         
-        # Entry conditions: TK cross with cloud filter and volume
-        long_entry = tk_cross_bull and price_above_cloud and volume_filter
-        short_entry = tk_cross_bear and price_below_cloud and volume_filter
-        
-        # Exit conditions: Opposite TK cross or price enters cloud
-        tk_cross_exit_bull = tenkan_6h[i] < kijun_6h[i]  # Bearish cross exits long
-        tk_cross_exit_bear = tenkan_6h[i] > kijun_6h[i]  # Bullish cross exits short
-        price_in_cloud = (close[i] >= cloud_bottom) and (close[i] <= cloud_top)
+        # Exit conditions: Return to pivot
+        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] > pivot_12h[i] if not np.isnan(pivot_12h[i]) else False
+        short_exit = close[i] < pivot_12h[i] if not np.isnan(pivot_12h[i]) else False
         
         if long_entry and position != 1:
             position = 1
@@ -92,10 +91,10 @@ def generate_signals(prices):
         elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
-        elif position == 1 and (tk_cross_exit_bull or price_in_cloud):
+        elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (tk_cross_exit_bear or price_in_cloud):
+        elif position == -1 and short_exit:
             position = 0
             signals[i] = 0.0
         else:
@@ -109,6 +108,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_ichimoku_tk_cross_volume_filter_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_s1r1_mean_reversion_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
