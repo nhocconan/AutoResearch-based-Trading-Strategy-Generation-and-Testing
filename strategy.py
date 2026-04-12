@@ -1,83 +1,57 @@
 #!/usr/bin/env python3
 """
-6h_1d_WeeklyVWAP_Pullback
-Hypothesis: Trade pullbacks to weekly VWAP on 6h chart with volume confirmation and 1d ADX trend filter. 
-Weekly VWAP acts as dynamic support/resistance that institutions defend. Works in bull (buy pullbacks to VWAP) and bear (sell rallies to VWAP) markets.
-Target: 60-100 total trades over 4 years (15-25/year) with clear trend-following logic.
+12h_1d_Camarilla_Breakout_Volume_TF
+Hypothesis: Trade breakouts from daily Camarilla pivot levels with volume confirmation and 1-week ADX trend filter. 
+Designed for 12-25 trades/year with strict entry conditions to avoid overtrading. 
+Works in bull markets (breakouts continue) and bear markets (breakouts fail, reverse) by using trend filter to avoid false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyVWAP_Pullback"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Breakout_Volume_TF"
+timeframe = "12h"
 leverage = 1.0
 
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close arrays."""
+    typical = (high + low + close) / 3
+    range_ = high - low
     
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Camarilla levels
+    H5 = close + range_ * 1.1 / 2
+    H4 = close + range_ * 1.1
+    H3 = close + range_ * 1.1 * 0.5
+    L3 = close - range_ * 1.1 * 0.5
+    L4 = close - range_ * 1.1
+    L5 = close - range_ * 1.1 / 2
     
-    # === WEEKLY VWAP CALCULATION ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
-    volume_w = df_1w['volume'].values
-    
-    # Calculate typical price and VWAP components
-    typical_price_w = (high_w + low_w + close_w) / 3.0
-    pv_w = typical_price_w * volume_w
-    
-    # Calculate cumulative sums for VWAP
-    cum_pv = np.cumsum(pv_w)
-    cum_vol = np.cumsum(volume_w)
-    vwap_w = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
-    
-    # Align weekly VWAP to 6h timeframe
-    vwap_w_aligned = align_htf_to_ltf(prices, df_1w, vwap_w)
-    
-    # === DAILY ADX FOR TREND FILTER ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    high_d = df_1d['high'].values
-    low_d = df_1d['low'].values
-    close_d = df_1d['close'].values
-    
-    # Calculate ADX (14-period)
-    plus_dm = np.zeros_like(high_d)
-    minus_dm = np.zeros_like(low_d)
-    tr = np.zeros_like(high_d)
-    
-    for i in range(1, len(high_d)):
-        plus_dm[i] = max(high_d[i] - high_d[i-1], 0)
-        minus_dm[i] = max(low_d[i-1] - low_d[i], 0)
-        tr[i] = max(high_d[i] - low_d[i], 
-                   abs(high_d[i] - close_d[i-1]), 
-                   abs(low_d[i] - close_d[i-1]))
-    
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+    return H5, H4, H3, L3, L4, L5
+
+def wilders_smooth(data, period):
+    """Wilder's smoothing (same as RSI smoothing)."""
+    result = np.full_like(data, np.nan)
+    if len(data) < period:
         return result
+    result[period-1] = np.nansum(data[:period])
+    for i in range(period, len(data)):
+        result[i] = result[i-1] - (result[i-1] / period) + data[i]
+    return result
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX indicator."""
+    plus_dm = np.zeros_like(high)
+    minus_dm = np.zeros_like(low)
+    tr = np.zeros_like(high)
     
-    period = 14
+    for i in range(1, len(high)):
+        plus_dm[i] = max(high[i] - high[i-1], 0)
+        minus_dm[i] = max(low[i-1] - low[i], 0)
+        tr[i] = max(high[i] - low[i], 
+                   abs(high[i] - close[i-1]), 
+                   abs(low[i] - close[i-1]))
+    
     tr_smooth = wilders_smooth(tr, period)
     plus_dm_smooth = wilders_smooth(plus_dm, period)
     minus_dm_smooth = wilders_smooth(minus_dm, period)
@@ -87,58 +61,87 @@ def generate_signals(prices):
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = wilders_smooth(dx, period)
     
-    # Align ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    return adx
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
     
-    # === 6H INDICATORS ===
-    # EMA20 for dynamic reference
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Volume filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === DAILY DATA FOR CAMARILLA AND VOLUME ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate Camarilla levels for each day
+    H5_1d, H4_1d, H3_1d, L3_1d, L4_1d, L5_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    
+    # Calculate volume average (20-day)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # === WEEKLY DATA FOR ADX TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX (14-period) on weekly
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, period=14)
+    
+    # Align all indicators to 12h timeframe
+    H5_1d_aligned = align_htf_to_ltf(prices, df_1d, H5_1d)
+    H4_1d_aligned = align_htf_to_ltf(prices, df_1d, H4_1d)
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
+    L4_1d_aligned = align_htf_to_ltf(prices, df_1d, L4_1d)
+    L5_1d_aligned = align_htf_to_ltf(prices, df_1d, L5_1d)
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(vwap_w_aligned[i]) or np.isnan(ema20[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(H5_1d_aligned[i]) or np.isnan(L5_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx_aligned[i] > 20
+        # Trend filter: ADX > 25 indicates strong trend
+        trending = adx_1w_aligned[i] > 25
         
         # Volume strength
-        strong_volume = volume[i] > (vol_ma[i] * 1.5)
+        strong_volume = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
         
-        # Distance from VWAP as percentage
-        if vwap_w_aligned[i] != 0:
-            dist_from_vwap = (close[i] - vwap_w_aligned[i]) / vwap_w_aligned[i]
-        else:
-            dist_from_vwap = 0
-        
-        # Long: pullback to VWAP support in uptrend
-        long_signal = (dist_from_vwap <= 0.01 and  # Within 1% above VWAP
-                      close[i] > vwap_w_aligned[i] and  # Above VWAP
-                      ema20[i] > vwap_w_aligned[i] and  # EMA above VWAP (uptrend bias)
+        # Long: price breaks above H4 with volume and trend
+        long_signal = (close[i] > H4_1d_aligned[i] and 
                       strong_volume and 
                       trending)
         
-        # Short: rally to VWAP resistance in downtrend
-        short_signal = (dist_from_vwap >= -0.01 and  # Within 1% below VWAP
-                       close[i] < vwap_w_aligned[i] and  # Below VWAP
-                       ema20[i] < vwap_w_aligned[i] and  # EMA below VWAP (downtrend bias)
+        # Short: price breaks below L4 with volume and trend
+        short_signal = (close[i] < L4_1d_aligned[i] and 
                        strong_volume and 
                        trending)
         
-        # Exit: price moves 2% away from VWAP or trend weakens
+        # Exit: price returns to H3/L3 or trend weakens
         exit_long = (position == 1 and 
-                    (dist_from_vwap >= 0.02 or adx_aligned[i] < 15))
+                    (close[i] < H3_1d_aligned[i] or adx_1w_aligned[i] < 20))
         exit_short = (position == -1 and 
-                     (dist_from_vwap <= -0.02 or adx_aligned[i] < 15))
+                     (close[i] > L3_1d_aligned[i] or adx_1w_aligned[i] < 20))
         
         # Execute trades
         if long_signal and position != 1:
