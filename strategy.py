@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_Bollinger_Band_Mean_Reversion_v1
-Hypothesis: In ranging markets, price reverses at Bollinger Band extremes (2 std dev) with confirmation from RSI extremes and volume contraction. Uses 1d trend filter to avoid counter-trend trades. Works in both bull and bear markets by adapting to regime (uses Bollinger Band Width percentile to detect ranging vs trending). Target: 20-30 trades per year (80-120 total over 4 years).
+4h_1d_Camarilla_Breakout_Volume_v2
+Hypothesis: Camarilla pivot levels from 1d chart act as strong support/resistance on 4h timeframe.
+Price tends to reverse or bounce from these levels with confirmation from volume spike and RSI filter.
+Uses 1d for structure (reduced noise) and 4h for timely entries. Works in both bull and bear markets.
+Target: 20-30 trades per year (80-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Bollinger_Band_Mean_Reversion_v1"
+name = "4h_1d_Camarilla_Breakout_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,80 +25,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for trend filter and BBW percentile
+    # Get 1D data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # === 4H BOLLINGER BANDS (20, 2) ===
-    bb_period = 20
-    bb_std = 2.0
-    sma = np.full(n, np.nan)
-    bb_std_dev = np.full(n, np.nan)
+    # === CAMARILLA PIVOT LEVELS (based on previous 1d bar) ===
+    # Calculate from previous 1d bar's OHLC
+    prev_high = np.roll(daily_high, 1)
+    prev_low = np.roll(daily_low, 1)
+    prev_close = np.roll(daily_close, 1)
     
-    if n >= bb_period:
-        # Calculate SMA
-        sma_sum = np.sum(close[:bb_period])
-        sma[bb_period-1] = sma_sum / bb_period
-        for i in range(bb_period, n):
-            sma_sum = sma_sum - close[i-bb_period] + close[i]
-            sma[i] = sma_sum / bb_period
-        
-        # Calculate standard deviation
-        for i in range(bb_period-1, n):
-            bb_std_dev[i] = np.std(close[i-bb_period+1:i+1])
+    # First bar will have invalid data, but we'll handle with valid check
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    upper_band = sma + (bb_std * bb_std_dev)
-    lower_band = sma - (bb_std * bb_std_dev)
+    # Camarilla levels
+    l3 = pivot + (range_val * 1.1 / 4)
+    l4 = pivot + (range_val * 1.1 / 2)
+    h3 = pivot - (range_val * 1.1 / 4)
+    h4 = pivot - (range_val * 1.1 / 2)
     
-    # === 1D RSI (14) FOR TREND FILTER ===
+    # Align to 4h timeframe (these levels are valid for the entire 1d bar)
+    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
+    l4_4h = align_htf_to_ltf(prices, df_1d, l4)
+    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, h4)
+    
+    # === RSI FILTER (14-period on 1d) ===
     delta = pd.Series(daily_close).diff().values
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # === 1D BOLLINGER BAND WIDTH PERCENTILE (50-period) FOR REGIME DETECTION ===
-    bbw_period = 50
-    bbw_lookback = 50
-    sma_1d = np.full(len(daily_close), np.nan)
-    bb_std_dev_1d = np.full(len(daily_close), np.nan)
-    bb_width = np.full(len(daily_close), np.nan)
-    
-    if len(daily_close) >= bbw_period:
-        # Calculate 1d SMA
-        sma_sum = np.sum(daily_close[:bbw_period])
-        sma_1d[bbw_period-1] = sma_sum / bbw_period
-        for i in range(bbw_period, len(daily_close)):
-            sma_sum = sma_sum - daily_close[i-bbw_period] + daily_close[i]
-            sma_1d[i] = sma_sum / bbw_period
-        
-        # Calculate 1d standard deviation and BB Width
-        for i in range(bbw_period-1, len(daily_close)):
-            bb_std_dev_1d[i] = np.std(daily_close[i-bbw_period+1:i+1])
-            bb_width[i] = ( (sma_1d[i] + (bb_std * bb_std_dev_1d[i])) - (sma_1d[i] - (bb_std * bb_std_dev_1d[i])) ) / sma_1d[i]
-    
-    # Calculate percentile of current BBW over lookback period
-    bbw_percentile = np.full(len(daily_close), np.nan)
-    if len(daily_close) >= bbw_period + bbw_lookback:
-        for i in range(bbw_period + bbw_lookback - 1, len(daily_close)):
-            lookback_data = bb_width[i-bbw_lookback+1:i+1]
-            valid_data = lookback_data[~np.isnan(lookback_data)]
-            if len(valid_data) > 0:
-                current_bw = bb_width[i]
-                if not np.isnan(current_bw) and sma_1d[i] != 0:
-                    bbw_percentile[i] = (np.sum(valid_data <= current_bw) / len(valid_data)) * 100
-    
-    bbw_percentile_aligned = align_htf_to_ltf(prices, df_1d, bbw_percentile)
-    
-    # === VOLUME CONTRACTION (below 50% of 20-period average) ===
+    # === VOLUME SPIKE (2x 20-period average on 4h) ===
     vol_ma = np.full(n, np.nan)
     if n >= 20:
         vol_sum = np.sum(volume[:20])
@@ -103,38 +74,37 @@ def generate_signals(prices):
         for i in range(20, n):
             vol_sum = vol_sum - volume[i-20] + volume[i]
             vol_ma[i] = vol_sum / 20
-    vol_contraction = volume < (vol_ma * 0.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if any data invalid
-        if (np.isnan(sma[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(bbw_percentile_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        # Skip if any data invalid (first bar roll will have NaN)
+        if (np.isnan(l3_4h[i]) or np.isnan(l4_4h[i]) or 
+            np.isnan(h3_4h[i]) or np.isnan(h4_4h[i]) or
+            np.isnan(rsi_4h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Regime filter: only trade in ranging markets (BBW percentile between 30 and 70)
-        is_ranging = (bbw_percentile_aligned[i] >= 30) and (bbw_percentile_aligned[i] <= 70)
+        # Price near Camarilla levels (within 0.15% tolerance)
+        near_l3 = abs(low[i] - l3_4h[i]) / l3_4h[i] < 0.0015
+        near_l4 = abs(low[i] - l4_4h[i]) / l4_4h[i] < 0.0015
+        near_h3 = abs(high[i] - h3_4h[i]) / h3_4h[i] < 0.0015
+        near_h4 = abs(high[i] - h4_4h[i]) / h4_4h[i] < 0.0015
         
-        # Trend filter: avoid strong trends (RSI not too extreme)
-        rsi_not_extreme = (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
+        # RSI conditions for reversal
+        rsi_oversold = rsi_4h[i] < 30
+        rsi_overbought = rsi_4h[i] > 70
         
-        # Mean reversion conditions
-        at_lower_band = low[i] <= lower_band[i]
-        at_upper_band = high[i] >= upper_band[i]
-        rsi_oversold = rsi_1d_aligned[i] < 30  # Using 1d RSI for mean reversion signal
-        rsi_overbought = rsi_1d_aligned[i] > 70
+        # Entry conditions with volume confirmation
+        long_entry = (near_l3 or near_l4) and rsi_oversold and vol_spike[i]
+        short_entry = (near_h3 or near_h4) and rsi_overbought and vol_spike[i]
         
-        # Entry conditions: BB touch + RSI extreme + volume contraction + ranging regime
-        long_entry = at_lower_band and rsi_oversold and vol_contraction[i] and is_ranging and rsi_not_extreme
-        short_entry = at_upper_band and rsi_overbought and vol_contraction[i] and is_ranging and rsi_not_extreme
-        
-        # Exit conditions: price returns to middle band or opposite signal
-        long_exit = close[i] >= sma[i]
-        short_exit = close[i] <= sma[i]
+        # Exit conditions: price moves back toward pivot or opposite signal
+        pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] >= pivot_4h[i]  # Exit long when price reaches pivot
+        short_exit = close[i] <= pivot_4h[i]  # Exit short when price reaches pivot
         
         # Signal logic
         if long_entry and position != 1:
