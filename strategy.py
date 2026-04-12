@@ -8,11 +8,11 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla breakout with 1d trend filter and chop regime
-    # Camarilla R3/S3 levels from 1d act as key intraday support/resistance
-    # 1d EMA(50) trend filter ensures alignment with higher timeframe direction
-    # Choppiness Index (CHOP) filter avoids whipsaw in ranging markets
-    # Breakout above R3 or below S3 with volume confirmation = continuation signal
+    # Hypothesis: 4h Donchian breakout with 1d EMA trend filter and chop regime
+    # Donchian(20) breakout provides clear entry/exit levels
+    # 1d EMA(50) ensures alignment with higher timeframe trend
+    # Choppiness Index filter avoids whipsaw in ranging markets
+    # Volume confirmation adds conviction to breakouts
     # Target: 20-40 trades/year per symbol to minimize fee drag
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend
+    # Get 1d data for EMA trend and chop regime
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -33,16 +33,6 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d Camarilla pivot levels (R3/S3 for intraday trading)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R3 = C + (Range * 1.1/4)
-    # S3 = C - (Range * 1.1/4)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
     
     # Calculate 1d EMA(50) for trend filter
     close_1d_series = pd.Series(close_1d)
@@ -71,10 +61,15 @@ def generate_signals(prices):
             chop_1d[i] = 50.0  # neutral when undefined
     
     # Align 1d indicators to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     chop_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate 4h Donchian channels (20-period)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,7 +80,7 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
@@ -101,21 +96,18 @@ def generate_signals(prices):
         else:
             vol_ratio = 1.0
         
-        # Chop regime: only trade when CHOP < 61.8 (trending) or > 38.2 (not too choppy)
-        # Actually, we want to avoid extreme chop: CHOP > 61.8 is too choppy for breakouts
-        chop_condition = chop_aligned[i] < 61.8  # avoid extremely choppy markets
+        # Chop regime: only trade when CHOP < 61.8 (avoid extremely choppy markets)
+        chop_condition = chop_aligned[i] < 61.8
         
-        # Breakout signals: price breaks R3/S3 with volume confirmation AND trend alignment
-        breakout_long = (close[i] > r3_aligned[i]) and (vol_ratio > 1.5) and uptrend and chop_condition
-        breakout_short = (close[i] < s3_aligned[i]) and (vol_ratio > 1.5) and downtrend and chop_condition
+        # Donchian breakout signals with volume confirmation AND trend alignment
+        breakout_long = (close[i] > highest_high[i]) and (vol_ratio > 1.5) and uptrend and chop_condition
+        breakout_short = (close[i] < lowest_low[i]) and (vol_ratio > 1.5) and downtrend and chop_condition
         
-        # Exit conditions: return to opposite Camarilla level (S3/R3) or pivot
-        # Use pivot as dynamic exit
-        pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        # Exit conditions: return to opposite Donchian level (middle)
+        middle = (highest_high[i] + lowest_low[i]) / 2.0
         
-        long_exit = close[i] < pivot_aligned[i]
-        short_exit = close[i] > pivot_aligned[i]
+        long_exit = close[i] < middle
+        short_exit = close[i] > middle
         
         if breakout_long and position != 1:
             position = 1
@@ -140,6 +132,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_breakout_trend_chop_v1"
+name = "4h_1d_donchian_breakout_ema_chop_v1"
 timeframe = "4h"
 leverage = 1.0
