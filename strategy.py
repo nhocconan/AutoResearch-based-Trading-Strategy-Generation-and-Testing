@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_camarilla_volume_regime_v1
-# Uses weekly Camarilla pivot levels (H3/L3) with volume confirmation and 1d momentum filter.
-# In bull markets, buys breakouts above weekly H3 with volume and positive 1d momentum.
-# In bear markets, shorts breakdowns below weekly L3 with volume and negative 1d momentum.
-# Weekly timeframe reduces noise and false signals; volume confirms institutional interest.
-# Target: 15-30 trades/year per symbol for low friction and high edge.
+# Hypothesis: 6h_1d_elder_ray_power_v1
+# Uses Elder Ray (Bull/Bear Power) from 1d timeframe with 60-period EMA.
+# Bull Power = High - EMA60, Bear Power = EMA60 - Low.
+# Long when Bull Power > 0 and rising, short when Bear Power > 0 and rising.
+# Filters: volume > 1.5x 20-period average, avoids whipsaws in low volume.
+# Target: 15-30 trades/year per symbol, works in both bull and bear via power shift.
 
-name = "1d_1w_camarilla_volume_regime_v1"
-timeframe = "1d"
+name = "6h_1d_elder_ray_power_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 70:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,47 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous week
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
-    close_prev = df_1w['close'].shift(1).values
+    # Calculate 60-period EMA on daily close
+    close_1d = df_1d['close'].values
+    ema60 = pd.Series(close_1d).ewm(span=60, adjust=False, min_periods=60).mean().values
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h3 = close_prev + range_prev * 1.1 / 4
-    camarilla_l3 = close_prev - range_prev * 1.1 / 4
+    # Elder Ray components
+    bull_power = df_1d['high'].values - ema60  # High - EMA60
+    bear_power = ema60 - df_1d['low'].values   # EMA60 - Low
     
-    # Align to 1d timeframe (already delayed by 1 week due to shift)
-    h3_level = align_htf_to_ltf(prices, df_1w, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    # Align to 6h timeframe
+    ema60_aligned = align_htf_to_ltf(prices, df_1d, ema60)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # 1d momentum filter: positive/negative momentum over 3 days
-    mom = close - np.roll(close, 3)
-    mom = np.where(np.arange(len(close)) < 3, 0, mom)  # pad first 3 values
-    mom_filter = mom > 0  # for long
-    mom_filter_short = mom < 0  # for short
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]):
+    for i in range(60, n):  # start after EMA warmup
+        # Skip if values not ready
+        if np.isnan(ema60_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume filter
+        # Require volume confirmation
         if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+            # Hold current position if no volume
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -73,19 +66,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly H3 with volume and positive momentum
-        if close[i] > h3_level[i] and mom_filter[i] and position != 1:
+        # Long signal: Bull Power positive AND rising (momentum)
+        if bull_power_aligned[i] > 0 and bull_power_aligned[i] > bull_power_aligned[i-1] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly L3 with volume and negative momentum
-        elif close[i] < l3_level[i] and mom_filter_short[i] and position != -1:
+        # Short signal: Bear Power positive AND rising (momentum)
+        elif bear_power_aligned[i] > 0 and bear_power_aligned[i] > bear_power_aligned[i-1] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l3_level[i] and position == 1:
+        # Exit: when power turns negative (loss of momentum)
+        elif position == 1 and bull_power_aligned[i] <= 0:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h3_level[i] and position == -1:
+        elif position == -1 and bear_power_aligned[i] <= 0:
             position = 0
             signals[i] = 0.0
         else:
