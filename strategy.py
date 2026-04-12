@@ -1,11 +1,17 @@
-# 12h_1w_1d_camarilla_breakout_v1
-# Uses weekly and daily pivots with volume confirmation and chop regime filter
-# Weekly: trend direction (price above/below weekly pivot)
-# Daily: entry signals at H3/L3 levels with volume
-# Chop filter: avoid ranging markets
-# Target: 15-30 trades/year per symbol
-name = "12h_1w_1d_camarilla_breakout_v1"
-timeframe = "12h"
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 6h_1d_rsi_vs_ma_mean_reversion
+# Uses RSI(14) mean reversion with daily moving average filter.
+# Long when RSI < 30 and price > daily EMA(50) (oversold in uptrend).
+# Short when RSI > 70 and price < daily EMA(50) (overbought in downtrend).
+# Works in both bull and bear markets by combining momentum exhaustion with trend filter.
+# Target: 20-40 trades/year per symbol.
+
+name = "6h_1d_rsi_vs_ma_mean_reversion"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -16,82 +22,50 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w and 1d data
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for EMA filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 2 or len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly pivot for trend direction
-    high_w = df_1w['high'].shift(1).values
-    low_w = df_1w['low'].shift(1).values
-    close_w = df_1w['close'].shift(1).values
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    weekly_pivot = align_htf_to_ltf(prices, df_1w, pivot_w)
+    # Calculate daily EMA(50)
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Daily Camarilla levels
-    high_d = df_1d['high'].shift(1).values
-    low_d = df_1d['low'].shift(1).values
-    close_d = df_1d['close'].shift(1).values
-    range_d = high_d - low_d
-    h3_d = close_d + range_d * 1.1 / 4
-    l3_d = close_d - range_d * 1.1 / 4
-    h3_level = align_htf_to_ltf(prices, df_1d, h3_d)
-    l3_level = align_htf_to_ltf(prices, df_1d, l3_d)
+    # Calculate RSI(14) on 6h closes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: volume > 1.8 * 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_confirm = volume > (vol_ma * 1.8)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        # Skip if levels not ready
-        if np.isnan(weekly_pivot[i]) or np.isnan(h3_level[i]) or np.isnan(l3_level[i]):
+    for i in range(14, n):
+        # Skip if EMA not ready
+        if np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price above weekly pivot and breaks above H3
-        if close[i] > weekly_pivot[i] and close[i] > h3_level[i] and position != 1:
+        # Long: RSI oversold and price above daily EMA
+        if rsi[i] < 30 and close[i] > ema_50_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price below weekly pivot and breaks below L3
-        elif close[i] < weekly_pivot[i] and close[i] < l3_level[i] and position != -1:
+        # Short: RSI overbought and price below daily EMA
+        elif rsi[i] > 70 and close[i] < ema_50_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: price crosses weekly pivot in opposite direction
-        elif (close[i] < weekly_pivot[i] and position == 1) or (close[i] > weekly_pivot[i] and position == -1):
+        # Exit: RSI returns to neutral zone
+        elif 40 <= rsi[i] <= 60 and position != 0:
             position = 0
             signals[i] = 0.0
+        # Hold position
         else:
-            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
