@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_breakout_v1
-# Uses 12h price action with 1-day Camarilla levels, volume confirmation, and chop regime filter.
-# Designed to capture institutional breakouts in trending markets while avoiding false signals in chop.
-# Target: 12-30 trades/year per symbol for low friction and high edge.
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+# Hypothesis: 4h_1d_adaptive_breakout_v1
+# Combines adaptive moving average (KAMA) trend with Donchian breakout and volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades, reducing whipsaw in choppy markets.
+# Designed for low trade frequency (<40/year) with high win rate in both bull and bear markets.
+name = "4h_1d_adaptive_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,55 +21,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # KAMA trend on daily close
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    er[1:] = change[1:] / (np.sum(volatility[np.arange(1, len(close_1d))[:, None] == np.arange(len(volatility))[None, :]], axis=1) + 1e-10)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align KAMA to 4h
+    kama_4h = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
-    
-    # Align to 12h timeframe
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Donchian channel (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+    for i in range(20, n):
+        # Skip if values not ready
+        if np.isnan(kama_4h[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
+        # Skip if volume confirmation fails
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -78,19 +72,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume
-        if close[i] > h4_level[i] and position != 1:
+        # Long: price above Donchian high AND above daily KAMA (uptrend)
+        if close[i] > high_max[i] and close[i] > kama_4h[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
+        # Short: price below Donchian low AND below daily KAMA (downtrend)
+        elif close[i] < low_min[i] and close[i] < kama_4h[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
+        # Exit: opposite Donchian break
+        elif close[i] < low_min[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
+        elif close[i] > high_max[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
