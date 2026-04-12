@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v33"
+name = "4h_1d_camarilla_breakout_v34"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -58,7 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    for i in range(200, n):
+    for i in range(100, n):
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
             np.isnan(vol_confirm[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
