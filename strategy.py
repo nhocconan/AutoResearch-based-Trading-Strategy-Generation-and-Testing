@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v2"
+name = "12h_1d_camarilla_breakout_v3"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,13 +31,13 @@ def generate_signals(prices):
     pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
     range_1d_prev = high_1d_prev - low_1d_prev
     
-    # Camarilla levels (H4 and L4 - stronger breakout levels)
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    # Camarilla levels (H3 and L3 - core reversal levels)
+    h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
+    l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
     
     # Align levels to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
     
     # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
@@ -59,17 +59,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
             np.isnan(volume_ok[i]) or np.isnan(rsi_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H4 with volume confirmation
-        long_signal = close[i] > h4_aligned[i] and volume_ok[i] and rsi_ok[i]
-        # Short: price breaks below L4 with volume confirmation
-        short_signal = close[i] < l4_aligned[i] and volume_ok[i] and rsi_ok[i]
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and rsi_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and rsi_ok[i]
         
         # Exit when price returns to pivot
         pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
