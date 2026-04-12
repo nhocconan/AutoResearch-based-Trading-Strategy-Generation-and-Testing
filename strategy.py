@@ -8,85 +8,78 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla breakout with 1d trend filter and volume confirmation
-    # Camarilla R3/S3 levels from 1d act as key support/resistance for 12h timeframe
-    # 1d EMA(50) trend filter ensures alignment with higher timeframe direction
-    # Volume confirmation reduces false breakouts
-    # Target: 12-30 trades/year per symbol to minimize fee drag on 12h timeframe
-    
-    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Hypothesis: 4h Donchian breakout with 12h trend filter and volume confirmation
+    # Donchian(20) provides clear structure for breakouts in both bull/bear markets
+    # 12h EMA(50) ensures alignment with higher timeframe trend to avoid counter-trend trades
+    # Volume > 2x 20-period average confirms institutional participation
+    # Target: 30-50 trades/year per symbol to minimize fee drag and avoid overtrading
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d Camarilla pivot levels (R3/S3)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
+    # Calculate 12h EMA(50) for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channels (20-period) on 4h
+    highest_20 = np.full(n, np.nan)
+    lowest_20 = np.full(n, np.nan)
     
-    # Align 1d indicators to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    for i in range(20, n):
+        highest_20[i] = np.max(high[i-20:i])
+        lowest_20[i] = np.min(low[i-20:i])
+    
+    # Volume confirmation: current volume > 2x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma_20[i] = np.mean(volume[i-20:i])
+    
+    vol_ratio = np.full(n, np.nan)
+    for i in range(20, n):
+        if vol_ma_20[i] > 0:
+            vol_ratio[i] = volume[i] / vol_ma_20[i]
+        else:
+            vol_ratio[i] = 1.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 1d EMA(50)
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Determine trend from 12h EMA(50)
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Volume confirmation: current 12h volume > 1.3x 20-period average
-        if i >= 20:
-            vol_ma = np.mean(volume[max(0, i-20):i])
-            vol_ratio = volume[i] / vol_ma if vol_ma > 0 else 1.0
-        else:
-            vol_ratio = 1.0
+        # Breakout conditions
+        breakout_long = (close[i] > highest_20[i]) and (vol_ratio[i] > 2.0) and uptrend
+        breakout_short = (close[i] < lowest_20[i]) and (vol_ratio[i] > 2.0) and downtrend
         
-        # Breakout signals: price breaks R3/S3 with volume confirmation AND trend alignment
-        breakout_long = (close[i] > r3_aligned[i]) and (vol_ratio > 1.3) and uptrend
-        breakout_short = (close[i] < s3_aligned[i]) and (vol_ratio > 1.3) and downtrend
-        
-        # Exit conditions: return to opposite Camarilla level (S3/R3)
-        long_exit = close[i] < s3_aligned[i]
-        short_exit = close[i] > r3_aligned[i]
+        # Exit conditions: return to midpoint of Donchian channel
+        midpoint_20 = (highest_20[i] + lowest_20[i]) / 2.0
+        long_exit = close[i] < midpoint_20
+        short_exit = close[i] > midpoint_20
         
         if breakout_long and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.30
         elif breakout_short and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.30
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -96,14 +89,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1d_camarilla_breakout_trend_vol_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_breakout_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
