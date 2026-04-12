@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h_1w_Camarilla_Breakout_V1
+12h_1w_Camarilla_Breakout_v2
 Hypothesis: Use weekly Camarilla H3/L3 breakouts with 1d EMA trend filter and volume confirmation.
 Enter long when price breaks above weekly H3 in uptrend (1d close > EMA20) with volume > 2x average.
 Enter short when price breaks below weekly L3 in downtrend (1d close < EMA20) with volume > 2x average.
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Camarilla_Breakout_V1"
+name = "12h_1w_Camarilla_Breakout_v2"
 timeframe = "12h"
 leverage = 1.0
 
