@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-1d_1w_RCIMultiplier_v1
-Hypothesis: Uses Relative Candle Index Multiplier (RCIM) with weekly trend filter.
-RCIM = (Close - Low)/(High - Low) * Volume normalized.
-Long when RCIM > 0.7 and weekly close > weekly EMA20; short when RCIM < 0.3 and weekly close < weekly EMA20.
-Designed for low trade frequency by requiring strong momentum and trend alignment.
-Works in bull via RCIM>0.7, in bear via RCIM<0.3.
+12h_1d_Camarilla_Pivot_Trend_v1
+Hypothesis: Uses 1-day Camarilla pivot levels with trend filter and volume confirmation.
+Long when price breaks above H4 in uptrend; short when price breaks below L4 in downtrend.
+Designed for low trade frequency by requiring breakout of key levels with trend alignment.
+Works in bull via long breakouts, in bear via short breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_RCIMultiplier_v1"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,60 +33,75 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # RCIM calculation: (Close - Low)/(High - Low) * Volume normalized
-    price_range = high_1d - low_1d
-    price_range = np.where(price_range == 0, 1, price_range)  # avoid division by zero
-    rcim = ((close_1d - low_1d) / price_range) * volume_1d
+    # Calculate Camarilla pivot levels for previous day
+    # Pivot = (High + Low + Close) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_ = high_1d - low_1d
     
-    # Normalize RCIM by its 20-period average
-    rcim_series = pd.Series(rcim)
-    rcim_ma = rcim_series.rolling(window=20, min_periods=20).mean().values
-    rcim_normalized = rcim / np.where(rcim_ma == 0, 1, rcim_ma)
+    # Resistance levels: H1-H4
+    h1 = close_1d + (range_ * 1.1 / 12)
+    h2 = close_1d + (range_ * 1.1 / 6)
+    h3 = close_1d + (range_ * 1.1 / 4)
+    h4 = close_1d + (range_ * 1.1 / 2)
     
-    # Weekly EMA20 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Support levels: L1-L4
+    l1 = close_1d - (range_ * 1.1 / 12)
+    l2 = close_1d - (range_ * 1.1 / 6)
+    l3 = close_1d - (range_ * 1.1 / 4)
+    l4 = close_1d - (range_ * 1.1 / 2)
     
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Daily EMA50 for trend filter
+    close_s = pd.Series(close_1d)
+    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).values
     
-    # Align RCIM to daily
-    rcim_normalized_aligned = align_htf_to_ltf(prices, df_1d, rcim_normalized)
+    # Align to 12h
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    
+    # Volume average (20-period for confirmation)
+    vol_avg = np.zeros(n)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if i >= 20:
+            vol_sum -= volume[i-20]
+            vol_count -= 1
+        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(rcim_normalized_aligned[i]) or np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # RCIM conditions
-        rcim_high = rcim_normalized_aligned[i] > 0.7
-        rcim_low = rcim_normalized_aligned[i] < 0.3
+        # Volume confirmation: at least 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Weekly trend filter
-        weekly_uptrend = close_1w[-1] > ema20_1w_aligned[i] if len(close_1w) > 0 else False
-        weekly_downtrend = close_1w[-1] < ema20_1w_aligned[i] if len(close_1w) > 0 else False
+        # Trend filter: price above/below EMA50
+        price_vs_ema = close[i] > ema50_aligned[i]
         
-        # Entry conditions
-        long_setup = rcim_high and weekly_uptrend
-        short_setup = rcim_low and weekly_downtrend
+        # Breakout conditions
+        breakout_long = close[i] > h4_aligned[i] and price_vs_ema and vol_confirm
+        breakout_short = close[i] < l4_aligned[i] and not price_vs_ema and vol_confirm
         
-        # Exit when RCIM reverses or trend fails
-        exit_long = not rcim_high or not weekly_uptrend
-        exit_short = not rcim_low or not weekly_downtrend
+        # Exit when price returns to pivot or trend fails
+        pivot_level = (high_1d + low_1d + close_1d) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(high_1d, pivot_level))
+        exit_long = close[i] < pivot_aligned[i] or not price_vs_ema
+        exit_short = close[i] > pivot_aligned[i] or price_vs_ema
         
-        if long_setup and position != 1:
+        if breakout_long and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_setup and position != -1:
+        elif breakout_short and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
