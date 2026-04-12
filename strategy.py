@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1d_camarilla_breakout_volume
-Hypothesis: 12-hour strategy using daily Camarilla pivot levels with volume confirmation.
-Enters long when price breaks above H3 with volume spike; short when breaks below L3 with volume spike.
-Uses fixed position sizing (0.25) to minimize churn and uses simple exit on opposite H3/L3 touch.
-Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drift while capturing strong moves.
-Focus on breakout quality with volume filter to avoid false signals in chop.
+4h_1d_camarilla_breakout_volume_v5
+Hypothesis: 4-hour strategy using daily Camarilla pivot levels with volume confirmation and tighter filters.
+Enters long when price breaks above H3 with volume > 2.5x 20-period average; short when breaks below L3 with volume > 2.5x.
+Exits on touch of opposite H3/L3 or when volume drops below 1.5x average (early exit in weakening momentum).
+Uses position size 0.25 to balance risk and return. Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+Focus on high-quality breakouts with strong volume to avoid false signals in choppy markets.
 """
 
 import numpy as np
@@ -51,11 +51,11 @@ def generate_signals(prices):
     h4 = pivot + 1.1 * range_val
     l4 = pivot - 1.1 * range_val
     
-    # Align Camarilla levels to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, l3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, l4)
+    # Align Camarilla levels to 4h timeframe
+    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, l4)
     
     # Calculate volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -67,21 +67,22 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or 
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average (strict filter)
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume filters: strict entry, moderate exit
+        volume_entry = volume[i] > vol_ma[i] * 2.5  # Stricter entry filter
+        volume_exit = volume[i] < vol_ma[i] * 1.5   # Early exit if momentum weakens
         
         # Entry conditions: Camarilla H3/L3 breakout with volume confirmation
-        long_breakout = close[i] > h3_12h[i] and volume_filter
-        short_breakout = close[i] < l3_12h[i] and volume_filter
+        long_breakout = close[i] > h3_4h[i] and volume_entry
+        short_breakout = close[i] < l3_4h[i] and volume_entry
         
-        # Exit conditions: touch opposite H3/L3 level
-        long_exit = close[i] < l3_12h[i]
-        short_exit = close[i] > h3_12h[i]
+        # Exit conditions: touch opposite H3/L3 level OR volume drops (weakening momentum)
+        long_exit = close[i] < l3_4h[i] or volume_exit
+        short_exit = close[i] > h3_4h[i] or volume_exit
         
         if long_breakout and position != 1:
             position = 1
@@ -106,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v5"
+timeframe = "4h"
 leverage = 1.0
