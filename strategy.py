@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
+"""
+6h_1d_keltner_breakout_trend
+Hypothesis: 6-hour Keltner breakout with daily trend filter. Uses daily EMA50 as trend filter and Keltner bands (ATR-based) for breakout signals. Works in both bull and bear by only taking long trades when above daily EMA50 and short trades when below. ATR filter prevents trading in low volatility. Target: 20-50 trades/year.
+"""
 
-# 1d_1w_camarilla_breakout_with_volume_and_atr
-# Hypothesis: Daily chart Camarilla breakout with weekly trend filter, volume confirmation, and ATR volatility filter.
-# Uses weekly trend direction to filter trades (only long in weekly uptrend, short in weekly downtrend) to avoid counter-trend trades.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag while maintaining edge.
-
-name = "1d_1w_camarilla_breakout_with_volume_and_atr"
-timeframe = "1d"
+name = "6h_1d_keltner_breakout_trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,22 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA21 for trend direction
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_uptrend = close_1w > ema21_1w  # True when in weekly uptrend
-    weekly_downtrend = close_1w < ema21_1w  # True when in weekly downtrend
-    
-    # Align weekly trend to daily
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
-    
-    # Get daily data for Camarilla and ATR
+    # Get daily data for trend and Keltner calculations
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -47,33 +31,29 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range (for Camarilla calculation)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Daily EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
-    
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    # Daily ATR(10) for Keltner bands
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align Camarilla levels and ATR to daily timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Daily EMA20 for Keltner center line
+    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Bands: Upper = EMA20 + 2*ATR, Lower = EMA20 - 2*ATR
+    keltner_upper = ema20_1d + 2.0 * atr_1d
+    keltner_lower = ema20_1d - 2.0 * atr_1d
+    
+    # Align daily indicators to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -84,28 +64,26 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i]) or np.isnan(weekly_uptrend_aligned[i]) or
-            np.isnan(weekly_downtrend_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or 
+            np.isnan(keltner_lower_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume, volatility filter, and weekly uptrend
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and weekly_uptrend_aligned[i] and position != 1):
+        # Long entry: close breaks above Keltner Upper with volume, above daily EMA50, and sufficient volatility
+        if (close[i] > keltner_upper_aligned[i] and vol_confirm[i] and 
+            close[i] > ema50_1d_aligned[i] and atr_1d_aligned[i] > 0 and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume, volatility filter, and weekly downtrend
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and weekly_downtrend_aligned[i] and position != -1):
+        # Short entry: close breaks below Keltner Lower with volume, below daily EMA50, and sufficient volatility
+        elif (close[i] < keltner_lower_aligned[i] and vol_confirm[i] and 
+              close[i] < ema50_1d_aligned[i] and atr_1d_aligned[i] > 0 and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: reverse signal or close crosses back to opposite Keltner band
+        elif position == 1 and close[i] < keltner_lower_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and close[i] > keltner_upper_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
