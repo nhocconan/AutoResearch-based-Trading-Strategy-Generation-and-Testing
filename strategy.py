@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_1d_RSI_Overbought_Oversold_Volume_Confirmation
-Hypothesis: Uses daily RSI extremes combined with 4-hour volume confirmation to capture mean-reversion opportunities.
-In bull markets, buys oversold dips; in bear markets, sells overbought rallies. Volume filter ensures institutional participation.
-Designed for low-frequency, high-probability trades (target 20-40/year) to minimize fee drag.
+6h_12h_ElderRay_Power_Reversal
+Hypothesis: Uses 12h Elder Ray (bull/bear power) with 6m zero-cross signals and volume confirmation.
+Elder Ray > 0 indicates bull power > 0, < 0 indicates bear power > 0. Zero-cross signals trend changes.
+Works in both bull/bear markets by capturing momentum shifts with volume filter to avoid false signals.
+Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_RSI_Overbought_Oversold_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_12h_ElderRay_Power_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,60 +25,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY RSI CALCULATION ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # === 12H ELDER RAY (BULL/BEAR POWER) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate RSI(14) on daily closes
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 13-period EMA of close for Elder Ray
+    def ema(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        multiplier = 2 / (period + 1)
+        result[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
+        return result
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    ema_13 = ema(close_12h, 13)
     
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+    bull_power = high_12h - ema_13
+    bear_power = ema_13 - low_12h
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Align to 6h timeframe
+    bull_power_6h = align_htf_to_ltf(prices, df_12h, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_12h, bear_power)
     
-    # Align RSI to 4h timeframe
-    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # === 4h VOLUME CONFIRMATION ===
+    # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(rsi_4h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Entry conditions
-        # Long: Daily RSI oversold (<30) with volume confirmation
-        long_signal = (rsi_4h[i] < 30) and (vol_ratio[i] > 1.5)
-        
-        # Short: Daily RSI overbought (>70) with volume confirmation
-        short_signal = (rsi_4h[i] > 70) and (vol_ratio[i] > 1.5)
+        # Long: Bull Power crosses above zero with volume confirmation
+        long_signal = (bull_power_6h[i] > 0 and bull_power_6h[i-1] <= 0 and vol_ratio[i] > 1.5)
+        # Short: Bear Power crosses above zero with volume confirmation
+        short_signal = (bear_power_6h[i] > 0 and bear_power_6h[i-1] <= 0 and vol_ratio[i] > 1.5)
         
         # Exit conditions
-        # Exit long when RSI returns to neutral (>50) or reverses
-        exit_long = (position == 1) and (rsi_4h[i] > 50)
-        
-        # Exit short when RSI returns to neutral (<50) or reverses
-        exit_short = (position == -1) and (rsi_4h[i] < 50)
+        # Exit long when Bear Power crosses above zero (bearish momentum takes over)
+        exit_long = (position == 1) and (bear_power_6h[i] > 0 and bear_power_6h[i-1] <= 0)
+        # Exit short when Bull Power crosses above zero (bullish momentum takes over)
+        exit_short = (position == -1) and (bull_power_6h[i] > 0 and bull_power_6h[i-1] <= 0)
         
         # Execute trades
         if long_signal and position != 1:
