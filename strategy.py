@@ -97,6 +97,9 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_ema10_breakout_vol_filter_v1"
-timeframe = "4h"
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volatility filter.
+# Works in bull markets via trend-following breakouts and in bear markets via volatility-filtered short breakdowns.
+# 12h timeframe reduces trade frequency to avoid fee drag while capturing major moves.
+name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
+timeframe = "12h"
 leverage = 1.0
