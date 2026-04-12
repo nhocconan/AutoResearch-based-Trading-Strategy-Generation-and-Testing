@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Breakout_Volume_Regime_v1
-Hypothesis: On 12h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation and chop regime favors trending, enter short when price breaks below daily Camarilla S3 with volume confirmation and chop regime favors trending. Uses daily Camarilla levels for structure, volume filter for institutional participation, and chop regime to avoid whipsaws in sideways markets. Target: 15-30 trades per year per symbol (60-120 over 4 years).
+4h_1d_1w_Camarilla_Breakout_Volume_Regime_v1
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation and weekly chop regime favors trending, enter short when price breaks below daily Camarilla S3 with volume confirmation and weekly chop regime favors trending. Uses daily Camarilla levels for structure, weekly chop for regime filter, and volume filter for institutional participation. Target: 20-50 trades per year per symbol (80-200 over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_Breakout_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,9 +39,55 @@ def generate_signals(prices):
     r3 = close_1d + range_1d * 1.1 / 4
     s3 = close_1d - range_1d * 1.1 / 4
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === WEEKLY CHOPPINESS INDEX REGIME FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range calculation for weekly data
+    tr = np.maximum(high_1w - low_1w, np.maximum(np.abs(high_1w - np.roll(close_1w, 1)), np.abs(low_1w - np.roll(close_1w, 1))))
+    tr[0] = high_1w[0] - low_1w[0]
+    
+    # ATR(14) for weekly
+    atr14 = np.zeros_like(tr)
+    if len(tr) >= 14:
+        atr14[14] = np.mean(tr[0:14])
+        for i in range(15, len(tr)):
+            atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
+    
+    # Sum of ATR(14) over 14 periods
+    sum_atr14 = np.zeros_like(atr14)
+    if len(atr14) >= 14:
+        sum_atr14[14] = np.sum(atr14[0:14])
+        for i in range(15, len(sum_atr14)):
+            sum_atr14[i] = sum_atr14[i-1] - atr14[i-14] + atr14[i]
+    
+    # Highest high and lowest low over 14 periods
+    highest_high = np.maximum.accumulate(high_1w)
+    lowest_low = np.minimum.accumulate(low_1w)
+    hh_ll_diff = highest_high - lowest_low
+    
+    # Choppiness Index
+    chop = np.zeros_like(close_1w)
+    for i in range(14, len(chop)):
+        if sum_atr14[i] > 0 and hh_ll_diff[i] > 0:
+            chop[i] = 100 * np.log10(sum_atr14[i] / hh_ll_diff[i]) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral
+    
+    # Align chop to 4h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    
+    # Chop regime: < 38.2 = trending, > 61.8 = ranging
+    chop_trending = chop_aligned < 38.2
     
     # === VOLUME FILTER ===
     vol_ma = np.zeros_like(volume)
@@ -50,40 +96,6 @@ def generate_signals(prices):
         for i in range(21, len(volume)):
             vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     volume_filter = volume > 1.5 * vol_ma
-    
-    # === CHOPPINESS INDEX REGIME FILTER (using daily data) ===
-    # Chop = 100 * log10(sum(ATR(14)) / (highest_high - lowest_low)) / log10(14)
-    tr = np.maximum(high_1d - low_1d, np.maximum(abs(high_1d - np.roll(close_1d, 1)), abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]  # first period
-    atr14 = np.zeros_like(tr)
-    if len(tr) >= 14:
-        atr14[14] = np.mean(tr[0:14])
-        for i in range(15, len(tr)):
-            atr14[i] = (atr14[i-1] * 13 + tr[i]) / 14
-    
-    # Calculate choppy index
-    sum_atr14 = np.zeros_like(atr14)
-    if len(atr14) >= 14:
-        sum_atr14[14] = np.sum(atr14[0:14])
-        for i in range(15, len(sum_atr14)):
-            sum_atr14[i] = sum_atr14[i-1] - atr14[i-14] + atr14[i]
-    
-    highest_high = np.maximum.accumulate(high_1d)
-    lowest_low = np.minimum.accumulate(low_1d)
-    hh_ll_diff = highest_high - lowest_low
-    
-    chop = np.zeros_like(close_1d)
-    for i in range(14, len(chop)):
-        if sum_atr14[i] > 0 and hh_ll_diff[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr14[i] / hh_ll_diff[i]) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral
-    
-    # Align chop to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Chop regime: < 38.2 = trending, > 61.8 = ranging
-    chop_trending = chop_aligned < 38.2
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
