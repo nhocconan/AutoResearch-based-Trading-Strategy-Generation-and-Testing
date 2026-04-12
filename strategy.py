@@ -23,12 +23,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA200 for trend filter (200 periods)
+    # Calculate daily EMA200 for trend filter
     ema200_1d = np.full(len(df_1d), np.nan)
     k = 2 / (200 + 1)
-    ema200_1d[0] = close_1d[0]
-    for i in range(1, len(df_1d)):
-        ema200_1d[i] = close_1d[i] * k + ema200_1d[i-1] * (1 - k)
+    if len(df_1d) > 0:
+        ema200_1d[0] = close_1d[0]
+        for i in range(1, len(df_1d)):
+            ema200_1d[i] = close_1d[i] * k + ema200_1d[i-1] * (1 - k)
     
     # Calculate daily ATR for volatility (period 14)
     tr1 = np.abs(high_1d - low_1d)
