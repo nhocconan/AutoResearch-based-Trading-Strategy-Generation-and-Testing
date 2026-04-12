@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_1d_Alligator_Range_Filter_v1
-Hypothesis: Bill Williams Alligator identifies trending vs ranging markets. In range (JAW>TEETH>LIPS or reverse), fade price extremes at Bollinger Bands (20,2) on 6h. In trend (JAW<TEETH<LIPS or reverse), follow Alligator crossovers. Uses 1d Alligator for regime, 6h for entries. Avoids whipsaw in chop, catches trends. Works in bull (trend follow) and bear (range fade). Target 15-30 trades/year.
+12h_1d_Camarilla_Pivot_Signal_v1
+Hypothesis: Camarilla pivot levels from daily chart act as strong support/resistance on 12h timeframe.
+Price tends to reverse or bounce from these levels with confluence from volume spike and RSI filter.
+Works in both bull and bear markets as pivot levels represent key institutional price levels.
+Target: 20-30 trades per year (80-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Alligator_Range_Filter_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_Pivot_Signal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,106 +23,88 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1D data for Alligator regime
+    # Get 1D data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # === 1D ALLIGATOR (13,8,5 SMMA) ===
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        res = np.full(len(arr), np.nan)
-        sma = np.mean(arr[:period])
-        res[period-1] = sma
-        for i in range(period, len(arr)):
-            res[i] = (res[i-1] * (period-1) + arr[i]) / period
-        return res
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    ma13 = smma(df_1d['close'].values, 13)
-    ma8 = smma(df_1d['close'].values, 8)
-    ma5 = smma(df_1d['close'].values, 5)
+    # === CAMARILLA PIVOT LEVELS (based on previous day) ===
+    # Calculate from previous day's OHLC
+    prev_high = np.roll(daily_high, 1)
+    prev_low = np.roll(daily_low, 1)
+    prev_close = np.roll(daily_close, 1)
     
-    # Align Alligator lines to 6h
-    jaw_6h = align_htf_to_ltf(prices, df_1d, ma13)
-    teeth_6h = align_htf_to_ltf(prices, df_1d, ma8)
-    lips_6h = align_htf_to_ltf(prices, df_1d, ma5)
+    # First day will have invalid data, but we'll handle with valid check
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # === 6H BOLLINGER BANDS (20, 2) ===
-    if n < 20:
-        return np.zeros(n)
+    # Camarilla levels
+    l3 = pivot + (range_val * 1.1 / 4)
+    l4 = pivot + (range_val * 1.1 / 2)
+    h3 = pivot - (range_val * 1.1 / 4)
+    h4 = pivot - (range_val * 1.1 / 2)
     
-    sma20 = np.full(n, np.nan)
-    std20 = np.full(n, np.nan)
-    sum_close = np.sum(close[:20])
-    sum_sq = np.sum(close[:20]**2)
-    sma20[19] = sum_close / 20
-    var20 = (sum_sq / 20) - (sma20[19]**2)
-    std20[19] = np.sqrt(max(var20, 0))
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
+    # Align to 12h timeframe (these levels are valid for the entire day)
+    l3_12h = align_htf_to_ltf(prices, df_1d, l3)
+    l4_12h = align_htf_to_ltf(prices, df_1d, l4)
+    h3_12h = align_htf_to_ltf(prices, df_1d, h3)
+    h4_12h = align_htf_to_ltf(prices, df_1d, h4)
     
-    for i in range(20, n):
-        sum_close = sum_close - close[i-20] + close[i]
-        sum_sq = sum_sq - close[i-20]**2 + close[i]**2
-        sma20[i] = sum_close / 20
-        var20 = (sum_sq / 20) - (sma20[i]**2)
-        std20[i] = np.sqrt(max(var20, 0))
-        upper_bb[i] = sma20[i] + 2 * std20[i]
-        lower_bb[i] = sma20[i] - 2 * std20[i]
+    # === RSI FILTER (14-period on 1d) ===
+    delta = pd.Series(daily_close).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # === SIGNAL LOGIC ===
+    # === VOLUME SPIKE (2x 20-period average) ===
+    vol_ma = np.full(n, np.nan)
+    if n >= 20:
+        vol_sum = np.sum(volume[:20])
+        vol_ma[19] = vol_sum / 20
+        for i in range(20, n):
+            vol_sum = vol_sum - volume[i-20] + volume[i]
+            vol_ma[i] = vol_sum / 20
+    vol_spike = volume > (vol_ma * 2.0)
+    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if any data invalid
-        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or
-            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
+        # Skip if any data invalid (first day roll will have NaN)
+        if (np.isnan(l3_12h[i]) or np.isnan(l4_12h[i]) or 
+            np.isnan(h3_12h[i]) or np.isnan(h4_12h[i]) or
+            np.isnan(rsi_12h[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine regime: trending or ranging
-        # Trend: JAW < TEETH < LIPS (bull) or JAW > TEETH > LIPS (bear)
-        # Range: JAW > TEETH > LIPS (bull alignment but prices in range) or JAW < TEETH < LIPS (bear alignment but ranging)
-        # Actually: Alligator sleeping (all intertwined) = range; waking up (separated) = trend
-        # Simpler: if lips > teeth > jaw OR lips < teeth < jaw = trending, else ranging
-        lips_above_teeth = lips_6h[i] > teeth_6h[i]
-        teeth_above_jaw = teeth_6h[i] > jaw_6h[i]
-        lips_below_teeth = lips_6h[i] < teeth_6h[i]
-        teeth_below_jaw = teeth_6h[i] < jaw_6h[i]
+        # Price near Camarilla levels (within 0.1% tolerance)
+        near_l3 = abs(low[i] - l3_12h[i]) / l3_12h[i] < 0.001
+        near_l4 = abs(low[i] - l4_12h[i]) / l4_12h[i] < 0.001
+        near_h3 = abs(high[i] - h3_12h[i]) / h3_12h[i] < 0.001
+        near_h4 = abs(high[i] - h4_12h[i]) / h4_12h[i] < 0.001
         
-        trending = (lips_above_teeth and teeth_above_jaw) or (lips_below_teeth and teeth_below_jaw)
-        ranging = not trending
+        # RSI conditions for reversal
+        rsi_oversold = rsi_12h[i] < 30
+        rsi_overbought = rsi_12h[i] > 70
         
-        if ranging:
-            # Fade Bollinger Band extremes
-            long_entry = close[i] <= lower_bb[i]
-            short_entry = close[i] >= upper_bb[i]
-            long_exit = close[i] >= (sma20[i])  # Exit at middle BB
-            short_exit = close[i] <= (sma20[i])
-        else:
-            # Follow Alligator crossover (Lips cross Teeth)
-            # Need previous values for crossover
-            if i == 50:
-                prev_lips = lips_6h[i-1] if not np.isnan(lips_6h[i-1]) else lips_6h[i]
-                prev_teeth = teeth_6h[i-1] if not np.isnan(teeth_6h[i-1]) else teeth_6h[i]
-            else:
-                prev_lips = lips_6h[i-1]
-                prev_teeth = teeth_6h[i-1]
-            
-            # Bullish crossover: Lips crosses above Teeth
-            bullish_cross = (prev_lips <= prev_teeth) and (lips_6h[i] > teeth_6h[i])
-            # Bearish crossover: Lips crosses below Teeth
-            bearish_cross = (prev_lips >= prev_teeth) and (lips_6h[i] < teeth_6h[i])
-            
-            long_entry = bullish_cross
-            short_entry = bearish_cross
-            # Exit when cross reverses
-            long_exit = bearish_cross
-            short_exit = bullish_cross
+        # Entry conditions with volume confirmation
+        long_entry = (near_l3 or near_l4) and rsi_oversold and vol_spike[i]
+        short_entry = (near_h3 or near_h4) and rsi_overbought and vol_spike[i]
+        
+        # Exit conditions: price moves back toward pivot or opposite signal
+        pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+        long_exit = close[i] >= pivot_12h[i]  # Exit long when price reaches pivot
+        short_exit = close[i] <= pivot_12h[i]  # Exit short when price reaches pivot
         
         # Signal logic
         if long_entry and position != 1:
