@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_volatility_breakout_v1
-Hypothesis: Breakouts from volatility contraction (low Bollinger Bandwidth) followed by expansion, filtered by 1d trend (EMA50) and volume confirmation. Works in bull/bear by aligning with higher timeframe trend and using volatility as entry signal.
-Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
+12h_1d_trix_volume_trend
+Hypothesis: 12-hour strategy using TRIX momentum on daily timeframe for trend direction, 
+with volume confirmation and 12-hour price action for entries. TRIX filters noise and 
+identifies sustained momentum, working in both bull and bear markets by capturing 
+medium-term trends. Volume confirmation avoids false signals. Target: 15-30 trades/year 
+(60-120 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -11,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,62 +22,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) for volatility squeeze
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper = sma20 + 2 * std20
-    lower = sma20 - 2 * std20
-    bandwidth = (upper - lower) / sma20  # Normalized bandwidth
-    
-    # Bollinger Bandwidth percentile (20-period lookback) to detect squeeze
-    bandwidth_series = pd.Series(bandwidth)
-    bandwidth_percentile = bandwidth_series.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
-    ).values
-    
-    # Volatility squeeze: bandwidth < 20th percentile
-    squeeze = bandwidth_percentile < 20
-    
-    # Volatility expansion: bandwidth > 50th percentile AND increasing
-    bandwidth_increasing = bandwidth > np.roll(bandwidth, 1)
-    expansion = (bandwidth_percentile > 50) & bandwidth_increasing
-    
-    # Get 1d data for trend filter (EMA50)
+    # Get daily data for TRIX trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate TRIX: triple EMA of 15-period
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    
+    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
+    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix = trix_raw.fillna(0).values
+    
+    # Align TRIX to 12h timeframe (wait for daily close)
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    
+    # Volume confirmation: volume > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or 
-            np.isnan(bandwidth_percentile[i]) or np.isnan(ema50_1d_aligned[i])):
+        if np.isnan(trix_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Long entry: volatility expansion after squeeze, price above 1d EMA50, volume confirmation
-        if (squeeze[i-1] and expansion[i] and close[i] > ema50_1d_aligned[i] and vol_confirm[i] and position != 1):
+        # Long entry: positive TRIX (bullish momentum) AND price above prior close with volume
+        if (trix_aligned[i] > 0 and close[i] > close[i-1] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: volatility expansion after squeeze, price below 1d EMA50, volume confirmation
-        elif (squeeze[i-1] and expansion[i] and close[i] < ema50_1d_aligned[i] and vol_confirm[i] and position != -1):
+        # Short entry: negative TRIX (bearish momentum) AND price below prior close with volume
+        elif (trix_aligned[i] < 0 and close[i] < close[i-1] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: volatility contraction returns (bandwidth < 30th percentile) or opposite volatility expansion
-        elif position == 1 and bandwidth_percentile[i] < 30:
+        # Exit: TRIX crosses zero or price reverses against position
+        elif position == 1 and trix_aligned[i] < 0:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and bandwidth_percentile[i] < 30:
+        elif position == -1 and trix_aligned[i] > 0:
             position = 0
             signals[i] = 0.0
         else:
@@ -88,6 +80,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_volatility_breakout_v1"
-timeframe = "4h"
+name = "12h_1d_trix_volume_trend"
+timeframe = "12h"
 leverage = 1.0
