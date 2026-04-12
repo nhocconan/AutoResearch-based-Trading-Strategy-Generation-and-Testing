@@ -1,15 +1,22 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+Strategy: 4h_1d_camarilla_breakout_vol_v1
+Hypothesis: Camarilla pivot breakouts with volume confirmation on 4h timeframe.
+Works in both bull and bear markets by capturing breakouts from key institutional levels.
+Volume filter reduces false breakouts. Target: 20-40 trades/year.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_camarilla_breakout_v1"
-timeframe = "6h"
+name = "4h_1d_camarilla_breakout_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,32 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 5:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from 12h data
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # Calculate Camarilla pivot levels from 1d data
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
     # Camarilla levels (using standard multipliers)
-    h4 = pivot + (range_12h * 1.1 / 2)   # Resistance 4
-    h3 = pivot + (range_12h * 1.1 / 4)   # Resistance 3
-    l3 = pivot - (range_12h * 1.1 / 4)   # Support 3
-    l4 = pivot - (range_12h * 1.1 / 2)   # Support 4
+    h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
+    l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
     
-    # Align Camarilla levels to 6h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_12h, h4)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, l3)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, l4)
+    # Align Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume filter - 20-period average on 6h data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -50,11 +54,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or 
-            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
@@ -64,7 +67,6 @@ def generate_signals(prices):
         short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
         # Exit when price returns to pivot
-        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
