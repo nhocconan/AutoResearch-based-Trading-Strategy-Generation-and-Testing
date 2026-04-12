@@ -8,45 +8,76 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Bollinger Band squeeze breakout + 12h ADX trend filter
-    # Only trade breakouts when volatility is low (BB width < 20th percentile) and 12h ADX > 25
-    # Direction: breakout above upper band = long, below lower band = short
-    # Uses discrete sizing 0.25 to minimize fee churn. Target: 15-35 trades/year.
+    # Hypothesis: 12h Camarilla pivot + volume spike + choppiness regime filter
+    # Long when price touches Camarilla L3 in bullish chop regime (ADX<20)
+    # Short when price touches Camarilla H3 in bearish chop regime (ADX<20)
+    # Uses 1d HTF for Camarilla levels, 12h for regime filter
+    # Discrete sizing 0.25 to minimize fee churn. Target: 12-30 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 6h Bollinger Bands (20, 2.0)
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = sma + bb_std * std
-    lower = sma - bb_std * std
-    bb_width = (upper - lower) / sma * 100  # percentage
-    
-    # Calculate 6h BB width percentile (lookback 50 periods for regime)
-    def calculate_percentile(arr, lookback=50):
-        n = len(arr)
-        percentile = np.full(n, np.nan)
-        for i in range(lookback, n):
-            window = arr[i-lookback:i]
-            if not np.all(np.isnan(window)):
-                percentile[i] = np.percentile(window[~np.isnan(window)], 20)  # 20th percentile
-        return percentile
-    
-    bb_width_20th = calculate_percentile(bb_width, 50)
-    squeeze = bb_width < bb_width_20th  # low volatility regime
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla pivot levels (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Camarilla levels
+    camarilla_h3 = np.zeros(len(close_1d))
+    camarilla_l3 = np.zeros(len(close_1d))
+    camarilla_h4 = np.zeros(len(close_1d))
+    camarilla_l4 = np.zeros(len(close_1d))
+    camarilla_h5 = np.zeros(len(close_1d))
+    camarilla_l5 = np.zeros(len(close_1d))
+    camarilla_h6 = np.zeros(len(close_1d))
+    camarilla_l6 = np.zeros(len(close_1d))
+    
+    for i in range(len(close_1d)):
+        if i < 1:
+            camarilla_h3[i] = camarilla_l3[i] = np.nan
+            camarilla_h4[i] = camarilla_l4[i] = np.nan
+            camarilla_h5[i] = camarilla_l5[i] = np.nan
+            camarilla_h6[i] = camarilla_l6[i] = np.nan
+            continue
+            
+        high_val = high_1d[i-1]
+        low_val = low_1d[i-1]
+        close_val = close_1d[i-1]
+        diff = high_val - low_val
+        
+        camarilla_h3[i] = close_val + 1.1 * diff / 6
+        camarilla_l3[i] = close_val - 1.1 * diff / 6
+        camarilla_h4[i] = close_val + 1.1 * diff / 4
+        camarilla_l4[i] = close_val - 1.1 * diff / 4
+        camarilla_h5[i] = close_val + 1.1 * diff / 2
+        camarilla_l5[i] = close_val - 1.1 * diff / 2
+        camarilla_h6[i] = close_val + 1.1 * diff
+        camarilla_l6[i] = close_val - 1.1 * diff
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)
+    camarilla_h6_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h6)
+    camarilla_l6_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l6)
+    
+    # Get 12h data for regime filter (ADX)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Calculate 12h ADX(14)
     def calculate_adx(high, low, close, period=14):
@@ -87,31 +118,52 @@ def generate_signals(prices):
     adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
     adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
+    # Calculate 12h EMA20 for trend filter
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    
+    # Calculate volume spike filter (12h)
+    volume_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma_12h * 1.5)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(sma[i]) or np.isnan(std[i]) or 
-            np.isnan(bb_width_20th[i]) or np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(ema20_12h_aligned[i]) or 
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(volume_ma_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when 12h ADX > 25 (strong trend)
-        strong_trend = adx_12h_aligned[i] > 25
+        # Determine 12h regime
+        chop_regime = adx_12h_aligned[i] < 20  # Choppy/ranging market
+        trending = adx_12h_aligned[i] >= 20
         
-        # Breakout conditions
-        long_breakout = close[i] > upper[i-1] and squeeze[i-1]  # break above upper band after squeeze
-        short_breakout = close[i] < lower[i-1] and squeeze[i-1]  # break below lower band after squeeze
+        # Volume confirmation
+        vol_confirm = volume_spike[i]
         
-        # Exit conditions: opposite breakout or loss of squeeze (volatility expansion)
-        long_exit = short_breakout or not squeeze[i]
-        short_exit = long_breakout or not squeeze[i]
+        # Entry logic - only in choppy regime with volume spike
+        long_entry = False
+        short_entry = False
         
-        if long_breakout and strong_trend and position != 1:
+        if chop_regime and vol_confirm:
+            # Long when price touches or crosses above L3
+            if close[i] >= camarilla_l3_aligned[i]:
+                long_entry = True
+            # Short when price touches or crosses below H3
+            if close[i] <= camarilla_h3_aligned[i]:
+                short_entry = True
+        
+        # Exit logic - reverse signal or regime change to trending
+        long_exit = (not chop_regime) or (close[i] <= camarilla_l4_aligned[i])
+        short_exit = (not chop_regime) or (close[i] >= camarilla_h4_aligned[i])
+        
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and strong_trend and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -131,6 +183,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_bb_squeeze_breakout_adx_v1"
-timeframe = "6h"
+name = "12h_1d_camarilla_chop_volume_v1"
+timeframe = "12h"
 leverage = 1.0
