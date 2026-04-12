@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 12h_1d_Camarilla_Breakout_Pullback_v1
-Hypothesis: Trade pullbacks to Camarilla pivot levels on 12h timeframe with 1d volume confirmation.
-Camarilla levels provide institutional support/resistance. Pullbacks reduce false breakouts.
-Volume confirms institutional participation. Works in bull/bear by trading mean reversion at key levels.
+Hypothesis: In any market regime (bull/bear/range), price tends to pull back to Camarilla pivot levels (especially H3/L3) before continuing the trend. We enter on pullbacks to H3/L3 with volume confirmation in the direction of the 1d trend (EMA50). Stops are placed beyond H4/L4. Designed for low trade frequency and high win rate.
 """
 
 import numpy as np
@@ -24,96 +22,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOTS ===
+    # === DAILY DATA FOR CAMARILLA PIVOTS AND TREND ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # PP = (H + L + C) / 3
-    # R4 = PP + (H - L) * 1.1/2
-    # R3 = PP + (H - L) * 1.1/4
-    # R2 = PP + (H - L) * 1.1/6
-    # R1 = PP + (H - L) * 1.1/12
-    # S1 = PP - (H - L) * 1.1/12
-    # S2 = PP - (H - L) * 1.1/6
-    # S3 = PP - (H - L) * 1.1/4
-    # S4 = PP - (H - L) * 1.1/2
+    # Camarilla levels from previous day
+    # Pivot = (H + L + C)/3
+    # Range = H - L
+    # H4 = P + 1.1*R/2, L4 = P - 1.1*R/2
+    # H3 = P + 1.1*R/4, L3 = P - 1.1*R/4
+    # H2 = P + 1.1*R/6, L2 = P - 1.1*R/6
+    # H1 = P + 1.1*R/12, L1 = P - 1.1*R/12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Use previous day's data to avoid look-ahead
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first bar uses current day
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    h4_1d = pivot_1d + 1.1 * range_1d / 2.0
+    l4_1d = pivot_1d - 1.1 * range_1d / 2.0
+    h3_1d = pivot_1d + 1.1 * range_1d / 4.0
+    l3_1d = pivot_1d - 1.1 * range_1d / 4.0
     
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
+    # Align to 12h timeframe (use previous day's levels)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
     
-    r4 = pp + range_hl * 1.1 / 2.0
-    r3 = pp + range_hl * 1.1 / 4.0
-    r2 = pp + range_hl * 1.1 / 6.0
-    r1 = pp + range_hl * 1.1 / 12.0
-    s1 = pp - range_hl * 1.1 / 12.0
-    s2 = pp - range_hl * 1.1 / 6.0
-    s3 = pp - range_hl * 1.1 / 4.0
-    s4 = pp - range_hl * 1.1 / 2.0
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align Camarilla levels to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === DAILY VOLUME CONFIRMATION ===
-    # Volume > 1.3x 20-day average indicates institutional interest
-    volume_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume_1d / np.where(volume_ma == 0, 1, volume_ma)
-    volume_ratio_aligned = align_htf_to_ltf(prices, df_1d, volume_ratio)
+    # === 12H VOLUME CONFIRMATION ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Need enough lookback
         # Skip if not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(volume_ratio_aligned[i])):
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        volume_confirm = volume_ratio_aligned[i] > 1.3
+        # Pullback to H3/L3 with volume confirmation
+        near_h3 = abs(close[i] - h3_1d_aligned[i]) / close[i] < 0.005  # Within 0.5%
+        near_l3 = abs(close[i] - l3_1d_aligned[i]) / close[i] < 0.005
+        volume_confirm = vol_ratio[i] > 1.5
         
-        # LONG SETUP: Pullback to S1 or S2 with volume confirmation
-        long_setup = volume_confirm and (
-            (low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]) or  # Bounce off S1
-            (low[i] <= s2_aligned[i] and close[i] > s2_aligned[i])    # Bounce off S2
-        )
+        # Trend filter: only long if price > EMA50, short if price < EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
-        # SHORT SETUP: Pullback to R1 or R2 with volume confirmation
-        short_setup = volume_confirm and (
-            (high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]) or  # Rejection at R1
-            (high[i] >= r2_aligned[i] and close[i] < r2_aligned[i])    # Rejection at R2
-        )
+        # Entry conditions
+        long_setup = near_l3 and volume_confirm and uptrend
+        short_setup = near_h3 and volume_confirm and downtrend
         
-        # EXIT: Return to midpoint (PP) or opposite level touch
-        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-        exit_long = position == 1 and (
-            close[i] >= pp_aligned[i] or  # Return to midpoint
-            high[i] >= r1_aligned[i]      # Hit resistance
-        )
-        exit_short = position == -1 and (
-            close[i] <= pp_aligned[i] or  # Return to midpoint
-            low[i] <= s1_aligned[i]       # Hit support
-        )
+        # Exit when price reaches H4/L4 (stop) or returns to pivot (target)
+        long_exit = close[i] >= h4_1d_aligned[i] or close[i] <= pivot_1d[i]  # Stop or target
+        short_exit = close[i] <= l4_1d_aligned[i] or close[i] >= pivot_1d[i]  # Stop or target
         
         # Execute trades
         if long_setup and position != 1:
@@ -122,10 +95,10 @@ def generate_signals(prices):
         elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
-        elif exit_long and position == 1:
+        elif long_exit and position == 1:
             position = 0
             signals[i] = 0.0
-        elif exit_short and position == -1:
+        elif short_exit and position == -1:
             position = 0
             signals[i] = 0.0
         else:
