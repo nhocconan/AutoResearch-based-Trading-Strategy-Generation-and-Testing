@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v1
-# Uses daily Camarilla pivot levels (H4/L4) as support/resistance on 4h chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below L4 with volume confirmation.
-# Exits when price returns to daily pivot point (PP).
-# Designed for low trade frequency (target: 19-50 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
-# Focus on BTC/ETH with potential to work on SOL.
+# Hypothesis: 1d_1w_fair_value_gap_breakout
+# Uses weekly Fair Value Gap (FVG) levels as dynamic support/resistance.
+# Long when price breaks above FVG upper boundary with volume confirmation.
+# Short when price breaks below FVG lower boundary with volume confirmation.
+# Exits when price returns to opposite FVG boundary (mean reversion).
+# Designed for very low trade frequency (target: 7-25 trades/year) to minimize fee drag.
+# Works in trending markets via breakouts and ranging markets via mean reversion to FVG.
+# FVG identifies institutional order flow imbalances, effective in both bull and bear markets.
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "1d_1w_fair_value_gap_breakout"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,40 +26,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for FVG calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 3:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Fair Value Gaps
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate pivot point and Camarilla levels for each day
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Bullish FVG: low of current candle > high of previous candle
+    bullish_fvg_high = high_1w[2:]  # current candle high
+    bullish_fvg_low = high_1w[1:-1]  # previous candle high (gap lower bound)
+    bullish_fvg = bullish_fvg_high > bullish_fvg_low
     
-    # Camarilla levels: H4 = PP + 1.1/2 * range, L4 = PP - 1.1/2 * range
-    h4 = pp + (1.1 / 2) * range_1d
-    l4 = pp - (1.1 / 2) * range_1d
+    # Bearish FVG: high of current candle < low of previous candle
+    bearish_fvg_low = low_1w[2:]  # current candle low
+    bearish_fvg_high = low_1w[1:-1]  # previous candle low (gap upper bound)
+    bearish_fvg = bearish_fvg_low < bearish_fvg_high
     
-    # Align daily levels to 4h timeframe (daily values update after daily bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Create arrays for FVG boundaries
+    fvg_upper = np.full(len(high_1w), np.nan)
+    fvg_lower = np.full(len(high_1w), np.nan)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Bullish FVG: gap between previous high and current low
+    fvg_upper[2:] = np.where(bullish_fvg, high_1w[2:], np.nan)  # upper boundary = current high
+    fvg_lower[2:] = np.where(bullish_fvg, high_1w[1:-1], np.nan)  # lower boundary = previous high
+    
+    # Bearish FVG: gap between previous low and current high
+    fvg_upper[2:] = np.where(bearish_fvg & ~np.isnan(fvg_upper[2:]), fvg_upper[2:], low_1w[1:-1])  # upper boundary = previous low
+    fvg_lower[2:] = np.where(bearish_fvg & ~np.isnan(fvg_lower[2:]), fvg_lower[2:], low_1w[2:])  # lower boundary = current low
+    
+    # Align weekly FVG levels to daily timeframe
+    fvg_upper_aligned = align_htf_to_ltf(prices, df_1w, fvg_upper)
+    fvg_lower_aligned = align_htf_to_ltf(prices, df_1w, fvg_lower)
+    
+    # Volume confirmation: volume > 2.0 * 50-period average (daily timeframe)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(100, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
+        if np.isnan(fvg_upper_aligned[i]) or np.isnan(fvg_lower_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -74,19 +85,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4
-        if close[i] > h4_aligned[i] and position != 1:
+        # Long signal: price breaks above FVG upper boundary
+        if close[i] > fvg_upper_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below L4
-        elif close[i] < l4_aligned[i] and position != -1:
+        # Short signal: price breaks below FVG lower boundary
+        elif close[i] < fvg_lower_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price returns to daily pivot point (mean reversion)
-        elif position == 1 and close[i] <= pp_aligned[i]:
+        # Exit conditions: price returns to opposite FVG boundary (mean reversion)
+        elif position == 1 and close[i] <= fvg_lower_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= pp_aligned[i]:
+        elif position == -1 and close[i] >= fvg_upper_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
