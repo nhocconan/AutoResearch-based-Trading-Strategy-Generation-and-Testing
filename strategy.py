@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,17 +13,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for structure and volume
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get daily data for ATR and price levels
+    # Get 1d data for ATR and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 20-day ATR on daily data
+    # Calculate 14-day ATR on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -33,71 +33,66 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d[1:] - close_1d[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_1d = np.full(len(close_1d), np.nan)
-    for i in range(20, len(atr_1d)):
-        atr_1d[i] = np.nanmean(tr[i-19:i+1])
+    for i in range(14, len(atr_1d)):
+        atr_1d[i] = np.nanmean(tr[i-13:i+1])
     
-    # Align ATR to daily timeframe
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Align ATR to 6h timeframe
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Calculate weekly trend using SMA crossover
-    close_1w = df_1w['close'].values
-    sma_20 = np.full(len(close_1w), np.nan)
-    sma_50 = np.full(len(close_1w), np.nan)
-    for i in range(20, len(close_1w)):
-        sma_20[i] = np.mean(close_1w[i-20:i])
-    for i in range(50, len(close_1w)):
-        sma_50[i] = np.mean(close_1w[i-50:i])
-    weekly_trend = np.where(sma_20 > sma_50, 1, np.where(sma_20 < sma_50, -1, 0))
-    weekly_trend_1d = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    # Calculate 12h Donchian channel (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate daily pivot points using previous day's data
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    upper_12h = np.full(len(high_12h), np.nan)
+    lower_12h = np.full(len(low_12h), np.nan)
+    for i in range(20, len(high_12h)):
+        upper_12h[i] = np.max(high_12h[i-20:i])
+        lower_12h[i] = np.min(low_12h[i-20:i])
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    upper_6h = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_6h = align_htf_to_ltf(prices, df_12h, lower_12h)
     
-    # Key levels: R1, S1
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # Calculate 12h volume moving average (20-period)
+    volume_12h = df_12h['volume'].values
+    vol_ma_12h = np.full(len(volume_12h), np.nan)
+    for i in range(20, len(volume_12h)):
+        vol_ma_12h[i] = np.mean(volume_12h[i-20:i])
+    vol_ma_6h = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # Align levels to daily timeframe
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate volume moving average (20-period on daily)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Calculate 1d trend using SMA crossover (50/200)
+    sma_50_1d = np.full(len(close_1d), np.nan)
+    sma_200_1d = np.full(len(close_1d), np.nan)
+    for i in range(50, len(close_1d)):
+        sma_50_1d[i] = np.mean(close_1d[i-50:i])
+    for i in range(200, len(close_1d)):
+        sma_200_1d[i] = np.mean(close_1d[i-200:i])
+    daily_trend = np.where(sma_50_1d > sma_200_1d, 1, np.where(sma_50_1d < sma_200_1d, -1, 0))
+    daily_trend_6h = align_htf_to_ltf(prices, df_1d, daily_trend)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(weekly_trend_1d[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or 
+            np.isnan(atr_6h[i]) or np.isnan(vol_ma_6h[i]) or np.isnan(daily_trend_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume filter: current 6h volume > 1.5x 12h average
+        volume_filter = volume[i] > vol_ma_6h[i] * 1.5
         
-        # Only take trades in direction of weekly trend
-        weekly_bullish = weekly_trend_1d[i] == 1
-        weekly_bearish = weekly_trend_1d[i] == -1
+        # Only take trades in direction of daily trend
+        daily_bullish = daily_trend_6h[i] == 1
+        daily_bearish = daily_trend_6h[i] == -1
         
-        # Entry conditions: S1/R1 breakout with volume confirmation and weekly trend alignment
-        long_breakout = (close[i] > r1_1d[i]) and volume_filter and weekly_bullish
-        short_breakout = (close[i] < s1_1d[i]) and volume_filter and weekly_bearish
+        # Entry conditions: 12h Donchian breakout with volume confirmation and daily trend alignment
+        long_breakout = (close[i] > upper_6h[i]) and volume_filter and daily_bullish
+        short_breakout = (close[i] < lower_6h[i]) and volume_filter and daily_bearish
         
-        # Exit conditions: touch opposite S1/R1 level or weekly trend reversal or ATR stop
-        long_exit = (close[i] < s1_1d[i]) or (weekly_trend_1d[i] == -1) or (close[i] < r1_1d[i] - 1.5 * atr_1d_aligned[i])
-        short_exit = (close[i] > r1_1d[i]) or (weekly_trend_1d[i] == 1) or (close[i] > s1_1d[i] + 1.5 * atr_1d_aligned[i])
+        # Exit conditions: touch opposite Donchian level or trend reversal or ATR stop
+        long_exit = (close[i] < lower_6h[i]) or (daily_trend_6h[i] == -1) or (close[i] < upper_6h[i] - 2.0 * atr_6h[i])
+        short_exit = (close[i] > upper_6h[i]) or (daily_trend_6h[i] == 1) or (close[i] > lower_6h[i] + 2.0 * atr_6h[i])
         
         if long_breakout and position != 1:
             position = 1
@@ -122,6 +117,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_pivot_breakout_weekly_trend_v1"
-timeframe = "1d"
+name = "6h_12h_1d_donchian_breakout_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
