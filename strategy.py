@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_Trend_v1
+4h_1d_Camarilla_Pivot_Breakout_Trend_v2
 Hypothesis: Use daily Camarilla pivot levels as dynamic support/resistance. 
-Breakout above R4 or below S4 with volume confirmation and 1-day trend filter (price above/below EMA50).
-Only take long when trend up and price breaks R4, short when trend down and price breaks S4.
-Targets 20-40 trades per year to minimize fee drag. Works in bull (follow breakouts) and bear (fade false breaks).
+Breakout above R3 or below S3 with volume confirmation and 1-day trend filter (price above/below EMA50).
+Only take long when trend up and price breaks R3, short when trend down and price breaks S3.
+Targets 15-30 trades per year to minimize fee drift. Works in bull (follow breakouts) and 
+bear (fade false breaks) by requiring strict trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Trend_v1"
+name = "4h_1d_Camarilla_Pivot_Breakout_Trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,9 +33,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate daily Camarilla levels (using previous day's range)
-    # Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
-    # S4 = C - (H-L)*1.1/2, S3 = C - (H-L)*1.1/4
-    # where C = (H+L+CLOSE)/3 of previous day
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
@@ -43,7 +41,7 @@ def generate_signals(prices):
     prev_high = np.roll(daily_high, 1)
     prev_low = np.roll(daily_low, 1)
     prev_close = np.roll(daily_close, 1)
-    prev_high[0] = daily_high[0]  # first bar uses same day
+    prev_high[0] = daily_high[0]
     prev_low[0] = daily_low[0]
     prev_close[0] = daily_close[0]
     
@@ -51,17 +49,13 @@ def generate_signals(prices):
     pivot = (prev_high + prev_low + prev_close) / 3
     rng = prev_high - prev_low
     
-    # Camarilla levels
-    R4 = pivot + rng * 1.1 / 2
+    # Camarilla levels (R3/S3 only - tighter bands)
     R3 = pivot + rng * 1.1 / 4
     S3 = pivot - rng * 1.1 / 4
-    S4 = pivot - rng * 1.1 / 2
     
     # Align Camarilla levels to 4h
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
     R3_4h = align_htf_to_ltf(prices, df_1d, R3)
     S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
     
     # Daily EMA50 for trend filter
     ema50 = np.full(len(daily_close), np.nan)
@@ -87,9 +81,9 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(R4_4h[i]) or np.isnan(S4_4h[i]) or 
+        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
             np.isnan(ema50_4h[i]) or np.isnan(vol_ma[i])):
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
+            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
             continue
         
         # Trend filter: daily close above/below EMA50
@@ -100,9 +94,9 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x average
         vol_confirm = volume[i] > vol_ma[i] * 1.5
         
-        # Breakout conditions
-        breakout_up = high[i] > R4_4h[i] and vol_confirm
-        breakout_down = low[i] < S4_4h[i] and vol_confirm
+        # Breakout conditions (using R3/S3 for tighter entry)
+        breakout_up = high[i] > R3_4h[i] and vol_confirm
+        breakout_down = low[i] < S3_4h[i] and vol_confirm
         
         # Entry logic: only follow trend
         long_entry = breakout_up and trend_up
@@ -116,10 +110,10 @@ def generate_signals(prices):
         # Signal logic
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -127,6 +121,6 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
+            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
     
     return signals
