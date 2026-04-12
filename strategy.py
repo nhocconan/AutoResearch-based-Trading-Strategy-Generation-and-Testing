@@ -1,20 +1,15 @@
-# US-116218: 4h Camarilla breakout with volume confirmation - optimized for lower trade count
-# Uses 1d Camarilla H3/L3 levels with 1d volume > 1.5x 20-day average to reduce false signals
-# Exit on close crossing H3/L3 level or reversal signal
-# Target: 30-50 trades/year to stay under 400 total over 4 years
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v28"
-timeframe = "4h"
+name = "6h_1d_alligator_elderray_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,48 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for Elder Ray and Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Previous 1d bar data (avoid look-ahead)
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    # Calculate Elder Ray Power (13-period EMA)
+    close_1d = df_1d['close'].values
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Using current high vs 13 EMA
+    bear_power = low - ema13   # Using current low vs 13 EMA
     
-    # Calculate 1d Camarilla H3/L3 levels (breakout levels)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
-    l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
+    # Align Elder Ray to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Align to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
+    # Alligator lines (13, 8, 5 SMAs with future shifts)
+    # Jaw (13-period SMMA shifted 8 bars)
+    sma13 = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(sma13, 8)  # Shift forward 8 bars
+    jaw[:8] = np.nan
     
-    # 1d volume spike: volume > 1.5x 20-day average (reduced threshold for better signal quality)
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_spike = df_1d['volume'] > (vol_ma_1d * 1.5)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Teeth (8-period SMMA shifted 5 bars)
+    sma8 = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(sma8, 5)  # Shift forward 5 bars
+    teeth[:5] = np.nan
+    
+    # Lips (5-period SMMA shifted 3 bars)
+    sma5 = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(sma5, 3)  # Shift forward 3 bars
+    lips[:3] = np.nan
+    
+    # Align Alligator to 6h
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above H3 with volume spike
-        long_signal = close[i] > h3_aligned[i] and vol_spike_aligned[i]
-        # Short: break below L3 with volume spike
-        short_signal = close[i] < l3_aligned[i] and vol_spike_aligned[i]
+        # Elder Ray conditions
+        bull_power_pos = bull_power_aligned[i] > 0
+        bear_power_neg = bear_power_aligned[i] < 0
         
-        # Exit when price crosses H3/L3 level (mean reversion)
-        exit_long = close[i] < h3_aligned[i]
-        exit_short = close[i] > l3_aligned[i]
+        # Alligator alignment (all three lines in order)
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish_alignment = (lips_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > jaw_aligned[i])
+        # Bearish alignment: Jaw > Teeth > Lips
+        bearish_alignment = (jaw_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
+        
+        # Long signal: Bullish Elder Ray + Bullish Alligator alignment
+        long_signal = bull_power_pos and bear_power_neg and bullish_alignment
+        # Short signal: Bearish Elder Ray + Bearish Alligator alignment
+        short_signal = (not bull_power_pos) and (not bear_power_neg) and bearish_alignment
+        
+        # Exit conditions: Elder Ray divergence or Alligator crossing
+        exit_long = (bull_power_aligned[i] <= 0) or (lips_aligned[i] < jaw_aligned[i])
+        exit_short = (bear_power_aligned[i] >= 0) or (lips_aligned[i] > jaw_aligned[i])
         
         if long_signal and position != 1:
             position = 1
