@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
+name = "12h_1d_camarilla_breakout_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels
+    # Daily data for Camarilla levels and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -27,60 +27,29 @@ def generate_signals(prices):
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla levels: H = (H-L)*1.1/12 + C, L = C - (H-L)*1.1/12
-    # Resistance levels: R3, R4; Support levels: S3, S4
-    H_minus_L = prev_high - prev_low
-    R4 = prev_close + H_minus_L * 1.1 / 2
-    R3 = prev_close + H_minus_L * 1.1 / 4
-    S3 = prev_close - H_minus_L * 1.1 / 4
-    S4 = prev_close - H_minus_L * 1.1 / 2
-    
-    # Map daily Camarilla levels to each 12h bar (using previous day's values)
-    R4_mapped = np.full(n, np.nan)
-    R3_mapped = np.full(n, np.nan)
-    S3_mapped = np.full(n, np.nan)
-    S4_mapped = np.full(n, np.nan)
-    
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_date = current_time.date() - pd.Timedelta(days=1)
-        
-        # Find previous day in daily data
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
-                R4_mapped[i] = R4[j]
-                R3_mapped[i] = R3[j]
-                S3_mapped[i] = S3[j]
-                S4_mapped[i] = S4[j]
-                break
-    
-    # Daily ATR for volatility filter
+    # Calculate previous day's ATR for volatility filter
     tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
     tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
     tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
     tr_daily = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr_daily = pd.Series(tr_daily).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Map ATR to 12h timeframe
-    atr_daily_mapped = np.full(n, np.nan)
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_date = current_time.date() - pd.Timedelta(days=1)
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
-                atr_daily_mapped[i] = atr_daily[j]
-                break
+    # Map daily data to 12h timeframe (properly aligned)
+    close_1d = align_htf_to_ltf(prices, df_1d, prev_close)
+    high_1d = align_htf_to_ltf(prices, df_1d, prev_high)
+    low_1d = align_htf_to_ltf(prices, df_1d, prev_low)
+    atr_1d = align_htf_to_ltf(prices, df_1d, atr_daily)
+    
+    # Calculate Camarilla levels from previous day's data
+    H_minus_L = high_1d - low_1d
+    R4 = close_1d + H_minus_L * 1.1 / 2  # Strong resistance
+    R3 = close_1d + H_minus_L * 1.1 / 4  # Resistance
+    S3 = close_1d - H_minus_L * 1.1 / 4  # Support
+    S4 = close_1d - H_minus_L * 1.1 / 2  # Strong support
     
     # Volume confirmation: current 12h volume > 20-period average of daily volume
-    vol_1d_mapped = np.full(n, np.nan)
-    for i in range(n):
-        current_time = pd.Timestamp(prices.iloc[i]['open_time'])
-        prev_date = current_time.date() - pd.Timedelta(days=1)
-        for j in range(len(df_1d)):
-            if pd.Timestamp(df_1d.iloc[j]['open_time']).date() == prev_date:
-                vol_1d_mapped[i] = df_1d.iloc[j]['volume']
-                break
-    vol_ma = pd.Series(vol_1d_mapped).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_1d = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+    vol_ma = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ma
     
     # Chop index for regime filter (12h)
@@ -98,28 +67,28 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(R4_mapped[i]) or np.isnan(R3_mapped[i]) or 
-            np.isnan(S3_mapped[i]) or np.isnan(S4_mapped[i]) or
-            np.isnan(atr_daily_mapped[i]) or np.isnan(chop[i]) or 
+        if (np.isnan(R4[i]) or np.isnan(R3[i]) or 
+            np.isnan(S3[i]) or np.isnan(S4[i]) or
+            np.isnan(atr_1d[i]) or np.isnan(chop[i]) or 
             np.isnan(volume_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volatility filter: only trade when volatility is elevated (ATR > 20-period average)
-        vol_filter = atr_daily_mapped[i] > np.nanmedian(atr_daily_mapped[max(0, i-20):i+1])
+        vol_filter = atr_1d[i] > np.nanmedian(atr_1d[max(0, i-20):i+1])
         
         # Chop regime: Chop < 40 = trending (favor breakouts), Chop > 60 = ranging (avoid)
         trending_regime = chop[i] < 40
         
         # Long: price breaks above R4 (strong resistance) in trending market with volume
-        long_signal = (close[i] > R4_mapped[i] and trending_regime and volume_filter[i] and vol_filter)
+        long_signal = (close[i] > R4[i] and trending_regime and volume_filter[i] and vol_filter)
         
         # Short: price breaks below S4 (strong support) in trending market with volume
-        short_signal = (close[i] < S4_mapped[i] and trending_regime and volume_filter[i] and vol_filter)
+        short_signal = (close[i] < S4[i] and trending_regime and volume_filter[i] and vol_filter)
         
         # Exit: chop increases (range) or price returns to mid-point (S3/R3)
-        exit_long = (position == 1 and (chop[i] > 60 or close[i] < (R3_mapped[i] + S3_mapped[i])/2))
-        exit_short = (position == -1 and (chop[i] > 60 or close[i] > (R3_mapped[i] + S3_mapped[i])/2))
+        exit_long = (position == 1 and (chop[i] > 60 or close[i] < (R3[i] + S3[i])/2))
+        exit_short = (position == -1 and (chop[i] > 60 or close[i] > (R3[i] + S3[i])/2))
         
         # Execute trades
         if long_signal and position != 1:
