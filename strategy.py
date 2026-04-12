@@ -13,79 +13,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA filter and volatility regime
+    # Get daily data for 20-period EMA (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily 30-period EMA for trend filter
+    # Calculate daily 20-period EMA
     close_1d = df_1d['close'].values
-    ema30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
-    ema30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema30_1d)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Calculate daily ATR for volatility regime
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate 10-period ATR for volatility filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        atr1d[i] = np.nanmean(tr[i-14:i+1])
+    atr10 = np.full(n, np.nan)
+    for i in range(9, n):
+        atr10[i] = np.nanmean(tr[i-9:i+1])
     
-    # ATR ratio: current daily ATR / 20-period average ATR
-    atr_mean20 = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        atr_mean20[i] = np.nanmean(atr1d[i-19:i+1])
-    atr_ratio = atr1d / atr_mean20
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # Calculate 4-period RSI for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(3, n):
-        if i == 3:
-            avg_gain[i] = np.mean(gain[0:4])
-            avg_loss[i] = np.mean(loss[0:4])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 3 + gain[i]) / 4
-            avg_loss[i] = (avg_loss[i-1] * 3 + loss[i]) / 4
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi4 = 100 - (100 / (1 + rs))
+    # Calculate 20-period ATR EMA for volatility regime
+    atr_ema20 = np.full(n, np.nan)
+    atr_series = pd.Series(atr10)
+    atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_ema20[:] = atr_ema20_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema30_1d_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(rsi4[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(atr10[i]) or 
+            np.isnan(atr_ema20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: elevated volatility (ATR ratio > 1.2)
-        vol_filter = atr_ratio_aligned[i] > 1.2
+        # Volatility filter: current ATR10 > 1.0x 20-period ATR EMA (elevated volatility)
+        vol_filter = atr10[i] > atr_ema20[i] * 1.0
         
-        # Trend filter: price relative to daily EMA
-        price_above_ema = close[i] > ema30_1d_aligned[i]
-        price_below_ema = close[i] < ema30_1d_aligned[i]
+        # Trend filter: price above/below daily 20 EMA
+        price_above_ema20 = close[i] > ema20_1d_aligned[i]
+        price_below_ema20 = close[i] < ema20_1d_aligned[i]
         
-        # Mean reversion entries: RSI extremes in direction of trend with volatility
-        long_entry = (rsi4[i] < 30) and price_above_ema and vol_filter
-        short_entry = (rsi4[i] > 70) and price_below_ema and vol_filter
+        # Entry conditions: breakout in direction of trend with volatility expansion
+        long_breakout = close[i] > high[i-1]  # break above previous high
+        short_breakout = close[i] < low[i-1]  # break below previous low
         
-        # Exit: RSI returns to neutral zone or volatility drops
-        long_exit = (rsi4[i] > 50) or (atr_ratio_aligned[i] < 0.8)
-        short_exit = (rsi4[i] < 50) or (atr_ratio_aligned[i] < 0.8)
+        long_entry = long_breakout and price_above_ema20 and vol_filter
+        short_entry = short_breakout and price_below_ema20 and vol_filter
+        
+        # Exit conditions: reversal signal or volatility contraction
+        long_exit = (close[i] < ema20_1d_aligned[i]) or (atr10[i] < atr_ema20[i] * 0.8)
+        short_exit = (close[i] > ema20_1d_aligned[i]) or (atr10[i] < atr_ema20[i] * 0.8)
         
         if long_entry and position != 1:
             position = 1
@@ -110,6 +90,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_rsi4_mean_reversion_vol_filter_v1"
+name = "4h_1d_ema20_breakout_vol_filter_v1"
 timeframe = "4h"
 leverage = 1.0
