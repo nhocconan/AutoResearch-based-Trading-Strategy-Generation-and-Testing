@@ -1,17 +1,10 @@
-# 12h_1d_camarilla_breakout_v36
-# Hypothesis: Camarilla pivot breakout on 12h with volume confirmation and volatility filter
-# Uses 1d Camarilla levels for structure, volume > 1.5x 20-period average for conviction,
-# and volatility filter to avoid chop. Designed for fewer trades (<150/4y) to reduce fee drag.
-# Works in bull (breakouts continue) and bear (mean reversion to pivot) via exit at pivot.
-# Target: 50-150 total trades over 4 years.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v36"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_v37"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,19 +27,19 @@ def generate_signals(prices):
     low_1d_prev = df_1d['low'].shift(1).values
     close_1d_prev = df_1d['close'].shift(1).values
     
-    # Calculate 1d Camarilla H4/L4 levels
+    # Calculate 1d Camarilla H3/L3 levels (tighter than H4/L4 for fewer trades)
     pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
     range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
+    l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
     
-    # Align to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
+    # Align to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     # ATR filter: avoid low volatility periods
     atr_period = 14
@@ -60,21 +53,21 @@ def generate_signals(prices):
     atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
     atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
     vol_ratio = atr / atr_ma
-    vol_filter = vol_ratio > 0.8  # Avoid extremely low volatility
+    vol_filter = vol_ratio > 0.7  # Avoid extremely low volatility
     
     signals = np.zeros(n)
     position = 0
     
     for i in range(100, n):
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
             np.isnan(vol_confirm[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above H4 with volume confirmation and vol filter
-        long_signal = close[i] > h4_aligned[i] and vol_confirm[i] and vol_filter[i]
-        # Short: break below L4 with volume confirmation and vol filter
-        short_signal = close[i] < l4_aligned[i] and vol_confirm[i] and vol_filter[i]
+        # Long: break above H3 with volume confirmation and vol filter
+        long_signal = close[i] > h3_aligned[i] and vol_confirm[i] and vol_filter[i]
+        # Short: break below L3 with volume confirmation and vol filter
+        short_signal = close[i] < l3_aligned[i] and vol_confirm[i] and vol_filter[i]
         
         # Exit when price returns to pivot level
         pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
