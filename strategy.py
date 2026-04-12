@@ -1,10 +1,16 @@
-# Solution
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_kama_rsi_v1"
+# Hypothesis: 12h_1d_vortex_v1
+# Vortex indicator (VI+) and (VI-) identifies trend direction. 
+# Long when VI+ crosses above VI- in uptrend, short when VI- crosses above VI+ in downtrend.
+# Uses 1d timeframe for Vortex calculation to reduce noise. 
+# Includes volume confirmation (volume > 20-period average) and volatility filter (ATR-based).
+# Designed for low trade frequency (<30/year) with strong trend signals.
+# Works in both bull and bear markets by following major trends.
+name = "12h_1d_vortex_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -18,58 +24,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA and RSI
+    # Get 1d data for Vortex and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate KAMA on 1d
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    er[1:] = change[1:] / (np.abs(np.diff(close_1d)) + 1e-10)
-    er = np.where(volatility == 0, 0, er)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate True Range for 1d
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Calculate RSI on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate +DM and -DM for 1d
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align to 12h
-    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi)
+    # Smooth TR, DM+ and DM- using Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    
+    def wilders_smoothing(data, alpha):
+        result = np.full_like(data, np.nan)
+        for i in range(len(data)):
+            if np.isnan(data[i]):
+                if i == 0:
+                    result[i] = np.nan
+                else:
+                    result[i] = result[i-1]
+            else:
+                if i == 0 or np.isnan(result[i-1]):
+                    result[i] = data[i]
+                else:
+                    result[i] = (1 - alpha) * result[i-1] + alpha * data[i]
+        return result
+    
+    tr_smooth = wilders_smoothing(tr, alpha)
+    dm_plus_smooth = wilders_smoothing(dm_plus, alpha)
+    dm_minus_smooth = wilders_smoothing(dm_minus, alpha)
+    
+    # Calculate VI+ and VI-
+    vi_plus = dm_plus_smooth / tr_smooth
+    vi_minus = dm_minus_smooth / tr_smooth
+    
+    # Calculate ATR for volatility filter (14-period ATR)
+    atr = tr_smooth  # Wilder's ATR is the smoothed TR
+    
+    # Calculate 20-period average volume for volume filter
+    vol_avg = np.convolve(volume_1d, np.ones(20)/20, mode='same')
+    vol_avg[:10] = np.nan
+    vol_avg[-10:] = np.nan
+    
+    # Align indicators to 12h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        if np.isnan(kama_12h[i]) or np.isnan(rsi_12h[i]):
+        # Skip if indicators not ready
+        if np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or np.isnan(atr_aligned[i]) or np.isnan(vol_avg_aligned[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Entry conditions
-        long_entry = close[i] > kama_12h[i] and rsi_12h[i] < 50
-        short_entry = close[i] < kama_12h[i] and rsi_12h[i] > 50
+        # Volume filter: current volume > 20-period average
+        volume_filter = volume[i] > vol_avg_aligned[i]
         
-        # Exit conditions
-        exit_long = close[i] < kama_12h[i]
-        exit_short = close[i] > kama_12h[i]
+        # Volatility filter: avoid extremely low volatility (ATR < 50% of its 50-period average)
+        if i >= 50:
+            atr_ma = np.nanmean(atr_aligned[i-50:i])
+            vol_filter = atr_aligned[i] > 0.5 * atr_ma if not np.isnan(atr_ma) else True
+        else:
+            vol_filter = True
         
-        if long_entry and position != 1:
+        # Vortex crossover signals
+        vi_plus_cross_above = vi_plus_aligned[i] > vi_minus_aligned[i] and vi_plus_aligned[i-1] <= vi_minus_aligned[i-1]
+        vi_minus_cross_above = vi_minus_aligned[i] > vi_plus_aligned[i] and vi_minus_aligned[i-1] <= vi_plus_aligned[i-1]
+        
+        # Trend strength: only take signal if VI+ or VI- is significantly above the other
+        trend_filter = np.abs(vi_plus_aligned[i] - vi_minus_aligned[i]) > 0.1
+        
+        # Long signal: VI+ crosses above VI- with volume and volatility confirmation
+        long_signal = vi_plus_cross_above and volume_filter and vol_filter and trend_filter
+        
+        # Short signal: VI- crosses above VI+ with volume and volatility confirmation
+        short_signal = vi_minus_cross_above and volume_filter and vol_filter and trend_filter
+        
+        # Exit on opposite crossover
+        exit_long = vi_minus_cross_above
+        exit_short = vi_plus_cross_above
+        
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
