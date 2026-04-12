@@ -5,17 +5,16 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Camarilla pivot long/short with 1d volume spike filter
-    # Camarilla levels provide mean-reversion edges in ranging markets
-    # Volume spike confirms institutional interest at pivot touches
-    # Works in bull/bear by fading extremes with volume validation
-    # Target: 12-37 trades/year per symbol.
+    # Hypothesis: 1d Donchian(20) breakout with 1w ATR volatility filter
+    # Captures strong breakouts in trending markets while avoiding false signals in chop
+    # Volatility filter ensures breakouts occur during expanding volatility
+    # Target: 20-50 trades/year per symbol (75-200 total over 4 years)
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    hours = prices.index.hour  # prices.index is DatetimeIndex
     in_session = (hours >= 8) & (hours <= 20)
     
     close = prices['close'].values
@@ -23,62 +22,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume context (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for context (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # H4 = Pivot + 1.1 * (H - L) / 2
-    # L4 = Pivot - 1.1 * (H - L) / 2
-    # H3 = Pivot + 1.1 * (H - L) / 4
-    # L3 = Pivot - 1.1 * (H - L) / 4
-    # H2 = Pivot + 1.1 * (H - L) / 6
-    # L2 = Pivot - 1.1 * (H - L) / 6
-    # H1 = Pivot + 1.1 * (H - L) / 12
-    # L1 = Pivot - 1.1 * (H - L) / 12
+    # 1w ATR(14) for volatility filter
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = np.full(len(df_1w), np.nan)
+    for i in range(14, len(df_1w)):
+        atr_1w[i] = np.mean(tr[i-14:i+1])
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Align 1w ATR to 1d timeframe
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    h4_1d = pivot_1d + 1.1 * range_1d / 2.0
-    l4_1d = pivot_1d - 1.1 * range_1d / 2.0
-    h3_1d = pivot_1d + 1.1 * range_1d / 4.0
-    l3_1d = pivot_1d - 1.1 * range_1d / 4.0
-    h2_1d = pivot_1d + 1.1 * range_1d / 6.0
-    l2_1d = pivot_1d - 1.1 * range_1d / 6.0
-    h1_1d = pivot_1d + 1.1 * range_1d / 12.0
-    l1_1d = pivot_1d - 1.1 * range_1d / 12.0
+    # 1w ATR(14) 20-period average for volatility threshold
+    atr_ma_20_1w = np.full(len(df_1w), np.nan)
+    for i in range(33, len(df_1w)):  # 14 + 20 - 1
+        if not np.isnan(np.mean(atr_1w[i-19:i+1])):
+            atr_ma_20_1w[i] = np.mean(atr_1w[i-19:i+1])
+    atr_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ma_20_1w)
     
-    # Align 1d Camarilla levels to 12h timeframe
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h2_1d_aligned = align_htf_to_ltf(prices, df_1d, h2_1d)
-    l2_1d_aligned = align_htf_to_ltf(prices, df_1d, l2_1d)
-    h1_1d_aligned = align_htf_to_ltf(prices, df_1d, h1_1d)
-    l1_1d_aligned = align_htf_to_ltf(prices, df_1d, l1_1d)
-    
-    # 1d volume spike filter: current volume > 1.5 * 20-period average
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_20_1d[i] = np.mean(volume_1d[i-20:i])
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_spike = (not np.isnan(vol_ma_20_1d_aligned[i]) and 
-                   volume_1d[-1] > 1.5 * vol_ma_20_1d_aligned[i]) if len(volume_1d) > 0 else False
-    
-    # For per-bar volume spike, we need to calculate it properly
-    vol_ma_20_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_20_1d[i] = np.mean(volume_1d[i-20:i])
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # 1d Donchian(20) for breakout signals
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -89,25 +68,25 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or 
-            np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(atr_1w_aligned[i]) or np.isnan(atr_ma_20_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition
-        vol_filter = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volatility filter: current ATR > 0.3 * its 20-period average
+        vol_filter = atr_1w_aligned[i] > 0.3 * atr_ma_20_1w_aligned[i]
         
-        # Mean reversion at Camarilla extremes with volume confirmation
-        # Long near L3/L4, Short near H3/H4
-        long_entry = ((close[i] <= l3_1d_aligned[i] or close[i] <= l4_1d_aligned[i]) and 
-                     vol_filter)
-        short_entry = ((close[i] >= h3_1d_aligned[i] or close[i] >= h4_1d_aligned[i]) and 
-                      vol_filter)
+        # Breakout conditions
+        breakout_long = close[i] > donch_high[i]
+        breakout_short = close[i] < donch_low[i]
         
-        # Exit when price moves back toward pivot (mean reversion complete)
-        long_exit = close[i] >= pivot_1d_aligned[i] if not np.isnan(pivot_1d_aligned[i]) else False
-        short_exit = close[i] <= pivot_1d_aligned[i] if not np.isnan(pivot_1d_aligned[i]) else False
+        # Entry conditions
+        long_entry = breakout_long and vol_filter
+        short_entry = breakout_short and vol_filter
+        
+        # Exit conditions: opposite breakout or volatility collapse
+        long_exit = (close[i] < donch_low[i]) or (not vol_filter)
+        short_exit = (close[i] > donch_high[i]) or (not vol_filter)
         
         if long_entry and position != 1:
             position = 1
@@ -132,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_camarilla_mean_reversion_vol_filter_v1"
-timeframe = "12h"
+name = "1d_1w_donchian_breakout_vol_filter_v1"
+timeframe = "1d"
 leverage = 1.0
