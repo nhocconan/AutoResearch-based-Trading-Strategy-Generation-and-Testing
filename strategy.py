@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,57 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Use previous daily bar's data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    # Previous 12h bar data to avoid look-ahead
+    high_12h_prev = df_12h['high'].shift(1).values
+    low_12h_prev = df_12h['low'].shift(1).values
+    close_12h_prev = df_12h['close'].shift(1).values
     
-    # Calculate Camarilla pivot levels from previous daily data
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
+    # Calculate 12h Camarilla levels (H4/L4 breakout)
+    pivot_prev = (high_12h_prev + low_12h_prev + close_12h_prev) / 3.0
+    range_12h_prev = high_12h_prev - low_12h_prev
+    h4_prev = pivot_prev + (range_12h_prev * 1.1 / 2)
+    l4_prev = pivot_prev - (range_12h_prev * 1.1 / 2)
     
-    # Camarilla levels (H4 and L4 - breakout levels)
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    # Align to 4h
+    h4_aligned = align_htf_to_ltf(prices, df_12h, h4_prev)
+    l4_aligned = align_htf_to_ltf(prices, df_12h, l4_prev)
     
-    # Align levels to 12h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volume filter - 10-period average on 12h data
+    # Volume filter: 20-period average on 4h
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=10, min_periods=10).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # Trend filter: 20-period SMA on 12h data
+    # Trend filter: 50-period SMA on 4h
     close_series = pd.Series(close)
-    sma_20 = close_series.rolling(window=20, min_periods=20).mean().values
-    trend_up = close > sma_20
-    trend_down = close < sma_20
+    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
+    trend_up = close > sma_50
+    trend_down = close < sma_50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
-        # Skip if not ready
+        # Skip if any values not ready
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
             np.isnan(volume_ok[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H4 with volume confirmation and uptrend
+        # Long: break above H4 with volume and uptrend
         long_signal = close[i] > h4_aligned[i] and volume_ok[i] and trend_up[i]
-        # Short: price breaks below L4 with volume confirmation and downtrend
+        # Short: break below L4 with volume and downtrend
         short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_down[i]
         
-        # Exit when price returns to pivot (mean reversion)
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
+        # Exit on opposite breakout (mean reversion to pivot)
+        pivot_prev_val = (high_12h_prev + low_12h_prev + close_12h_prev) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_prev_val)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
