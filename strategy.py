@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
+from math import sqrt
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v5"
+name = "4h_1d_camarilla_breakout_v10"
 timeframe = "4h"
 leverage = 1.0
 
