@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_elder_ray_trend_v1"
-timeframe = "6h"
+name = "4h_1d_donchian_breakout_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,37 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation
+    # Get 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate EMA(13) for 1d
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Donchian(20) on daily data
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Bull Power and Bear Power
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Align Donchian levels to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Align to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    
-    # Get 1w data for trend filter (EMA 50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume filter - 20-period average on 6h data
+    # Volume filter - 20-period average on 4h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -57,25 +43,20 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema13_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from 1w EMA
-        uptrend = close[i] > ema50_1w_aligned[i]
-        downtrend = close[i] < ema50_1w_aligned[i]
+        # Breakout signals with volume confirmation
+        # Long: price breaks above 20-day high with volume
+        long_signal = close[i] > donch_high_aligned[i] and volume_ok[i]
+        # Short: price breaks below 20-day low with volume
+        short_signal = close[i] < donch_low_aligned[i] and volume_ok[i]
         
-        # Elder Ray signals with volume confirmation
-        # Long: Bull Power > 0 and Bear Power < 0 in uptrend
-        long_signal = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and uptrend and volume_ok[i]
-        # Short: Bear Power < 0 and Bull Power < 0 in downtrend (strong bearish)
-        short_signal = bear_power_aligned[i] < 0 and bull_power_aligned[i] < 0 and downtrend and volume_ok[i]
-        
-        # Exit when Elder Ray signals weaken
-        exit_long = bull_power_aligned[i] < 0  # Bull power turned negative
-        exit_short = bear_power_aligned[i] > 0  # Bear power turned positive
+        # Exit when price returns to opposite channel
+        exit_long = close[i] < donch_low_aligned[i]
+        exit_short = close[i] > donch_high_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
