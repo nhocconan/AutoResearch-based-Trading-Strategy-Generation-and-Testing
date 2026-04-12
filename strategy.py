@@ -1,99 +1,99 @@
 #!/usr/bin/env python3
 """
-12h_1d_Wick_Reversal_v1
-Hypothesis: Price rejection at key daily levels (wick testing) with volume confirmation.
-Long when price tests daily support (low) with long lower wick and volume > avg,
-short when tests daily resistance (high) with long upper wick and volume > avg.
-Uses 1d support/resistance levels for institutional reference. Works in both bull/bear
-as it captures rejection at key levels. Target: 50-150 trades over 4 years.
+6h_1d_Ichimoku_Signal_v1
+Hypothesis: Use Ichimoku components from 1d timeframe for trend direction and 6s for entry timing.
+Long when Tenkan > Kijun and price above Kumo cloud, short when opposite.
+Kumo cloud acts as dynamic support/resistance. Tenkan/Kijun cross provides momentum signal.
+Works in bull via trend continuation, in bear via counter-trend bounces off cloud.
+Target: 50-150 total trades over 4 years to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Wick_Reversal_v1"
-timeframe = "12h"
+name = "6h_1d_Ichimoku_Signal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for support/resistance
+    # Get 1d data for Ichimoku calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Previous day's high/low for S/R
-    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
-    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Align daily S/R to 12h timeframe
-    daily_high_array = np.full(len(df_1d), prev_high)
-    daily_low_array = np.full(len(df_1d), prev_low)
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high_array)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low_array)
+    # Calculate Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period).max() + 
+                  pd.Series(low).rolling(window=tenkan_period).min()) / 2
     
-    # Volume confirmation: current volume > 1.3x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = volume_series / vol_ma
-    vol_ratio = vol_ratio.fillna(1.0).values
+    # Calculate Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=kijun_period).max() + 
+                 pd.Series(low).rolling(window=kijun_period).min()) / 2
     
-    # Wick calculations
-    body_size = np.abs(close - open_prices) if 'open' in prices else np.abs(close - np.roll(close, 1))
-    # For first bar, use close-open approximation
-    open_prices = prices['open'].values
-    body_size = np.abs(close - open_prices)
-    upper_wick = high - np.maximum(close, open_prices)
-    lower_wick = np.minimum(close, open_prices) - low
+    # Calculate Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun_period)
     
-    # Avoid division by zero
-    body_size_safe = np.where(body_size == 0, 0.001, body_size)
-    upper_wick_ratio = upper_wick / body_size_safe
-    lower_wick_ratio = lower_wick / body_size_safe
+    # Calculate Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b = ((pd.Series(high).rolling(window=senkou_span_b_period).max() + 
+                      pd.Series(low).rolling(window=senkou_span_b_period).min()) / 2).shift(kijun_period)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou_span = pd.Series(close).shift(-kijun_period)
+    
+    # Align all Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any data invalid
-        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(upper_wick_ratio[i]) or 
-            np.isnan(lower_wick_ratio[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long reversal: price tests daily support with strong lower wick
-        near_support = low[i] <= daily_low_aligned[i] * 1.002  # within 0.2% of support
-        strong_lower_wick = lower_wick_ratio[i] > 2.0  # wick at least 2x body
-        volume_confirm = vol_ratio[i] > 1.3
+        # Determine if price is above or below Kumo cloud
+        top_kumo = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        bottom_kumo = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Short reversal: price tests daily resistance with strong upper wick
-        near_resistance = high[i] >= daily_high_aligned[i] * 0.998  # within 0.2% of resistance
-        strong_upper_wick = upper_wick_ratio[i] > 2.0  # wick at least 2x body
+        price_above_kumo = close[i] > top_kumo
+        price_below_kumo = close[i] < bottom_kumo
         
-        long_signal = near_support and strong_lower_wick and volume_confirm
-        short_signal = near_resistance and strong_upper_wick and volume_confirm
+        # Tenkan/Kijun cross signals
+        tenkan_above_kijun = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tenkan_below_kijun = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
         
-        # Exit: price moves back toward opposite side of daily range
-        daily_mid = (daily_high_aligned[i] + daily_low_aligned[i]) / 2
-        long_exit = position == 1 and close[i] < daily_mid
-        short_exit = position == -1 and close[i] > daily_mid
+        # Entry conditions
+        long_entry = price_above_kumo and tenkan_above_kijun
+        short_entry = price_below_kumo and tenkan_below_kijun
+        
+        # Exit conditions: price crosses back into Kumo or Tenkan/Kijun reverse
+        long_exit = price_below_kumo or tenkan_below_kijun
+        short_exit = price_above_kumo or tenkan_above_kijun
         
         # Signal logic
-        if long_signal and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
