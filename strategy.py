@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_cci_trend_follow
-# Uses daily CCI (Commodity Channel Index) to detect overbought/oversold conditions.
-# Long when daily CCI crosses above +100 and 4h price is above 4h EMA(50).
-# Short when daily CCI crosses below -100 and 4h price is below 4h EMA(50).
-# Exits when price crosses the 4h EMA(50) in opposite direction.
-# Only trade when 4h ADX > 25 to filter for trending markets.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in trending markets via CCI extremes and mean reversion to EMA.
+# Hypothesis: Daily KAMA with RSI and Chop Filter
+# Uses Kaufman Adaptive Moving Average (KAMA) on daily data to determine trend direction.
+# Long when price > KAMA and RSI < 50 (avoid overbought), short when price < KAMA and RSI > 50 (avoid oversold).
+# Only trade when Choppiness Index > 61.8 (ranging market) to avoid whipsaws in strong trends.
+# Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
+# Works in ranging markets via mean reversion to KAMA and avoids trending markets where KAMA lags.
+# Focus on BTC/ETH as primary targets.
 
-name = "4h_1d_cci_trend_follow"
-timeframe = "4h"
+name = "1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,100 +24,122 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get daily data for CCI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Choppiness Index
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate daily CCI (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily KAMA (10, 2, 30)
+    def kama(close, fast=2, slow=30, lookback=10):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, lookback))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.zeros_like(close)
+        er[lookback:] = change[lookback:] / volatility[lookback:]
+        er[:lookback] = 0
+        
+        # Smoothing Constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2
+        
+        # KAMA
+        kama_vals = np.zeros_like(close)
+        kama_vals[0] = close[0]
+        for i in range(1, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
     
-    # Typical Price
-    tp = (high_1d + low_1d + close_1d) / 3.0
-    # Simple Moving Average of TP
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    # Mean Deviation
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    # CCI = (TP - SMA) / (0.015 * Mean Deviation)
-    cci = (tp - sma_tp) / (0.015 * mad)
-    # Handle division by zero
-    cci = np.where(mad == 0, 0, cci)
+    kama_vals = kama(close, 2, 30, 10)
     
-    # Align daily CCI to 4h timeframe
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    # Calculate daily RSI (14)
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        
+        # First average
+        if len(gain) >= period:
+            avg_gain[period] = np.mean(gain[:period])
+            avg_loss[period] = np.mean(loss[:period])
+        
+        # Wilder smoothing
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
     
-    # 4h EMA(50) for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    rsi_vals = rsi(close, 14)
     
-    # ADX filter: only trade when ADX > 25 (trending market)
-    def calculate_adx(high, low, close, period=14):
+    # Calculate weekly Choppiness Index (14)
+    def chop(high, low, close, period=14):
         # True Range
         tr1 = high - low
         tr2 = np.abs(high - np.roll(close, 1))
         tr3 = np.abs(low - np.roll(close, 1))
         tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First value
         
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
+        # Sum of True Range over period
+        atr_sum = np.zeros_like(close)
+        for i in range(period, len(tr)):
+            atr_sum[i] = np.sum(tr[i-period+1:i+1])
         
-        # Smoothed values using Wilder's smoothing (alpha = 1/period)
-        def wilders_smoothing(data, period):
-            result = np.full_like(data, np.nan)
-            alpha = 1.0 / period
-            # First value is simple average
-            if len(data) >= period:
-                result[period-1] = np.nansum(data[:period]) / period
-                for i in range(period, len(data)):
-                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-            return result
+        # Highest high and lowest low over period
+        max_high = np.zeros_like(close)
+        min_low = np.zeros_like(close)
+        for i in range(period, len(high)):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
         
-        atr = wilders_smoothing(tr, period)
-        dm_plus_smooth = wilders_smoothing(dm_plus, period)
-        dm_minus_smooth = wilders_smoothing(dm_minus, period)
-        
-        # Avoid division by zero
-        dx = np.zeros_like(atr)
-        mask = (dm_plus_smooth + dm_minus_smooth) != 0
-        dx[mask] = 100 * np.abs(dm_plus_smooth[mask] - dm_minus_smooth[mask]) / (dm_plus_smooth[mask] + dm_minus_smooth[mask])
-        
-        adx = wilders_smoothing(dx, period)
-        return adx
+        # Chop calculation
+        chop_vals = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if atr_sum[i] > 0 and max_high[i] != min_low[i]:
+                chop_vals[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
+            else:
+                chop_vals[i] = 50  # neutral
+        return chop_vals
     
-    adx = calculate_adx(high, low, close, 14)
-    adx_filter = adx > 25
+    chop_vals = chop(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    chop_align = align_htf_to_ltf(prices, df_1w, chop_vals)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(30, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(cci_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(adx[i]):
+        if np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(chop_align[i]):
             signals[i] = 0.0
             continue
         
-        # Long signal: CCI crosses above +100 and price above EMA50
-        if cci_aligned[i] > 100 and cci_aligned[i-1] <= 100 and close[i] > ema_50[i] and position != 1:
+        # Only trade in ranging markets (Chop > 61.8)
+        if chop_align[i] <= 61.8:
+            # Hold current position if not ranging
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Long signal: price above KAMA and RSI < 50 (not overbought)
+        if close[i] > kama_vals[i] and rsi_vals[i] < 50 and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: CCI crosses below -100 and price below EMA50
-        elif cci_aligned[i] < -100 and cci_aligned[i-1] >= -100 and close[i] < ema_50[i] and position != -1:
+        # Short signal: price below KAMA and RSI > 50 (not oversold)
+        elif close[i] < kama_vals[i] and rsi_vals[i] > 50 and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses EMA50 in opposite direction
-        elif position == 1 and close[i] < ema_50[i]:
+        # Exit: price crosses KAMA (mean reversion)
+        elif position == 1 and close[i] <= kama_vals[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ema_50[i]:
+        elif position == -1 and close[i] >= kama_vals[i]:
             position = 0
             signals[i] = 0.0
         else:
