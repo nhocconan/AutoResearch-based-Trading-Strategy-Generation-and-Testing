@@ -3,16 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_keltner_channel_breakout
-# Uses daily Keltner Channels (ATR-based) as dynamic support/resistance on 4h chart.
-# Long when price closes above upper KC (EMA + 2*ATR) with volume confirmation.
-# Short when price closes below lower KC (EMA - 2*ATR) with volume confirmation.
-# Exits when price crosses the middle line (EMA).
-# Keltner Channels adapt to volatility, reducing false breakouts in low vol regimes.
-# Volume confirmation filters out weak breakouts. Designed for low trade frequency.
+# Hypothesis: 1d_1w_weekly_bollinger_mean_reversion
+# Uses weekly Bollinger Bands on 1w chart with price reversion to mean on 1d chart.
+# Long when 1d close crosses below weekly BB lower band with volume confirmation.
+# Short when 1d close crosses above weekly BB upper band with volume confirmation.
+# Exits when price returns to weekly BB middle band (20-period SMA).
+# Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
+# Works in ranging markets via mean reversion and captures overextended moves in trends.
+# Focus on BTC/ETH as primary targets.
 
-name = "4h_1d_keltner_channel_breakout"
-timeframe = "4h"
+name = "1d_1w_weekly_bollinger_mean_reversion"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +26,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Keltner Channel calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for Bollinger Bands calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA and ATR for Keltner Channels
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate weekly Bollinger Bands (20-period, 2 std dev)
+    close_1w = df_1w['close'].values
+    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + (2 * std_20)
+    bb_lower = sma_20 - (2 * std_20)
+    bb_middle = sma_20  # 20-period SMA
     
-    # 20-period EMA (middle line)
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly Bollinger Bands to daily timeframe
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
     
-    # True Range and ATR (20-period)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel bounds
-    kc_upper = ema_20 + (2.0 * atr)
-    kc_lower = ema_20 - (2.0 * atr)
-    kc_middle = ema_20  # EMA as middle line
-    
-    # Align daily Keltner levels to 4h timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_1d, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_1d, kc_lower)
-    kc_middle_aligned = align_htf_to_ltf(prices, df_1d, kc_middle)
-    
-    # Volume confirmation: volume > 1.3 * 20-period average (4h timeframe)
+    # Volume confirmation: volume > 1.3 * 20-period average (1d timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
@@ -65,7 +53,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or np.isnan(kc_middle_aligned[i]):
+        if np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or np.isnan(bb_middle_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -80,19 +68,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price closes above upper KC
-        if close[i] > kc_upper_aligned[i] and position != 1:
+        # Long signal: price crosses below weekly BB lower band (oversold)
+        if close[i] < bb_lower_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price closes below lower KC
-        elif close[i] < kc_lower_aligned[i] and position != -1:
+        # Short signal: price crosses above weekly BB upper band (overbought)
+        elif close[i] > bb_upper_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses middle line (EMA)
-        elif position == 1 and close[i] <= kc_middle_aligned[i]:
+        # Exit conditions: price returns to weekly BB middle band (mean reversion)
+        elif position == 1 and close[i] >= bb_middle_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= kc_middle_aligned[i]:
+        elif position == -1 and close[i] <= bb_middle_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
