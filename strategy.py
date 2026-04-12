@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_with_volume_and_atr_v2
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter.
-# Uses tighter entry conditions to reduce trade frequency and avoid fee drag.
-# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+"""
+6h_1d_donchian_breakout_volume_regime
+Hypothesis: 6-hour Donchian breakout with volume confirmation and weekly trend regime filter.
+Works in bull/bear by only taking breakouts in direction of weekly trend (EWMA50) and requiring volume confirmation.
+Targets 25-35 trades/year (100-140 total over 4 years) to minimize fee drag.
+"""
 
-name = "4h_1d_camarilla_breakout_with_volume_and_atr_v2"
-timeframe = "4h"
+name = "6h_1d_donchian_breakout_volume_regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,73 +24,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ATR calculation
+    # Get daily data for Donchian and ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Weekly EMA for trend filter (using weekly data)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # Daily Donchian channels (20-period)
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Donchian breakout levels
+    upper = high_20
+    lower = low_20
+    
+    # Align Donchian levels to 6h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     
     # ATR for volatility filter (14-day ATR)
     tr1 = np.abs(np.subtract(high_1d, low_1d))
     tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
     tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
     
-    # Align Camarilla levels and ATR to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
-    
-    # Volume confirmation: volume > 1.8x 30-period average (stricter)
+    # Volume confirmation: volume > 1.8x 30-period average
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(atr_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and volatility filter
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: close breaks above upper Donchian with volume and weekly uptrend
+        if (close[i] > upper_aligned[i] and vol_confirm[i] and 
+            close_1d[i] > ema50_1w_aligned[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and volatility filter
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: close breaks below lower Donchian with volume and weekly downtrend
+        elif (close[i] < lower_aligned[i] and vol_confirm[i] and 
+              close_1d[i] < ema50_1w_aligned[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: reverse signal or close crosses back to opposite Donchian level
+        elif position == 1 and close[i] < lower_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and close[i] > upper_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
