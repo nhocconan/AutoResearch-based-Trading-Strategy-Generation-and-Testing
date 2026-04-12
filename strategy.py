@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_reversion_v1"
-timeframe = "1d"
+name = "6h_1d_parabolic_sar_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,69 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get daily data for Parabolic SAR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly ATR(10)
-    high_low_1w = high_1w - low_1w
-    high_close_1w = np.abs(high_1w - np.roll(close_1w, 1))
-    low_close_1w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_1w = np.maximum(high_low_1w, np.maximum(high_close_1w, low_close_1w))
-    tr_1w[0] = high_low_1w[0]
-    atr_1w = pd.Series(tr_1w).rolling(window=10, min_periods=10).mean().values
+    # Parabolic SAR calculation
+    # Parameters: start=0.02, increment=0.02, max=0.2
+    psar = np.zeros(len(high_1d))
+    psar[0] = low_1d[0]
+    trend = 1  # 1 for uptrend, -1 for downtrend
+    af = 0.02  # acceleration factor
+    max_af = 0.2
+    ep = high_1d[0] if trend == 1 else low_1d[0]  # extreme point
     
-    # Calculate weekly EMA(20) of close
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    for i in range(1, len(high_1d)):
+        if trend == 1:  # uptrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Reverse if price goes below SAR
+            if low_1d[i] < psar[i]:
+                trend = -1
+                psar[i] = ep
+                af = 0.02
+                ep = low_1d[i]
+            else:
+                # Update EP and AF
+                if high_1d[i] > ep:
+                    ep = high_1d[i]
+                    af = min(af + 0.02, max_af)
+        else:  # downtrend
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Reverse if price goes above SAR
+            if high_1d[i] > psar[i]:
+                trend = 1
+                psar[i] = ep
+                af = 0.02
+                ep = high_1d[i]
+            else:
+                # Update EP and AF
+                if low_1d[i] < ep:
+                    ep = low_1d[i]
+                    af = min(af + 0.02, max_af)
     
-    # Keltner Channel: EMA(20) ± 1.5 * ATR(10)
-    upper_1w = ema_20_1w + 1.5 * atr_1w
-    lower_1w = ema_20_1w - 1.5 * atr_1w
+    # Align PSAR to 6h timeframe
+    psar_aligned = align_htf_to_ltf(prices, df_1d, psar)
     
-    # Align Keltner levels to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
-    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Daily volume filter - 20-period average
+    # Volume filter - 20-period average on 6h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
-    # Daily RSI(14) for overbought/oversold
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Simple trend filter: price above/below 50-period EMA
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_up = close > ema_50
+    trend_down = close < ema_50
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(ema_aligned[i]) or np.isnan(volume_ok[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(psar_aligned[i]) or np.isnan(volume_ok[i]) or 
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Mean reversion signals at Keltner extremes
-        # Long when price touches lower band and RSI < 30 (oversold)
-        long_signal = (close[i] <= lower_aligned[i]) and (rsi[i] < 30) and volume_ok[i]
-        # Short when price touches upper band and RSI > 70 (overbought)
-        short_signal = (close[i] >= upper_aligned[i]) and (rsi[i] > 70) and volume_ok[i]
+        # Long: price above PSAR and volume confirmation and uptrend
+        long_signal = close[i] > psar_aligned[i] and volume_ok[i] and trend_up[i]
+        # Short: price below PSAR and volume confirmation and downtrend
+        short_signal = close[i] < psar_aligned[i] and volume_ok[i] and trend_down[i]
         
-        # Exit when price returns to EMA(20)
-        exit_long = close[i] >= ema_aligned[i]
-        exit_short = close[i] <= ema_aligned[i]
+        # Exit when price crosses PSAR in opposite direction
+        exit_long = close[i] < psar_aligned[i]
+        exit_short = close[i] > psar_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
