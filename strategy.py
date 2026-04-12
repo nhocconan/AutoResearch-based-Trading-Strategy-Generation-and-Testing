@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_Breakout_Volume_Regime_v1
-Hypothesis: On 12h timeframe, take long positions when price breaks above Camarilla R3 from prior day
-with 1-week uptrend (price above 200-period EMA) and volume confirmation (1.5x average).
-Take short positions when price breaks below Camarilla S3 with 1-week downtrend.
-Exit when price returns to the daily pivot point.
-Uses weekly trend filter to avoid counter-trend trades and volume confirmation to reduce false breakouts.
-Designed for low trade frequency (12-37/year) requiring multiple confluence factors.
-Works in bull/bear via weekly trend filter and mean-reversion exit at pivot.
+4h_1d_Camarilla_Breakout_Signal_v2
+Hypothesis: On 4h timeframe, long when price breaks above daily Camarilla H4 level with volume confirmation and 1d trend filter; short when breaks below L4 level with volume confirmation and 1d trend filter. Exit at opposite level (L4 for longs, H4 for shorts). Uses volume confirmation to avoid false breakouts and 1d EMA(50) for trend filter. Designed for low trade frequency (20-40/year) by requiring Camarilla level confluence and trend alignment. Works in bull/bear via 1d trend filter and mean-reversion exit at Camarilla levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_Camarilla_Breakout_Volume_Regime_v1"
-timeframe = "12h"
+name = "4h_1d_Camarilla_Breakout_Signal_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,83 +31,64 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels (based on previous day's range)
-    # Using prior day's data to avoid look-ahead
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # first day uses current
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
+    # Daily pivot and range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    range_1d = prev_high_1d - prev_low_1d
-    camarilla_mult = 1.1 / 6  # Camarilla multiplier
+    # Camarilla levels (H4/L4 for breakouts)
+    h4_1d = close_1d + range_1d * 1.1 / 2
+    l4_1d = close_1d - range_1d * 1.1 / 2
     
-    # Resistance levels
-    r3_1d = prev_close_1d + range_1d * camarilla_mult * 4
-    r4_1d = prev_close_1d + range_1d * camarilla_mult * 5
-    # Support levels
-    s3_1d = prev_close_1d - range_1d * camarilla_mult * 4
-    s4_1d = prev_close_1d - range_1d * camarilla_mult * 5
-    # Pivot point
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    
-    # === WEEKLY TREND FILTER (EMA 200) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    if len(close_1w) >= 200:
-        ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # === 1D EMA(50) FOR TREND FILTER ===
+    if len(close_1d) >= 50:
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     else:
-        ema_200_1w = np.full_like(close_1w, np.nan)
+        ema_50_1d = np.full_like(close_1d, np.nan)
     
-    # === VOLUME AVERAGE (24-period for 12h = ~12 days) ===
+    # Align data to 4h timeframe
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume average (20-period for 4h = ~1 day) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 24:
-            vol_sum -= volume[i-24]
+        if i >= 20:
+            vol_sum -= volume[i-20]
             vol_count -= 1
         if vol_count > 0:
             vol_avg[i] = vol_sum / vol_count
         else:
             vol_avg[i] = 0.0
     
-    # Align data to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: at least 1.5x average
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend filter: price above/below weekly EMA(200)
-        price_above_ema = close[i] > ema_200_1w_aligned[i]
-        price_below_ema = close[i] < ema_200_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA(50)
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
         # Entry conditions
-        long_setup = (close[i] > r3_1d_aligned[i]) and vol_confirm and price_above_ema
-        short_setup = (close[i] < s3_1d_aligned[i]) and vol_confirm and price_below_ema
+        long_setup = (close[i] > h4_1d_aligned[i]) and vol_confirm and price_above_ema
+        short_setup = (close[i] < l4_1d_aligned[i]) and vol_confirm and price_below_ema
         
-        # Exit conditions: mean reversion to daily pivot
-        exit_long = close[i] < pivot_1d_aligned[i]
-        exit_short = close[i] > pivot_1d_aligned[i]
+        # Exit conditions: mean reversion to opposite Camarilla level
+        exit_long = close[i] < l4_1d_aligned[i]
+        exit_short = close[i] > h4_1d_aligned[i]
         
         if long_setup and position != 1:
             position = 1
