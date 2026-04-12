@@ -1,81 +1,113 @@
 #!/usr/bin/env python3
 """
-6h_1d_1w_Volume_Weighted_Average_Price_VWAP_Breakout
-Hypothesis: 6h timeframe with VWAP from 1d and 1w timeframes, using VWAP deviation and volume confirmation.
-Trades when price deviates significantly from VWAP with high volume, expecting mean reversion to VWAP.
-Works in both bull and bear markets as VWAP acts as dynamic support/resistance.
-Target: 50-150 total trades over 4 years (12-37/year).
+6h_1d_Ichimoku_Cloud_Breakout_v1
+Hypothesis: Use Ichimoku Cloud from daily timeframe as major support/resistance. 
+Go long when price breaks above the cloud with bullish TK cross, short when breaks below with bearish TK cross.
+Works in bull/bear markets by using cloud as dynamic S/R and TK cross for momentum confirmation.
+Targets 20-40 trades/year on 6f timeframe by requiring both cloud break and TK alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_1w_Volume_Weighted_Average_Price_VWAP_Breakout"
+name = "6h_1d_Ichimoku_Cloud_Breakout_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1d and 1w data ONCE before loop
+    # Load 1d data ONCE before loop for Ichimoku
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    if len(df_1d) < 52:  # Need enough data for Ichimoku calculations
         return np.zeros(n)
     
-    # Calculate VWAP for 1d and 1w
-    # VWAP = sum(price * volume) / sum(volume)
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d_values = vwap_1d.values
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
-    vwap_1w_values = vwap_1w.values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Align VWAP to 6h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w_values)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Calculate volume average (20 period) for volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # For Ichimoku signals, we don't actually plot it back, we compare current price to it
+    # But for our use, we'll use the current close vs the close 26 periods ago
+    chikou_span = np.roll(close_1d, 26)  # Shifted back 26 periods
+    chikou_span[:26] = np.nan  # First 26 values invalid
+    
+    # Align all Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    chikou_6h = align_htf_to_ltf(prices, df_1d, chikou_span)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(52, n):  # Start after Ichimoku warmup
         # Skip if any required data is invalid
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(span_a_6h[i]) or np.isnan(span_b_6h[i]) or 
+            np.isnan(chikou_6h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume spike: current volume > 1.5x average
-        volume_spike = volume[i] > vol_ma[i] * 1.5
+        # Determine cloud boundaries (Senkou Span A and B)
+        upper_cloud = np.maximum(span_a_6h[i], span_b_6h[i])
+        lower_cloud = np.minimum(span_a_6h[i], span_b_6h[i])
         
-        # Calculate deviation from VWAP (as percentage)
-        deviation_1d = (close[i] - vwap_1d_aligned[i]) / vwap_1d_aligned[i]
-        deviation_1w = (close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i]
+        # TK Cross conditions
+        tk_bullish = tenkan_6h[i] > kijun_6h[i]
+        tk_bearish = tenkan_6h[i] < kijun_6h[i]
         
-        # Entry conditions: significant deviation from VWAP with volume spike
-        # Long when price is significantly below VWAP (oversold)
-        # Short when price is significantly above VWAP (overbought)
-        long_entry = (deviation_1d < -0.015) and (deviation_1w < -0.01) and volume_spike
-        short_entry = (deviation_1d > 0.015) and (deviation_1w > 0.01) and volume_spike
+        # Price relative to cloud
+        price_above_cloud = close[i] > upper_cloud
+        price_below_cloud = close[i] < lower_cloud
+        price_in_cloud = (close[i] >= lower_cloud) and (close[i] <= upper_cloud)
         
-        # Exit conditions: return to VWAP or opposite deviation
-        long_exit = (close[i] > vwap_1d_aligned[i]) or (deviation_1d > -0.005)
-        short_exit = (close[i] < vwap_1d_aligned[i]) or (deviation_1d < 0.005)
+        # Chikou confirmation: today's price vs price 26 periods ago
+        # Chikou is current close plotted 26 periods back, so we compare it to price 26 periods ago
+        chikou_confirm_bullish = chikou_6h[i] > close_1d[max(0, i-26)] if i >= 26 else False
+        chikou_confirm_bearish = chikou_6h[i] < close_1d[max(0, i-26)] if i >= 26 else False
+        
+        # Entry conditions:
+        # Long: price breaks above cloud + bullish TK cross + Chikou confirmation
+        long_entry = price_above_cloud and tk_bullish and chikou_confirm_bullish and not price_in_cloud
+        
+        # Short: price breaks below cloud + bearish TK cross + Chikou confirmation
+        short_entry = price_below_cloud and tk_bearish and chikou_confirm_bearish and not price_in_cloud
+        
+        # Exit conditions:
+        # Long exit: price returns to cloud or TK cross turns bearish
+        long_exit = price_in_cloud or (not tk_bullish)
+        
+        # Short exit: price returns to cloud or TK cross turns bullish
+        short_exit = price_in_cloud or (not tk_bearish)
         
         # Priority: entry > exit > hold
         if long_entry and position != 1:
