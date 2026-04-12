@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_Keltner_Reversal_v1
-Hypothesis: Use 1d Keltner Channels with 10-period ATR for mean-reversion signals. Buy near lower band (oversold) and sell near upper band (overbought) with 4h ADX<20 to ensure ranging markets. Works in both bull/bear by capturing mean-reversion in ranging conditions while avoiding strong trends.
+6h_1d_TCI_Trend_v1
+Hypothesis: Use Trend-Correction Index (TCI) from 1d to identify pullbacks in stronger trends (ADX>25) on 6h. 
+Buy when TCI < -0.1 (oversold in uptrend) and ADX > 25, sell when TCI > 0.1 (overbought in downtrend) and ADX > 25.
+This captures trend continuation after pullbacks, working in both bull/bear by following the dominant trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Keltner_Reversal_v1"
-timeframe = "4h"
+name = "6h_1d_TCI_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,30 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h ADX for regime filter (range detection)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # 6h ADX for trend strength filter
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
     # True Range
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_4h[0] = tr1[0]
+    tr1 = high_6h - low_6h
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr_6h = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_6h[0] = tr1[0]
     
     # Directional Movement
-    up_move = high_4h - np.roll(high_4h, 1)
-    down_move = np.roll(low_4h, 1) - low_4h
+    up_move = high_6h - np.roll(high_6h, 1)
+    down_move = np.roll(low_6h, 1) - low_6h
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
     # Smoothed values
-    tr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    tr_14 = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
     plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
     minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
     
@@ -54,57 +56,67 @@ def generate_signals(prices):
     plus_di = 100 * plus_dm_14 / tr_14
     minus_di = 100 * minus_dm_14 / tr_14
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_4h = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    adx_6h = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_6h_aligned = align_htf_to_ltf(prices, df_6h, adx_6h)
     
-    # Daily Keltner Channel
+    # Daily Trend-Correction Index (TCI)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # ATR(10) for Keltner Channel
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_10 = pd.Series(tr_1d).rolling(window=10, min_periods=10).mean().values
+    # Linear regression slope (20-period) as trend component
+    def linreg_slope(arr, window):
+        slope = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window-1, len(arr)):
+            y = arr[i-window+1:i+1]
+            x = np.arange(window)
+            if np.all(np.isnan(y)):
+                slope[i] = np.nan
+            else:
+                # Use only valid points
+                mask = ~np.isnan(y)
+                if np.sum(mask) < 2:
+                    slope[i] = np.nan
+                else:
+                    slope[i] = np.polyfit(x[mask], y[mask], 1)[0]
+        return slope
     
-    # EMA(20) of close
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 20-period linear regression slope of closes
+    lr_slope = linreg_slope(close_1d, 20)
     
-    # Keltner Bands
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Standard deviation of residuals (detrended price)
+    detrended = close_1d - np.roll(close_1d, 1)  # Simple change as detrended component
+    std_dev = pd.Series(detrended).rolling(window=20, min_periods=20).std().values
     
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    # TCI = (LR slope) / (std dev) - normalized trend strength
+    tci = np.where(std_dev != 0, lr_slope / std_dev, 0)
+    tci = np.nan_to_num(tci, nan=0.0)
+    
+    tci_aligned = align_htf_to_ltf(prices, df_1d, tci)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(30, n):
         # Skip if any data invalid
-        if (np.isnan(adx_4h_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or 
-            np.isnan(keltner_lower_aligned[i])):
+        if (np.isnan(adx_6h_aligned[i]) or np.isnan(tci_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Range filter: only trade when ADX < 20 (ranging market)
-        ranging = adx_4h_aligned[i] < 20
+        # Trend filter: only trade when ADX > 25 (trending market)
+        trending = adx_6h_aligned[i] > 25
         
-        # Mean-reversion signals
-        long_signal = close[i] <= keltner_lower_aligned[i] and ranging
-        short_signal = close[i] >= keltner_upper_aligned[i] and ranging
+        # Trend-following on pullbacks
+        long_signal = tci_aligned[i] < -0.1 and trending  # Oversold in uptrend
+        short_signal = tci_aligned[i] > 0.1 and trending   # Overbought in downtrend
         
-        # Exit: return to EMA(20)
-        ema_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
-        long_exit = close[i] >= ema_aligned[i]
-        short_exit = close[i] <= ema_aligned[i]
+        # Exit: when TCI returns to neutral zone
+        long_exit = tci_aligned[i] >= -0.05
+        short_exit = tci_aligned[i] <= 0.05
         
         # Signal logic
         if long_signal and position != 1:
