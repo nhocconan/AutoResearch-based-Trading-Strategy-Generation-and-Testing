@@ -1,113 +1,109 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_Donchian_EMA_Vol_Filter
-Hypothesis: In volatile markets (high 1d ATR), 6h Donchian breakouts in the direction of the 12h EMA trend yield sustainable trends.
-Uses 12h EMA20/EMA50 for trend, 1d ATR/MA(ATR) for volatility filter, and 6h Donchian(20) for breakouts.
-Targets 50-150 total trades over 4 years (12-37/year) with 0.25 position sizing.
-Works in bull/bear by requiring volatility expansion and trend alignment.
+4h_1d_AngleBased_Trend_Reversal_v1
+Hypothesis: Price reverses at daily Camarilla L3/H3 when 4H price angle (slope of EMA20) is opposite to position, indicating exhaustion.
+Long when price touches L3 and 4H EMA20 slope turns up after being down; short when touches H3 and slope turns down after being up.
+Exit when price touches opposite H4/L4 or slope reverses. Designed for 4H to work in both bull and bear via mean-reversion at institutional levels.
+Target: 50-120 total trades over 4 years (12-30/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_1d_Donchian_EMA_Vol_Filter"
-timeframe = "6h"
+name = "4h_1d_AngleBased_Trend_Reversal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # === 12H TREND: EMA20 and EMA50 ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    close_12h = df_12h['close'].values
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # === 1D VOLATILITY FILTER: ATR(14) and its 50-period MA ===
+    # === DAILY CAMARILLA LEVELS ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    # Calculate Camarilla levels (H3, L3, H4, L4)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    camarilla_h4 = np.full(len(close_1d), np.nan)
+    camarilla_l4 = np.full(len(close_1d), np.nan)
     
-    # ATR(14)
-    atr_14 = np.full_like(close_1d, np.nan)
-    for i in range(14, len(close_1d)):
-        atr_14[i] = np.nanmean(tr[i-13:i+1])  # Simple mean of last 14 TR
+    for i in range(len(close_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        range_val = high_1d[i] - low_1d[i]
+        camarilla_h3[i] = close_1d[i] + range_val * 1.1 / 6
+        camarilla_l3[i] = close_1d[i] - range_val * 1.1 / 6
+        camarilla_h4[i] = close_1d[i] + range_val * 1.1 / 4
+        camarilla_l4[i] = close_1d[i] - range_val * 1.1 / 4
     
-    # ATR 50-period MA
-    atr_ma = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    vol_ratio = atr_14 / atr_ma  # >1 indicates expanding volatility
+    # Align to 4h timeframe
+    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # === 6H DONCHIAN CHANNEL (20-period) ===
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
-    
-    # Align 12h EMAs and 1d volatility ratio to 6h timeframe
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    # === 4-HOUR EMA20 AND SLOPE ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Slope: change over 3 periods
+    ema20_slope = np.zeros_like(ema20)
+    ema20_slope[3:] = (ema20[3:] - ema20[:-3]) / 3
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    # Start after warmup period (ensures all indicators are valid)
-    start_idx = 100
-    for i in range(start_idx, n):
-        # Skip if any key value is NaN
-        if (np.isnan(ema20_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i])):
-            # Hold current position or flat if none
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+    for i in range(20, n):
+        # Skip if not ready
+        if (np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or np.isnan(h4_4h[i]) or 
+            np.isnan(l4_4h[i]) or np.isnan(ema20_slope[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        close_price = prices['close'].iloc[i]
-        trend_up = ema20_12h_aligned[i] > ema50_12h_aligned[i]
-        trend_down = ema20_12h_aligned[i] < ema50_12h_aligned[i]
-        high_vol = vol_ratio_aligned[i] > 1.0
+        # Long: price at L3 and EMA20 slope turns up (was <=0, now >0)
+        long_signal = (close[i] <= l3_4h[i] * 1.001 and  # Very tight tolerance
+                      close[i] >= l4_4h[i] * 0.999 and   # Above L4
+                      ema20_slope[i] > 0 and 
+                      ema20_slope[i-1] <= 0)
         
-        # Long: 12h uptrend, high volatility, Donchian breakout up
-        if trend_up and high_vol and close_price > donchian_high[i]:
-            if position != 1:
-                position = 1
-                signals[i] = 0.25
-            else:
-                signals[i] = 0.25
-        # Short: 12h downtrend, high volatility, Donchian breakout down
-        elif trend_down and high_vol and close_price < donchian_low[i]:
-            if position != -1:
-                position = -1
-                signals[i] = -0.25
-            else:
-                signals[i] = -0.25
-        # Exit long: trend reversal or volatility contraction
-        elif position == 1 and (not trend_up or not high_vol):
+        # Short: price at H3 and EMA20 slope turns down (was >=0, now <0)
+        short_signal = (close[i] >= h3_4h[i] * 0.999 and   # Very tight tolerance
+                       close[i] <= h4_4h[i] * 1.001 and    # Below H4
+                       ema20_slope[i] < 0 and 
+                       ema20_slope[i-1] >= 0)
+        
+        # Exit: price touches opposite level or slope reverses
+        exit_long = (position == 1 and 
+                    (close[i] >= h4_4h[i] or ema20_slope[i] < 0))
+        exit_short = (position == -1 and 
+                     (close[i] <= l4_4h[i] or ema20_slope[i] > 0))
+        
+        # Execute trades
+        if long_signal and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_signal and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
-        # Exit short: trend reversal or volatility contraction
-        elif position == -1 and (not trend_down or not high_vol):
+        elif exit_short and position == -1:
             position = 0
             signals[i] = 0.0
-        # Hold existing position
         else:
+            # Hold position
             signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
