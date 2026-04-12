@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h_1d_camarilla_pivot_breakout_volume
-# Uses daily Camarilla pivot levels (from prior day) as support/resistance on 12h chart.
-# Long when price breaks above R3 (resistance 3) with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below S3 (support 3) with volume confirmation.
-# Exits when price crosses the pivot point (mean reversion).
-# Designed for low trade frequency (target: 12-37/year) to minimize fee drag.
+# Hypothesis: 4h_1d_camarilla_pivot_volume
+# Uses daily Camarilla pivot levels (H3, L3) from previous day as entry triggers on 4h chart.
+# Long when price closes above H3 with volume confirmation (volume > 1.5x 20-period average).
+# Short when price closes below L3 with volume confirmation.
+# Exits when price crosses the daily pivot point (mean reversion).
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
 # Works in trending markets via breakouts and ranging markets via mean reversion to pivot.
-# Focus on BTC/ETH as primary targets (Camarilla pivots work well on major crypto pairs).
+# Focus on BTC/ETH as primary targets.
 
-name = "12h_1d_camarilla_pivot_breakout_volume"
-timeframe = "12h"
+name = "4h_1d_camarilla_pivot_volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,34 +31,33 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (based on prior day's OHLC)
-    # Formula: Pivot = (H + L + C) / 3
-    # R3 = Pivot + (H - L) * 1.1
-    # S3 = Pivot - (H - L) * 1.1
+    # Calculate daily Camarilla pivot levels (based on previous day's OHLC)
+    # Using previous day's data to avoid look-ahead
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot levels for previous day (shift by 1 to avoid look-ahead)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r3 = pivot + (high_1d - low_1d) * 1.1
-    s3 = pivot - (high_1d - low_1d) * 1.1
+    # Shift by 1 to use previous day's data for today's levels
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # Set first day's values to NaN since no previous day exists
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Shift by 1 to use prior day's levels (avoid look-ahead)
-    pivot_shifted = np.roll(pivot, 1)
-    r3_shifted = np.roll(r3, 1)
-    s3_shifted = np.roll(s3, 1)
-    # First day has no prior data
-    pivot_shifted[0] = np.nan
-    r3_shifted[0] = np.nan
-    s3_shifted[0] = np.nan
+    # Camarilla calculations
+    range_prev = prev_high - prev_low
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    h3 = prev_close + range_prev * 1.1 / 2  # Resistance level
+    l3 = prev_close - range_prev * 1.1 / 2  # Support level
     
-    # Align daily Camarilla levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_shifted)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_shifted)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_shifted)
+    # Align daily Camarilla levels to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
@@ -67,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -82,15 +81,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above R3 (resistance 3)
-        if close[i] > r3_aligned[i] and position != 1:
+        # Long signal: price closes above H3 (resistance breakout)
+        if close[i] > h3_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below S3 (support 3)
-        elif close[i] < s3_aligned[i] and position != -1:
+        # Short signal: price closes below L3 (support breakdown)
+        elif close[i] < l3_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses pivot point (mean reversion)
+        # Exit conditions: price crosses daily pivot point (mean reversion)
         elif position == 1 and close[i] <= pivot_aligned[i]:
             position = 0
             signals[i] = 0.0
