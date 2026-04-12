@@ -1,17 +1,10 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h/1d Camarilla pivot breakout with volume confirmation and ADX trend filter.
-# Targets medium-term breakouts in trending markets while avoiding whipsaws in chop.
-# Works in bull/bear by capturing directional momentum after consolidation.
-# Designed for ~30-50 trades/year to minimize fee drag.
-
-name = "4h_1d_camarilla_breakout_adx_v1"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,79 +31,38 @@ def generate_signals(prices):
     range_1d = high_1d - low_1d
     
     # Camarilla levels (using standard multipliers)
+    h4 = pivot + (range_1d * 1.1 / 2)   # Resistance 4
     h3 = pivot + (range_1d * 1.1 / 4)   # Resistance 3
     l3 = pivot - (range_1d * 1.1 / 4)   # Support 3
+    l4 = pivot - (range_1d * 1.1 / 2)   # Support 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
     h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
     l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Volume filter - 20-period average on 4h data
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
-    
-    # ADX trend filter on 4h data (14-period)
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(data[:period]) / period
-        # Subsequent values
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    tr14 = wilders_smoothing(tr, 14)
-    plus_dm14 = wilders_smoothing(plus_dm, 14)
-    minus_dm14 = wilders_smoothing(minus_dm, 14)
-    
-    # DI values
-    plus_di14 = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
-    minus_di14 = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
-    
-    # DX and ADX
-    dx = np.where((plus_di14 + minus_di14) != 0, 
-                  np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14) * 100, 0)
-    adx = wilders_smoothing(dx, 14)
-    
-    # ADX > 25 indicates trending market
-    adx_ok = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(volume_ok[i]) or
-            np.isnan(adx_ok[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: price breaks above H3 with volume confirmation and ADX trend
-        long_signal = close[i] > h3_aligned[i] and volume_ok[i] and adx_ok[i]
-        # Short: price breaks below L3 with volume confirmation and ADX trend
-        short_signal = close[i] < l3_aligned[i] and volume_ok[i] and adx_ok[i]
+        # Long: price breaks above H3 with volume confirmation
+        long_signal = close[i] > h3_aligned[i] and volume_ok[i]
+        # Short: price breaks below L3 with volume confirmation
+        short_signal = close[i] < l3_aligned[i] and volume_ok[i]
         
         # Exit when price returns to pivot
         exit_long = close[i] < pivot_aligned[i]
