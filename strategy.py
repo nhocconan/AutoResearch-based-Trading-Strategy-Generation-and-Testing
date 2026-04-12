@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_RSI_Trend_v1
-Hypothesis: KAMA identifies trend direction on 4h, RSI(2) identifies oversold/overbought entries within trend,
-with volume confirmation and daily ATR filter to avoid chop. Works in bull (buy dips in uptrend) and 
-bear (sell rallies in downtrend) by following the trend while fading short-term extremes.
-Target: 75-200 total trades over 4 years (19-50/year).
+12h_1d_1w_Camarilla_Reversion_v1
+Hypothesis: Mean reversion at weekly/ daily Camarilla levels with 12h trend filter and volume confirmation.
+Long when price touches daily L3 in uptrend (12h close > EMA20) with volume spike; short when touches daily H3 in downtrend.
+Exit on trend reversal or break of weekly L4/H4. Uses weekly context to filter false breaks in ranging markets.
+Designed for 12h timeframe to capture reversals with low frequency and high edge.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_KAMA_RSI_Trend_v1"
-timeframe = "4h"
+name = "12h_1d_1w_Camarilla_Reversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,117 +26,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === KAMA TREND (4H) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) >= 10 else np.array([])
-    if len(change) > 0 and len(volatility) > 0:
-        er = np.where(volatility != 0, change / volatility, 0)
-    else:
-        er = np.zeros(len(close))
-    # Pad ER to match close length
-    er = np.concatenate([np.full(10, np.nan), er])
+    # === WEEKLY CONTEXT (regime filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Smoothing constants
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    sc = np.where(np.isnan(sc), 0.0645**2, sc)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    if len(close) > 10:
-        kama[10] = close[10]
-        for i in range(11, len(close)):
-            if not np.isnan(sc[i]):
-                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-            else:
-                kama[i] = kama[i-1]
+    # Calculate weekly Camarilla levels (H4, L4 for breakout filter)
+    camarilla_h4_1w = np.full(len(close_1w), np.nan)
+    camarilla_l4_1w = np.full(len(close_1w), np.nan)
     
-    # === DAILY ATR FILTER (avoid chop) ===
+    for i in range(len(close_1w)):
+        if np.isnan(high_1w[i]) or np.isnan(low_1w[i]) or np.isnan(close_1w[i]):
+            continue
+        range_val = high_1w[i] - low_1w[i]
+        camarilla_h4_1w[i] = close_1w[i] + range_val * 1.1 / 4
+        camarilla_l4_1w[i] = close_1w[i] - range_val * 1.1 / 4
+    
+    # Align weekly levels to 12h
+    h4_1w_12h = align_htf_to_ltf(prices, df_1w, camarilla_h4_1w)
+    l4_1w_12h = align_htf_to_ltf(prices, df_1w, camarilla_l4_1w)
+    
+    # === DAILY CAMARILLA LEVELS (entry/exit) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([np.array([0.0]), tr])  # first TR = 0
+    # Calculate daily Camarilla levels (H3, L3 for entry, H4/L4 for exit)
+    camarilla_h3_1d = np.full(len(close_1d), np.nan)
+    camarilla_l3_1d = np.full(len(close_1d), np.nan)
+    camarilla_h4_1d = np.full(len(close_1d), np.nan)
+    camarilla_l4_1d = np.full(len(close_1d), np.nan)
     
-    # ATR(14)
-    atr_1d = np.full_like(close_1d, np.nan)
-    if len(tr) >= 15:
-        atr_1d[13] = np.mean(tr[1:15])  # first ATR
-        for i in range(14, len(tr)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
+    for i in range(len(close_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        range_val = high_1d[i] - low_1d[i]
+        camarilla_h3_1d[i] = close_1d[i] + range_val * 1.1 / 6
+        camarilla_l3_1d[i] = close_1d[i] - range_val * 1.1 / 6
+        camarilla_h4_1d[i] = close_1d[i] + range_val * 1.1 / 4
+        camarilla_l4_1d[i] = close_1d[i] - range_val * 1.1 / 4
     
-    atr_1d_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_ma)
+    # Align daily levels to 12h
+    h3_1d_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3_1d)
+    l3_1d_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3_1d)
+    h4_1d_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
+    l4_1d_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
     
-    # === RSI(2) for entry timing ===
-    rsi_period = 2
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # === 12-HOUR TREND FILTER ===
+    close_12h = df_1d['close'].values  # Use daily close as proxy for trend (12h aggregates 2x daily)
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_12h = align_htf_to_ltf(prices, df_1d, ema20_12h)  # align daily EMA to 12h
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    
-    if len(gain) >= rsi_period:
-        avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-        avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-        for i in range(rsi_period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === VOLUME CONFIRMATION ===
+    # === VOLUME SURGE FILTER ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(h3_1d_12h[i]) or np.isnan(l3_1d_12h[i]) or 
+            np.isnan(h4_1w_12h[i]) or np.isnan(l4_1w_12h[i]) or
+            np.isnan(ema20_12h_12h[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: price vs KAMA
-        bullish = close[i] > kama[i]
-        bearish = close[i] < kama[i]
+        # Determine 12h trend using daily EMA
+        trend_up = close[i] > ema20_12h_12h[i]
+        trend_down = close[i] < ema20_12h_12h[i]
         
-        # Volatility filter: avoid low volatility/chop
-        vol_filter = atr_1d_aligned[i] > 0  # ATR > 0 always true if calculated
+        # Long: touch daily L3 in uptrend, volume spike, and above weekly L4 (not in strong weekly downtrend)
+        long_signal = (trend_up and 
+                      close[i] <= l3_1d_12h[i] * 1.005 and  # Slightly relaxed tolerance for 12h
+                      close[i] >= l4_1d_12h[i] * 0.995 and  # Above daily L4
+                      vol_ratio[i] > 2.0 and
+                      close[i] > l4_1w_12h[i])  # Above weekly L4 to avoid strong weekly downtrend
         
-        # Entry conditions
-        long_entry = (bullish and 
-                     rsi[i] < 15 and  # deeply oversold
-                     vol_ratio[i] > 1.5)  # volume confirmation
+        # Short: touch daily H3 in downtrend, volume spike, and below weekly H4 (not in strong weekly uptrend)
+        short_signal = (trend_down and 
+                       close[i] >= h3_1d_12h[i] * 0.995 and  # Slightly relaxed tolerance
+                       close[i] <= h4_1d_12h[i] * 1.005 and  # Below daily H4
+                       vol_ratio[i] > 2.0 and
+                       close[i] < h4_1w_12h[i])  # Below weekly H4 to avoid strong weekly uptrend
         
-        short_entry = (bearish and 
-                      rsi[i] > 85 and  # deeply overbought
-                      vol_ratio[i] > 1.5)  # volume confirmation
-        
-        # Exit conditions
+        # Exit: trend reversal or break of daily H4/L4
         exit_long = (position == 1 and 
-                    (not bullish or rsi[i] > 70))  # trend change or overbought
+                    (not trend_up or close[i] >= h4_1d_12h[i]))
         exit_short = (position == -1 and 
-                     (not bearish or rsi[i] < 30))  # trend change or oversold
+                     (not trend_down or close[i] <= l4_1d_12h[i]))
         
         # Execute trades
-        if long_entry and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
