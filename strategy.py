@@ -1,120 +1,99 @@
-# 4h_1d_1w_Camarilla_Pivot_Breakout_v1
-# Hypothesis: Use daily and weekly Camarilla pivot levels on 4h timeframe with volume confirmation.
-# Long when price breaks above daily R4 or weekly R4 with volume > 1.5x 20-period average.
-# Short when price breaks below daily S4 or weekly S4 with volume > 1.5x 20-period average.
-# Exit when price returns to daily or weekly pivot level.
-# Camarilla levels are known to work well in both trending and ranging markets due to their
-# mathematical construction based on previous day's range. Weekly levels add higher timeframe
-# context. Volume confirmation reduces false breakouts. Designed for low trade frequency.
+#!/usr/bin/env python3
+# 6h_1d_Ichimoku_Cloud_Breakout_v1
+# Hypothesis: Use Ichimoku cloud from daily timeframe with 6h breakouts for trend following.
+# Long when price breaks above Kumo (cloud) with Tenkan > Kijun, short when breaks below with Tenkan < Kijun.
+# Ichimoku provides dynamic support/resistance and trend direction; works in bull (cloud acts as support) and bear (cloud as resistance).
+# Low trade frequency due to dual confirmation (cloud break + TK cross) targeting 50-150 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Camarilla_Pivot_Breakout_v1"
-timeframe = "4h"
+name = "6h_1d_Ichimoku_Cloud_Breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
+    # Daily data for Ichimoku
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:  # Need at least 52 periods for Senkou B
         return np.zeros(n)
     
-    # Weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate Ichimoku components on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high_d = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
-    prev_low_d = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
-    prev_close_d = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    # Previous week's OHLC for Camarilla calculation
-    prev_high_w = df_1w['high'].iloc[-2] if len(df_1w) >= 2 else df_1w['high'].iloc[-1]
-    prev_low_w = df_1w['low'].iloc[-2] if len(df_1w) >= 2 else df_1w['low'].iloc[-1]
-    prev_close_w = df_1w['close'].iloc[-2] if len(df_1w) >= 2 else df_1w['close'].iloc[-1]
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Calculate daily Camarilla levels
-    range_d = prev_high_d - prev_low_d
-    if range_d <= 0:
-        return np.zeros(n)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    daily_r4 = prev_close_d + range_d * 1.1 / 2  # R4 = Close + 1.1 * Range / 2
-    daily_s4 = prev_close_d - range_d * 1.1 / 2  # S4 = Close - 1.1 * Range / 2
-    daily_pivot = (prev_high_d + prev_low_d + prev_close_d) / 3
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # Calculate weekly Camarilla levels
-    range_w = prev_high_w - prev_low_w
-    if range_w <= 0:
-        return np.zeros(n)
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # Not used for signals but calculated for completeness
     
-    weekly_r4 = prev_close_w + range_w * 1.1 / 2  # R4 = Close + 1.1 * Range / 2
-    weekly_s4 = prev_close_w - range_w * 1.1 / 2  # S4 = Close - 1.1 * Range / 2
-    weekly_pivot = (prev_high_w + prev_low_w + prev_close_w) / 3
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
     
-    # Align daily levels to 4h timeframe
-    daily_r4_array = np.full(len(df_1d), daily_r4)
-    daily_s4_array = np.full(len(df_1d), daily_s4)
-    daily_pivot_array = np.full(len(df_1d), daily_pivot)
-    
-    daily_r4_aligned = align_htf_to_ltf(prices, df_1d, daily_r4_array)
-    daily_s4_aligned = align_htf_to_ltf(prices, df_1d, daily_s4_array)
-    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_array)
-    
-    # Align weekly levels to 4h timeframe
-    weekly_r4_array = np.full(len(df_1w), weekly_r4)
-    weekly_s4_array = np.full(len(df_1w), weekly_s4)
-    weekly_pivot_array = np.full(len(df_1w), weekly_pivot)
-    
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4_array)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4_array)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_array)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
-    vol_ratio = volume_series / vol_ma
-    vol_ratio = vol_ratio.fillna(1.0).values  # default to 1.0 if no MA
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
+    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(52, n):
         # Skip if any data invalid
-        if (np.isnan(daily_r4_aligned[i]) or np.isnan(daily_s4_aligned[i]) or
-            np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or
-            np.isnan(daily_pivot_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume filter (daily OR weekly)
-        long_breakout = ((close[i] > daily_r4_aligned[i] or close[i] > weekly_r4_aligned[i]) and 
-                         vol_ratio[i] > 1.5)
-        short_breakout = ((close[i] < daily_s4_aligned[i] or close[i] < weekly_s4_aligned[i]) and 
-                          vol_ratio[i] > 1.5)
+        # Ichimoku signals
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
+        tenkan_above_kijun = tenkan_aligned[i] > kijun_aligned[i]
+        tenkan_below_kijun = tenkan_aligned[i] < kijun_aligned[i]
         
-        # Exit conditions: return to daily OR weekly pivot
-        long_exit = close[i] < daily_pivot_aligned[i] or close[i] < weekly_pivot_aligned[i]
-        short_exit = close[i] > daily_pivot_aligned[i] or close[i] > weekly_pivot_aligned[i]
+        # Long: price above cloud + TK cross bullish
+        long_signal = price_above_cloud and tenkan_above_kijun
+        # Short: price below cloud + TK cross bearish
+        short_signal = price_below_cloud and tenkan_below_kijun
+        
+        # Exit: price returns to cloud or TK cross reverses
+        long_exit = not price_above_cloud or tenkan_below_kijun
+        short_exit = not price_below_cloud or tenkan_above_kijun
         
         # Signal logic
-        if long_breakout and position != 1:
+        if long_signal and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_signal and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
