@@ -3,119 +3,91 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_kama_rsi_chop
-# Uses Kaufman's Adaptive Moving Average (KAMA) on 1d timeframe for trend direction.
-# Enters long when KAMA slope > 0 and RSI(14) > 50 on 4h, short when slope < 0 and RSI < 50.
-# Uses Choppiness Index (14) on 4h to avoid chop: only trade when CHOP < 40 (trending).
-# Exits when RSI crosses back to 50 or KAMA slope changes sign.
-# Designed for low trade frequency (~20-40 trades/year) to minimize fee drag.
-# Works in trending markets via KAMA/RSI alignment and avoids whipsaw via CHOP filter.
+# Hypothesis: 6h_1d_1w_alligator_elder_ray_v1
+# Uses weekly trend via Alligator (SMAs of median price) and daily Elder Ray (bull/bear power) for entry timing.
+# Long when weekly trend is bullish (price > Alligator's Jaw) AND daily bull power > 0.
+# Short when weekly trend is bearish (price < Alligator's Jaw) AND daily bear power < 0.
+# Exits when Elder Ray signal reverses or price crosses Alligator's Teeth.
+# Designed for low trade frequency (target: 12-37/year) with trend-following in weekly timeframe and precise entry on daily.
+# Works in trending markets via Alligator filter and avoids whipsaws via Elder Ray confirmation.
 
-name = "4h_1d_kama_rsi_chop"
-timeframe = "4h"
+name = "6h_1d_1w_alligator_elder_ray_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get daily data for KAMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for Alligator
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close (ER=10, fast=2, slow=30)
+    # Get daily data for Elder Ray
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
+        return np.zeros(n)
+    
+    # Calculate weekly median price (typical price)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    median_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    
+    # Alligator: SMAs of median price (13, 8, 5) with future shift
+    jaw = pd.Series(median_price_1w).rolling(window=13, min_periods=13).mean().values  # 13-period
+    teeth = pd.Series(median_price_1w).rolling(window=8, min_periods=8).mean().values   # 8-period
+    lips = pd.Series(median_price_1w).rolling(window=5, min_periods=5).mean().values    # 5-period
+    
+    # Align weekly Alligator to 6h timeframe (with proper delay for completed weekly bar)
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    
+    # Calculate daily Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i < 9:
-            er[i] = np.nan
-        else:
-            direction = np.abs(close_1d[i] - close_1d[i-9])
-            volatility_sum = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-            er[i] = direction / volatility_sum if volatility_sum != 0 else 0
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_slope = np.diff(kama, prepend=0)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Align daily KAMA slope to 4h timeframe
-    kama_slope_aligned = align_htf_to_ltf(prices, df_1d, kama_slope)
-    
-    # RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14) on 4h
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(np.sum(tr, axis=0) / (max_hh - min_ll)) / np.log10(14)  # placeholder, fix
-    # Proper CHOP calculation
-    chop = np.zeros(n)
-    for i in range(14, n):
-        atr_sum = np.sum(tr[i-13:i+1])
-        hh_ll = max_hh[i] - min_ll[i]
-        chop[i] = 100 * np.log10(atr_sum / hh_ll) / np.log10(14) if hh_ll != 0 else 50
+    # Align daily Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(kama_slope_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Only trade in trending market (CHOP < 40)
-        if chop[i] >= 40:
-            # Hold current position if choppy
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
+        # Weekly trend filter: price vs Jaw (Alligator's Jaw)
+        price_vs_jaw = close[i] - jaw_aligned[i]
         
-        # Long signal: KAMA up and RSI > 50
-        if kama_slope_aligned[i] > 0 and rsi[i] > 50 and position != 1:
+        # Long setup: weekly bullish trend AND daily bull power positive
+        if price_vs_jaw > 0 and bull_power_aligned[i] > 0 and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: KAMA down and RSI < 50
-        elif kama_slope_aligned[i] < 0 and rsi[i] < 50 and position != -1:
+        # Short setup: weekly bearish trend AND daily bear power negative
+        elif price_vs_jaw < 0 and bear_power_aligned[i] < 0 and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: RSI crosses 50 or KAMA slope changes sign
-        elif position == 1 and (rsi[i] <= 50 or kama_slope_aligned[i] <= 0):
+        # Exit conditions: Elder Ray signal reverses OR price crosses Teeth
+        elif position == 1 and (bull_power_aligned[i] <= 0 or close[i] <= teeth_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi[i] >= 50 or kama_slope_aligned[i] >= 0):
+        elif position == -1 and (bear_power_aligned[i] >= 0 or close[i] >= teeth_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
