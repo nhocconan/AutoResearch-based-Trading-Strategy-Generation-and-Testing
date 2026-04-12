@@ -3,7 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_volatility_filter_v3"
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Works in bull markets by capturing breakouts, in bear markets by filtering out
+# counter-trend breakouts using 1d EMA trend. Low trade frequency (~20-40/year)
+# avoids fee drag. Uses discrete position sizing (0.25) to minimize churn.
+
+name = "4h_1d_donchian_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,64 +22,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous 1d bar data to avoid look-ahead
-    high_1d_prev = df_1d['high'].shift(1).values
-    low_1d_prev = df_1d['low'].shift(1).values
-    close_1d_prev = df_1d['close'].shift(1).values
+    # 1d EMA(50) for trend filter (uses completed 1d candle)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-    range_1d_prev = high_1d_prev - low_1d_prev
-    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
+    # 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align to 4h
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
-    
-    # Volatility filter: ATR ratio (ATR(10)/ATR(30)) < 0.8 = low volatility regime
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr1 = high_low
-    tr2 = high_close
-    tr3 = low_close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr10 / atr30
-    low_vol = atr_ratio < 0.8  # Low volatility regime for better breakout follow-through
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(200, n):
         # Skip if any values not ready
-        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(low_vol[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above H4 in low volatility with volume confirmation
-        long_signal = close[i] > h4_aligned[i] and low_vol[i] and vol_confirm[i]
-        # Short: break below L4 in low volatility with volume confirmation
-        short_signal = close[i] < l4_aligned[i] and low_vol[i] and vol_confirm[i]
+        # Long: break above Donchian high in uptrend with volume
+        long_signal = (close[i] > high_20[i] and 
+                      close[i] > ema_50_1d_aligned[i] and 
+                      vol_confirm[i])
+        # Short: break below Donchian low in downtrend with volume
+        short_signal = (close[i] < low_20[i] and 
+                       close[i] < ema_50_1d_aligned[i] and 
+                       vol_confirm[i])
         
-        # Exit on opposite breakout to pivot level
-        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
-        exit_long = close[i] < pivot_aligned[i]
-        exit_short = close[i] > pivot_aligned[i]
+        # Exit when price crosses back through Donchian midpoint
+        mid = (high_20[i] + low_20[i]) / 2.0
+        exit_long = close[i] < mid
+        exit_short = close[i] > mid
         
         # Execute trades
         if long_signal and position != 1:
