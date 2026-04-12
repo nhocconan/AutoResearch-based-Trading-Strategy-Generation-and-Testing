@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_1d_WeeklyPivot_DonchianBreakout_v2
-Hypothesis: Combine weekly pivot points with 6-hour Donchian channel breakouts and volume confirmation.
-Weekly pivot provides directional bias from higher timeframe, while Donchian breakout captures momentum.
-Volume filter ensures breakouts have conviction. Designed to work in both bull and bear markets by
-focusing on institutional levels and breakout confirmation. Target: 50-150 total trades over 4 years.
+12h_1d_Momentum_Camarilla_With_Volume
+Hypothesis: 12-hour breakout of daily Camarilla H4/L4 levels with volume confirmation (>1.8x 30-period average) and momentum filter (price > 50-period SMA). Uses discrete position sizing (0.25) to minimize churn. Designed for low-frequency, high-probability trades in both bull and bear markets. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivot_DonchianBreakout_v2"
-timeframe = "6h"
+name = "12h_1d_Momentum_Camarilla_With_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,56 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY PIVOT CALCULATION ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points (P), resistance (R1,R2), support (S1,S2)
-    pivot = np.zeros(len(df_1w))
-    R1 = np.zeros(len(df_1w))
-    S1 = np.zeros(len(df_1w))
-    R2 = np.zeros(len(df_1w))
-    S2 = np.zeros(len(df_1w))
-    
-    for i in range(len(df_1w)):
-        pp = (high_1w[i] + low_1w[i] + close_1w[i]) / 3
-        r = high_1w[i] - low_1w[i]
-        pivot[i] = pp
-        R1[i] = 2 * pp - low_1w[i]
-        S1[i] = 2 * pp - high_1w[i]
-        R2[i] = pp + r
-        S2[i] = pp - r
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
-    R1_6h = align_htf_to_ltf(prices, df_1w, R1)
-    S1_6h = align_htf_to_ltf(prices, df_1w, S1)
-    R2_6h = align_htf_to_ltf(prices, df_1w, R2)
-    S2_6h = align_htf_to_ltf(prices, df_1w, S2)
-    
-    # === DAILY DONCHIAN CHANNEL (20-period) ===
+    # === DAILY CAMARILLA PIVOT CALCULATION ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla H4/L4 levels for each day
+    H4 = np.zeros(len(df_1d))
+    L4 = np.zeros(len(df_1d))
     
-    # Align Donchian channels to 6h timeframe
-    upper_6h = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_6h = align_htf_to_ltf(prices, df_1d, lower_20)
+    for i in range(len(df_1d)):
+        range_ = high_1d[i] - low_1d[i]
+        if range_ <= 0:
+            H4[i] = L4[i] = close_1d[i]
+        else:
+            H4[i] = close_1d[i] + range_ * 1.1 / 2
+            L4[i] = close_1d[i] - range_ * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    H4_12h = align_htf_to_ltf(prices, df_1d, H4)
+    L4_12h = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # === MOMENTUM FILTER (50-period SMA) ===
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
     
     # === VOLUME FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
@@ -82,22 +59,34 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(pivot_6h[i]) or np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or
-            np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(H4_12h[i]) or np.isnan(L4_12h[i]) or 
+            np.isnan(sma_50[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine bias from weekly pivot
-        bullish_bias = close[i] > pivot_6h[i]
-        bearish_bias = close[i] < pivot_6h[i]
+        # Breakout conditions
+        # Long: Price breaks above H4 with volume + price above SMA50
+        long_breakout = (close[i] > H4_12h[i]) and (vol_ratio[i] > 1.8) and (close[i] > sma_50[i])
         
-        # Breakout conditions with volume confirmation
-        long_breakout = (close[i] > upper_6h[i]) and (vol_ratio[i] > 1.5) and bullish_bias
-        short_breakout = (close[i] < lower_6h[i]) and (vol_ratio[i] > 1.5) and bearish_bias
+        # Short: Price breaks below L4 with volume + price below SMA50
+        short_breakout = (close[i] < L4_12h[i]) and (vol_ratio[i] > 1.8) and (close[i] < sma_50[i])
         
-        # Exit conditions: return to opposite pivot level
-        exit_long = (position == 1) and (close[i] < S1_6h[i])
-        exit_short = (position == -1) and (close[i] > R1_6h[i])
+        # Exit: Price returns to opposite H3/L3 level
+        # Calculate H3/L3 for exit
+        H3 = np.zeros(len(df_1d))
+        L3 = np.zeros(len(df_1d))
+        for i_1d in range(len(df_1d)):
+            range_ = high_1d[i_1d] - low_1d[i_1d]
+            if range_ <= 0:
+                H3[i_1d] = L3[i_1d] = close_1d[i_1d]
+            else:
+                H3[i_1d] = close_1d[i_1d] + range_ * 1.1 / 4
+                L3[i_1d] = close_1d[i_1d] - range_ * 1.1 / 4
+        H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+        L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+        
+        exit_long = (position == 1) and (close[i] < L3_12h[i])
+        exit_short = (position == -1) and (close[i] > H3_12h[i])
         
         # Execute trades
         if long_breakout and position != 1:
