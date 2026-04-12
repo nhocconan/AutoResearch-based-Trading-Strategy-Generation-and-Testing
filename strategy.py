@@ -8,88 +8,75 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla H3/L3 breakout with 1d EMA200 trend filter and volume confirmation
-    # Trade only in direction of 1d EMA200 to avoid counter-trend whipsaws
+    # Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
+    # Trade only in direction of 12h EMA50 to avoid counter-trend whipsaws
     # Volume spike (>1.5x 20-period average) confirms participation
     # Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag
-    # Works in bull/bear markets by only trading with the dominant 1d trend
+    # Works in bull/bear markets by only trading with the dominant 12h trend
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for Donchian calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate previous 1d bar's Camarilla levels (H3, L3)
-    # H3 = close_prev + 1.1 * (high_prev - low_prev) / 4
-    # L3 = close_prev - 1.1 * (high_prev - low_prev) / 4
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate previous 12h bar's Donchian channels (20-period)
+    # Upper = max(high_prev_20), Lower = min(low_prev_20)
+    high_roll_max = np.full(len(df_12h), np.nan)
+    low_roll_min = np.full(len(df_12h), np.nan)
+    for i in range(20, len(df_12h)):
+        high_roll_max[i] = np.max(high_12h[i-20:i])
+        low_roll_min[i] = np.min(low_12h[i-20:i])
     
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Get 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 1d EMA200 for trend filter
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Get 1d volume for confirmation (>1.5x 20-period average)
-    vol_ma_1d = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
-    volume_spike_1d = volume_1d > (1.5 * vol_ma_1d)
+    # Get 12h volume for confirmation (>1.5x 20-period average)
+    vol_ma_12h = np.full(len(df_12h), np.nan)
+    for i in range(20, len(df_12h)):
+        vol_ma_12h[i] = np.mean(volume_12h[i-20:i])
+    volume_spike_12h = volume_12h > (1.5 * vol_ma_12h)
     
     # Align all indicators to LTF (4h)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, high_roll_max)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, low_roll_min)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > camarilla_h3_aligned[i]
-        short_breakout = close[i] < camarilla_l3_aligned[i]
+        long_breakout = close[i] > donchian_upper_aligned[i]
+        short_breakout = close[i] < donchian_lower_aligned[i]
         
-        # 1d trend filter
-        bullish_trend = close[i] > ema200_1d_aligned[i]
-        bearish_trend = close[i] < ema200_1d_aligned[i]
+        # 12h trend filter
+        bullish_trend = close[i] > ema50_12h_aligned[i]
+        bearish_trend = close[i] < ema50_12h_aligned[i]
         
         # Entry logic: Breakout + trend alignment + volume confirmation
         long_entry = long_breakout and bullish_trend and volume_spike_aligned[i]
         short_entry = short_breakout and bearish_trend and volume_spike_aligned[i]
         
-        # Exit logic: price returns to Camarilla pivot level (mean reversion)
-        # Camarilla pivot = (high_prev + low_prev + close_prev) / 3
-        camarilla_pivot = (prev_high + prev_low + prev_close) / 3
-        camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-        
-        # Exit when price returns to pivot level (within 0.1% tolerance)
-        pivot_distance = abs(close[i] - camarilla_pivot_aligned[i]) / close[i]
-        at_pivot = pivot_distance < 0.001
-        
-        long_exit = at_pivot or not bullish_trend
-        short_exit = at_pivot or not bearish_trend
+        # Exit logic: opposite Donchian breakout or trend reversal
+        long_exit = short_breakout or not bullish_trend
+        short_exit = long_breakout or not bearish_trend
         
         if long_entry and position != 1:
             position = 1
@@ -114,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_camarilla_h3l3_ema200_volume_v1"
+name = "4h_12h_donchian_breakout_ema50_volume_v1"
 timeframe = "4h"
 leverage = 1.0
