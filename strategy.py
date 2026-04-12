@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_v3
-Hypothesis: Combines 1d Camarilla pivot levels with 4h price action, volume confirmation, and RSI filter.
-Goes long when price touches L3/L4 with oversold RSI and volume spike; goes short when price touches H3/H4 with overbought RSI and volume spike.
-Exits when price returns to the daily pivot. Designed to work in both bull and bear markets by fading extremes.
-Target: 20-30 trades per year (80-120 total over 4 years).
+6h_1d_1w_Momentum_Regime_v1
+Hypothesis: On 6b timeframe, combine 1d momentum (EMA crossover) with 1w regime filter (price above/below weekly EMA200) and volume confirmation.
+In bull regime (price > weekly EMA200), take long signals from 1d EMA crossover; in bear regime (price < weekly EMA200), take short signals.
+Uses volume spike to confirm momentum strength. Designed to work in both bull and bear markets by adapting direction based on higher timeframe trend.
+Target: 20-40 trades per year (80-160 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_v3"
-timeframe = "4h"
+name = "6h_1d_1w_Momentum_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,49 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla pivots
+    # Get 1D data for momentum signals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Get 1W data for regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
     daily_close = df_1d['close'].values
+    weekly_close = df_1w['close'].values
     
-    # === CAMARILLA PIVOT LEVELS (based on previous 1d bar) ===
-    # Calculate from previous 1d bar's OHLC
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_close = np.roll(daily_close, 1)
+    # === 1D EMA CROSSOVER (fast=9, slow=21) ===
+    ema_fast = pd.Series(daily_close).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_slow = pd.Series(daily_close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # First bar will have invalid data, but we'll handle with valid check
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Bullish crossover: fast crosses above slow
+    bullish_cross = (ema_fast > ema_slow) & (np.roll(ema_fast, 1) <= np.roll(ema_slow, 1))
+    # Bearish crossover: fast crosses below slow
+    bearish_cross = (ema_fast < ema_slow) & (np.roll(ema_fast, 1) >= np.roll(ema_slow, 1))
     
-    # Camarilla levels
-    l3 = pivot + (range_val * 1.1 / 4)
-    l4 = pivot + (range_val * 1.1 / 2)
-    h3 = pivot - (range_val * 1.1 / 4)
-    h4 = pivot - (range_val * 1.1 / 2)
+    # Align crossovers to 6h timeframe
+    bullish_cross_6h = align_htf_to_ltf(prices, df_1d, bullish_cross.astype(float))
+    bearish_cross_6h = align_htf_to_ltf(prices, df_1d, bearish_cross.astype(float))
     
-    # Align to 4h timeframe (these levels are valid for the entire 1d bar)
-    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
-    l4_4h = align_htf_to_ltf(prices, df_1d, l4)
-    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
-    h4_4h = align_htf_to_ltf(prices, df_1d, h4)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    # === 1W REGIME FILTER (price vs EMA200) ===
+    ema200 = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    bull_regime = weekly_close > ema200  # Bull regime: price above weekly EMA200
+    bear_regime = weekly_close < ema200  # Bear regime: price below weekly EMA200
     
-    # === RSI FILTER (14-period on 1d) ===
-    delta = pd.Series(daily_close).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align regime to 6h timeframe
+    bull_regime_6h = align_htf_to_ltf(prices, df_1w, bull_regime.astype(float))
+    bear_regime_6h = align_htf_to_ltf(prices, df_1w, bear_regime.astype(float))
     
-    # === VOLUME SPIKE (2x 20-period average on 4h) ===
+    # === VOLUME SPIKE (2x 20-period average on 6h) ===
     vol_ma = np.full(n, np.nan)
     if n >= 20:
         vol_sum = np.sum(volume[:20])
@@ -80,31 +73,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any data invalid (first bar roll will have NaN)
-        if (np.isnan(l3_4h[i]) or np.isnan(l4_4h[i]) or 
-            np.isnan(h3_4h[i]) or np.isnan(h4_4h[i]) or
-            np.isnan(rsi_4h[i]) or np.isnan(vol_ma[i])):
+    for i in range(100, n):
+        # Skip if any data invalid
+        if (np.isnan(bullish_cross_6h[i]) or np.isnan(bearish_cross_6h[i]) or
+            np.isnan(bull_regime_6h[i]) or np.isnan(bear_regime_6h[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price near Camarilla levels (within 0.15% tolerance)
-        near_l3 = abs(low[i] - l3_4h[i]) / l3_4h[i] < 0.0015
-        near_l4 = abs(low[i] - l4_4h[i]) / l4_4h[i] < 0.0015
-        near_h3 = abs(high[i] - h3_4h[i]) / h3_4h[i] < 0.0015
-        near_h4 = abs(high[i] - h4_4h[i]) / h4_4h[i] < 0.0015
+        # Entry conditions: crossover in direction of regime + volume confirmation
+        long_entry = bool(bullish_cross_6h[i]) and bool(bull_regime_6h[i]) and vol_spike[i]
+        short_entry = bool(bearish_cross_6h[i]) and bool(bear_regime_6h[i]) and vol_spike[i]
         
-        # RSI conditions for reversal
-        rsi_oversold = rsi_4h[i] < 30
-        rsi_overbought = rsi_4h[i] > 70
-        
-        # Entry conditions with volume confirmation
-        long_entry = (near_l3 or near_l4) and rsi_oversold and vol_spike[i]
-        short_entry = (near_h3 or near_h4) and rsi_overbought and vol_spike[i]
-        
-        # Exit conditions: price moves back toward pivot or opposite signal
-        long_exit = close[i] >= pivot_4h[i]  # Exit long when price reaches pivot
-        short_exit = close[i] <= pivot_4h[i]  # Exit short when price reaches pivot
+        # Exit conditions: opposite crossover or regime change
+        long_exit = bool(bearish_cross_6h[i]) or not bool(bull_regime_6h[i])
+        short_exit = bool(bullish_cross_6h[i]) or not bool(bear_regime_6h[i])
         
         # Signal logic
         if long_entry and position != 1:
