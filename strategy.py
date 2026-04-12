@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_1d_keltner_breakout_with_volume_and_regime
-Hypothesis: Keltner breakout with volume confirmation and market regime filter.
-Keltner channels adapt to volatility, reducing false breakouts in low volatility.
-Volume ensures conviction. Regime filter (ADX) avoids chop. Works in bull/bear by
-adapting to volatility and using regime to filter noise.
-Target: 20-50 trades/year (80-200 total over 4 years).
+12h_1d_ema_crossover_with_volume_and_regime
+Hypothesis: 12-hour EMA crossover (8/21) with volume confirmation and 1-day ATR regime filter.
+Works in bull/bear by using trend-following EMA crossovers only when volatility is elevated
+(avoiding choppy markets) and volume confirms institutional participation.
+Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
 """
 
-name = "6h_1d_keltner_breakout_with_volume_and_regime"
-timeframe = "6h"
+name = "12h_1d_ema_crossover_with_volume_and_regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,84 +25,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Keltner and ADX
+    # Get daily data for EMA and ATR calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Keltner Channel (20, 2.0)
-    ma = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
-    atr = pd.Series(np.maximum(
-        np.maximum(high_1d - low_1d,
-                   np.abs(high_1d - np.roll(close_1d, 1))),
-        np.abs(low_1d - np.roll(close_1d, 1))
-    )).rolling(window=20, min_periods=20).mean().values
+    # EMA crossover (8/21) on daily
+    ema8 = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    upper = ma + 2.0 * atr
-    lower = ma - 2.0 * atr
+    # ATR for regime filter (14-day ATR)
+    tr1 = np.abs(np.subtract(high_1d, low_1d))
+    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
+    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # ADX for regime filter (14)
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    tr = np.maximum(
-        np.maximum(high_1d - low_1d,
-                   np.abs(high_1d - np.roll(close_1d, 1))),
-        np.abs(low_1d - np.roll(close_1d, 1))
-    )
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align EMA and ATR to 12h timeframe
+    ema8_aligned = align_htf_to_ltf(prices, df_1d, ema8)
+    ema21_aligned = align_htf_to_ltf(prices, df_1d, ema21)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Align to 6h
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: volume > 1.3x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(ema8_aligned[i]) or np.isnan(ema21_aligned[i]) or 
+            np.isnan(atr_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when trending (ADX > 25)
-        if adx_aligned[i] <= 25:
-            # In chop, stay flat
-            if position != 0:
-                position = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long entry: close breaks above upper Keltner with volume
-        if close[i] > upper_aligned[i] and vol_confirm[i] and position != 1:
+        # Long entry: EMA8 crosses above EMA21 with volume and volatility filter
+        if (ema8_aligned[i] > ema21_aligned[i] and 
+            ema8_aligned[i-1] <= ema21_aligned[i-1] and
+            vol_confirm[i] and 
+            atr_aligned[i] > 0 and 
+            position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below lower Keltner with volume
-        elif close[i] < lower_aligned[i] and vol_confirm[i] and position != -1:
+        # Short entry: EMA8 crosses below EMA21 with volume and volatility filter
+        elif (ema8_aligned[i] < ema21_aligned[i] and 
+              ema8_aligned[i-1] >= ema21_aligned[i-1] and
+              vol_confirm[i] and 
+              atr_aligned[i] > 0 and 
+              position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite side
-        elif position == 1 and close[i] < ma_aligned[i]:  # Exit at middle line
+        # Exit: reverse signal
+        elif position == 1 and ema8_aligned[i] < ema21_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ma_aligned[i]:
+        elif position == -1 and ema8_aligned[i] > ema21_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
@@ -116,6 +97,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-
-# Align middle line for exit
-    ma_aligned = align_htf_to_ltf(prices, df_1d, ma)
