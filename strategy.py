@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_camarilla_breakout_v1
-# Uses weekly Camarilla levels from 1-week chart to capture major breakouts on daily chart.
-# Weekly H4/L4 act as strong institutional support/resistance levels.
-# Volume confirmation ensures institutional participation.
-# Chop filter avoids false signals in ranging markets.
-# Designed to work in both bull (breakouts) and bear (breakdowns) markets.
-# Target: 10-25 trades/year per symbol for low friction and high edge.
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+# Hypothesis: 6h_12h_elder_ray_regime_v1
+# Uses Elder Ray (Bull/Bear Power) from 12h timeframe to determine regime and force direction.
+# In bull regime (Bull Power > 0 and rising): only allow longs on 6h EMA(20) pullbacks to EMA(50).
+# In bear regime (Bear Power < 0 and falling): only allow shorts on 6h EMA(20) rallies to EMA(50).
+# Adds volume confirmation (volume > 1.5x 20-period average) to avoid low-quality signals.
+# Designed for 6h timeframe with target 12-37 trades/year (50-150 over 4 years).
+# Works in both bull and bear markets by adapting to the prevailing trend via Elder Ray.
+
+name = "6h_12h_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,55 +25,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for Elder Ray calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels from previous week
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
-    close_prev = df_1w['close'].shift(1).values
+    # Calculate 12h EMA(13) and EMA(20) for Elder Ray
+    close_12h = df_12h['close'].values
+    ema13_12h = pd.Series(close_12h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Weekly Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA20
+    bull_power = df_12h['high'].values - ema13_12h
+    bear_power = df_12h['low'].values - ema20_12h
     
-    # Align to daily timeframe (already delayed by 1 week due to shift)
-    h4_level = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    # Align Elder Ray to 6h timeframe (1-bar delay for completed 12h bar)
+    bull_power_6h = align_htf_to_ltf(prices, df_12h, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_12h, bear_power)
+    
+    # 6h EMA(20) and EMA(50) for pullback entries
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_6h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+    for i in range(50, n):  # start after warmup
+        # Skip if Elder Ray not ready
+        if np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
+        # Determine regime from Elder Ray slope (using 3-period change)
+        if i >= 3:
+            bull_slope = bull_power_6h[i] - bull_power_6h[i-3]
+            bear_slope = bear_power_6h[i] - bear_power_6h[i-3]
+        else:
+            bull_slope = 0
+            bear_slope = 0
+        
+        # Bull regime: Bull Power > 0 and rising
+        bull_regime = (bull_power_6h[i] > 0) and (bull_slope > 0)
+        # Bear regime: Bear Power < 0 and falling
+        bear_regime = (bear_power_6h[i] < 0) and (bear_slope < 0)
+        
+        # Skip if no clear regime
+        if not (bull_regime or bear_regime):
+            # Hold current position if exists
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -81,25 +84,50 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above weekly H4 with volume
-        if close[i] > h4_level[i] and position != 1:
-            position = 1
-            signals[i] = 0.25
-        # Short signal: price breaks below weekly L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
-            position = 0
-            signals[i] = 0.0
-        else:
-            # Hold current position
+        # Check volume confirmation
+        if not vol_confirm[i]:
+            # Hold current position if exists
             if position == 1:
                 signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Bull regime: look for longs on pullbacks to EMA(50)
+        if bull_regime:
+            # Long signal: price pulls back to EMA(50) from above and resumes up
+            if (close[i] > ema50_6h[i] and 
+                close[i-1] <= ema50_6h[i-1] and 
+                close[i] > ema20_6h[i] and 
+                position != 1):
+                position = 1
+                signals[i] = 0.25
+            # Exit: price breaks below EMA(20)
+            elif close[i] < ema20_6h[i] and position == 1:
+                position = 0
+                signals[i] = 0.0
+            # Hold long
+            elif position == 1:
+                signals[i] = 0.25
+            else:
+                signals[i] = 0.0
+        
+        # Bear regime: look for shorts on rallies to EMA(50)
+        elif bear_regime:
+            # Short signal: price rallies to EMA(50) from below and resumes down
+            if (close[i] < ema50_6h[i] and 
+                close[i-1] >= ema50_6h[i-1] and 
+                close[i] < ema20_6h[i] and 
+                position != -1):
+                position = -1
+                signals[i] = -0.25
+            # Exit: price breaks above EMA(20)
+            elif close[i] > ema20_6h[i] and position == -1:
+                position = 0
+                signals[i] = 0.0
+            # Hold short
             elif position == -1:
                 signals[i] = -0.25
             else:
