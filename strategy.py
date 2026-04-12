@@ -8,14 +8,14 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla pivot breakout with 12h volume confirmation and chop regime filter
-    # Camarilla levels from 12h provide clear intraday support/resistance
-    # Volume spike on 12h confirms breakout validity
-    # Chop regime filter (12h) avoids whipsaws in ranging markets
-    # Works in bull/bear: fade extremes in range (chop>61.8), follow breakouts in trend (chop<38.2)
-    # Target: 20-50 trades/year per symbol.
+    # Hypothesis: 1h strategy using 4h Camarilla pivot breakouts with volume confirmation
+    # Camarilla levels provide intraday support/resistance based on prior day's range
+    # Breakouts above/below key levels with volume spike indicate institutional participation
+    # Session filter (08-20 UTC) focuses on liquid London/NY overlap
+    # Discrete position sizing (0.20) controls drawdown and minimizes fee churn
+    # Target: 15-37 trades/year per symbol (60-150 total over 4 years)
     
-    # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
+    # Session filter: 8:00-20:00 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -24,108 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla levels and volume context
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for Camarilla pivot calculation (based on prior day's OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    # Calculate prior day's Camarilla levels
+    # H4 = Close + 1.5*(High-Low)  (resistance)
+    # L4 = Close - 1.5*(High-Low)  (support)
+    # H3 = Close + 1.125*(High-Low)
+    # L3 = Close - 1.125*(High-Low)
+    # H2 = Close + 0.75*(High-Low)
+    # L2 = Close - 0.75*(High-Low)
+    # H1 = Close + 0.5*(High-Low)
+    # L1 = Close - 0.5*(High-Low)
+    # Pivot = (High + Low + Close)/3
     
-    # Calculate 12h Camarilla levels (based on previous day's OHLC)
-    camarilla_h4 = np.full(len(df_12h), np.nan)  # resistance 4
-    camarilla_l4 = np.full(len(df_12h), np.nan)  # support 4
-    camarilla_h3 = np.full(len(df_12h), np.nan)  # resistance 3
-    camarilla_l3 = np.full(len(df_12h), np.nan)  # support 3
-    camarilla_h2 = np.full(len(df_12h), np.nan)  # resistance 2
-    camarilla_l2 = np.full(len(df_12h), np.nan)  # support 2
-    camarilla_h1 = np.full(len(df_12h), np.nan)  # resistance 1
-    camarilla_l1 = np.full(len(df_12h), np.nan)  # support 1
-    camarilla_pivot = np.full(len(df_12h), np.nan)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(1, len(df_12h)):
-        # Previous period's OHLC
-        ph = high_12h[i-1]
-        pl = low_12h[i-1]
-        pc = close_12h[i-1]
-        
-        # Camarilla pivot point
-        camarilla_pivot[i] = (ph + pl + pc) / 3
-        
-        # Range
-        rng = ph - pl
-        
-        # Camarilla levels
-        camarilla_h4[i] = camarilla_pivot[i] + rng * 1.1 / 2
-        camarilla_l4[i] = camarilla_pivot[i] - rng * 1.1 / 2
-        camarilla_h3[i] = camarilla_pivot[i] + rng * 1.1 / 4
-        camarilla_l3[i] = camarilla_pivot[i] - rng * 1.1 / 4
-        camarilla_h2[i] = camarilla_pivot[i] + rng * 1.1 / 6
-        camarilla_l2[i] = camarilla_pivot[i] - rng * 1.1 / 6
-        camarilla_h1[i] = camarilla_pivot[i] + rng * 1.1 / 12
-        camarilla_l1[i] = camarilla_pivot[i] - rng * 1.1 / 12
+    # Prior day's range
+    range_1d = high_1d - low_1d
     
-    # Align 12h Camarilla levels to 4h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-    h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
-    h2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h2)
-    l2_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l2)
-    h1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h1)
-    l1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l1)
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
+    # Camarilla levels for prior day
+    h4_1d = close_1d + 1.5 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
+    h3_1d = close_1d + 1.125 * range_1d
+    l3_1d = close_1d - 1.125 * range_1d
+    h2_1d = close_1d + 0.75 * range_1d
+    l2_1d = close_1d - 0.75 * range_1d
+    h1_1d = close_1d + 0.5 * range_1d
+    l1_1d = close_1d - 0.5 * range_1d
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
     
-    # 12h volume spike filter (current volume > 1.5 * 20-period average)
-    vol_ma_20_12h = np.full(len(df_12h), np.nan)
-    for i in range(19, len(df_12h)):
-        vol_ma_20_12h[i] = np.mean(volume_12h[i-19:i+1])
-    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
-    volume_spike = volume > 1.5 * vol_ma_20_12h_aligned
+    # Align 1d Camarilla levels to 1h timeframe (prior day's levels available at 00:00 UTC)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h2_aligned = align_htf_to_ltf(prices, df_1d, h2_1d)
+    l2_aligned = align_htf_to_ltf(prices, df_1d, l2_1d)
+    h1_aligned = align_htf_to_ltf(prices, df_1d, h1_1d)
+    l1_aligned = align_htf_to_ltf(prices, df_1d, l1_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Chop regime filter (using 12h data)
-    # Chop > 61.8 = ranging (mean revert at pivot)
-    # Chop < 38.2 = trending (follow breakouts at H3/L3)
-    atr_12h = np.full(len(df_12h), np.nan)
-    for i in range(14, len(df_12h)):
-        tr = np.max([
-            high_12h[i] - low_12h[i],
-            np.abs(high_12h[i] - close_12h[i-1]),
-            np.abs(low_12h[i] - close_12h[i-1])
-        ])
-        if i == 14:
-            atr_12h[i] = np.mean([high_12h[j] - low_12h[j] for j in range(i-13, i+1)])
-        else:
-            atr_12h[i] = (atr_12h[i-1] * 13 + tr) / 14
-    
-    # Calculate Chop (14-period)
-    sum_tr_14 = np.full(len(df_12h), np.nan)
-    max_min_range_14 = np.full(len(df_12h), np.nan)
-    chop = np.full(len(df_12h), 50.0)  # default neutral
-    
-    for i in range(13, len(df_12h)):
-        # Sum of true range over 14 periods
-        tr_sum = 0
-        for j in range(i-13, i+1):
-            tr = np.max([
-                high_12h[j] - low_12h[j],
-                np.abs(high_12h[j] - close_12h[j-1]) if j > 0 else 0,
-                np.abs(low_12h[j] - close_12h[j-1]) if j > 0 else 0
-            ])
-            tr_sum += tr
-        sum_tr_14[i] = tr_sum
-        
-        # Max high - min low over 14 periods
-        max_high = np.max(high_12h[i-13:i+1])
-        min_low = np.min(low_12h[i-13:i+1])
-        max_min_range_14[i] = max_high - min_low
-        
-        if max_min_range_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr_14[i] / max_min_range_14[i]) / np.log10(14)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    close_s = pd.Series(close)
+    volume_s = pd.Series(volume)
+    vol_ma_20 = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -136,32 +84,26 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Regime-based logic
-        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at pivot
-            # Long near support, short near resistance
-            long_entry = close[i] <= l3_aligned[i] and volume_spike[i]
-            short_entry = close[i] >= h3_aligned[i] and volume_spike[i]
-            long_exit = close[i] >= pivot_aligned[i]
-            short_exit = close[i] <= pivot_aligned[i]
-        else:  # Trending market - follow breakouts at H3/L3
-            # Breakout entries
-            long_entry = close[i] > h3_aligned[i] and volume_spike[i]
-            short_entry = close[i] < l3_aligned[i] and volume_spike[i]
-            # Exit on opposite test of H3/L3 or volume dropout
-            long_exit = close[i] < l3_aligned[i] or (not volume_spike[i])
-            short_exit = close[i] > h3_aligned[i] or (not volume_spike[i])
+        # Breakout logic: price breaks key Camarilla levels with volume spike
+        long_breakout = (close[i] > h3_aligned[i] or close[i] > h4_aligned[i]) and volume_spike[i]
+        short_breakout = (close[i] < l3_aligned[i] or close[i] < l4_aligned[i]) and volume_spike[i]
         
-        if long_entry and position != 1:
+        # Exit logic: price returns to pivot or opposite test of levels
+        long_exit = close[i] < pivot_aligned[i]
+        short_exit = close[i] > pivot_aligned[i]
+        
+        if long_breakout and position != 1:
             position = 1
-            signals[i] = 0.25
-        elif short_entry and position != -1:
+            signals[i] = 0.20
+        elif short_breakout and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -171,14 +113,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_12h_camarilla_breakout_vol_chop_v1"
-timeframe = "4h"
+name = "1h_1d_camarilla_breakout_vol_v1"
+timeframe = "1h"
 leverage = 1.0
