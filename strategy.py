@@ -1,16 +1,11 @@
-#!/usr/bin/env python3
-"""
-6h_1d_weekly_bias_daily_trend
-Hypothesis: In 6h timeframe, use 1d trend direction (EMA50) as bias, and weekly structure (Donchian high/low) for breakout confirmation.
-Long when: price > EMA50(1d) AND breaks above weekly Donchian high (20-period) with volume confirmation.
-Short when: price < EMA50(1d) AND breaks below weekly Donchian low with volume confirmation.
-Exit when price returns to EMA50(1d) or volatility expands (weekly ATR expansion).
-Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drift.
-Works in bull markets (trend-following breaks) and bear markets (mean-reversion at extremes via EMA filter).
-"""
+# 12h_1w_vwap_mean_reversion
+# Strategy uses 1-week VWAP as mean price with Bollinger Bands for overextension detection.
+# Mean reversion when price deviates >2σ from VWAP with volume confirmation.
+# Works in both bull and bear markets as VWAP represents fair value and deviations correct over time.
+# Low trade frequency expected due to strict deviation threshold and volume filter.
 
-name = "6h_1d_weekly_bias_daily_trend"
-timeframe = "6h"
+name = "12h_1w_vwap_mean_reversion"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,71 +22,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA bias and weekly structure
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for VWAP and Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # EMA50 on 1d for trend bias
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # VWAP calculation (20-period)
+    vwap_length = 20
+    typical_price = (high_1w + low_1w + close_1w) / 3
+    vwap_numerator = (typical_price * volume_1w)
+    vwap_denominator = volume_1w
     
-    # Weekly Donchian channels (20-period ~ 20 days)
-    donch_len = 20
-    donch_high = pd.Series(high_1d).rolling(window=donch_len, min_periods=donch_len).max().values
-    donch_low = pd.Series(low_1d).rolling(window=donch_len, min_periods=donch_len).min().values
+    vwap = pd.Series(vwap_numerator).rolling(window=vwap_length, min_periods=vwap_length).sum().values / \
+           pd.Series(vwap_denominator).rolling(window=vwap_length, min_periods=vwap_length).sum().values
     
-    # Weekly ATR for volatility filter (14-period)
-    atr_len = 14
-    tr1 = pd.Series(high_1d).rolling(2).max().values - pd.Series(low_1d).rolling(2).min().values
-    tr2 = abs(pd.Series(high_1d).rolling(2).shift(1).values - pd.Series(close_1d).rolling(2).shift(1).values)
-    tr3 = abs(pd.Series(low_1d).rolling(2).shift(1).values - pd.Series(close_1d).rolling(2).shift(1).values)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=atr_len, min_periods=atr_len).mean().values
+    # Standard deviation of price from VWAP
+    price_diff = typical_price - vwap
+    variance = pd.Series(price_diff * price_diff).rolling(window=vwap_length, min_periods=vwap_length).sum().values / \
+               pd.Series(vwap_denominator).rolling(window=vwap_length, min_periods=vwap_length).sum().values
+    std_dev = np.sqrt(np.maximum(variance, 0))
     
-    # Align 1d indicators to 6h
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Upper and lower bands (2 standard deviations)
+    upper_band = vwap + (2.0 * std_dev)
+    lower_band = vwap - (2.0 * std_dev)
     
-    # Volume confirmation on 6f: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume_1w).rolling(window=vwap_length, min_periods=vwap_length).mean().values
+    vol_confirm = volume_1w > (vol_ma * 1.5)
+    
+    # Align VWAP, bands, and volume confirmation to 12h
+    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    vol_confirm_aligned = align_htf_to_ltf(prices, df_1w, vol_confirm)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema50_aligned[i]) or np.isnan(donch_high_aligned[i]) or 
-            np.isnan(donch_low_aligned[i]) or np.isnan(atr_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or np.isnan(vol_confirm_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price > EMA50(1d) AND breaks above weekly Donchian high with volume
-        if (close[i] > ema50_aligned[i] and 
-            close[i] > donch_high_aligned[i] and 
-            vol_confirm[i] and 
-            position != 1):
+        # Long entry: price below lower band with volume confirmation
+        if close[i] < lower_aligned[i] and vol_confirm_aligned[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short entry: price < EMA50(1d) AND breaks below weekly Donchian low with volume
-        elif (close[i] < ema50_aligned[i] and 
-              close[i] < donch_low_aligned[i] and 
-              vol_confirm[i] and 
-              position != -1):
+        # Short entry: price above upper band with volume confirmation
+        elif close[i] > upper_aligned[i] and vol_confirm_aligned[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions
-        elif position == 1 and close[i] <= ema50_aligned[i]:
+        # Exit: price returns to VWAP
+        elif position == 1 and close[i] >= vwap_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= ema50_aligned[i]:
+        elif position == -1 and close[i] <= vwap_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
