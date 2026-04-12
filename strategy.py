@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1d_camarilla_breakout_v1
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation and ATR volatility filter
-# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# 6h_1d_mrsi_reversion
+# Hypothesis: Modified RSI (MRSI) on daily timeframe identifies overbought/oversold conditions.
+# In 6h timeframe, we mean-revert when MRSI is extreme and price touches Bollinger Bands.
+# Works in bull/bear because it fades extremes rather than following trend.
+# Uses volume confirmation to avoid false signals in low volatility.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
 
-name = "4h_1d_camarilla_breakout_v1"
-timeframe = "4h"
+name = "6h_1d_mrsi_reversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ATR calculation
+    # Get daily data for MRSI and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -31,64 +33,91 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Calculate Modified RSI (MRSI) = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
+    # RSI(3)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/3, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/3, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi3 = 100 - (100 / (1 + rs))
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    # RSI Streak (2): count consecutive up/down days
+    streak = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        if close_1d[i] > close_1d[i-1]:
+            streak[i] = streak[i-1] + 1 if streak[i-1] >= 0 else 1
+        elif close_1d[i] < close_1d[i-1]:
+            streak[i] = streak[i-1] - 1 if streak[i-1] <= 0 else -1
+        else:
+            streak[i] = 0
+    # RSI of streak (clamped to -20,20 for RSI calculation)
+    streak_clipped = np.clip(streak, -20, 20)
+    # Calculate RSI on streak (using same 3-period)
+    delta_streak = np.diff(streak_clipped, prepend=streak_clipped[0])
+    gain_streak = np.where(delta_streak > 0, delta_streak, 0)
+    loss_streak = np.where(delta_streak < 0, -delta_streak, 0)
+    avg_gain_streak = pd.Series(gain_streak).ewm(alpha=1/3, adjust=False).mean().values
+    avg_loss_streak = pd.Series(loss_streak).ewm(alpha=1/3, adjust=False).mean().values
+    rs_streak = avg_gain_streak / (avg_loss_streak + 1e-10)
+    rsi_streak = 100 - (100 / (1 + rs_streak))
     
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Percent Rank (100): where today's close ranks in last 100 days
+    def rolling_percent_rank(arr, window):
+        from scipy.stats import rankdata
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(window-1, len(arr)):
+            window_data = arr[i-window+1:i+1]
+            # Rank of last element in window (0-100)
+            rank = (rankdata(window_data, method='average')[-1] - 1) / (window-1) * 100
+            result[i] = rank
+        return result
+    percent_rank = rolling_percent_rank(close_1d, 100)
     
-    # Align Camarilla levels and ATR to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # MRSI = average of three components
+    mrsi = (rsi3 + rsi_streak + percent_rank) / 3
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Bollinger Bands (20, 2)
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
+    
+    # Align indicators to 6h timeframe
+    mrsi_aligned = align_htf_to_ltf(prices, df_1d, mrsi)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(mrsi_aligned[i]) or np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and volatility filter
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long entry: MRSI oversold (<30) and price touches lower BB
+        if (mrsi_aligned[i] < 30 and close[i] <= lower_aligned[i] and 
+            vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and volatility filter
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        # Short entry: MRSI overbought (>70) and price touches upper BB
+        elif (mrsi_aligned[i] > 70 and close[i] >= upper_aligned[i] and 
+              vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: MRSI returns to neutral zone (40-60) or opposite touch
+        elif position == 1 and (mrsi_aligned[i] > 40 or close[i] >= upper_aligned[i]):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (mrsi_aligned[i] < 60 or close[i] <= lower_aligned[i]):
             position = 0
             signals[i] = 0.0
         else:
