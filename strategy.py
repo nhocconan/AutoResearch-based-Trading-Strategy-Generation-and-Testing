@@ -1,23 +1,24 @@
+# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_ema_crossover_volume_filter_v1
-# Uses 50-day EMA and 200-day EMA crossover on daily chart for trend direction.
-# Enters long when 50 EMA crosses above 200 EMA with volume confirmation (volume > 1.5x 20-day average).
-# Enters short when 50 EMA crosses below 200 EMA with volume confirmation.
-# Uses weekly ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
-# Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drift.
-# Works in bull markets (golden cross continuation) and bear markets (death cross continuation).
+# Hypothesis: 12h_1d_1w_camarilla_breakout_v1
+# Uses daily and weekly timeframes to calculate 12h-period-adapted Camarilla levels.
+# Enters long when price breaks above daily H3 with volume confirmation and weekly trend alignment.
+# Enters short when price breaks below daily L3 with volume confirmation and weekly trend alignment.
+# Uses weekly ADX > 25 to ensure trading only in strong weekly trends, avoiding false signals.
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag on 12h timeframe.
+# Works in bull markets (continuation of weekly trend breakouts) and bear markets (continuation of weekly trend breakdowns).
 
-name = "1d_1w_ema_crossover_volume_filter_v1"
-timeframe = "1d"
+name = "12h_1d_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,71 +26,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ADX filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for Camarilla calculation (base levels)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 50 EMA and 200 EMA on daily close
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
-    ema_200 = close_series.ewm(span=200, adjust=False, min_periods=200).values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate crossover signals
-    ema_crossover = np.where(ema_50 > ema_200, 1, -1)  # 1 for golden cross, -1 for death cross
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Volume confirmation: volume > 1.5 * 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h3 = close_prev + range_prev * 1.1 / 4
+    camarilla_l3 = close_prev - range_prev * 1.1 / 4
+    
+    # Align to 12h timeframe (daily levels update only after daily bar closes)
+    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume confirmation: volume > 1.5 * 50-period average (balanced for 12h)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Weekly ADX calculation (using Wilder's smoothing)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Weekly ADX trend filter: only trade when weekly ADX > 25 (strong trend)
+    # Calculate True Range from weekly data
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    # True Range calculation
+    tr1 = wh[1:] - wl[1:]
+    tr2 = np.abs(wh[1:] - wc[:-1])
+    tr3 = np.abs(wl[1:] - wc[:-1])
     tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Directional Movement
-    plus_dm = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    minus_dm = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    # Plus and Minus Directional Movement
+    plus_dm = np.where((wh[1:] - wh[:-1]) > (wl[:-1] - wl[1:]), np.maximum(wh[1:] - wh[:-1], 0), 0)
+    minus_dm = np.where((wl[:-1] - wl[1:]) > (wh[1:] - wh[:-1]), np.maximum(wl[:-1] - wl[1:], 0), 0)
     
     # Wilder's smoothing function
     def wilders_smooth(data, period):
         result = np.full_like(data, np.nan, dtype=float)
         if len(data) < period:
             return result
+        # First value is simple average
         result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
         for i in range(period, len(data)):
             result[i] = (result[i-1] * (period-1) + data[i]) / period
         return result
     
-    atr_1w = wilders_smooth(tr, 14)
+    atr = wilders_smooth(tr, 14)
     plus_dm_smooth = wilders_smooth(plus_dm, 14)
     minus_dm_smooth = wilders_smooth(minus_dm, 14)
     
-    plus_di = np.where(atr_1w != 0, 100 * plus_dm_smooth / atr_1w, 0)
-    minus_di = np.where(atr_1w != 0, 100 * minus_dm_smooth / atr_1w, 0)
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
     dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx_1w = wilders_smooth(dx, 14)
+    adx = wilders_smooth(dx, 14)
+    adx_1w = adx  # weekly ADX values
     
-    # Align weekly ADX to daily timeframe (only use completed weekly bars)
+    # Align weekly ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    adx_filter = adx_aligned > 25  # strong trend only
+    adx_filter = adx_aligned > 25  # strong weekly trend only
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # start after warmup
-        # Skip if EMA or ADX not ready
-        if np.isnan(ema_50[i]) or np.isnan(ema_200[i]) or np.isnan(adx_filter[i]):
+    for i in range(50, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and strong trend filters
+        # Require both volume and strong weekly trend filters
         if not (vol_confirm[i] and adx_filter[i]):
             # Hold current position if filters fail
             if position == 1:
@@ -100,19 +117,19 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long signal: 50 EMA crosses above 200 EMA (golden cross) with volume
-        if ema_crossover[i] == 1 and ema_crossover[i-1] == -1 and position != 1:
+        # Long signal: price breaks above daily H3 with volume and weekly trend alignment
+        if close[i] > h3_level[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: 50 EMA crosses below 200 EMA (death cross) with volume
-        elif ema_crossover[i] == -1 and ema_crossover[i-1] == 1 and position != -1:
+        # Short signal: price breaks below daily L3 with volume and weekly trend alignment
+        elif close[i] < l3_level[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: opposite crossover
-        elif ema_crossover[i] == -1 and ema_crossover[i-1] == 1 and position == 1:
+        # Exit conditions: opposite breakout
+        elif close[i] < l3_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif ema_crossover[i] == 1 and ema_crossover[i-1] == -1 and position == -1:
+        elif close[i] > h3_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
@@ -125,3 +142,4 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+# %%
