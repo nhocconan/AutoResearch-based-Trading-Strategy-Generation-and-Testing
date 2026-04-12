@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,18 +37,9 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate daily Donchian(20) channels
-    donch_high_1d = np.full(len(high_1d), np.nan)
-    donch_low_1d = np.full(len(low_1d), np.nan)
-    for i in range(19, len(high_1d)):
-        donch_high_1d[i] = np.max(high_1d[i-19:i+1])
-        donch_low_1d[i] = np.min(low_1d[i-19:i+1])
-    
     # Align daily indicators to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
     # Calculate 4h ATR(14) for position sizing
     tr1_h = np.abs(high - low)
@@ -60,14 +51,17 @@ def generate_signals(prices):
     for i in range(14, n):
         atr_4h[i] = np.mean(tr_h[i-14:i+1])
     
+    # Calculate 4h EMA(21) for trend
+    close_s = pd.Series(close)
+    ema_21_4h = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
         if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or 
-            np.isnan(atr_4h[i])):
+            np.isnan(ema_21_4h[i]) or np.isnan(atr_4h[i])):
             signals[i] = 0.0
             continue
         
@@ -82,18 +76,17 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions: price breaks daily Donchian channels
-        breakout_up = close[i] > donch_high_1d_aligned[i]
-        breakout_down = close[i] < donch_low_1d_aligned[i]
+        # Trend filter: 4h EMA21
+        price_above_ema = close[i] > ema_21_4h[i]
+        price_below_ema = close[i] < ema_21_4h[i]
         
-        # Entry conditions: Donchian breakout with trend and volatility filter
-        long_entry = breakout_up and vol_filter and uptrend
-        short_entry = breakout_down and vol_filter and downtrend
+        # Entry conditions: price above/below both EMAs with volatility filter
+        long_entry = price_above_ema and uptrend and vol_filter
+        short_entry = price_below_ema and downtrend and vol_filter
         
-        # Exit conditions: price crosses back to daily Donchian mid-point
-        mid_point = (donch_high_1d_aligned[i] + donch_low_1d_aligned[i]) / 2
-        long_exit = close[i] < mid_point
-        short_exit = close[i] > mid_point
+        # Exit conditions: price crosses back to EMA21
+        long_exit = close[i] < ema_21_4h[i]
+        short_exit = close[i] > ema_21_4h[i]
         
         if long_entry and position != 1:
             position = 1
@@ -118,6 +111,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_donchian_ema_trend_filter_v1"
+name = "4h_1d_ema_dual_trend_filter_v1"
 timeframe = "4h"
 leverage = 1.0
