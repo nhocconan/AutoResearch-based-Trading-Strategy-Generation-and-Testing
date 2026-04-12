@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h_4h_1d_ema_alignment_v1
-# Uses 4h EMA21 trend direction and 1d EMA50 trend filter for direction.
-# Entry on 1h when price crosses EMA13 in direction of higher timeframe trend.
-# Uses volume confirmation (volume > 1.3x 20-period average) to filter false signals.
-# Designed for low trade frequency (target: 15-37/year) to minimize fee drift.
-# Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 6h_1d_weekly_pivot_breakout_v1
+# Uses weekly pivot points (from 1w) to identify key support/resistance levels.
+# Long when price breaks above weekly R1 with volume confirmation.
+# Short when price breaks below weekly S1 with volume confirmation.
+# Uses 1d ADX > 25 to filter ranging markets and ensure trend context.
+# Designed for low trade frequency (target: 15-40 trades/year) to minimize fee drag.
+# Works in bull markets (buying breakouts) and bear markets (selling breakdowns).
 
-name = "1h_4h_1d_ema_alignment_v1"
-timeframe = "1h"
+name = "6h_1d_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,93 +25,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Align weekly pivot levels to 6h timeframe (weekly values update after weekly bar closes)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Get daily data for ADX filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate EMA21 on 4h close for trend direction
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    
-    # Calculate EMA50 on 1d close for trend filter
+    # Calculate ADX(14) on daily timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate EMA13 on 1h for entry timing
-    ema13_1h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Directional Movement
+    up_move = np.concatenate([[0], high_1d[1:] - high_1d[:-1]])
+    down_move = np.concatenate([[0], low_1d[:-1] - low_1d[1:]])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average (6h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # start after warmup
         # Skip if data not ready
-        if np.isnan(ema21_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(ema13_1h[i]):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation
-        if not vol_confirm[i]:
-            # Hold current position if volume filter fails
+        # Require ADX > 25 (trending market) and volume confirmation
+        if adx_aligned[i] <= 25 or not vol_confirm[i]:
+            # Hold current position if filters fail
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine trend direction from higher timeframes
-        # 4h trend: price above/below EMA21
-        trend_4h = 1 if close_4h[-1] > ema21_4h[-1] else -1 if len(close_4h) > 0 else 0
-        # Use aligned values for current bar
-        bullish_aligned = close[i] > ema21_4h_aligned[i]
-        bearish_aligned = close[i] < ema21_4h_aligned[i]
-        
-        # 1d trend filter: only take trades in direction of daily trend
-        daily_uptrend = close[i] > ema50_1d_aligned[i]
-        daily_downtrend = close[i] < ema50_1d_aligned[i]
-        
-        # Long signal: 4h bullish, 1d uptrend, price crosses above EMA13
-        if bullish_aligned and daily_uptrend and close[i] > ema13_1h[i] and position != 1:
-            # Additional confirmation: price was below EMA13 one bar ago (crossing up)
-            if i > 0 and close[i-1] <= ema13_1h[i-1]:
-                position = 1
-                signals[i] = 0.20
-            else:
-                signals[i] = 0.0
-        # Short signal: 4h bearish, 1d downtrend, price crosses below EMA13
-        elif bearish_aligned and daily_downtrend and close[i] < ema13_1h[i] and position != -1:
-            # Additional confirmation: price was above EMA13 one bar ago (crossing down)
-            if i > 0 and close[i-1] >= ema13_1h[i-1]:
-                position = -1
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0
-        # Exit conditions: opposite 4h signal or loss of 1d trend filter
-        elif (not bullish_aligned or not daily_uptrend) and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif (not bearish_aligned or not daily_downtrend) and position == -1:
+        # Long signal: price breaks above weekly R1
+        if close[i] > r1_1w_aligned[i] and position != 1:
+            position = 1
+            signals[i] = 0.25
+        # Short signal: price breaks below weekly S1
+        elif close[i] < s1_1w_aligned[i] and position != -1:
+            position = -1
+            signals[i] = -0.25
+        # Exit conditions: price returns to pivot level
+        elif close[i] >= s1_1w_aligned[i] and close[i] <= r1_1w_aligned[i] and position != 0:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
