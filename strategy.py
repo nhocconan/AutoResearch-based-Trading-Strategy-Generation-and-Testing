@@ -8,12 +8,10 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Camarilla pivot breakout with 1d volume confirmation
-    # Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) derived from 1d OHLC
-    # Trade breakouts at R4/S4 with volume spike confirmation (>1.5x 20-period avg volume)
-    # Use R3/S3 for mean reversion exits to avoid giving back profits in chop
-    # Works in bull/bear by adapting to volatility via volume confirmation
-    # Target: 12-37 trades/year per symbol (~50-150 total over 4 years)
+    # Hypothesis: 12h Williams %R extreme + 1d volume spike + chop regime filter
+    # Williams %R < -80 = oversold, > -20 = overbought. Trade reversals from extremes
+    # only when volume confirms and market is choppy (avoid trending whipsaws).
+    # Target: 12-37 trades/year per symbol. Works in bull/bear via mean reversion.
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -24,67 +22,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and volume context (HTF)
+    # Get 1d data for HTF indicators
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
-    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
+    # Williams %R(14) on 1d
+    highest_high_14 = np.full(len(df_1d), np.nan)
+    lowest_low_14 = np.full(len(df_1d), np.nan)
+    for i in range(13, len(df_1d)):
+        highest_high_14[i] = np.max(high_1d[i-13:i+1])
+        lowest_low_14[i] = np.min(low_1d[i-13:i+1])
+    williams_r = np.full(len(df_1d), np.nan)
+    for i in range(13, len(df_1d)):
+        denom = highest_high_14[i] - lowest_low_14[i]
+        if denom != 0:
+            williams_r[i] = (highest_high_14[i] - close_1d[i]) / denom * -100
     
-    # Align 1d Camarilla levels to 6h timeframe (wait for completed 1d bar)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align Williams %R to 12h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Volume confirmation: current volume > 1.5x 20-period average volume
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # 1d volume spike: current volume > 2.0 * 20-period average
+    vol_ma_20_1d = np.full(len(df_1d), np.nan)
+    for i in range(19, len(df_1d)):
+        vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    volume_spike = volume_1d_aligned > (2.0 * vol_ma_20_1d_aligned) if 'volume_1d_aligned' in locals() else np.full(n, False)
+    # Need to align volume_1d first
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    volume_spike = volume_1d_aligned > (2.0 * vol_ma_20_1d_aligned)
+    
+    # 1d Choppiness Index(14) for regime filter
+    chop = np.full(len(df_1d), np.nan)
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(1, len(df_1d)):
+        tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+        atr_1d[i] = tr if i < 14 else np.mean(atr_1d[i-13:i+1]) if i >= 14 else atr_1d[i-1]
+    # Initialize first 13 ATR values
+    if len(atr_1d) >= 14:
+        atr_1d[0] = max(high_1d[0] - low_1d[0], abs(high_1d[0] - close_1d[0]), abs(low_1d[0] - close_1d[0]))  # placeholder
+        for i in range(1, 14):
+            tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+            atr_1d[i] = np.mean(atr_1d[max(0, i-13):i+1])
+    
+    for i in range(13, len(df_1d)):
+        atr_sum = np.sum(atr_1d[i-13:i+1])
+        highest_high = np.max(high_1d[i-13:i+1])
+        lowest_low = np.min(low_1d[i-13:i+1])
+        if atr_sum > 0 and highest_high > lowest_low:
+            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+        else:
+            chop[i] = 50.0
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    chop_filter = chop_aligned > 61.8  # choppy regime
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):
         if not in_session[i]:
             signals[i] = 0.0
             continue
         
         # Skip if data not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Breakout conditions at R4/S4
-        breakout_long = close[i] > r4_aligned[i]
-        breakout_short = close[i] < s4_aligned[i]
+        # Entry conditions
+        long_entry = (williams_r_aligned[i] < -80) and volume_spike[i] and chop_filter[i]
+        short_entry = (williams_r_aligned[i] > -20) and volume_spike[i] and chop_filter[i]
         
-        # Mean reversion conditions at R3/S3 (for exits)
-        mean_revert_long = close[i] < r3_aligned[i]  # Exit long when price drops below R3
-        mean_revert_short = close[i] > s3_aligned[i]  # Exit short when price rises above S3
-        
-        # Entry conditions: breakout with volume confirmation
-        long_entry = breakout_long and volume_filter[i]
-        short_entry = breakout_short and volume_filter[i]
-        
-        # Exit conditions: opposite breakout OR mean reversion at R3/S3
-        long_exit = (close[i] < s4_aligned[i]) or mean_revert_long
-        short_exit = (close[i] > r4_aligned[i]) or mean_revert_short
+        # Exit conditions: opposite extreme or regime change
+        long_exit = (williams_r_aligned[i] > -20) or (not chop_filter[i])
+        short_exit = (williams_r_aligned[i] < -80) or (not chop_filter[i])
         
         if long_entry and position != 1:
             position = 1
@@ -109,6 +127,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1d_camarilla_breakout_vol_filter_v1"
-timeframe = "6h"
+name = "12h_1d_williams_r_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
