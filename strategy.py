@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Bounce_v1
-Hypothesis: Use daily Camarilla pivot levels with volume confirmation on 4h timeframe.
-Long when price bounces off daily S3 with volume > 1.5x 20-period average,
-short when price bounces off daily R3 with volume > 1.5x 20-period average.
-Camarilla levels are widely watched by institutions; bounce strategy works in both
-trending and ranging markets. Designed for low trade frequency (target: 75-200 total
-over 4 years) to minimize fee drag. Works in bull via bounces off support,
-in bear via bounces off resistance.
+12h_1d_Price_Channel_Breakout_v1
+Hypothesis: Use 1-day high/low price channel with volume confirmation on 12h timeframe.
+Long when price breaks above 20-period 1d high with volume > 1.3x 20-period average,
+short when breaks below 20-period 1d low with volume > 1.3x 20-period average.
+Exit on opposite channel touch or volatility contraction.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drift.
+Works in bull via breakouts above resistance, in bear via breakdowns below support.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Pivot_Bounce_v1"
-timeframe = "4h"
+name = "12h_1d_Price_Channel_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price arrays
@@ -29,39 +28,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
+    # Daily data for price channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].iloc[-2] if len(df_1d) >= 2 else df_1d['high'].iloc[-1]
-    prev_low = df_1d['low'].iloc[-2] if len(df_1d) >= 2 else df_1d['low'].iloc[-1]
-    prev_close = df_1d['close'].iloc[-2] if len(df_1d) >= 2 else df_1d['close'].iloc[-1]
+    # 20-period daily high and low channels
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     
-    # Calculate daily Camarilla pivot levels
-    range_val = prev_high - prev_low
-    if range_val <= 0:
-        return np.zeros(n)
+    high_20 = pd.Series(daily_high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(daily_low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    camarilla_r3 = prev_close + range_val * 1.1 / 4  # R3 = Close + (Range * 1.1/4)
-    camarilla_s3 = prev_close - range_val * 1.1 / 4  # S3 = Close - (Range * 1.1/4)
-    camarilla_r4 = prev_close + range_val * 1.1 / 2  # R4 = Close + (Range * 1.1/2)
-    camarilla_s4 = prev_close - range_val * 1.1 / 2  # S4 = Close - (Range * 1.1/2)
+    # Align daily channels to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
     
-    # Align daily levels to 4h timeframe
-    camarilla_r3_array = np.full(len(df_1d), camarilla_r3)
-    camarilla_s3_array = np.full(len(df_1d), camarilla_s3)
-    camarilla_r4_array = np.full(len(df_1d), camarilla_r4)
-    camarilla_s4_array = np.full(len(df_1d), camarilla_s4)
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_array)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_array)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_array)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_array)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.3x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
     vol_ratio = volume_series / vol_ma
@@ -70,31 +53,26 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any data invalid
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Bounce conditions with volume filter
-        long_bounce = (low[i] <= camarilla_s3_aligned[i] and 
-                       close[i] > camarilla_s3_aligned[i] and
-                       vol_ratio[i] > 1.5)
-        short_bounce = (high[i] >= camarilla_r3_aligned[i] and 
-                        close[i] < camarilla_r3_aligned[i] and
-                        vol_ratio[i] > 1.5)
+        # Breakout conditions with volume filter
+        long_breakout = close[i] > high_20_aligned[i] and vol_ratio[i] > 1.3
+        short_breakout = close[i] < low_20_aligned[i] and vol_ratio[i] > 1.3
         
-        # Exit conditions: opposite Camarilla level
-        long_exit = close[i] >= camarilla_r3_aligned[i]
-        short_exit = close[i] <= camarilla_s3_aligned[i]
+        # Exit conditions: opposite channel touch
+        long_exit = close[i] < low_20_aligned[i]
+        short_exit = close[i] > high_20_aligned[i]
         
         # Signal logic
-        if long_bounce and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_bounce and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
