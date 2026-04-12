@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_12h_hlc_hybrid
-Hybrid strategy using 12h price action (higher highs/lows) for trend direction,
-4h Donchian breakout for entry timing, and volume confirmation.
-Designed for low trade frequency (<40/year) to minimize fee drag.
-Works in both bull and bear markets by following higher timeframe structure.
+1d_1w_donchian_breakout_volume
+Uses weekly Donchian breakout with daily volume confirmation for long-term trend following.
+Targets 10-20 trades per year to minimize fee drag, works in both bull and bear markets by
+capturing strong directional moves confirmed by volume spikes.
 """
 
-name = "4h_12h_hlc_hybrid"
-timeframe = "4h"
+name = "1d_1w_donchian_breakout_volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,72 +24,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend structure (higher highs/lows)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get weekly data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Identify swing points on 12h
-    # Higher High: current high > previous high AND previous high > high before that
-    hh_12h = np.zeros(len(df_12h), dtype=bool)
-    ll_12h = np.zeros(len(df_12h), dtype=bool)
-    for i in range(2, len(df_12h)):
-        hh_12h[i] = (high_12h[i] > high_12h[i-1]) and (high_12h[i-1] > high_12h[i-2])
-        ll_12h[i] = (low_12h[i] < low_12h[i-1]) and (low_12h[i-1] < low_12h[i-2])
+    # Weekly Donchian channels (20-period)
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Trend state: 1 = uptrend (last was HH), -1 = downtrend (last was LL), 0 = unclear
-    trend_state = np.zeros(len(df_12h), dtype=int)
-    current_trend = 0
-    for i in range(len(df_12h)):
-        if hh_12h[i]:
-            current_trend = 1
-        elif ll_12h[i]:
-            current_trend = -1
-        trend_state[i] = current_trend
+    # Align Donchian channels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Align trend state to 4h
-    trend_aligned = align_htf_to_ltf(prices, df_12h, trend_state.astype(float))
-    
-    # 4h Donchian channels (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Daily volume confirmation: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
-        # Skip if trend data not ready
-        if np.isnan(trend_aligned[i]):
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])):
             signals[i] = 0.0
             continue
         
-        trend = int(trend_aligned[i])
-        
-        # Long entry: uptrend on 12h + price breaks above 4h Donchian high + volume
-        if trend == 1 and close[i] > highest_high[i] and vol_confirm[i] and position != 1:
+        # Long entry: price breaks above weekly Donchian high with volume confirmation
+        if (close[i] > donchian_high_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: downtrend on 12h + price breaks below 4h Donchian low + volume
-        elif trend == -1 and close[i] < lowest_low[i] and vol_confirm[i] and position != -1:
+        # Short entry: price breaks below weekly Donchian low with volume confirmation
+        elif (close[i] < donchian_low_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: trend change or price retracement to midpoint
-        elif position == 1 and (trend == -1 or close[i] < (highest_high[i] + lowest_low[i]) * 0.5):
+        # Exit: price crosses back inside the Donchian channel
+        elif position == 1 and close[i] < donchian_high_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (trend == 1 or close[i] > (highest_high[i] + lowest_low[i]) * 0.5):
+        elif position == -1 and close[i] > donchian_low_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
-            # Hold position
+            # Hold current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
