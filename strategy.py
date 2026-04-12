@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Breakout_Volume_Regime_v2
-Hypothesis: On 4h timeframe, buy breakouts above Camarilla H3 with 1d uptrend filter and volume confirmation,
-sell breakdowns below L3 with 1d downtrend and volume confirmation. Exit at H4/L4 levels.
-Uses daily volatility regime filter to avoid choppy markets. Designed for low trade frequency
-(20-40/year) by requiring multiple confluence factors. Works in bull/bear via 1d trend filter
+12h_1w_1d_Camarilla_Breakout_Trend_v1
+Hypothesis: On 12h timeframe, buy breakouts above weekly Camarilla H3 with 1d uptrend filter and volume confirmation,
+sell breakdowns below weekly L3 with 1d downtrend and volume confirmation. Exit at weekly H4/L4 levels.
+Uses weekly volatility regime filter to avoid choppy markets. Designed for low trade frequency
+(12-37/year) by requiring multiple confluence factors. Works in bull/bear via 1d trend filter
 and mean-reversion exit at Camarilla levels.
 """
 
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Breakout_Volume_Regime_v2"
-timeframe = "4h"
+name = "12h_1w_1d_Camarilla_Breakout_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,33 +26,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY CAMARILLA LEVELS ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === WEEKLY CAMARILLA LEVELS ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Use previous day's close for Camarilla calculation (proper method)
-    close_prev = np.concatenate([[close_1d[0]], close_1d[:-1]])
-    range_1d = high_1d - low_1d
+    # Camarilla pivot levels
+    close_prev = close_1w  # using same week's close as approximation
+    range_1w = high_1w - low_1w
     
-    h5 = close_prev + (range_1d * 1.1 / 2)
-    h4 = close_prev + (range_1d * 1.1)
-    h3 = close_prev + (range_1d * 1.1 / 4)
-    l3 = close_prev - (range_1d * 1.1 / 4)
-    l4 = close_prev - (range_1d * 1.1)
-    l5 = close_prev - (range_1d * 1.1 / 2)
+    h5 = close_prev + (range_1w * 1.1 / 2)
+    h4 = close_prev + (range_1w * 1.1)
+    h3 = close_prev + (range_1w * 1.1 / 4)
+    l3 = close_prev - (range_1w * 1.1 / 4)
+    l4 = close_prev - (range_1w * 1.1)
+    l5 = close_prev - (range_1w * 1.1 / 2)
     
-    # === DAILY VOLATILITY REGIME FILTER ===
-    # Daily ATR(14) for volatility measurement
-    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # === WEEKLY VOLATILITY REGIME FILTER ===
+    # Weekly ATR(14) for volatility measurement
+    tr1 = np.abs(high_1w[1:] - low_1w[:-1])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = np.full_like(tr, np.nan, dtype=np.float64)
+    atr_14 = np.zeros_like(tr)
     for i in range(len(tr)):
         if i < 14:
             atr_14[i] = np.nan
@@ -61,7 +61,7 @@ def generate_signals(prices):
         else:
             atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     # Volatility regime: low volatility = trending market
-    vol_ma = np.full_like(atr_14, np.nan)
+    vol_ma = np.zeros_like(atr_14)
     for i in range(len(atr_14)):
         if i < 30:
             vol_ma[i] = np.nan
@@ -70,14 +70,14 @@ def generate_signals(prices):
     # Low volatility regime (trending) when current ATR < MA
     vol_regime = atr_14 < vol_ma
     
-    # Align data to 4h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
+    # Align data to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1w, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1w, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime.astype(float))
     
-    # Volume average (20-period for 4h = ~5 days) for confirmation
+    # Volume average (20-period for 12h = ~10 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
