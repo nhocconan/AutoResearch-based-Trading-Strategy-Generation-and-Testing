@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
+#\047/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_daily_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_1d_cci_trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,44 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
+    # Get 1d data for CCI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # Calculate CCI(20) on daily data
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
     
-    # Align daily pivots to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align CCI to 12h timeframe
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
-    # Get weekly data for trend filter
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    # Weekly 20-period EMA for trend
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume filter on 6h - 20-period average
+    # Volume filter - 20-period average on 12h data
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -64,31 +54,24 @@ def generate_signals(prices):
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+        if (np.isnan(cci_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_20_1w_aligned[i]
-        downtrend = close[i] < ema_20_1w_aligned[i]
+        # Trend from 1w EMA
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Price position relative to daily pivots
-        above_r1 = close[i] > r1_1d_aligned[i]
-        below_s1 = close[i] < s1_1d_aligned[i]
-        between_pivots = (close[i] >= s1_1d_aligned[i]) and (close[i] <= r1_1d_aligned[i])
+        # CCI signals with volume confirmation and stricter thresholds
+        # Long: CCI > -50 (strong bullish) in uptrend
+        long_signal = cci_1d_aligned[i] > -50 and uptrend and volume_ok[i]
+        # Short: CCI < 50 (strong bearish) in downtrend
+        short_signal = cci_1d_aligned[i] < 50 and downtrend and volume_ok[i]
         
-        # Long conditions: price above S1 in uptrend with volume
-        long_signal = (above_r1 or between_pivots) and uptrend and volume_ok[i]
-        # Short conditions: price below R1 in downtrend with volume
-        short_signal = (below_s1 or between_pivots) and downtrend and volume_ok[i]
-        
-        # Exit conditions: reverse of entry
-        exit_long = below_s1 and not uptrend
-        exit_short = above_r1 and not downtrend
+        # Exit when CCI reverses beyond threshold
+        exit_long = cci_1d_aligned[i] < -50
+        exit_short = cci_1d_aligned[i] > 50
         
         # Execute trades
         if long_signal and position != 1:
