@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Breakout_With_Filter
-Hypothesis: Daily Camarilla pivot breakouts with weekly trend filter and volume confirmation.
-Go long when price breaks above daily H3 in uptrend, short when breaks below L3 in downtrend.
-Weekly trend determined by price position relative to weekly VWAP.
-Works in bull (breakouts continuation) and bear (breakdowns continuation).
-Target: 50-100 total trades over 4 years (12-25/year) on 1d timeframe.
+4h_12h_Camarilla_Pivot_Volume_Squeeze
+Hypothesis: Use 12h EMA trend filter with 4h Camarilla pivot levels and volume squeeze detection.
+Long when price closes above Camarilla H3 in uptrend with volume contraction followed by expansion.
+Short when price closes below Camarilla L3 in downtrend with volume contraction followed by expansion.
+Volume squeeze defined as current volume < 50% of 20-period average, expansion as volume > 150% of average.
+Targets breakouts from low volatility periods in trending markets, effective in both bull (continuation) and bear (reversal) phases.
+Target: 50-120 total trades over 4 years (12-30/year) on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_Breakout_With_Filter"
-timeframe = "1d"
+name = "4h_12h_Camarilla_Pivot_Volume_Squeeze"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,61 +27,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === 12H DATA FOR TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
     
-    # Calculate weekly VWAP for trend
-    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
-    vwap_1w_values = vwap_1w.values
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w_values)
+    close_12h = df_12h['close'].values
+    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
     
-    # === DAILY CAMARILLA PIVOTS ===
-    # Use previous day's OHLC to calculate today's Camarilla levels
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # first day uses same day
-    
-    # Camarilla calculation
-    range_val = prev_high - prev_low
-    h3 = prev_close + range_val * 1.1 / 6
-    l3 = prev_close - range_val * 1.1 / 6
-    h4 = prev_close + range_val * 1.1 / 2
-    l4 = prev_close - range_val * 1.1 / 2
-    
-    # === VOLUME FILTER (20-day average) ===
+    # === VOLUME AVERAGE FOR SQUEEZE DETECTION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma!=0)
+    
+    # === CAMARILLA PIVOT LEVELS (DAILY) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Typical price for pivot calculation
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    pivot = typical_price
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    h3 = pivot + (range_1d * 1.1 / 4)
+    l3 = pivot - (range_1d * 1.1 / 4)
+    h4 = pivot + (range_1d * 1.1 / 2)
+    l4 = pivot - (range_1d * 1.1 / 2)
+    
+    # Align to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(h3[i]) or np.isnan(l3[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema21_12h_aligned[i]) or np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Determine trend from weekly VWAP
-        trend_up = close[i] > vwap_1w_aligned[i]
-        trend_down = close[i] < vwap_1w_aligned[i]
+        # Determine trend from 12h EMA21
+        close_12h_arr = df_12h['close'].values
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h_arr)
+        trend_up = close_12h_aligned[i] > ema21_12h_aligned[i]
+        trend_down = close_12h_aligned[i] < ema21_12h_aligned[i]
         
-        # Breakout conditions: price breaks Camarilla H3/L3 + trend + volume
-        breakout_up = close[i] > h3[i]
-        breakout_down = close[i] < l3[i]
+        # Volume squeeze and expansion
+        vol_squeeze = volume[i] < (vol_ma[i] * 0.5)
+        vol_expansion = volume[i] > (vol_ma[i] * 1.5)
         
-        long_signal = breakout_up and trend_up and vol_ratio[i] > 1.5
-        short_signal = breakout_down and trend_down and vol_ratio[i] > 1.5
+        # Entry conditions: price closes beyond Camarilla levels with trend and volume expansion
+        long_signal = (close[i] > h3_aligned[i] and 
+                      trend_up and 
+                      vol_expansion and
+                      (not vol_squeeze or i < 30 or volume[i-1] < vol_ma[i-1] * 0.5))
         
-        # Exit conditions: opposite breakout or trend reversal
+        short_signal = (close[i] < l3_aligned[i] and 
+                       trend_down and 
+                       vol_expansion and
+                       (not vol_squeeze or i < 30 or volume[i-1] < vol_ma[i-1] * 0.5))
+        
+        # Exit conditions: opposite Camarilla level or trend reversal
         exit_long = (position == 1 and 
-                    (breakout_down or not trend_up))
+                    (close[i] < l3_aligned[i] or not trend_up))
         exit_short = (position == -1 and 
-                     (breakout_up or not trend_down))
+                     (close[i] > h3_aligned[i] or not trend_down))
         
         # Execute trades
         if long_signal and position != 1:
