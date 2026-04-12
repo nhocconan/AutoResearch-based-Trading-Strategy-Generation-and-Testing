@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-1d_1w_Turtle_Breakout_Regime_v1
-Hypothesis: On daily timeframe, buy breakouts above 20-day high with weekly uptrend filter and volume confirmation,
-sell breakdowns below 20-day low with weekly downtrend and volume confirmation. Exit at opposite breakout level.
-Uses weekly volatility regime filter to avoid choppy markets. Designed for low trade frequency (10-20/year) by requiring multiple confluence factors.
-Works in bull/bear via weekly trend filter and mean-reversion exit at breakout levels.
+4h_1D_CAMARILLA_BREAKOUT_TREND_V2
+Hypothesis: On 4h timeframe, buy breakouts above Camarilla H3 with 1d uptrend filter,
+sell breakdowns below L3 with 1d downtrend. Exit at H4/L4 levels. Uses daily ADX(14)
+for trend strength filtering to avoid chop. Designed for low trade frequency (20-40/year)
+by requiring trend alignment. Works in bull/bear via 1d trend filter and mean-reversion exit.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Turtle_Breakout_Regime_v1"
-timeframe = "1d"
+name = "4h_1D_CAMARILLA_BREAKOUT_TREND_V2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,65 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # === DAILY CAMARILLA LEVELS ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA(20) for trend direction
-    close_1w_series = pd.Series(close_1w)
-    ema_20_1w = close_1w_series.ewm(span=20, adjust=False, min_periods=20).values
-    weekly_uptrend = ema_20_1w > np.roll(ema_20_1w, 1)
-    weekly_uptrend[0] = False  # first value has no previous
-    weekly_downtrend = ema_20_1w < np.roll(ema_20_1w, 1)
-    weekly_downtrend[0] = False
+    # Previous day's close for pivot calculation
+    close_prev = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    range_1d = high_1d - low_1d
     
-    # Weekly ATR(14) for volatility regime
-    tr1_w = np.abs(high_1w[1:] - low_1w[:-1])
-    tr2_w = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3_w = np.abs(low_1w[1:] - close_1w[:-1])
-    tr_w = np.concatenate([[np.nan], np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))])
-    atr_14_1w = np.zeros_like(tr_w)
-    for i in range(len(tr_w)):
-        if i < 14:
-            atr_14_1w[i] = np.nan
-        elif i == 14:
-            atr_14_1w[i] = np.nanmean(tr_w[1:i+1])
-        else:
-            atr_14_1w[i] = (atr_14_1w[i-1] * 13 + tr_w[i]) / 14
-    # Volatility regime: low volatility = trending market
-    vol_ma_1w = np.zeros_like(atr_14_1w)
-    for i in range(len(atr_14_1w)):
-        if i < 30:
-            vol_ma_1w[i] = np.nan
-        else:
-            vol_ma_1w[i] = np.mean(atr_14_1w[i-29:i+1])
-    # Low volatility regime (trending) when current ATR < MA
-    vol_regime_1w = atr_14_1w < vol_ma_1w
+    # Camarilla levels
+    h5 = close_prev + (range_1d * 1.1 / 2)
+    h4 = close_prev + (range_1d * 1.1)
+    h3 = close_prev + (range_1d * 1.1 / 4)
+    l3 = close_prev - (range_1d * 1.1 / 4)
+    l4 = close_prev - (range_1d * 1.1)
+    l5 = close_prev - (range_1d * 1.1 / 2)
     
-    # Align weekly data to daily timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_regime_1w.astype(float))
+    # === DAILY ADX TREND STRENGTH FILTER ===
+    # Calculate ADX(14) for trend strength
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # === DAILY BREAKOUT LEVELS ===
-    # Donchian breakout: 20-day high/low
-    high_20 = np.zeros(n)
-    low_20 = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            high_20[i] = np.nan
-            low_20[i] = np.nan
-        else:
-            high_20[i] = np.max(high[i-19:i+1])
-            low_20[i] = np.min(low[i-19:i+1])
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Daily volume average (20-period) for confirmation
+    # Smoothed TR, DM+ (Wilder smoothing)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(data[1:period+1])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Trend strength filter: ADX > 25 indicates strong trend
+    trend_strong = adx > 25
+    
+    # Align data to 4h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    trend_strong_aligned = align_htf_to_ltf(prices, df_1d, trend_strong.astype(float))
+    
+    # Volume average (20-period for 4h = ~5 days) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -101,26 +114,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(60, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if indicators not available
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(vol_regime_aligned[i]) or vol_avg[i] == 0.0):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(trend_strong_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: at least 1.5x average
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Only trade in low volatility (trending) regime on weekly
-        in_trend_regime = vol_regime_aligned[i] > 0.5
+        # Only trade in strong trend regime
+        in_trend_regime = trend_strong_aligned[i] > 0.5
         
         # Entry conditions
-        long_setup = (close[i] > high_20[i]) and vol_confirm and in_trend_regime and weekly_uptrend_aligned[i] > 0.5
-        short_setup = (close[i] < low_20[i]) and vol_confirm and in_trend_regime and weekly_downtrend_aligned[i] > 0.5
+        long_setup = (close[i] > h3_aligned[i]) and vol_confirm and in_trend_regime
+        short_setup = (close[i] < l3_aligned[i]) and vol_confirm and in_trend_regime
         
-        # Exit conditions: mean reversion to opposite breakout level
-        exit_long = close[i] < low_20[i]
-        exit_short = close[i] > high_20[i]
+        # Exit conditions: mean reversion to H4/L4 levels
+        exit_long = close[i] < l4_aligned[i]
+        exit_short = close[i] > h4_aligned[i]
         
         if long_setup and position != 1:
             position = 1
