@@ -1,124 +1,99 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_RSI_Trend_v1
-Hypothesis: On daily timeframe, use KAMA for trend direction, RSI for momentum confirmation,
-and weekly trend filter (price vs weekly SMA20) to avoid counter-trend trades.
-Enters long when KAMA rising, RSI > 50, and price above weekly SMA20.
-Enters short when KAMA falling, RSI < 50, and price below weekly SMA20.
-Exits when trend reverses. Designed for low trade frequency (<20 trades/year) by requiring
-alignment across multiple timeframes. Works in bull via long trends, in bear via short trends.
+6h_1d_PowerOfThree_V1
+Hypothesis: Uses Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
+Long when Bull Power > 0 and Bear Power < 0 in uptrend; short when Bear Power > 0 and Bull Power < 0 in downtrend.
+Designed for low trade frequency by requiring strong directional power and trend alignment.
+Works in bull via long strength, in bear via short strength.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_KAMA_RSI_Trend_v1"
-timeframe = "1d"
+name = "6h_1d_PowerOfThree_V1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
     # === DAILY DATA ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend indicator
-    # ER (Efficiency Ratio) = |change| / volatility
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # placeholder, will compute properly below
+    # EMA13 for power calculation
+    close_s = pd.Series(close_1d)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Proper ER calculation
-    diff = np.diff(close_1d, prepend=close_1d[0])
-    abs_diff = np.abs(diff)
-    change_over_period = np.abs(np.diff(close_1d, 10))  # 10-period change
-    sum_abs_diff = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        sum_abs_diff[i] = sum_abs_diff[i-1] + abs_diff[i]
-        if i >= 10:
-            sum_abs_diff[i] -= abs_diff[i-10]
-    er = np.where(sum_abs_diff > 0, change_over_period / sum_abs_diff, 0)
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high_1d - ema13
+    bear_power = ema13 - low_1d
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Daily SMA50 for trend filter
+    sma50 = close_s.rolling(window=50, min_periods=50).mean().values
     
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50)
     
-    # RSI (14-period) - momentum confirmation
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === WEEKLY DATA (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly SMA20 for trend filter
-    close_s = pd.Series(close_1w)
-    sma20_1w = close_s.rolling(window=20, min_periods=20).mean().values
-    
-    # Align weekly SMA20 to daily
-    sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma20_1w)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Volume average (20-period for confirmation)
+    vol_avg = np.zeros(n)
+    vol_sum = 0.0
+    vol_count = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        vol_count += 1
+        if i >= 20:
+            vol_sum -= volume[i-20]
+            vol_count -= 1
+        vol_avg[i] = vol_sum / vol_count if vol_count > 0 else 0.0
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(30, n):  # warmup period
+    for i in range(50, n):
         # Skip if not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(sma20_1w_aligned[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(sma50_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filters
-        kama_rising = kama_aligned[i] > kama_aligned[i-1]
-        kama_falling = kama_aligned[i] < kama_aligned[i-1]
-        price_above_weekly_sma = close[i] > sma20_1w_aligned[i]
-        price_below_weekly_sma = close[i] < sma20_1w_aligned[i]
+        # Volume confirmation: at least 1.3x average
+        vol_confirm = volume[i] > 1.3 * vol_avg[i]
         
-        # Momentum confirmation
-        rsi_bullish = rsi_aligned[i] > 50
-        rsi_bearish = rsi_aligned[i] < 50
+        # Trend filter: price above/below SMA50
+        price_vs_sma = close[i] > sma50_aligned[i]
+        
+        # Power conditions
+        bull_strong = bull_power_aligned[i] > 0
+        bear_strong = bear_power_aligned[i] > 0
         
         # Entry conditions
-        long_entry = kama_rising and rsi_bullish and price_above_weekly_sma
-        short_entry = kama_falling and rsi_bearish and price_below_weekly_sma
+        long_setup = bull_strong and not bear_strong and price_vs_sma and vol_confirm
+        short_setup = bear_strong and not bull_strong and not price_vs_sma and vol_confirm
         
-        # Exit conditions (trend reversal)
-        exit_long = not (kama_rising and rsi_bullish and price_above_weekly_sma)
-        exit_short = not (kama_falling and rsi_bearish and price_below_weekly_sma)
+        # Exit when power reverses or trend fails
+        exit_long = not bull_strong or not price_vs_sma
+        exit_short = not bear_strong or price_vs_sma
         
-        if long_entry and position != 1:
+        if long_setup and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_setup and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
