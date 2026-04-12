@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_1w_keltner_breakout_volume_trend_v1
-Hypothesis: Daily strategy using weekly Keltner channel breakout with volume confirmation and weekly trend filter.
-Enters long when price breaks above upper Keltner band with volume spike and weekly uptrend; short when breaks below lower band with volume spike and weekly downtrend.
-Uses fixed position size (0.25) to minimize trading frequency and fee drag.
-Designed to capture strong trends while avoiding choppy markets via weekly trend filter.
-Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing strong moves.
+6h_12h_1d_triple_timeframe_momentum_confluence
+Hypothesis: Combines momentum signals from 6h (primary), 12h, and 1d timeframes to capture major trend moves while avoiding whipsaws.
+Enters long when: 6h price > 6h EMA20 AND 12h price > 12h EMA50 AND 1d price > 1d EMA50
+Enters short when: 6h price < 6h EMA20 AND 12h price < 12h EMA50 AND 1d price < 1d EMA50
+Uses volume confirmation to avoid low-probability breakouts.
+Designed to work in both bull and bear markets by requiring alignment across three timeframes.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag while capturing sustained moves.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,73 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Keltner channels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for Keltner center
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate weekly ATR(10) for Keltner width
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(np.roll(high_1w, 1) - close_1w)
-    tr3 = np.abs(np.roll(low_1w, 1) - close_1w)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1w = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 12h EMA50 for trend direction
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Weekly Keltner bands
-    keltner_upper = ema20_1w + 2.0 * atr_1w
-    keltner_lower = ema20_1w - 2.0 * atr_1w
+    # 1d EMA50 for trend direction
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly Keltner bands to daily timeframe
-    keltner_upper_daily = align_htf_to_ltf(prices, df_1w, keltner_upper)
-    keltner_lower_daily = align_htf_to_ltf(prices, df_1w, keltner_lower)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 6h EMA20 for faster trend signal
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Weekly trend filter: price above/below EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Volume filter: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(keltner_upper_daily[i]) or np.isnan(keltner_lower_daily[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(ema20_6h[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 1.5x 20-period average
-        if i >= 20:
-            vol_ma = np.mean(volume[max(0, i-20):i])
-            volume_filter = volume[i] > vol_ma * 1.5
-        else:
-            volume_filter = False
+        # Volume filter
+        volume_filter = volume[i] > vol_ma_20[i] * 1.3
         
-        # Trend filter from weekly EMA50
-        uptrend_1w = close[i] > ema50_1w_aligned[i]
-        downtrend_1w = close[i] < ema50_1w_aligned[i]
+        # Multi-timeframe alignment check
+        uptrend_aligned = (close[i] > ema20_6h[i] and 
+                          close[i] > ema50_12h_aligned[i] and 
+                          close[i] > ema50_1d_aligned[i])
+        downtrend_aligned = (close[i] < ema20_6h[i] and 
+                            close[i] < ema50_12h_aligned[i] and 
+                            close[i] < ema50_1d_aligned[i])
         
-        # Entry conditions: Keltner breakout with volume and trend confirmation
-        long_breakout = close[i] > keltner_upper_daily[i] and volume_filter and uptrend_1w
-        short_breakout = close[i] < keltner_lower_daily[i] and volume_filter and downtrend_1w
-        
-        # Exit conditions: reverse back to weekly EMA20 or trend change
-        long_exit = close[i] < ema20_1w_aligned[i] or not uptrend_1w
-        short_exit = close[i] > ema20_1w_aligned[i] or not downtrend_1w
-        
-        # Fixed position size to minimize trading frequency
+        # Fixed position size
         position_size = 0.25
         
-        if long_breakout and position != 1:
+        # Entry conditions: All timeframes aligned + volume
+        long_entry = uptrend_aligned and volume_filter
+        short_entry = downtrend_aligned and volume_filter
+        
+        # Exit conditions: Loss of alignment in any timeframe
+        long_exit = not uptrend_aligned
+        short_exit = not downtrend_aligned
+        
+        if long_entry and position != 1:
             position = 1
             signals[i] = position_size
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -position_size
         elif position == 1 and long_exit:
@@ -108,6 +104,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_keltner_breakout_volume_trend_v1"
-timeframe = "1d"
+name = "6h_12h_1d_triple_timeframe_momentum_confluence"
+timeframe = "6h"
 leverage = 1.0
