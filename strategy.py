@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_Breakout_Volume_Trend_v5
-Hypothesis: Trade breakouts of daily R3/S3 only when weekly trend is aligned (price above/below weekly pivot) and volume > 1.3x average. Exit at opposite S3/R3 level. Target: 20-30 trades/year. Works in bull (follow weekly uptrend) and bear (follow weekly downtrend).
+4h_1d_1w_Camarilla_Breakout_Volume_Regime_v5
+Hypothesis: Further reduce trade frequency by requiring volume > 2.0x average AND ADX(14) > 35 on 1d. Only trade breakouts of daily R3/S3 when weekly price is between S3 and R3 (range-bound weekly context). Exit at daily pivot. Target: 5-15 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_1w_Camarilla_Breakout_Volume_Trend_v5"
+name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -50,8 +50,64 @@ def generate_signals(prices):
     
     # Weekly pivot calculation
     pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
-    # === VOLUME AVERAGE (20-period for 4h) ===
+    # Weekly Camarilla levels
+    r3_1w = close_1w + range_1w * 1.1
+    s3_1w = close_1w - range_1w * 1.1
+    
+    # === DAILY ADX(14) FOR TREND STRENGTH ===
+    if len(df_1d) >= 14:
+        # True Range
+        tr1 = np.abs(high_1d[1:] - low_1d[1:])
+        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align with index
+        
+        # Directional Movement
+        dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+        dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+        dm_plus = np.concatenate([[np.nan], dm_plus])
+        dm_minus = np.concatenate([[np.nan], dm_minus])
+        
+        # Smoothed values
+        def smooth_wilder(arr, period):
+            result = np.full_like(arr, np.nan)
+            if len(arr) < period:
+                return result
+            # First value: simple average
+            result[period-1] = np.nanmean(arr[1:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, len(arr)):
+                if not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            return result
+        
+        atr = smooth_wilder(tr, 14)
+        dm_plus_smooth = smooth_wilder(dm_plus, 14)
+        dm_minus_smooth = smooth_wilder(dm_minus, 14)
+        
+        # DI+ and DI-
+        di_plus = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
+        di_minus = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+        
+        # DX and ADX
+        dx = np.where((di_plus + di_minus) != 0, np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+        adx = smooth_wilder(dx, 14)
+    else:
+        adx = np.full(len(df_1d), np.nan)
+    
+    # Align to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume average (20-period for 4h = ~10 hours) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
@@ -66,35 +122,34 @@ def generate_signals(prices):
         else:
             vol_avg[i] = 0.0
     
-    # Align to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # start after warmup
         # Skip if indicators not available
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or vol_avg[i] == 0.0):
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or vol_avg[i] == 0.0):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Volume confirmation: at least 1.3x average
-        vol_confirm = volume[i] > 1.3 * vol_avg[i]
+        # Volume confirmation: at least 2.0x average (stricter)
+        vol_confirm = volume[i] > 2.0 * vol_avg[i]
         
-        # Weekly trend filter: price above/below weekly pivot
-        weekly_uptrend = close[i] > pivot_1w_aligned[i]
-        weekly_downtrend = close[i] < pivot_1w_aligned[i]
+        # Trend filter: ADX > 35 indicates strong trend (stricter)
+        strong_trend = adx_aligned[i] > 35
         
-        # Breakout entries with volume and weekly trend alignment
-        long_setup = (close[i] > r3_1d_aligned[i]) and vol_confirm and weekly_uptrend
-        short_setup = (close[i] < s3_1d_aligned[i]) and vol_confirm and weekly_downtrend
+        # Weekly range-bound context: price between S3 and R3
+        weekly_range = (close[i] > s3_1w_aligned[i]) & (close[i] < r3_1w_aligned[i])
         
-        # Exit when price reaches opposite S3/R3 level (mean reversion to weekly context)
-        exit_long = close[i] < s3_1d_aligned[i]
-        exit_short = close[i] > r3_1d_aligned[i]
+        # Breakout entries at S3/R3 with volume, trend, and weekly range filters
+        long_setup = (close[i] > r3_1d_aligned[i]) and vol_confirm and strong_trend and weekly_range
+        short_setup = (close[i] < s3_1d_aligned[i]) and vol_confirm and strong_trend and weekly_range
+        
+        # Exit when price returns to daily pivot (mean reversion)
+        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = close[i] < pivot_1d_aligned[i]
+        exit_short = close[i] > pivot_1d_aligned[i]
         
         if long_setup and position != 1:
             position = 1
