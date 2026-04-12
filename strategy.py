@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_Volume_v1
-Hypothesis: Trade Camarilla pivot level breakouts (H3/L3 from daily) with volume confirmation (>1.5x 20-period average) and trend filter (ADX > 25 on daily). 
-Long when price breaks above H3 with volume and ADX>25, short when breaks below L3 with volume and ADX>25. Exit when price returns to PIVOT point or ADX drops below 20.
-Designed for 20-30 trades/year with clear rules to avoid overtrading.
+1d_1w_Donchian_Breakout_Trend_v1
+Hypothesis: Trade weekly Donchian channel breakouts (20-week high/low) on daily timeframe with trend confirmation from weekly EMA50 and volume filter. 
+Long when price breaks above weekly Donchian high with volume > 1.5x average and price above weekly EMA50. 
+Short when price breaks below weekly Donchian low with volume > 1.5x average and price below weekly EMA50.
+Exit when price crosses weekly EMA50 in opposite direction. 
+Designed for 15-25 trades/year with clear trend-following logic that works in bull (breakouts continue) and bear (breakouts fail, reverse) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Volume_v1"
-timeframe = "4h"
+name = "1d_1w_Donchian_Breakout_Trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,98 +26,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOTS AND ADX ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # === WEEKLY DATA FOR DONCHIAN CHANNEL AND EMA50 ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # PIVOT = (H + L + C) / 3
-    # H3 = PIVOT + 1.1 * (H - L) / 2
-    # L3 = PIVOT - 1.1 * (H - L) / 2
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    pivot = typical_price
-    hl_range = high_1d - low_1d
-    h3 = pivot + 1.1 * hl_range / 2
-    l3 = pivot - 1.1 * hl_range / 2
+    # Calculate weekly Donchian channels (20-period)
+    donchian_period = 20
+    donchian_high = pd.Series(high_1w).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Calculate ADX (14-period) for trend filter
-    plus_dm = np.zeros_like(high_1d)
-    minus_dm = np.zeros_like(low_1d)
-    tr = np.zeros_like(high_1d)
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(high_1d[i] - high_1d[i-1], 0)
-        minus_dm[i] = max(low_1d[i-1] - low_1d[i], 0)
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - close_1d[i-1]), 
-                   abs(low_1d[i] - close_1d[i-1]))
+    # Calculate weekly average volume for volume filter
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
     
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align weekly indicators to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    period = 14
-    tr_smooth = wilders_smooth(tr, period)
-    plus_dm_smooth = wilders_smooth(plus_dm, period)
-    minus_dm_smooth = wilders_smooth(minus_dm, period)
-    
-    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
-    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, period)
-    
-    # Align Camarilla levels and ADX to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # === 4H INDICATORS ===
-    # Volume filter: 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === DAILY INDICATORS ===
+    # Daily average volume for volume confirmation
+    vol_ma_daily = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_1w_aligned[i]) or 
+            np.isnan(vol_ma_daily[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 25 indicates strong trend
-        trending = adx_aligned[i] > 25
+        # Volume strength: current daily volume > 1.5x weekly average volume
+        strong_volume = volume[i] > (vol_ma_1w_aligned[i] * 1.5)
         
-        # Volume strength
-        strong_volume = volume[i] > (vol_ma[i] * 1.5)
-        
-        # Long: price breaks above H3 with volume and trend
-        long_signal = (close[i] > h3_aligned[i] and 
+        # Long: price breaks above weekly Donchian high with volume and above weekly EMA50
+        long_signal = (close[i] > donchian_high_aligned[i] and 
                       strong_volume and 
-                      trending)
+                      close[i] > ema50_1w_aligned[i])
         
-        # Short: price breaks below L3 with volume and trend
-        short_signal = (close[i] < l3_aligned[i] and 
+        # Short: price breaks below weekly Donchian low with volume and below weekly EMA50
+        short_signal = (close[i] < donchian_low_aligned[i] and 
                        strong_volume and 
-                       trending)
+                       close[i] < ema50_1w_aligned[i])
         
-        # Exit: price returns to PIVOT point or trend weakens
-        exit_long = (position == 1 and 
-                    (close[i] < pivot_aligned[i] or adx_aligned[i] < 20))
-        exit_short = (position == -1 and 
-                     (close[i] > pivot_aligned[i] or adx_aligned[i] < 20))
+        # Exit: price crosses weekly EMA50 in opposite direction
+        exit_long = (position == 1 and close[i] < ema50_1w_aligned[i])
+        exit_short = (position == -1 and close[i] > ema50_1w_aligned[i])
         
         # Execute trades
         if long_signal and position != 1:
