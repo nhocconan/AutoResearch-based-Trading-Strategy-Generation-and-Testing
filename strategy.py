@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_donchian_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_donchian_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,23 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_12h = df_12h['close'].values
+    # Calculate 50-period EMA on 12h data for trend
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian channels (20-day high/low)
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period Donchian channels on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # Volume filter - 20-period average on 12h data
+    # Volume filter: 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -43,21 +43,23 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout signals with volume confirmation
-        # Long: price breaks above 20-day high
-        long_signal = close[i] > donchian_high_aligned[i] and volume_ok[i]
-        # Short: price breaks below 20-day low
-        short_signal = close[i] < donchian_low_aligned[i] and volume_ok[i]
+        # Trend filter: price above/below 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Exit when price returns to the midpoint of the channel
-        donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2.0
-        exit_long = close[i] < donchian_mid
-        exit_short = close[i] > donchian_mid
+        # Breakout signals with volume confirmation and trend filter
+        long_signal = close[i] > donchian_upper[i] and volume_ok[i] and uptrend
+        short_signal = close[i] < donchian_lower[i] and volume_ok[i] and downtrend
+        
+        # Exit when price crosses back through the Donchian middle
+        donchian_middle = (donchian_upper[i] + donchian_lower[i]) / 2.0
+        exit_long = close[i] < donchian_middle
+        exit_short = close[i] > donchian_middle
         
         # Execute trades
         if long_signal and position != 1:
