@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_1w_camarilla_volume_trend"
-timeframe = "12h"
+name = "6h_1w_donchian_breakout_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,68 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels (based on previous day)
-    # H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    H4 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    L4 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    
-    # Get 1w data for trend filter
+    # Get 1w data for Donchian channels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Align to 12h timeframe
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 20-period Donchian channels on weekly
+    # Upper band: highest high over last 20 weeks
+    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low over last 20 weeks
+    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter - 30-period average on 12h data
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_ok = volume > vol_ma
+    # Align Donchian channels to 6h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate 20-period volume average on daily
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Get current 6h volume for comparison
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
+    for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend from weekly EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Volume filter: current 6h volume > 1d 20-period average volume
+        volume_filter = volume[i] > vol_ma_1d_aligned[i]
         
-        # Camarilla breakout with volume confirmation
-        # Long: Break above H4 in uptrend
-        long_signal = close[i] > H4_aligned[i] and uptrend and volume_ok[i]
-        # Short: Break below L4 in downtrend
-        short_signal = close[i] < L4_aligned[i] and downtrend and volume_ok[i]
+        # Breakout conditions
+        breakout_up = close[i] > donchian_upper_aligned[i] and volume_filter
+        breakout_down = close[i] < donchian_lower_aligned[i] and volume_filter
         
-        # Exit when price returns to mid-point (pivot)
-        pivot = (H4_aligned[i] + L4_aligned[i]) / 2
-        exit_long = close[i] < pivot
-        exit_short = close[i] > pivot
+        # Exit conditions: price crosses back through the opposite band
+        exit_long = close[i] < donchian_lower_aligned[i]
+        exit_short = close[i] > donchian_upper_aligned[i]
         
         # Execute trades
-        if long_signal and position != 1:
+        if breakout_up and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_signal and position != -1:
+        elif breakout_down and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
