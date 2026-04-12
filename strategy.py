@@ -1,97 +1,117 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_Pullback_v1
-Hypothesis: On 1h timeframe, buy pullbacks to Camarilla L3 in 4h uptrend (price > 1d EMA200) and sell rallies to H3 in 4h downtrend (price < 1d EMA200).
-Trades only during active session (08-20 UTC) to reduce noise. Uses 1h for precise entry timing, 4h/1d for trend and structure.
-Target: 60-150 trades over 4 years (15-37/year) with low turnover to minimize fee drag.
+6h_1w_1d_ElderRay_Pullback_v1
+Hypothesis: On 6h timeframe, buy pullbacks to weekly EMA20 during bull regimes (weekly close > weekly EMA50) and sell pullbacks during bear regimes (weekly close < weekly EMA50). Uses Elder Ray (bull/bear power) to confirm momentum alignment. Designed for low trade frequency by requiring trend alignment and pullback to EMA20. Works in bull via long pullbacks in uptrends and in bear via short pullbacks in downtrends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_Pullback_v1"
-timeframe = "1h"
+name = "6h_1w_1d_ElderRay_Pullback_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # --- 4h data for Camarilla levels and trend ---
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    # Weekly EMA20 and EMA50
+    ema20_1w = np.zeros_like(close_1w)
+    ema50_1w = np.zeros_like(close_1w)
+    alpha20 = 2 / (20 + 1)
+    alpha50 = 2 / (50 + 1)
+    ema20_1w[0] = close_1w[0]
+    ema50_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        ema20_1w[i] = alpha20 * close_1w[i] + (1 - alpha20) * ema20_1w[i-1]
+        ema50_1w[i] = alpha50 * close_1w[i] + (1 - alpha50) * ema50_1w[i-1]
     
-    # Camarilla levels using prior 4h bar
-    range_4h = high_4h - low_4h
-    close_prev = np.concatenate([[close_4h[0]], close_4h[:-1]])  # shift(1)
+    # Weekly trend: bull if close > EMA50, bear if close < EMA50
+    weekly_bull = close_1w > ema50_1w
+    weekly_bear = close_1w < ema50_1w
     
-    h3 = close_prev + (range_4h * 1.1 / 4)
-    l3 = close_prev - (range_4h * 1.1 / 4)
+    # Align weekly trend to 6m
+    weekly_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_bull.astype(float))
+    weekly_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_bear.astype(float))
     
-    # --- 1d data for trend filter (EMA200) ---
+    # === DAILY ELDER RAY ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # EMA200 with proper initialization
-    ema_200 = np.full_like(close_1d, np.nan)
-    alpha = 2 / (200 + 1)
-    for i in range(len(close_1d)):
-        if i == 0:
-            ema_200[i] = close_1d[i]
-        elif np.isnan(ema_200[i-1]):
-            ema_200[i] = close_1d[i]
-        else:
-            ema_200[i] = alpha * close_1d[i] + (1 - alpha) * ema_200[i-1]
     
-    # --- Align HTF data to 1h ---
-    h3_aligned = align_htf_to_ltf(prices, df_4h, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_4h, l3)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # Daily EMA13 for Elder Ray
+    ema13_1d = np.zeros_like(close_1d)
+    alpha13 = 2 / (13 + 1)
+    ema13_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        ema13_1d[i] = alpha13 * close_1d[i] + (1 - alpha13) * ema13_1d[i-1]
     
-    # --- Session filter: 08-20 UTC ---
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
+    
+    # Align Elder Ray to 6m
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # === 6H EMA20 FOR PULLBACK ENTRY ===
+    ema20_6h = np.zeros(n)
+    alpha20 = 2 / (20 + 1)
+    ema20_6h[0] = close[0]
+    for i in range(1, n):
+        ema20_6h[i] = alpha20 * close[i] + (1 - alpha20) * ema20_6h[i-1]
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(200, n):
-        # Skip if not in session or data not ready
-        if not in_session[i] or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(ema200_aligned[i]):
-            signals[i] = 0.0
+    for i in range(50, n):  # start after warmup
+        # Skip if indicators not available
+        if (np.isnan(weekly_bull_aligned[i]) or np.isnan(weekly_bear_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema20_6h[i])):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend: 4h uptrend = price > 1d EMA200, downtrend = price < 1d EMA200
-        uptrend = close[i] > ema200_aligned[i]
-        downtrend = close[i] < ema200_aligned[i]
+        # Entry conditions: pullback to EMA20 with Elder Ray confirmation
+        long_setup = (weekly_bull_aligned[i] > 0.5 and 
+                     close[i] <= ema20_6h[i] * 1.005 and  # within 0.5% above EMA20
+                     bull_power_aligned[i] > 0)  # bullish momentum
         
-        # Pullback entries: buy near L3 in uptrend, sell near H3 in downtrend
-        long_setup = uptrend and (low[i] <= l3_aligned[i]) and (close[i] > l3_aligned[i])
-        short_setup = downtrend and (high[i] >= h3_aligned[i]) and (close[i] < h3_aligned[i])
+        short_setup = (weekly_bear_aligned[i] > 0.5 and 
+                      close[i] >= ema20_6h[i] * 0.995 and  # within 0.5% below EMA20
+                      bear_power_aligned[i] < 0)  # bearish momentum
         
-        # Mean reversion exit: reverse at opposite Camarilla level
-        exit_long = downtrend and (high[i] >= h3_aligned[i])
-        exit_short = uptrend and (low[i] <= l3_aligned[i])
+        # Exit conditions: reverse when Elder Ray diverges or price extends too far
+        exit_long = (weekly_bull_aligned[i] < 0.5 or 
+                    bear_power_aligned[i] < 0 or  # bearish momentum appears
+                    close[i] >= ema20_6h[i] * 1.02)  # extended 2% above EMA20
+        
+        exit_short = (weekly_bear_aligned[i] < 0.5 or 
+                     bull_power_aligned[i] > 0 or  # bullish momentum appears
+                     close[i] <= ema20_6h[i] * 0.98)  # extended 2% below EMA20
         
         if long_setup and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_setup and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -99,6 +119,7 @@ def generate_signals(prices):
             position = 0
             signals[i] = 0.0
         else:
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            # Hold current position
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
