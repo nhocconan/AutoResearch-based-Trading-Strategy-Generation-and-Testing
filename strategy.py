@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-12h_1d_keltner_volatility_breakout
-Hypothesis: 12-hour strategy using Keltner Channel breakouts with 1-day trend filter and volume confirmation.
-Works in bull/bear by requiring Keltner breakouts aligned with daily trend, using volatility to filter entries.
-Target: 12-30 trades/year (48-120 total over 4 years) to minimize fee drag.
+4h_1d_camarilla_breakout_volume_v3
+Hypothesis: 4-hour strategy using daily Camarilla pivot levels for breakout entries with volume confirmation and trend alignment.
+Uses daily EMA200 for trend filter to work in both bull/bear markets. Targets 20-30 trades/year (80-120 total over 4 years).
 """
 
 import numpy as np
@@ -20,55 +19,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily data for trend and Camarilla
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA100 for trend filter
-    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    # Daily EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 12h Keltner Channel (20-period EMA, 2*ATR)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Previous daily bar's range for Camarilla (using previous completed day)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
     
-    upper = ema20 + 2 * atr
-    lower = ema20 - 2 * atr
+    range_1d = prev_high_1d - prev_low_1d
+    # Resistance levels
+    r3 = prev_close_1d + range_1d * 1.1 / 2
+    r4 = prev_close_1d + range_1d * 1.1
+    # Support levels
+    s3 = prev_close_1d - range_1d * 1.1 / 2
+    s4 = prev_close_1d - range_1d * 1.1
     
-    # Volume confirmation: volume > 1.5x 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(ema20[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: price above EMA100 (uptrend) AND breaks above upper Keltner with volume
-        if (close[i] > ema100_1d_aligned[i] and close[i] > upper[i] and vol_confirm[i] and position != 1):
+        # Long entry: price > EMA200 (uptrend) AND close breaks above R4 with volume
+        if (close[i] > ema200_1d_aligned[i] and close[i] > r4_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price below EMA100 (downtrend) AND breaks below lower Keltner with volume
-        elif (close[i] < ema100_1d_aligned[i] and close[i] < lower[i] and vol_confirm[i] and position != -1):
+        # Short entry: price < EMA200 (downtrend) AND close breaks below S4 with volume
+        elif (close[i] < ema200_1d_aligned[i] and close[i] < s4_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or price crosses back to EMA20
-        elif position == 1 and close[i] < ema20[i]:
+        # Exit: reverse signal or close crosses back to opposite S3/R3
+        elif position == 1 and close[i] < s3_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > ema20[i]:
+        elif position == -1 and close[i] > r3_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
@@ -82,6 +92,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_keltner_volatility_breakout"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_volume_v3"
+timeframe = "4h"
 leverage = 1.0
