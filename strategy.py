@@ -8,93 +8,108 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-    # Only trade breakouts aligned with weekly trend to avoid counter-trend whipsaws
+    # Hypothesis: 1h Camarilla H3/L3 breakout with 4h trend filter and volume confirmation
+    # Only trade breakouts aligned with 4h trend to avoid counter-trend whipsaws
     # Volume spike (>2.0x 24-period average) confirms institutional participation
-    # Designed for very low frequency (target: 15-25/year) to minimize fee drag in 12h timeframe
-    # Works in bull/bear markets by only trading with the dominant weekly trend
+    # Session filter (08-20 UTC) reduces noise trades
+    # Designed for low frequency (target: 15-37/year) to minimize fee drag in 1h timeframe
+    # Works in bull/bear markets by only trading with the dominant 4h trend
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Camarilla calculation (HTF for direction)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Calculate previous 20-bar Donchian channels (using completed 12h bars)
-    # Upper = max(high_prev_20), Lower = min(low_prev_20)
-    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate previous 4h bar's Camarilla levels (H3, L3)
+    # H3 = close_prev + 1.1 * (high_prev - low_prev) / 4
+    # L3 = close_prev - 1.1 * (high_prev - low_prev) / 4
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 4h EMA50 for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 12h volume for confirmation
-    vol_ma_12h = np.full(len(df_12h), np.nan)
-    for i in range(24, len(df_12h)):
-        vol_ma_12h[i] = np.mean(volume_12h[i-24:i])
+    # Get 4h volume for confirmation (>2.0x 24-period average)
+    vol_ma_4h = np.full(len(df_4h), np.nan)
+    for i in range(24, len(df_4h)):
+        vol_ma_4h[i] = np.mean(volume_4h[i-24:i])
+    volume_spike_4h = volume_4h > (2.0 * vol_ma_4h)
     
-    # Volume confirmation: volume > 2.0 * 24-period average (12h)
-    volume_spike_12h = volume_12h > (2.0 * vol_ma_12h)
+    # Align all indicators to LTF (1h)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_l3)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
     
-    # Align all indicators to LTF
-    highest_20_aligned = align_htf_to_ltf(prices, df_12h, highest_20)
-    lowest_20_aligned = align_htf_to_ltf(prices, df_12h, lowest_20)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike_12h)
+    # Session filter: 08-20 UTC (pre-compute hours array)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        # Skip if data not ready
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_spike_aligned[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > highest_20_aligned[i]
-        short_breakout = close[i] < lowest_20_aligned[i]
+        long_breakout = close[i] > camarilla_h3_aligned[i]
+        short_breakout = close[i] < camarilla_l3_aligned[i]
         
-        # 1w trend filter
-        bullish_trend = close[i] > ema50_1w_aligned[i]
-        bearish_trend = close[i] < ema50_1w_aligned[i]
+        # 4h trend filter
+        bullish_trend = close[i] > ema50_4h_aligned[i]
+        bearish_trend = close[i] < ema50_4h_aligned[i]
         
         # Entry logic: Breakout + trend alignment + volume confirmation
         long_entry = False
         short_entry = False
         
-        # Long: bullish breakout above upper Donchian + bullish weekly trend + volume spike
+        # Long: bullish breakout above H3 + bullish 4h trend + volume spike
         if long_breakout and bullish_trend:
             long_entry = volume_spike_aligned[i]
-        # Short: bearish breakout below lower Donchian + bearish weekly trend + volume spike
+        # Short: bearish breakout below L3 + bearish 4h trend + volume spike
         elif short_breakout and bearish_trend:
             short_entry = volume_spike_aligned[i]
         
-        # Exit logic: opposite Donchian breakout or trend reversal
-        long_exit = (close[i] < lowest_20_aligned[i]) or (not bullish_trend)
-        short_exit = (close[i] > highest_20_aligned[i]) or (not bearish_trend)
+        # Exit logic: price returns to Camarilla pivot level (mean reversion)
+        # Camarilla pivot = (high_prev + low_prev + close_prev) / 3
+        camarilla_pivot = (prev_high + prev_low + prev_close) / 3
+        camarilla_pivot_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pivot)
+        
+        # Exit when price returns to pivot level (within 0.1% tolerance)
+        pivot_distance = abs(close[i] - camarilla_pivot_aligned[i]) / close[i]
+        at_pivot = pivot_distance < 0.001
+        
+        long_exit = at_pivot or not bullish_trend
+        short_exit = at_pivot or not bearish_trend
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -104,14 +119,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "12h_1w_donchian_breakout_ema50_volume_v1"
-timeframe = "12h"
+name = "1h_4h_camarilla_h3l3_trend_volume_session_v1"
+timeframe = "1h"
 leverage = 1.0
