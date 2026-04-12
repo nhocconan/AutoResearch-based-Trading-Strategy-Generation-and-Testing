@@ -3,71 +3,66 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h_1d_engulfing_reversal_v1
-# Engulfing candle reversal on 6h timeframe confirmed by 1d trend (EMA21).
-# Works in both bull and bear markets by catching reversals at swing points.
-# Low trade frequency expected (<30/year) due to strict pattern + trend filter.
-name = "6h_1d_engulfing_reversal_v1"
-timeframe = "6h"
+# Hypothesis: 12h_1d_donchian_volume_breakout_v1
+# Donchian(20) breakout on 12h timeframe with volume confirmation and 1d trend filter (EMA50).
+# Works in both bull and bear markets by trading breakouts with trend alignment.
+# Low trade frequency expected (15-30/year) due to strict breakout + volume + trend conditions.
+name = "12h_1d_donchian_volume_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA21)
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA21 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA21 to 6h timeframe
-    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Align 1d EMA50 to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Calculate Donchian channels (20-period) on 12h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate volume moving average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        # Skip if EMA not ready
-        if np.isnan(ema_21_aligned[i]):
+    for i in range(20, n):
+        # Skip if indicators not ready
+        if np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Detect bullish engulfing: current green candle fully engulfs previous red candle
-        bullish_engulf = (
-            close[i] > open_[i] and  # current candle is green
-            close[i-1] < open_[i-1] and  # previous candle is red
-            close[i] >= open_[i-1] and  # current close >= previous open
-            open_[i] <= close[i-1]  # current open <= previous close
-        )
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Detect bearish engulfing: current red candle fully engulfs previous green candle
-        bearish_engulf = (
-            close[i] < open_[i] and  # current candle is red
-            close[i-1] > open_[i-1] and  # previous candle is green
-            close[i] <= open_[i-1] and  # current close <= previous open
-            open_[i] >= close[i-1]  # current open >= previous close
-        )
+        # Breakout conditions
+        bullish_break = close[i] > highest_high[i-1] and vol_confirm
+        bearish_break = close[i] < lowest_low[i-1] and vol_confirm
         
-        # Trend filter: only take longs in uptrend (price > EMA21), shorts in downtrend (price < EMA21)
-        # But allow counter-trend entries at extreme reversals (strong engulfing)
-        # Actually, we'll use trend as confirmation: engulfing in direction of trend
-        bullish_signal = bullish_engulf and close[i] > ema_21_aligned[i]
-        bearish_signal = bearish_engulf and close[i] < ema_21_aligned[i]
+        # Trend filter: only take longs in uptrend (price > EMA50), shorts in downtrend (price < EMA50)
+        bullish_signal = bullish_break and close[i] > ema_50_aligned[i]
+        bearish_signal = bearish_break and close[i] < ema_50_aligned[i]
         
-        # Exit conditions: reverse signal or opposite engulfing
-        exit_long = bearish_engulf  # exit long on bearish engulfing
-        exit_short = bullish_engulf  # exit short on bullish engulfing
+        # Exit conditions: opposite breakout or trend reversal
+        exit_long = close[i] < ema_50_aligned[i]  # exit long when price crosses below EMA50
+        exit_short = close[i] > ema_50_aligned[i]  # exit short when price crosses above EMA50
         
         if bullish_signal and position != 1:
             position = 1
