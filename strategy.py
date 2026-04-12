@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-12h_1d_Stochastic_Bollinger_Trend_v1
-Hypothesis: 12h StochRSI + Bollinger Bands with 1d ADX trend filter. 
-StochRSI identifies overbought/oversold extremes within Bollinger Bands for mean reversion.
-ADX filter ensures we only trade in trending markets to avoid whipsaws in ranging conditions.
-Designed for low trade frequency (12-37/year) with clear entry/exit rules to minimize fee drag.
-Works in both bull and bear markets by trading pullbacks in established trends.
+4h_12h_Camarilla_Pivot_Breakout_Volume_Filter
+Hypothesis: 4h Camarilla pivot breakouts with 12h volume confirmation and 12h ADX trend filter.
+Camarilla levels provide high-probability reversal/breakout points. Volume confirms institutional interest.
+ADX ensures we only trade in trending markets, avoiding whipsaws in ranges.
+Designed for 4h timeframe with target 20-50 trades/year to minimize fee drag.
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Stochastic_Bollinger_Trend_v1"
-timeframe = "12h"
+name = "4h_12h_Camarilla_Pivot_Breakout_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price arrays
@@ -27,151 +27,118 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE before loop for ADX filter
+    # Load daily data for Camarilla pivots (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands (20, 2) on 12h close
-    bb_length = 20
-    bb_mult = 2.0
-    basis = np.zeros(n)
-    dev = np.zeros(n)
-    upper = np.zeros(n)
-    lower = np.zeros(n)
+    # Calculate Camarilla levels for each day
+    # Based on previous day's OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Simple moving average for basis
-    for i in range(bb_length - 1, n):
-        basis[i] = np.mean(close[i - bb_length + 1:i + 1])
+    # Camarilla multipliers
+    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
+    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    rng = high_1d - low_1d
+    r1 = close_1d + rng * 1.1 / 12
+    r2 = close_1d + rng * 1.1 / 6
+    r3 = close_1d + rng * 1.1 / 4
+    r4 = close_1d + rng * 1.1 / 2
+    s1 = close_1d - rng * 1.1 / 12
+    s2 = close_1d - rng * 1.1 / 6
+    s3 = close_1d - rng * 1.1 / 4
+    s4 = close_1d - rng * 1.1 / 2
     
-    # Standard deviation for bands
-    for i in range(bb_length - 1, n):
-        dev[i] = np.std(close[i - bb_length + 1:i + 1])
+    # Combine all levels
+    camarilla_levels = np.column_stack([r4, r3, r2, r1, s1, s2, s3, s4])
     
-    upper = basis + bb_mult * dev
-    lower = basis - bb_mult * dev
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_aligned = align_htf_to_ltf(prices, df_1d, camarilla_levels)
     
-    # Calculate StochRSI (14, 14, 3, 3) on 12h close
-    rsi_length = 14
-    stoch_length = 14
-    k_smooth = 3
-    d_smooth = 3
+    # Load 12h data for volume and ADX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # RSI calculation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Volume average (20-period)
+    vol_12h = df_12h['volume'].values
+    vol_avg = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[rsi_length] = np.mean(gain[1:rsi_length + 1])
-    avg_loss[rsi_length] = np.mean(loss[1:rsi_length + 1])
+    # ADX calculation (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    for i in range(rsi_length + 1, n):
-        avg_gain[i] = (avg_gain[i - 1] * (rsi_length - 1) + gain[i]) / rsi_length
-        avg_loss[i] = (avg_loss[i - 1] * (rsi_length - 1) + loss[i]) / rsi_length
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Stochastic of RSI
-    stoch_rsi = np.zeros(n)
-    for i in range(stoch_length - 1, n):
-        min_rsi = np.min(rsi[i - stoch_length + 1:i + 1])
-        max_rsi = np.max(rsi[i - stoch_length + 1:i + 1])
-        if max_rsi - min_rsi != 0:
-            stoch_rsi[i] = (rsi[i] - min_rsi) / (max_rsi - min_rsi) * 100
-        else:
-            stoch_rsi[i] = 50.0
-    
-    # Smooth K and D
-    k = np.zeros(n)
-    d = np.zeros(n)
-    for i in range(k_smooth - 1, n):
-        k[i] = np.mean(stoch_rsi[i - k_smooth + 1:i + 1])
-    for i in range(d_smooth - 1, n):
-        d[i] = np.mean(k[i - d_smooth + 1:i + 1])
-    
-    # Calculate ADX (14) on daily data for trend strength
     # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
     # Directional Movement
-    dm_plus = np.where((df_1d['high'] - df_1d['high'].shift(1)) > (df_1d['low'].shift(1) - df_1d['low']),
-                       np.maximum(df_1d['high'] - df_1d['high'].shift(1), 0), 0)
-    dm_minus = np.where((df_1d['low'].shift(1) - df_1d['low']) > (df_1d['high'] - df_1d['high'].shift(1)),
-                        np.maximum(df_1d['low'].shift(1) - df_1d['low'], 0), 0)
+    up_move = high_12h - np.roll(high_12h, 1)
+    down_move = np.roll(low_12h, 1) - low_12h
+    up_move[0] = 0
+    down_move[0] = 0
+    up_move = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    down_move = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
     # Smoothed values
-    tr_period = 14
-    atr = np.zeros(len(df_1d))
-    dm_plus_smooth = np.zeros(len(df_1d))
-    dm_minus_smooth = np.zeros(len(df_1d))
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    up_sum = pd.Series(up_move).rolling(window=14, min_periods=14).sum().values
+    down_sum = pd.Series(down_move).rolling(window=14, min_periods=14).sum().values
     
-    # Initial values
-    atr[tr_period] = np.mean(tr[:tr_period + 1])
-    dm_plus_smooth[tr_period] = np.mean(dm_plus[:tr_period + 1])
-    dm_minus_smooth[tr_period] = np.mean(dm_minus[:tr_period + 1])
-    
-    # Wilder's smoothing
-    for i in range(tr_period + 1, len(df_1d)):
-        atr[i] = (atr[i - 1] * (tr_period - 1) + tr[i]) / tr_period
-        dm_plus_smooth[i] = (dm_plus_smooth[i - 1] * (tr_period - 1) + dm_plus[i]) / tr_period
-        dm_minus_smooth[i] = (dm_minus_smooth[i - 1] * (tr_period - 1) + dm_minus[i]) / tr_period
-    
-    # Directional Indicators
-    plus_di = np.where(atr != 0, dm_plus_smooth / atr * 100, 0)
-    minus_di = np.where(atr != 0, dm_minus_smooth / atr * 100, 0)
+    # DI+ and DI-
+    plus_di = 100 * up_sum / tr_sum
+    minus_di = 100 * down_sum / tr_sum
     
     # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = np.zeros(len(df_1d))
-    adx[tr_period * 2 - 1] = np.mean(dx[:tr_period * 2])
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    for i in range(tr_period * 2, len(df_1d)):
-        adx[i] = (adx[i - 1] * (tr_period - 1) + dx[i]) / tr_period
-    
-    # Align ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 12h indicators to 4h timeframe
+    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):  # Start after warmup period
-        # Skip if any required data is invalid
-        if (np.isnan(d[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i])):
+    for i in range(200, n):  # Start after warmup
+        # Skip if any data is invalid
+        if (np.isnan(vol_avg_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(camarilla_aligned[i, 0]) or np.isnan(camarilla_aligned[i, 7])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending_market = adx_aligned[i] > 25
+        # Current Camarilla levels (from previous day)
+        r4, r3, r2, r1, s1, s2, s3, s4 = camarilla_aligned[i]
         
-        # StochRSI signals: oversold < 20, overbought > 80
-        stoch_oversold = d[i] < 20
-        stoch_overbought = d[i] > 80
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > vol_avg_aligned[i] * 1.5
         
-        # Bollinger Band position
-        price_above_upper = close[i] > upper[i]
-        price_below_lower = close[i] < lower[i]
-        price_in_bands = lower[i] <= close[i] <= upper[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Entry conditions: StochRSI extreme + price at Bollinger Band + trend
-        long_entry = stoch_oversold and price_below_lower and trending_market
-        short_entry = stoch_overbought and price_above_upper and trending_market
+        # Breakout conditions
+        # Long: price breaks above R4 with volume and trend
+        long_breakout = (close[i] > r4) and volume_confirm and strong_trend
+        # Short: price breaks below S4 with volume and trend
+        short_breakout = (close[i] < s4) and volume_confirm and strong_trend
         
-        # Exit conditions: StochRSI returns to middle or trend weakens
-        long_exit = (d[i] > 50 or adx_aligned[i] < 20)
-        short_exit = (d[i] < 50 or adx_aligned[i] < 20)
+        # Exit conditions: opposite breakout or loss of trend/volume
+        long_exit = (close[i] < r3) or (adx_aligned[i] < 20) or (volume[i] < vol_avg_aligned[i] * 0.8)
+        short_exit = (close[i] > s3) or (adx_aligned[i] < 20) or (volume[i] < vol_avg_aligned[i] * 0.8)
         
         # Priority: entry > exit > hold
-        if long_entry and position != 1:
+        if long_breakout and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_entry and position != -1:
+        elif short_breakout and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
