@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-6h_1d_volume_weighted_rsi_mean_reversion
-Hypothesis: Mean reversion on 6-hour timeframe using volume-weighted RSI(14) from 1-day timeframe.
-In ranging markets (2025+), price tends to revert to VWAP. Volume-weighted RSI identifies
-overextended conditions with institutional participation. Only trade when volume confirms.
-Uses 1-day VWAP as dynamic mean and volume-weighted RSI extremes for entry.
-Designed for low frequency (15-25 trades/year) to minimize fee drift in choppy markets.
-Works in both bull/bear by fading extremes regardless of trend direction.
+4h_1d_camarilla_reversal_v1
+Hypothesis: 4-hour strategy using daily Camarilla pivot levels for mean-reversion entries in both bull and bear markets.
+Goes long at L3 support and short at H3 resistance with volume confirmation and volatility filter.
+Designed for low trade frequency (<40/year) to minimize fee drag and work in ranging markets.
 """
 
 import numpy as np
@@ -15,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,73 +20,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for VWAP and volume-weighted RSI
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1-day VWAP (volume-weighted average price)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
-    vwap_denominator = np.cumsum(volume_1d)
-    vwap_1d = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, typical_price_1d)
+    # Calculate daily Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # L3 = C - (H - L) * 1.1 / 2
+    # H3 = C + (H - L) * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    L3_1d = close_1d - (range_1d * 1.1 / 2.0)
+    H3_1d = close_1d + (range_1d * 1.1 / 2.0)
     
-    # Calculate volume-weighted RSI(14) on 1-day timeframe
-    # Weight price changes by volume
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    weighted_gain = np.where(delta > 0, delta * volume_1d, 0.0)
-    weighted_loss = np.where(delta < 0, -delta * volume_1d, 0.0)
+    # Align to 4h timeframe
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, L3_1d)
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, H3_1d)
     
-    # Smoothed weighted gains/losses using Wilder's smoothing
-    avg_weighted_gain = np.zeros_like(weighted_gain)
-    avg_weighted_loss = np.zeros_like(weighted_loss)
+    # Calculate 4-period RSI for overbought/oversold
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    for i in range(1, len(weighted_gain)):
-        if i < 14:
-            # Simple average for first 14 periods
-            avg_weighted_gain[i] = np.mean(weighted_gain[max(0, i-13):i+1])
-            avg_weighted_loss[i] = np.mean(weighted_loss[max(0, i-13):i+1])
-        else:
-            # Wilder's smoothing
-            avg_weighted_gain[i] = (avg_weighted_gain[i-1] * 13 + weighted_gain[i]) / 14
-            avg_weighted_loss[i] = (avg_weighted_loss[i-1] * 13 + weighted_loss[i]) / 14
-    
-    # Avoid division by zero
-    rs = np.where(avg_weighted_loss != 0, avg_weighted_gain / avg_weighted_loss, 0)
-    vw_rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Align VWAP and volume-weighted RSI to 6h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    vw_rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, vw_rsi_1d)
+    # Calculate 20-period average volume for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if data not ready
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vw_rsi_1d_aligned[i])):
+        if (np.isnan(L3_1d_aligned[i]) or np.isnan(H3_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Mean reversion signals based on volume-weighted RSI extremes
-        # Oversold: VW-RSI < 25 -> long
-        # Overbought: VW-RSI > 75 -> short
-        if vw_rsi_1d_aligned[i] < 25 and close[i] < vwap_1d_aligned[i]:
-            # Long: price below VWAP and oversold
-            signals[i] = 0.25
-        elif vw_rsi_1d_aligned[i] > 75 and close[i] > vwap_1d_aligned[i]:
-            # Short: price above VWAP and overbought
-            signals[i] = -0.25
-        else:
-            # No clear signal - stay flat or hold
+        # Volume filter: require volume above average
+        vol_ok = volume[i] > vol_ma[i]
+        
+        # Long at L3 support with oversold RSI
+        if vol_ok and low[i] <= L3_1d_aligned[i] * 1.002 and rsi[i] < 30:
+            if position != 1:
+                position = 1
+                signals[i] = 0.25
+            else:
+                signals[i] = 0.25
+        # Short at H3 resistance with overbought RSI
+        elif vol_ok and high[i] >= H3_1d_aligned[i] * 0.998 and rsi[i] > 70:
+            if position != -1:
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = -0.25
+        # Exit on middle of range (pivot) or RSI normalization
+        elif position == 1 and (close[i] >= pivot_1d[i] * 0.998 or rsi[i] > 50):
+            position = 0
             signals[i] = 0.0
+        elif position == -1 and (close[i] <= pivot_1d[i] * 1.002 or rsi[i] < 50):
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
     
     return signals
 
-name = "6h_1d_volume_weighted_rsi_mean_reversion"
-timeframe = "6h"
+name = "4h_1d_camarilla_reversal_v1"
+timeframe = "4h"
 leverage = 1.0
