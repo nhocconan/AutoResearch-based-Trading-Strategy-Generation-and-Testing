@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_trend_filter_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_breakout_volume_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,15 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 50-period EMA on weekly data for trend
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 50-period EMA on 12h data for trend
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -47,7 +47,7 @@ def generate_signals(prices):
     atr_ma_20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
     atr_ratio = atr_14 / atr_ma_20
     
-    # Align ATR ratio to 12h timeframe
+    # Align ATR ratio to 4h timeframe
     atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Volatility-based position sizing (inverse volatility)
@@ -68,11 +68,11 @@ def generate_signals(prices):
         camarilla_high[i] = C + ((H - L) * 1.1 / 2)  # H3 level
         camarilla_low[i] = C - ((H - L) * 1.1 / 2)   # L3 level
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
     camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
-    # Volume filter: current volume > 20-period average (on 12h data)
+    # Volume filter: current volume > 20-period average (on 4h data)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
@@ -83,20 +83,20 @@ def generate_signals(prices):
     for i in range(200, n):
         # Skip if not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(position_size[i]) or np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(volume_ok[i]) or np.isnan(position_size[i]) or np.isnan(ema_50_12h_aligned[i])):
             signals[i] = 0.0 if position == 0 else (position_size[i] if position == 1 else -position_size[i])
             continue
         
-        # Determine trend from weekly EMA
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Determine trend from 12h EMA
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         # Breakout conditions with volume confirmation and trend filter
         breakout_up = close[i] > camarilla_high_aligned[i]
         breakout_down = close[i] < camarilla_low_aligned[i]
         vol_ok = volume_ok[i]
         
-        # Entry signals - only trade in direction of weekly trend
+        # Entry signals - only trade in direction of 12h trend
         long_signal = breakout_up and vol_ok and uptrend
         short_signal = breakout_down and vol_ok and downtrend
         
