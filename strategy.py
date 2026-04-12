@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_1d_WeeklyPivot_DonchianBreakout_v1
-Hypothesis: 6-hour breakout of weekly Donchian channel with directional filter from daily pivot point.
-In bull markets: price above daily pivot, break above weekly Donchian high -> long.
-In bear markets: price below daily pivot, break below weekly Donchian low -> short.
-Uses volume confirmation to avoid false breakouts. Designed for low-frequency, high-probability trades.
-Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+12h_1w_KAMA_Trend_Follow
+Hypothesis: 12-hour KAMA (Kaufman Adaptive Moving Average) trend with weekly ADX filter and volume confirmation.
+KAMA adapts to market noise, reducing whipsaws in sideways markets. Weekly ADX > 25 ensures strong trend context.
+Volume > 1.5x 20-period average confirms breakout strength. Designed for low-frequency trades (12-37/year) to avoid fee drag.
+Works in bull markets by catching trends and in bear markets by avoiding false signals during consolidation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_WeeklyPivot_DonchianBreakout_v1"
-timeframe = "6h"
+name = "12h_1w_KAMA_Trend_Follow"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,36 +25,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DONCHIAN CHANNEL (20 periods) ===
+    # === WEEKLY ADX TREND FILTER ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian high/low (20-period)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate ADX on weekly data
+    plus_dm = np.zeros(len(df_1w))
+    minus_dm = np.zeros(len(df_1w))
+    tr = np.zeros(len(df_1w))
     
-    # Align to 6h timeframe
-    donchian_high_6h = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_6h = align_htf_to_ltf(prices, df_1w, donchian_low)
+    for i in range(1, len(df_1w)):
+        high_diff = high_1w[i] - high_1w[i-1]
+        low_diff = low_1w[i-1] - low_1w[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
     
-    # === DAILY PIVOT POINT (for direction) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Wilder smoothing
+    def smooth_wilder(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period+1])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    period = 14
+    tr_smooth = smooth_wilder(tr, period)
+    plus_di = 100 * smooth_wilder(plus_dm, period) / tr_smooth
+    minus_di = 100 * smooth_wilder(minus_dm, period) / tr_smooth
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1w = smooth_wilder(dx, period)
     
-    # Standard pivot point: (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Align weekly ADX to 12h timeframe
+    adx_12h = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # Align to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    # === KAMA ON 12H DATA ===
+    # Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Handle first 10 values
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start after 10 periods
+    for i in range(10, n):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,29 +97,29 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if not ready
-        if (np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or 
-            np.isnan(pivot_6h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(adx_12h[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with pivot direction filter
-        # Long: Price above pivot AND breaks above weekly Donchian high with volume
-        long_breakout = (close[i] > pivot_6h[i]) and (close[i] > donchian_high_6h[i]) and (vol_ratio[i] > 1.5)
+        # Entry conditions
+        # Long: Price above KAMA + strong weekly trend + volume confirmation
+        long_entry = (close[i] > kama[i]) and (adx_12h[i] > 25) and (vol_ratio[i] > 1.5)
         
-        # Short: Price below pivot AND breaks below weekly Donchian low with volume
-        short_breakout = (close[i] < pivot_6h[i]) and (close[i] < donchian_low_6h[i]) and (vol_ratio[i] > 1.5)
+        # Short: Price below KAMA + strong weekly trend + volume confirmation
+        short_entry = (close[i] < kama[i]) and (adx_12h[i] > 25) and (vol_ratio[i] > 1.5)
         
-        # Exit: Price returns to opposite Donchian level or loses momentum
-        exit_long = (position == 1) and (close[i] < donchian_low_6h[i])
-        exit_short = (position == -1) and (close[i] > donchian_high_6h[i])
+        # Exit: Opposite KAMA cross or trend weakening
+        exit_long = (position == 1) and (close[i] < kama[i])
+        exit_short = (position == -1) and (close[i] > kama[i])
         
         # Execute trades
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif exit_long and position == 1:
