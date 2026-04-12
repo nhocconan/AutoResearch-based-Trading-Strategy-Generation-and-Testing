@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -13,66 +13,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Donchian channels
+    # Get 1d data for trend and momentum filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d 10-period EMA (trend filter)
-    close_1d = df_1d['close'].values
-    ema10_1d = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema10_1d)
+    # Calculate 1d RSI(14)
+    close_1d = pd.Series(df_1d['close'].values)
+    delta = close_1d.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi14 = 100 - (100 / (1 + rs))
+    rsi14_values = rsi14.values
+    rsi14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi14_values)
     
-    # Calculate 1d 20-period high and low for Donchian channels
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    
-    # Calculate 14-period ATR for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate 1d 14-period ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = np.full(n, np.nan)
-    for i in range(13, n):
-        atr14[i] = np.nanmean(tr[i-13:i+1])
+    atr14_1d = np.full(len(df_1d), np.nan)
+    for i in range(13, len(df_1d)):
+        atr14_1d[i] = np.nanmean(tr[i-13:i+1])
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # Calculate 20-period ATR EMA for volatility regime
-    atr_ema20 = np.full(n, np.nan)
-    atr_series = pd.Series(atr14)
-    atr_ema20_values = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_ema20[:] = atr_ema20_values
+    # Calculate 4-period RSI for entry timing
+    delta_4h = pd.Series(close).diff()
+    gain_4h = delta_4h.clip(lower=0)
+    loss_4h = -delta_4h.clip(upper=0)
+    avg_gain_4h = gain_4h.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    avg_loss_4h = loss_4h.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    rs_4h = avg_gain_4h / avg_loss_4h
+    rsi4 = 100 - (100 / (1 + rs_4h))
+    rsi4_values = rsi4.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(30, n):
         # Skip if data not ready
-        if (np.isnan(ema10_1d_aligned[i]) or np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or np.isnan(atr14[i]) or 
-            np.isnan(atr_ema20[i])):
+        if (np.isnan(rsi14_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
+            np.isnan(rsi4_values[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR14 > 1.0x 20-period ATR EMA (elevated volatility)
-        vol_filter = atr14[i] > atr_ema20[i] * 1.0
+        # Trend filter: 1d RSI > 50 for long, < 50 for short
+        rsi_long_filter = rsi14_1d_aligned[i] > 50
+        rsi_short_filter = rsi14_1d_aligned[i] < 50
         
-        # Trend filter: price above/below 1d 10 EMA
-        price_above_ema10 = close[i] > ema10_1d_aligned[i]
-        price_below_ema10 = close[i] < ema10_1d_aligned[i]
+        # Volatility filter: current 4h volatility > 1d ATR (avoid low volatility chop)
+        # Approximate 4h volatility using price range
+        vol_4h = (high[i] - low[i]) / close[i] * 100  # percentage range
+        vol_filter = vol_4h > (atr14_1d_aligned[i] / close[i] * 100) * 0.5
         
-        # Entry conditions: Donchian breakout in direction of trend with volatility expansion
-        long_breakout = close[i] > high_20_aligned[i]  # break above 1d 20-period high
-        short_breakout = close[i] < low_20_aligned[i]  # break below 1d 20-period low
+        # Entry timing: 4h RSI extremes for mean reversion within trend
+        rsi4_oversold = rsi4_values[i] < 30
+        rsi4_overbought = rsi4_values[i] > 70
         
-        long_entry = long_breakout and price_above_ema10 and vol_filter
-        short_entry = short_breakout and price_below_ema10 and vol_filter
+        long_entry = rsi_long_filter and rsi4_oversold and vol_filter
+        short_entry = rsi_short_filter and rsi4_overbought and vol_filter
         
-        # Exit conditions: reversal signal or volatility contraction
-        long_exit = (close[i] < ema10_1d_aligned[i]) or (atr14[i] < atr_ema20[i] * 0.8)
-        short_exit = (close[i] > ema10_1d_aligned[i]) or (atr14[i] < atr_ema20[i] * 0.8)
+        # Exit: RSI mean reversion or trend change
+        long_exit = (rsi4_values[i] > 50) or (rsi14_1d_aligned[i] < 45)
+        short_exit = (rsi4_values[i] < 50) or (rsi14_1d_aligned[i] > 55)
         
         if long_entry and position != 1:
             position = 1
@@ -97,6 +107,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_ema10_breakout_vol_filter_v1"
-timeframe = "12h"
+name = "4h_1d_rsi_trend_mean_reversion_v1"
+timeframe = "4h"
 leverage = 1.0
