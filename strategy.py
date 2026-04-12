@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_Breakout_v2
+4h_12h_1d_Camarilla_Breakout_v3
 Hypothesis: Breakout above daily Camarilla H3 or below L3 with 12h trend filter and volume confirmation.
 Long when price breaks above H3 in uptrend (12h close > EMA20) with volume surge; short when breaks below L3 in downtrend.
 Exit on trend reversal or retracement to H4/L4. Designed for 4h timeframe to capture directional moves in both bull and bear markets.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_Camarilla_Breakout_v2"
+name = "4h_12h_1d_Camarilla_Breakout_v3"
 timeframe = "4h"
 leverage = 1.0
 
