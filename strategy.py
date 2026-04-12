@@ -8,26 +8,25 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 1d Williams %R + 1w ADX regime filter
-    # Bull regime: 1w ADX > 25 + price > 1w EMA50 → long when Williams %R < -80 (oversold)
-    # Bear regime: 1w ADX > 25 + price < 1w EMA50 → short when Williams %R > -20 (overbought)
-    # Range regime: 1w ADX < 20 → fade at Williams %R extremes (%R < -80 for long, %R > -20 for short)
-    # Uses discrete sizing 0.25 to minimize fee churn. Target: 15-25 trades/year.
+    # Hypothesis: 6h Williams %R + 1d ADX regime
+    # Strong trend (1d ADX > 25): trade pullbacks in trend direction using 6h Williams %R
+    # Range (1d ADX < 20): fade extremes at Williams %R overbought/oversold
+    # Uses discrete sizing 0.25 to minimize fee churn. Target: 12-30 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 1w data for regime and trend filters
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1w ADX(14)
+    # Calculate 1d ADX(14)
     def calculate_adx(high, low, close, period=14):
         n = len(high)
         tr = np.zeros(n)
@@ -63,67 +62,54 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate 1w EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 6h Williams %R(14)
+    def williams_r(high, low, close, period=14):
+        highest_high = np.zeros_like(high)
+        lowest_low = np.zeros_like(low)
+        for i in range(len(high)):
+            if i < period:
+                highest_high[i] = np.nan
+                lowest_low[i] = np.nan
+            else:
+                highest_high[i] = np.max(high[i-period+1:i+1])
+                lowest_low[i] = np.min(low[i-period+1:i+1])
+        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+        return wr
     
-    # Calculate 1d Williams %R(14)
-    def calculate_williams_r(high, low, close, period=14):
-        n = len(high)
-        highest_high = np.zeros(n)
-        lowest_low = np.zeros(n)
-        williams_r = np.full(n, np.nan)
-        
-        for i in range(n):
-            start_idx = max(0, i - period + 1)
-            highest_high[i] = np.max(high[start_idx:i+1])
-            lowest_low[i] = np.min(low[start_idx:i+1])
-        
-        for i in range(period-1, n):
-            if highest_high[i] != lowest_low[i]:
-                williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        
-        return williams_r
-    
-    williams_r_1d = calculate_williams_r(high, low, close, 14)
+    wr_6h = williams_r(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(adx_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(williams_r_1d[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(wr_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1w regime
-        strong_trend = adx_1w_aligned[i] > 25
-        ranging = adx_1w_aligned[i] < 20
-        bullish_trend = strong_trend and (close[i] > ema50_1w_aligned[i])
-        bearish_trend = strong_trend and (close[i] < ema50_1w_aligned[i])
+        # Determine 1d regime
+        strong_trend = adx_1d_aligned[i] > 25
+        ranging = adx_1d_aligned[i] < 20
         
         # Entry logic
         long_entry = False
         short_entry = False
         
-        if bullish_trend:
-            # Bull regime: long on oversold conditions
-            long_entry = williams_r_1d[i] < -80
-        elif bearish_trend:
-            # Bear regime: short on overbought conditions
-            short_entry = williams_r_1d[i] > -20
+        if strong_trend:
+            # Strong trend: trade pullbacks
+            long_entry = wr_6h[i] < -80  # Oversold pullback in uptrend
+            short_entry = wr_6h[i] > -20  # Overbought pullback in downtrend
         elif ranging:
-            # Range regime: mean reversion at Williams %R extremes
-            long_entry = williams_r_1d[i] < -80  # Oversold bounce
-            short_entry = williams_r_1d[i] > -20  # Overbought rejection
+            # Range: fade extremes
+            long_entry = wr_6h[i] < -80  # Oversold bounce
+            short_entry = wr_6h[i] > -20  # Overbought rejection
         
-        # Exit logic: reverse signal or regime change
-        long_exit = (bearish_trend and williams_r_1d[i] > -20) or ranging
-        short_exit = (bullish_trend and williams_r_1d[i] < -80) or ranging
+        # Exit logic: reverse signal
+        long_exit = wr_6h[i] > -20  # Overbought
+        short_exit = wr_6h[i] < -80  # Oversold
         
         if long_entry and position != 1:
             position = 1
@@ -148,6 +134,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_williams_r_adx_regime_v1"
-timeframe = "1d"
+name = "6h_1d_williams_r_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
