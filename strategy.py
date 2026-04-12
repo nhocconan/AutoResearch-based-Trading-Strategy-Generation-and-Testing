@@ -1,60 +1,60 @@
-# Phase 3: Final — 12h Timeframe Focus
-# Hypothesis: Weekly Bollinger Band breakout with volume confirmation and daily trend filter
-# Uses weekly Bollinger Bands (20-period, 2.0 std) as dynamic breakout levels on 12h chart.
-# Long when price breaks above weekly upper band with volume confirmation (volume > 1.5x 20-period avg).
-# Short when price breaks below weekly lower band with volume confirmation.
-# Exits when price crosses weekly middle band (mean reversion).
-# Only trade when daily ADX > 25 to filter for trending markets and avoid whipsaws.
-# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
-# Works in trending markets via breakouts and ranging markets via mean reversion to middle band.
-# Focus on BTC/ETH as primary targets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_bb_breakout_volume"
-timeframe = "12h"
+# Hypothesis: 4h_1d_cci_trend_follow
+# Uses daily CCI (Commodity Channel Index) to detect overbought/oversold conditions.
+# Long when daily CCI crosses above +100 and 4h price is above 4h EMA(50).
+# Short when daily CCI crosses below -100 and 4h price is below 4h EMA(50).
+# Exits when price crosses the 4h EMA(50) in opposite direction.
+# Only trade when 4h ADX > 25 to filter for trending markets.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# Works in trending markets via CCI extremes and mean reversion to EMA.
+
+name = "4h_1d_cci_trend_follow"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Band calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly Bollinger Bands (20-period, 2.0 std)
-    close_1w = df_1w['close'].values
-    bb_middle = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2.0 * bb_std
-    bb_lower = bb_middle - 2.0 * bb_std
-    
-    # Align weekly Bollinger Bands to 12h timeframe
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1w, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1w, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1w, bb_middle)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
-    
-    # Get daily data for ADX filter
+    # Get daily data for CCI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate ADX using Wilder's smoothing
+    # Calculate daily CCI (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Typical Price
+    tp = (high_1d + low_1d + close_1d) / 3.0
+    # Simple Moving Average of TP
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    # Mean Deviation
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    # CCI = (TP - SMA) / (0.015 * Mean Deviation)
+    cci = (tp - sma_tp) / (0.015 * mad)
+    # Handle division by zero
+    cci = np.where(mad == 0, 0, cci)
+    
+    # Align daily CCI to 4h timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    
+    # 4h EMA(50) for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # ADX filter: only trade when ADX > 25 (trending market)
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
@@ -94,47 +94,31 @@ def generate_signals(prices):
         adx = wilders_smoothing(dx, period)
         return adx
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    adx_filter = adx_aligned > 25
+    adx = calculate_adx(high, low, close, 14)
+    adx_filter = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if data not ready
-        if (np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(bb_middle_aligned[i]) or np.isnan(adx_aligned[i])):
+        if np.isnan(cci_aligned[i]) or np.isnan(ema_50[i]) or np.isnan(adx[i]):
             signals[i] = 0.0
             continue
         
-        # Require volume confirmation and ADX filter for new entries
-        if not (vol_confirm[i] and adx_filter[i]):
-            # Hold current position if filters fail
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Long signal: price breaks above weekly upper band
-        if close[i] > bb_upper_aligned[i] and position != 1:
+        # Long signal: CCI crosses above +100 and price above EMA50
+        if cci_aligned[i] > 100 and cci_aligned[i-1] <= 100 and close[i] > ema_50[i] and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short signal: price breaks below weekly lower band
-        elif close[i] < bb_lower_aligned[i] and position != -1:
+        # Short signal: CCI crosses below -100 and price below EMA50
+        elif cci_aligned[i] < -100 and cci_aligned[i-1] >= -100 and close[i] < ema_50[i] and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses weekly middle band (mean reversion)
-        elif position == 1 and close[i] <= bb_middle_aligned[i]:
+        # Exit conditions: price crosses EMA50 in opposite direction
+        elif position == 1 and close[i] < ema_50[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] >= bb_middle_aligned[i]:
+        elif position == -1 and close[i] > ema_50[i]:
             position = 0
             signals[i] = 0.0
         else:
