@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_camarilla_breakout_v2
-# Uses weekly Camarilla pivot levels (H4/L4) as key support/resistance on daily chart.
-# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-day avg).
+# Hypothesis: 12h_1d_1w_camarilla_breakout_v1
+# Uses weekly Camarilla pivot levels (H4/L4) as key support/resistance on daily chart, aligned to 12h chart.
+# Long when price breaks above H4 with volume confirmation (volume > 1.5x 20-period avg).
 # Short when price breaks below L4 with volume confirmation.
 # Exits when price returns to weekly pivot point (PP).
-# Added volatility filter: only trade when daily ATR(10) > 1.2x 50-day average to avoid chop.
-# Designed for low trade frequency (target: 10-20 trades/year) to minimize fee drift.
+# Designed for low trade frequency (target: 12-37 trades/year) to minimize fee drag.
 # Works in trending markets via breakouts and in ranging markets via mean reversion to pivot.
+# Uses 12h timeframe to reduce noise and trades compared to lower timeframes.
 
-name = "1d_1w_camarilla_breakout_v2"
-timeframe = "1d"
+name = "12h_1d_1w_camarilla_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,37 +44,27 @@ def generate_signals(prices):
     h4 = pp + (1.1 / 2) * range_1w
     l4 = pp - (1.1 / 2) * range_1w
     
-    # Align weekly levels to daily timeframe (weekly values update after weekly bar closes)
+    # Align weekly levels to 12h timeframe (weekly values update after weekly bar closes)
     h4_aligned = align_htf_to_ltf(prices, df_1w, h4)
     l4_aligned = align_htf_to_ltf(prices, df_1w, l4)
     pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (daily timeframe)
+    # Volume confirmation: volume > 1.5 * 20-period average (12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
-    
-    # Volatility filter: ATR(10) > 1.2 * 50-day average ATR to avoid chop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR
-    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr10 > (atr50 * 1.2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # start after warmup
+    for i in range(50, n):  # start after warmup
         # Skip if data not ready
         if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or np.isnan(pp_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Require both volume and volatility filters for new entries
-        if not (vol_confirm[i] and vol_filter[i]):
-            # Hold current position if filters fail
+        # Require volume confirmation for new entries
+        if not vol_confirm[i]:
+            # Hold current position if volume filter fails
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
