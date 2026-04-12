@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
-6h_12h_ichimoku_cloud_v1
-Hypothesis: 6-hour strategy using 12-hour Ichimoku Cloud for trend direction and entry signals.
-The strategy takes long positions when price is above the cloud and Tenkan-sen crosses above Kijun-sen,
-and short positions when price is below the cloud and Tenkan-sen crosses below Kijun-sen.
-Ichimoku is a comprehensive trend system that adapts to both trending and ranging markets,
-providing clear entry/exit signals with built-in trend filtering.
-Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-Works in bull/bear by requiring price to be outside the cloud (strong trend) and using TK cross for timing.
+4h_1d_volatility_breakout_v1
+Hypothesis: Breakouts from volatility contraction (low Bollinger Bandwidth) followed by expansion, filtered by 1d trend (EMA50) and volume confirmation. Works in bull/bear by aligning with higher timeframe trend and using volatility as entry signal.
+Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -22,72 +17,64 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for Ichimoku
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 52:  # Need at least 52 periods for Ichimoku
+    # Bollinger Bands (20, 2) for volatility squeeze
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
+    bandwidth = (upper - lower) / sma20  # Normalized bandwidth
+    
+    # Bollinger Bandwidth percentile (20-period lookback) to detect squeeze
+    bandwidth_series = pd.Series(bandwidth)
+    bandwidth_percentile = bandwidth_series.rolling(window=20, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Volatility squeeze: bandwidth < 20th percentile
+    squeeze = bandwidth_percentile < 20
+    
+    # Volatility expansion: bandwidth > 50th percentile AND increasing
+    bandwidth_increasing = bandwidth > np.roll(bandwidth, 1)
+    expansion = (bandwidth_percentile > 50) & bandwidth_increasing
+    
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Ichimoku components (standard parameters: 9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_b)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i])):
+        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(bandwidth_percentile[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        lower_cloud = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
-        # Check for Tenkan/Kijun cross
-        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-        
-        # Long entry: price above cloud AND TK cross up
-        if (close[i] > upper_cloud and tk_cross_up and position != 1):
+        # Long entry: volatility expansion after squeeze, price above 1d EMA50, volume confirmation
+        if (squeeze[i-1] and expansion[i] and close[i] > ema50_1d_aligned[i] and vol_confirm[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price below cloud AND TK cross down
-        elif (close[i] < lower_cloud and tk_cross_down and position != -1):
+        # Short entry: volatility expansion after squeeze, price below 1d EMA50, volume confirmation
+        elif (squeeze[i-1] and expansion[i] and close[i] < ema50_1d_aligned[i] and vol_confirm[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit: price enters the cloud or reverse TK cross
-        elif position == 1 and (close[i] < upper_cloud or tk_cross_down):
+        # Exit: volatility contraction returns (bandwidth < 30th percentile) or opposite volatility expansion
+        elif position == 1 and bandwidth_percentile[i] < 30:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (close[i] > lower_cloud or tk_cross_up):
+        elif position == -1 and bandwidth_percentile[i] < 30:
             position = 0
             signals[i] = 0.0
         else:
@@ -101,6 +88,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_12h_ichimoku_cloud_v1"
-timeframe = "6h"
+name = "4h_1d_volatility_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
