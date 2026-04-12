@@ -1,17 +1,20 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
+"""
+Hypothesis: 6h_1d_vwap_mean_reversion
+- Uses 1-day VWAP as dynamic mean with 6h price reversion to VWAP
+- In bull markets: buy when price dips below VWAP with bullish momentum (close > open)
+- In bear markets: sell when price rises above VWAP with bearish momentum (close < open)
+- Volume-weighted average price acts as institutional reference point
+- Target: 20-40 trades/year per symbol with mean reversion edge
+"""
+name = "6h_1d_vwap_mean_reversion"
+timeframe = "6h"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12h_1d_camarilla_breakout_v1
-# Camarilla pivot levels from 1-day chart with volume confirmation and chop regime filter.
-# Works in bull markets by capturing breakouts above H4 resistance, and in bear markets
-# by shorting breakdowns below L4 support. Uses volume spike to confirm institutional
-# participation and chop filter to avoid false signals in ranging markets.
-# Target: 12-37 trades/year per symbol for low friction (50-150 total over 4 years).
-name = "12h_1d_camarilla_breakout_v1"
-timeframe = "12h"
-leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,79 +25,62 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate typical price and VWAP for 1d
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_values = vwap.values
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h4 = close_prev + range_prev * 1.1 / 2
-    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    # Align VWAP to 6h timeframe (1-day delay due to calculation needing close)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
     
-    # Align to 12h timeframe (already delayed by 1 day due to shift)
-    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # 6h momentum: close > open for bullish, close < open for bearish
+    bullish_momentum = close > open_price
+    bearish_momentum = close < open_price
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    # Distance from VWAP as percentage
+    vwap_distance = (close - vwap_aligned) / vwap_aligned
     
-    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
-    # Calculate CHOP using 14-period ATR and highest/lowest
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
-    chop_filter = chop < 61.8  # trending market
+    # Mean reversion thresholds: enter when price deviates significantly from VWAP
+    entry_threshold = 0.008  # 0.8% deviation
+    exit_threshold = 0.002   # 0.2% deviation for exit
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]):
+    for i in range(1, n):  # start after first bar for momentum calculation
+        # Skip if VWAP not ready
+        if np.isnan(vwap_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
-            # Hold current position if filters fail
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
+        # Exit conditions: price returns near VWAP
+        if abs(vwap_distance[i]) < exit_threshold:
+            if position != 0:
+                position = 0
+                signals[i] = 0.0
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above H4 with volume
-        if close[i] > h4_level[i] and position != 1:
-            position = 1
-            signals[i] = 0.25
-        # Short signal: price breaks below L4 with volume
-        elif close[i] < l4_level[i] and position != -1:
-            position = -1
-            signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l4_level[i] and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif close[i] > h4_level[i] and position == -1:
-            position = 0
-            signals[i] = 0.0
+        # Entry conditions with momentum confirmation
+        if position == 0:
+            # Long: price below VWAP with bullish momentum
+            if vwap_distance[i] < -entry_threshold and bullish_momentum[i]:
+                position = 1
+                signals[i] = 0.25
+            # Short: price above VWAP with bearish momentum
+            elif vwap_distance[i] > entry_threshold and bearish_momentum[i]:
+                position = -1
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
