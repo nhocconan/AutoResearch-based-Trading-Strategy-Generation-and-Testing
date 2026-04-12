@@ -1,10 +1,9 @@
-# %%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d_1w_camarilla_breakout_v1
+# Hypothesis: 1d_1w_camarilla_breakout_v2
 # Uses weekly high/low to calculate daily Camarilla levels for the next week.
 # Buys when price breaks above weekly H3 with volume confirmation.
 # Shorts when price breaks below weekly L3 with volume confirmation.
@@ -12,13 +11,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag.
 # Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
 
-name = "1d_1w_camarilla_breakout_v1"
+name = "1d_1w_camarilla_breakout_v2"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -45,9 +44,9 @@ def generate_signals(prices):
     h3_level = align_htf_to_ltf(prices, df_1w, camarilla_h3)
     l3_level = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
-    # Volume confirmation: volume > 2.0 * 50-period average (strict for daily)
+    # Volume confirmation: volume > 1.5 * 50-period average (moderate threshold)
     vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    vol_confirm = volume > (vol_ma * 1.5)
     
     # ADX trend filter: only trade when ADX > 25 (strong trend)
     # Calculate True Range
@@ -128,4 +127,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-# %%
