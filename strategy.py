@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# 4h_1d_1w_camarilla_breakout_volume_trend_v1
-# Hypothesis: 4-hour strategy combining daily Camarilla H3/L3 breakouts with weekly trend filter from SMA50/200 and volume confirmation.
-# Weekly trend ensures directional bias aligned with higher timeframe, reducing false breakouts in sideways markets.
-# Volume filter confirms breakout strength. Designed for low trade frequency (20-40/year) to minimize fee drag.
-# Works in both bull and bear markets by following weekly trend direction.
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,96 +13,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (SMA50 > SMA200 = bullish)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly SMAs
-    close_1w = df_1w['close'].values
-    sma50_1w = np.full(len(close_1w), np.nan)
-    sma200_1w = np.full(len(close_1w), np.nan)
-    
-    for i in range(50, len(close_1w)):
-        sma50_1w[i] = np.mean(close_1w[i-50:i])
-    for i in range(200, len(close_1w)):
-        sma200_1w[i] = np.mean(close_1w[i-200:i])
-    
-    # Weekly trend: 1 = bullish (SMA50 > SMA200), -1 = bearish (SMA50 < SMA200), 0 = neutral
-    weekly_trend = np.where(sma50_1w > sma200_1w, 1, np.where(sma50_1w < sma200_1w, -1, 0))
-    
-    # Align weekly trend to 4h timeframe
-    weekly_trend_4h = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    
-    # Get daily data for Camarilla levels
+    # Get daily data for ATR and price range calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels using PREVIOUS day's data (no look-ahead)
+    # Calculate daily ATR (14-period) for volatility filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # Set first day's previous values to NaN (no data yet)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First period
+    tr2[0] = np.nan  # No previous close
+    tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Camarilla calculations using previous day's data
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    # ATR calculation with proper smoothing
+    atr_1d = np.full(len(tr), np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr_1d[i] = np.mean(tr[1:i+1])  # Initial SMA
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
     
-    # Camarilla levels
-    h3 = pivot + 1.1 * range_val / 2
-    l3 = pivot - 1.1 * range_val / 2
-    h4 = pivot + 1.1 * range_val
-    l4 = pivot - 1.1 * range_val
+    # Calculate daily price range (high - low)
+    daily_range = high_1d - low_1d
     
-    # Align Camarilla levels to 4h timeframe
-    h3_4h = align_htf_to_ltf(prices, df_1d, h3)
-    l3_4h = align_htf_to_ltf(prices, df_1d, l3)
-    h4_4h = align_htf_to_ltf(prices, df_1d, h4)
-    l4_4h = align_htf_to_ltf(prices, df_1d, l4)
+    # Calculate range ratio: current daily range / ATR
+    range_ratio = np.full(len(daily_range), np.nan)
+    for i in range(len(daily_range)):
+        if not np.isnan(atr_1d[i]) and atr_1d[i] > 0:
+            range_ratio[i] = daily_range[i] / atr_1d[i]
     
-    # Calculate volume moving average (20-period)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    # Align ATR and range ratio to 12h timeframe
+    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
+    range_ratio_12h = align_htf_to_ltf(prices, df_1d, range_ratio)
+    
+    # Calculate 12-period EMA of close for trend filter
+    close_series = pd.Series(close)
+    ema_12 = close_series.ewm(span=12, adjust=False, min_periods=12).values
+    
+    # Calculate 12-period standard deviation for volatility bands
+    rolling_std = pd.Series(close).rolling(window=12, min_periods=12).std().values
+    
+    # Dynamic volatility bands: EMA ± (1.5 * std dev)
+    upper_band = ema_12 + 1.5 * rolling_std
+    lower_band = ema_12 - 1.5 * rolling_std
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(weekly_trend_4h[i]) or np.isnan(h3_4h[i]) or np.isnan(l3_4h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(range_ratio_12h[i]) or np.isnan(ema_12[i]) or 
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
             signals[i] = 0.0
             continue
         
-        # Volume filter: current volume > 2.0x 20-period average (strict filter for strength)
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volatility filter: trade only when range is expanded (trending market)
+        vol_expansion = range_ratio_12h[i] > 1.2
         
-        # Only take trades in direction of weekly trend
-        weekly_bullish = weekly_trend_4h[i] == 1
-        weekly_bearish = weekly_trend_4h[i] == -1
+        # Trend filter: price above/below EMA
+        price_above_ema = close[i] > ema_12[i]
+        price_below_ema = close[i] < ema_12[i]
         
-        # Entry conditions: Camarilla H3/L3 breakout with volume confirmation and weekly trend alignment
-        long_breakout = (close[i] > h3_4h[i]) and volume_filter and weekly_bullish
-        short_breakout = (close[i] < l3_4h[i]) and volume_filter and weekly_bearish
+        # Entry conditions: volatility expansion + price outside volatility bands
+        long_entry = vol_expansion and price_above_ema and close[i] > upper_band[i]
+        short_entry = vol_expansion and price_below_ema and close[i] < lower_band[i]
         
-        # Exit conditions: touch opposite H3/L3 level or weekly trend reversal
-        long_exit = (close[i] < l3_4h[i]) or (weekly_trend_4h[i] == -1)
-        short_exit = (close[i] > h3_4h[i]) or (weekly_trend_4h[i] == 1)
+        # Exit conditions: price returns to EMA or volatility contracts
+        long_exit = close[i] < ema_12[i] or range_ratio_12h[i] < 0.8
+        short_exit = close[i] > ema_12[i] or range_ratio_12h[i] < 0.8
         
-        if long_breakout and position != 1:
+        if long_entry and position != 1:
             position = 1
             signals[i] = 0.25
-        elif short_breakout and position != -1:
+        elif short_entry and position != -1:
             position = -1
             signals[i] = -0.25
         elif position == 1 and long_exit:
@@ -128,6 +112,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_1w_camarilla_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "12h_1d_volatility_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
