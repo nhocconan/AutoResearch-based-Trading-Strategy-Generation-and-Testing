@@ -3,12 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_12h_trix_volume_regime_v1
-# Uses TRIX momentum on 12h for trend direction, volume confirmation, and choppiness regime filter.
-# In trending markets (CHOP < 50), we follow TRIX crosses; in choppy markets (CHOP >= 50), we avoid trades.
-# This reduces whipsaws in sideways markets while capturing trends. Target: 20-40 trades/year per symbol.
-name = "4h_12h_trix_volume_regime_v1"
-timeframe = "4h"
+# Hypothesis: 1h_4d_camarilla_breakout_v1
+# Use 4h and 1d timeframes for signal direction, 1h for entry timing.
+# In bull markets: long when price breaks above 1d H4 with 4h trend confirmation.
+# In bear markets: short when price breaks below 1d L4 with 4h trend confirmation.
+# Volume confirmation and chop filter reduce false signals.
+# Session filter (08-20 UTC) avoids low-liquidity hours.
+# Target: 15-35 trades/year per symbol to minimize fee drag.
+name = "1h_4d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,27 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for TRIX calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate TRIX on 12h close: TRIX = EMA(EMA(EMA(close, 12), 12), 12)
-    close_12h = df_12h['close'].values
-    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_raw = pd.Series(ema3).pct_change() * 100  # percentage change
-    trix = trix_raw.values
+    # Get 4h data for trend confirmation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
     
-    # Align TRIX to 4h timeframe (wait for completed 12h bar)
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Camarilla formulas
+    range_prev = high_prev - low_prev
+    camarilla_h4 = close_prev + range_prev * 1.1 / 2
+    camarilla_l4 = close_prev - range_prev * 1.1 / 2
+    
+    # Align to 1h timeframe
+    h4_level = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_level = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # 4h EMA for trend confirmation (21-period)
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.3)
+    vol_confirm = volume > (vol_ma * 1.5)
     
-    # Chop regime filter: avoid choppy markets (CHOP >= 50)
+    # Chop regime filter: avoid choppy markets (CHOP > 61.8)
     # Calculate CHOP using 14-period ATR and highest/lowest
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
@@ -51,52 +66,54 @@ def generate_signals(prices):
     
     highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero or invalid values
-    denominator = atr * np.sqrt(14)
-    chop = np.where(denominator > 0, 100 * np.log10((highest_high - lowest_low) / denominator) / np.log10(14), 100)
-    chop_filter = chop < 50  # trending market (lower threshold for more signals)
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * np.sqrt(14))) / np.log10(14)
+    chop_filter = chop < 61.8  # trending market
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after warmup
-        # Skip if TRIX not ready
-        if np.isnan(trix_aligned[i]):
+    for i in range(30, n):  # start after warmup
+        # Skip if levels not ready
+        if np.isnan(h4_level[i]) or np.isnan(l4_level[i]) or np.isnan(ema_4h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Check volume and chop filters
-        if not (vol_confirm[i] and chop_filter[i]):
+        # Apply filters: volume, chop, session
+        if not (vol_confirm[i] and chop_filter[i] and session_filter[i]):
             # Hold current position if filters fail
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: TRIX crosses above zero with volume
-        if i > 0 and not np.isnan(trix_aligned[i-1]) and trix_aligned[i-1] <= 0 and trix_aligned[i] > 0 and position != 1:
+        # Long signal: price breaks above H4 with 4h uptrend
+        if close[i] > h4_level[i] and ema_4h_aligned[i] > close[i] and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: TRIX crosses below zero with volume
-        elif i > 0 and not np.isnan(trix_aligned[i-1]) and trix_aligned[i-1] >= 0 and trix_aligned[i] < 0 and position != -1:
+            signals[i] = 0.20
+        # Short signal: price breaks below L4 with 4h downtrend
+        elif close[i] < l4_level[i] and ema_4h_aligned[i] < close[i] and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit conditions: opposite TRIX cross
-        elif i > 0 and not np.isnan(trix_aligned[i-1]) and trix_aligned[i-1] < 0 and trix_aligned[i] >= 0 and position == 1:
+            signals[i] = -0.20
+        # Exit conditions: opposite breakout
+        elif close[i] < l4_level[i] and position == 1:
             position = 0
             signals[i] = 0.0
-        elif i > 0 and not np.isnan(trix_aligned[i-1]) and trix_aligned[i-1] > 0 and trix_aligned[i] <= 0 and position == -1:
+        elif close[i] > h4_level[i] and position == -1:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
