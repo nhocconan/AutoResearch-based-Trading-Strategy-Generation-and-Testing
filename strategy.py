@@ -3,21 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h_1d_camarilla_breakout_v3
-# Uses daily high/low to calculate daily Camarilla levels for the next day.
-# Buys when price breaks above daily H3 with volume confirmation.
-# Shorts when price breaks below daily L3 with volume confirmation.
-# Uses ADX > 25 to filter for strong trends, avoiding false signals in weak trends or ranges.
-# Designed for low trade frequency (target: 19-50 trades/year) to minimize fee drag.
-# Works in bull markets (breakouts continuation) and bear markets (breakdowns continuation).
+# Hypothesis: 1h_4h_1d_camarilla_breakout_v1
+# Uses 4h and 1d timeframes for signal direction: 4h trend via EMA cross, 1d momentum via price > SMA200.
+# 1h timeframe for entry timing: breaks above/below prior 4h swing high/low with volume confirmation.
+# Designed for low trade frequency (target: 15-37 trades/year) to minimize fee drag.
+# Works in bull markets (trend continuation) and bear markets (mean reversion at swings).
 
-name = "4h_1d_camarilla_breakout_v3"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,104 +23,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for trend and swing levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    camarilla_h3 = close_prev + range_prev * 1.1 / 4
-    camarilla_l3 = close_prev - range_prev * 1.1 / 4
+    # 4h EMA crossover for trend direction (fast=9, slow=21)
+    close_4h = df_4h['close'].values
+    ema_9 = pd.Series(close_4h).ewm(span=9, min_periods=9, adjust=False).mean().values
+    ema_21 = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_cross = ema_9 - ema_21  # >0 bullish, <0 bearish
+    ema_cross_aligned = align_htf_to_ltf(prices, df_4h, ema_cross)
     
-    # Align to 4h timeframe (daily levels update only after daily bar closes)
-    h3_level = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_level = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # 1d price > SMA200 for bull regime filter
+    sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
+    price_above_sma200 = df_1d['close'].values > sma_200_1d
+    regime_aligned = align_htf_to_ltf(prices, df_1d, price_above_sma200.astype(float))
     
-    # Volume confirmation: volume > 2.0 * 20-period average (4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 2.0)
+    # 4h swing high/low for entry levels (prior completed 4h bar)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    swing_high = np.maximum.accumulate(high_4h)  # simple proxy for resistance
+    swing_low = np.minimum.accumulate(low_4h)    # simple proxy for support
+    swing_high_aligned = align_htf_to_ltf(prices, df_4h, swing_high)
+    swing_low_aligned = align_htf_to_ltf(prices, df_4h, swing_low)
     
-    # ADX trend filter: only trade when ADX > 25 (strong trend)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Plus and Minus Directional Movement
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    
-    # Wilder's smoothing function
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr = wilders_smooth(tr, 14)
-    plus_dm_smooth = wilders_smooth(plus_dm, 14)
-    minus_dm_smooth = wilders_smooth(minus_dm, 14)
-    
-    # Avoid division by zero
-    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
-    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
-    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = wilders_smooth(dx, 14)
-    adx_filter = adx > 25  # strong trend only
+    # Volume confirmation: volume > 1.5 * 24-period average (1h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
-        # Skip if levels not ready
-        if np.isnan(h3_level[i]) or np.isnan(l3_level[i]) or np.isnan(adx_filter[i]):
+    for i in range(100, n):  # start after warmup
+        # Skip if any data not ready
+        if (np.isnan(ema_cross_aligned[i]) or np.isnan(regime_aligned[i]) or
+            np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # Require both volume and strong trend filters
-        if not (vol_confirm[i] and adx_filter[i]):
-            # Hold current position if filters fail
+        # Determine bias: bullish if 4h EMA bullish AND price above 1d SMA200
+        bullish_bias = (ema_cross_aligned[i] > 0) and (regime_aligned[i] > 0.5)
+        bearish_bias = (ema_cross_aligned[i] < 0) and (regime_aligned[i] <= 0.5)
+        
+        # Require volume confirmation
+        if not vol_confirm[i]:
+            # Hold current position if no volume
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Long signal: price breaks above daily H3 with volume
-        if close[i] > h3_level[i] and position != 1:
+        # Long signal: price breaks above 4h swing high with bullish bias
+        if close[i] > swing_high_aligned[i] and bullish_bias and position != 1:
             position = 1
-            signals[i] = 0.25
-        # Short signal: price breaks below daily L3 with volume
-        elif close[i] < l3_level[i] and position != -1:
+            signals[i] = 0.20
+        # Short signal: price breaks below 4h swing low with bearish bias
+        elif close[i] < swing_low_aligned[i] and bearish_bias and position != -1:
             position = -1
-            signals[i] = -0.25
-        # Exit conditions: opposite breakout
-        elif close[i] < l3_level[i] and position == 1:
-            position = 0
-            signals[i] = 0.0
-        elif close[i] > h3_level[i] and position == -1:
+            signals[i] = -0.20
+        # Exit conditions: opposite breakout or bias flip
+        elif (close[i] < swing_low_aligned[i] and position == 1) or \
+             (close[i] > swing_high_aligned[i] and position == -1) or \
+             (bullish_bias and position == -1) or \
+             (bearish_bias and position == 1):
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
