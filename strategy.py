@@ -8,16 +8,34 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 4h Camarilla H3/L3 breakout with volume confirmation in chop regimes
-    # Uses 1d Camarilla levels as institutional support/resistance
-    # Volume > 1.8x 20-period MA confirms institutional participation
-    # Chop > 61.8 ensures ranging markets where mean reversion works
-    # Discrete sizing 0.25 to minimize fee churn. Target: 25-40 trades/year.
+    # Hypothesis: 1h Camarilla H3/L3 breakout with volume confirmation and 4h trend filter
+    # Uses 4h EMA50 for trend direction (long only when price > EMA50, short only when price < EMA50)
+    # 1h Camarilla levels provide precise entry/exit levels for mean reversion in ranging markets
+    # Volume > 1.5x 20-period MA confirms institutional participation
+    # Session filter (08-20 UTC) reduces noise trades during low-liquidity periods
+    # Discrete sizing 0.20 to minimize fee churn. Target: 15-30 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_4h_50 = np.full(len(close_4h), np.nan)
+    for i in range(49, len(close_4h)):
+        if i == 49:
+            ema_4h_50[i] = np.mean(close_4h[i-49:i+1])
+        else:
+            ema_4h_50[i] = (close_4h[i] * 2 / (50 + 1)) + ema_4h_50[i-1] * (1 - 2 / (50 + 1))
+    
+    # Align 4h EMA50 to 1h timeframe
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
     
     # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
@@ -33,11 +51,11 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align to 4h timeframe (use previous day's levels)
+    # Align to 1h timeframe (use previous day's levels)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: current volume > 1.8x 20-period MA
+    # Volume confirmation: current volume > 1.5x 20-period MA
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -49,52 +67,36 @@ def generate_signals(prices):
         else:
             vol_ratio[i] = 1.0
     
-    # Chop regime filter: CHOP > 61.8 = ranging market (good for mean reversion)
-    # Calculate ATR(14)
-    atr = np.full(n, np.nan)
-    tr = np.full(n, np.nan)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    for i in range(14, n):
-        atr[i] = np.mean(tr[i-14:i])
-    
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(14, n):
-        highest_high[i] = np.max(high[i-14:i])
-        lowest_low[i] = np.min(low[i-14:i])
-    
-    # Chop = log10(sum(atr(14))/abs(highest_high - lowest_low)) * log10(14) * 100
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        if highest_high[i] != lowest_low[i] and atr[i] > 0:
-            sum_atr = np.sum(atr[i-14:i])
-            chop[i] = np.log10(sum_atr / abs(highest_high[i] - lowest_low[i])) * np.log10(14) * 100
-        else:
-            chop[i] = 50.0
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_4h_50_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Determine market regime: Chop > 61.8 = ranging (good for mean reversion)
-        ranging_market = chop[i] > 61.8
+        # Session filter: only trade during 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
+        # Trend filter: 4h EMA50
+        uptrend = close[i] > ema_4h_50_aligned[i]
+        downtrend = close[i] < ema_4h_50_aligned[i]
         
         # Breakout conditions with volume confirmation
         breakout_up = close[i] > camarilla_h3_aligned[i]
         breakout_down = close[i] < camarilla_l3_aligned[i]
         
-        # Entry conditions: breakout with volume confirmation in ranging market
-        long_entry = breakout_up and (vol_ratio[i] > 1.8) and ranging_market
-        short_entry = breakout_down and (vol_ratio[i] > 1.8) and ranging_market
+        # Entry conditions: breakout with volume confirmation and trend alignment
+        long_entry = breakout_up and (vol_ratio[i] > 1.5) and uptrend
+        short_entry = breakout_down and (vol_ratio[i] > 1.5) and downtrend
         
         # Exit conditions: price returns to midpoint between H3 and L3
         midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
@@ -103,10 +105,10 @@ def generate_signals(prices):
         
         if long_entry and position != 1:
             position = 1
-            signals[i] = 0.25
+            signals[i] = 0.20
         elif short_entry and position != -1:
             position = -1
-            signals[i] = -0.25
+            signals[i] = -0.20
         elif position == 1 and long_exit:
             position = 0
             signals[i] = 0.0
@@ -116,14 +118,14 @@ def generate_signals(prices):
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
     
     return signals
 
-name = "4h_1d_camarilla_breakout_vol_chop_v5"
-timeframe = "4h"
+name = "1h_4h_1d_camarilla_breakout_vol_trend_v1"
+timeframe = "1h"
 leverage = 1.0
