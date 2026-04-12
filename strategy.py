@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Turtle_Channel_Breakout_v1
-Hypothesis: Use 4-hour Donchian channel (20-period) breakout with 12-hour EMA trend filter and volume confirmation.
-Enter long when price breaks above 20-period Donchian high in uptrend (12h close > EMA20) with volume > 1.8x average.
-Enter short when price breaks below 20-period Donchian low in downtrend (12h close < EMA20) with volume > 1.8x average.
-Exit on trend reversal or price retracement to midpoint of Donchian channel.
-Designed to capture strong directional moves in both bull and bear markets while avoiding whipsaws.
-Target: 75-200 total trades over 4 years (19-50/year).
+1d_1w_DonchianBreakout_With_TrendFilter_v1
+Hypothesis: Use weekly trend filter with daily Donchian channel breakouts for medium-term trend following.
+Enter long when price breaks above 20-day high AND weekly close > weekly SMA50 (uptrend).
+Enter short when price breaks below 20-day low AND weekly close < weekly SMA50 (downtrend).
+Exit when price reverses to 10-day opposite channel or trend changes.
+Designed to capture major trends in both bull and bear markets with low trade frequency.
+Target: 20-60 total trades over 4 years (5-15/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_Turtle_Channel_Breakout_v1"
-timeframe = "4h"
+name = "1d_1w_DonchianBreakout_With_TrendFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,55 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 4-HOUR DONCHIAN CHANNEL (20-period) ===
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_20 = (high_20 + low_20) / 2.0
-    
-    # === 12-HOUR TREND FILTER ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h_4h = align_htf_to_ltf(prices, df_12h, ema20_12h)
-    close_12h_4h = align_htf_to_ltf(prices, df_12h, close_12h)
+    close_1w = df_1w['close'].values
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    trend_up = sma50_1w_aligned > close_1w  # weekly close above SMA50
+    trend_down = sma50_1w_aligned < close_1w  # weekly close below SMA50
     
-    # === VOLUME SURGE FILTER ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    # === DAILY DONCHIAN CHANNELS ===
+    # 20-day high/low for breakout
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 10-day high/low for exit (faster reversal)
+    high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):  # start after warmup
         # Skip if not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema20_12h_4h[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(high_10[i]) or np.isnan(low_10[i]) or
+            np.isnan(sma50_1w_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        trend_up = close_12h_4h[i] > ema20_12h_4h[i]
-        trend_down = close_12h_4h[i] < ema20_12h_4h[i]
+        # Get current weekly trend
+        week_trend_up = trend_up[i]
+        week_trend_down = trend_down[i]
         
-        # Long: break above Donchian high in uptrend with volume surge
-        long_signal = (trend_up and 
-                      close[i] > high_20[i] * 1.001 and  # Break above high
-                      vol_ratio[i] > 1.8)
+        # Long: break above 20-day high in weekly uptrend
+        long_signal = (week_trend_up and 
+                      close[i] > high_20[i])
         
-        # Short: break below Donchian low in downtrend with volume surge
-        short_signal = (trend_down and 
-                       close[i] < low_20[i] * 0.999 and  # Break below low
-                       vol_ratio[i] > 1.8)
+        # Short: break below 20-day low in weekly downtrend
+        short_signal = (week_trend_down and 
+                       close[i] < low_20[i])
         
-        # Exit: trend reversal or price retracement to midpoint
+        # Exit: reverse to 10-day opposite channel or trend change
         exit_long = (position == 1 and 
-                    (not trend_up or close[i] <= mid_20[i]))
+                    (close[i] < low_10[i] or not week_trend_up))
         exit_short = (position == -1 and 
-                     (not trend_down or close[i] >= mid_20[i]))
+                     (close[i] > high_10[i] or not week_trend_down))
         
         # Execute trades
         if long_signal and position != 1:
