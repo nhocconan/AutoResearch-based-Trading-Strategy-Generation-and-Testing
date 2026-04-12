@@ -8,7 +8,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1d ATR volatility filter
+    # Hypothesis: 4h Donchian(20) breakout with 1d ATR volatility filter
     # Works in bull/bear by capturing breakouts only when volatility is expanding
     # (avoids false breakouts in chop). Volume confirmation reduces false signals.
     # Target: 20-40 trades/year per symbol.
@@ -41,10 +41,10 @@ def generate_signals(prices):
     for i in range(14, len(df_1d)):
         atr_1d[i] = np.mean(tr[i-14:i+1])
     
-    # Align 1d ATR to 12h timeframe
+    # Align 1d ATR to 4h timeframe
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # 12h Donchian(20) for breakout signals
+    # 4h Donchian(20) for breakout signals
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     for i in range(20, n):
@@ -109,6 +109,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_donchian_breakout_vol_filter_v1"
-timeframe = "12h"
+name = "4h_1d_donchian_breakout_vol_filter_v1"
+timeframe = "4h"
 leverage = 1.0
