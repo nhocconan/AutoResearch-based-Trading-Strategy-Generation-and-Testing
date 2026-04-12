@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_camarilla_breakout_v1"
-timeframe = "1d"
+name = "4h_1d_camarilla_breakout_volatility_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,55 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots (weekly close)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous weekly data to avoid look-ahead (use completed weekly bar)
-    high_1w_prev = df_1w['high'].shift(1).values
-    low_1w_prev = df_1w['low'].shift(1).values
-    close_1w_prev = df_1w['close'].shift(1).values
+    # Previous 1d bar data to avoid look-ahead
+    high_1d_prev = df_1d['high'].shift(1).values
+    low_1d_prev = df_1d['low'].shift(1).values
+    close_1d_prev = df_1d['close'].shift(1).values
     
-    # Calculate weekly Camarilla levels (H4/L4 breakout)
-    pivot_prev = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
-    range_1w_prev = high_1w_prev - low_1w_prev
-    h4_prev = pivot_prev + (range_1w_prev * 1.1 / 2)
-    l4_prev = pivot_prev - (range_1w_prev * 1.1 / 2)
+    # Calculate 1d Camarilla levels (H4/L4 breakout)
+    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+    range_1d_prev = high_1d_prev - low_1d_prev
+    h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
+    l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
     
-    # Align to daily (only available after weekly bar closes)
-    h4_aligned = align_htf_to_ltf(prices, df_1w, h4_prev)
-    l4_aligned = align_htf_to_ltf(prices, df_1w, l4_prev)
+    # Align to 4h
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
-    # Volume filter: 20-day average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma
+    # Volatility filter: ATR ratio (ATR(10)/ATR(30)) < 0.8 = low volatility regime
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr1 = high_low
+    tr2 = high_close
+    tr3 = low_close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Trend filter: 50-day SMA
-    close_series = pd.Series(close)
-    sma_50 = close_series.rolling(window=50, min_periods=50).mean().values
-    trend_up = close > sma_50
-    trend_down = close < sma_50
+    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr10 / atr30
+    low_vol = atr_ratio < 0.8  # Low volatility regime for better breakout follow-through
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(300, n):
+    for i in range(200, n):
         # Skip if any values not ready
         if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i])):
+            np.isnan(low_vol[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above weekly H4 with volume and uptrend
-        long_signal = close[i] > h4_aligned[i] and volume_ok[i] and trend_up[i]
-        # Short: break below weekly L4 with volume and downtrend
-        short_signal = close[i] < l4_aligned[i] and volume_ok[i] and trend_down[i]
+        # Long: break above H4 in low volatility
+        long_signal = close[i] > h4_aligned[i] and low_vol[i]
+        # Short: break below L4 in low volatility
+        short_signal = close[i] < l4_aligned[i] and low_vol[i]
         
-        # Exit on opposite breakout (mean reversion to pivot)
-        pivot_prev_val = (high_1w_prev + low_1w_prev + close_1w_prev) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_prev_val)
+        # Exit on opposite breakout to pivot level
+        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
         
