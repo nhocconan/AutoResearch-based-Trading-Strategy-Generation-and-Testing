@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-12h_1w_Donchian_Breakout_Volume_v1
-Hypothesis: Use weekly Donchian channels (20-period) with volume confirmation and ADX trend filter.
-Long when price breaks above upper Donchian with volume > 1.5x average and ADX > 25.
-Short when price breaks below lower Donchian with volume > 1.5x average and ADX > 25.
-Only trade in direction of weekly EMA50 trend to avoid counter-trend whipsaws.
-Targets 15-30 trades/year to minimize fee drag. Works in bull (follow trend breakouts) and bear (fade reversals at Donchian bands).
+1d_1w_Camarilla_Pivot_Breakout_v2
+Hypothesis: Use weekly Camarilla pivot levels with daily price breakouts and volume confirmation.
+Trade long when price breaks above weekly H4 with volume > 1.5x average, short when breaks below weekly L4.
+Only trade when daily ADX > 25 to ensure trending conditions.
+Targets 15-25 trades/year to minimize fee drag. Works in bull (follow trend breakouts) and bear (avoid false breakouts in ranging markets).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_Donchian_Breakout_Volume_v1"
-timeframe = "12h"
+name = "1d_1w_Camarilla_Pivot_Breakout_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price arrays
@@ -27,81 +26,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Donchian channels and trend filter
+    # Weekly data for Camarilla pivot levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # === WEEKLY DONCHIAN CHANNEL (20-period) ===
+    # === WEEKLY CAMARILLA PIVOT LEVELS ===
     weekly_high = df_1w['high'].values
     weekly_low = df_1w['low'].values
     weekly_close = df_1w['close'].values
     
-    # Upper band: highest high of last 20 weeks
-    upper_donchian = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 weeks
-    lower_donchian = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    # Typical price
+    typical_price = (weekly_high + weekly_low + weekly_close) / 3
+    # Pivot point
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    # Ranges
+    range_h = weekly_high - weekly_low
     
-    upper_donchian_12h = align_htf_to_ltf(prices, df_1w, upper_donchian)
-    lower_donchian_12h = align_htf_to_ltf(prices, df_1w, lower_donchian)
+    # Camarilla levels
+    h4 = pivot + (1.1 / 2) * range_h
+    l4 = pivot - (1.1 / 2) * range_h
+    h3 = pivot + (1.1 / 4) * range_h
+    l3 = pivot - (1.1 / 4) * range_h
     
-    # === WEEKLY EMA50 TREND FILTER ===
-    ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h = align_htf_to_ltf(prices, df_1w, ema50)
+    h4_1d = align_htf_to_ltf(prices, df_1w, h4)
+    l4_1d = align_htf_to_ltf(prices, df_1w, l4)
+    h3_1d = align_htf_to_ltf(prices, df_1w, h3)
+    l3_1d = align_htf_to_ltf(prices, df_1w, l3)
     
-    # === WEEKLY ADX (14-period) FOR TREND STRENGTH ===
-    # Calculate True Range
-    tr1 = weekly_high[1:] - weekly_low[1:]
-    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1])
-    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # === DAILY ADX TREND FILTER ===
+    # Calculate ADX(14)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    # Calculate Directional Movement
-    dm_plus = np.where((weekly_high[1:] - weekly_high[:-1]) > (weekly_low[:-1] - weekly_low[1:]), 
-                       np.maximum(weekly_high[1:] - weekly_high[:-1], 0), 0)
-    dm_minus = np.where((weekly_low[:-1] - weekly_low[1:]) > (weekly_high[1:] - weekly_high[:-1]), 
-                        np.maximum(weekly_low[:-1] - weekly_low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/period)
-    atr = np.full(len(tr), np.nan)
-    dm_plus_smooth = np.full(len(dm_plus), np.nan)
-    dm_minus_smooth = np.full(len(dm_minus), np.nan)
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    period = 14
+    atr = np.zeros(n)
+    plus_di = np.zeros(n)
+    minus_di = np.zeros(n)
+    dx = np.zeros(n)
+    adx = np.zeros(n)
     
     # Initial values
-    if len(tr) >= 14:
-        atr[13] = np.nansum(tr[1:15])  # First 14-period ATR
-        dm_plus_smooth[13] = np.nansum(dm_plus[1:15])
-        dm_minus_smooth[13] = np.nansum(dm_minus[1:15])
+    atr[period] = np.mean(tr[1:period+1])
+    plus_dm_smoothed = np.sum(plus_dm[1:period+1])
+    minus_dm_smoothed = np.sum(minus_dm[1:period+1])
+    
+    for i in range(period+1, n):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        plus_dm_smoothed = plus_dm_smoothed - (plus_dm_smoothed / period) + plus_dm[i]
+        minus_dm_smoothed = minus_dm_smoothed - (minus_dm_smoothed / period) + minus_dm[i]
         
-        # Wilder's smoothing for remaining values
-        for i in range(14, len(tr)):
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
-    
-    # Calculate DI+ and DI-
-    di_plus = np.full(len(atr), np.nan)
-    di_minus = np.full(len(atr), np.nan)
-    dx = np.full(len(atr), np.nan)
-    
-    for i in range(14, len(atr)):
-        if not np.isnan(atr[i]) and atr[i] != 0:
-            di_plus[i] = (dm_plus_smooth[i] / atr[i]) * 100
-            di_minus[i] = (dm_minus_smooth[i] / atr[i]) * 100
-            if (di_plus[i] + di_minus[i]) != 0:
-                dx[i] = (np.abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])) * 100
-    
-    # Calculate ADX (smoothed DX)
-    adx = np.full(len(dx), np.nan)
-    if len(dx) >= 28:  # Need 14 for initial DX + 14 for smoothing
-        adx[27] = np.nanmean(dx[14:28])  # First 14-period ADX
-        for i in range(28, len(dx)):
-            if not np.isnan(dx[i]):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    adx_12h = align_htf_to_ltf(prices, df_1w, adx)
+        plus_di[i] = 100 * plus_dm_smoothed / atr[i] if atr[i] != 0 else 0
+        minus_di[i] = 100 * minus_dm_smoothed / atr[i] if atr[i] != 0 else 0
+        dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100 if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        if i == period*2:
+            adx[i] = np.mean(dx[period+1:i+1])
+        elif i > period*2:
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
     # === VOLUME FILTER (20-period average) ===
     vol_ma = np.full(n, np.nan)
@@ -115,33 +108,30 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any data invalid
-        if (np.isnan(upper_donchian_12h[i]) or np.isnan(lower_donchian_12h[i]) or 
-            np.isnan(ema50_12h[i]) or np.isnan(adx_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(h4_1d[i]) or np.isnan(l4_1d[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation: current volume > 1.5x average
         vol_confirm = volume[i] > vol_ma[i] * 1.5
         
-        # Trend strength filter: ADX > 25 indicates strong trend
-        strong_trend = adx_12h[i] > 25
-        
-        # Trend filter: price above/below EMA50
-        trend_up = close[i] > ema50_12h[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx[i] > 25
         
         # Breakout conditions
-        breakout_up = high[i] > upper_donchian_12h[i] and vol_confirm and strong_trend
-        breakout_down = low[i] < lower_donchian_12h[i] and vol_confirm and strong_trend
+        breakout_up = high[i] > h4_1d[i] and vol_confirm
+        breakout_down = low[i] < l4_1d[i] and vol_confirm
         
-        # Entry logic: only trade in direction of weekly trend
-        long_entry = breakout_up and trend_up
-        short_entry = breakout_down and not trend_up
+        # Entry logic: only trade breakouts in trending markets
+        long_entry = breakout_up and trending
+        short_entry = breakout_down and trending
         
-        # Exit logic: reverse signal or price returns to EMA50 (trend filter)
-        long_exit = not breakout_up or close[i] < ema50_12h[i]
-        short_exit = not breakout_down or close[i] > ema50_12h[i]
+        # Exit logic: reverse signal or price returns to H3/L3 levels
+        long_exit = not breakout_up or close[i] < h3_1d[i]
+        short_exit = not breakout_down or close[i] > l3_1d[i]
         
         # Signal logic
         if long_entry and position != 1:
