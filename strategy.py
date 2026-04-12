@@ -8,47 +8,36 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 12h Donchian(20) breakout with 1w trend filter and volume confirmation
-    # Uses weekly EMA50 for trend direction to avoid counter-trend trades
-    # Volume > 1.5x 20-period MA confirms breakout strength
-    # Discrete sizing 0.25 to minimize fee churn. Target: 12-37 trades/year.
+    # Hypothesis: 4h Camarilla H3/L3 breakout with volume confirmation in chop regimes
+    # Uses 1d Camarilla levels as institutional support/resistance
+    # Volume > 1.8x 20-period MA confirms institutional participation
+    # Chop > 61.8 ensures ranging markets where mean reversion works
+    # Discrete sizing 0.25 to minimize fee churn. Target: 25-40 trades/year.
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for Donchian channels (more stable than 12h)
+    # Get 1d data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily Donchian(20) channels
+    # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian high and low over 20 days
-    donchian_high = np.full(len(df_1d), np.nan)
-    donchian_low = np.full(len(df_1d), np.nan)
-    for i in range(20, len(df_1d)):
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+    # Camarilla H3 and L3 levels
+    camarilla_h3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_l3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align to 12h timeframe (use previous day's levels)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align to 4h timeframe (use previous day's levels)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
-    # Volume confirmation: current volume > 1.5x 20-period MA
+    # Volume confirmation: current volume > 1.8x 20-period MA
     vol_ma_20 = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma_20[i] = np.mean(volume[i-20:i])
@@ -60,31 +49,57 @@ def generate_signals(prices):
         else:
             vol_ratio[i] = 1.0
     
+    # Chop regime filter: CHOP > 61.8 = ranging market (good for mean reversion)
+    # Calculate ATR(14)
+    atr = np.full(n, np.nan)
+    tr = np.full(n, np.nan)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-14:i])
+    
+    # Calculate highest high and lowest low over 14 periods
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(14, n):
+        highest_high[i] = np.max(high[i-14:i])
+        lowest_low[i] = np.min(low[i-14:i])
+    
+    # Chop = log10(sum(atr(14))/abs(highest_high - lowest_low)) * log10(14) * 100
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        if highest_high[i] != lowest_low[i] and atr[i] > 0:
+            sum_atr = np.sum(atr[i-14:i])
+            chop[i] = np.log10(sum_atr / abs(highest_high[i] - lowest_low[i])) * np.log10(14) * 100
+        else:
+            chop[i] = 50.0
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Determine market regime: Chop > 61.8 = ranging (good for mean reversion)
+        ranging_market = chop[i] > 61.8
         
         # Breakout conditions with volume confirmation
-        breakout_up = close[i] > donchian_high_aligned[i]
-        breakout_down = close[i] < donchian_low_aligned[i]
+        breakout_up = close[i] > camarilla_h3_aligned[i]
+        breakout_down = close[i] < camarilla_l3_aligned[i]
         
-        # Entry conditions: breakout with volume confirmation and trend alignment
-        long_entry = breakout_up and (vol_ratio[i] > 1.5) and uptrend
-        short_entry = breakout_down and (vol_ratio[i] > 1.5) and downtrend
+        # Entry conditions: breakout with volume confirmation in ranging market
+        long_entry = breakout_up and (vol_ratio[i] > 1.8) and ranging_market
+        short_entry = breakout_down and (vol_ratio[i] > 1.8) and ranging_market
         
-        # Exit conditions: opposite Donchian touch
-        long_exit = close[i] < donchian_low_aligned[i]
-        short_exit = close[i] > donchian_high_aligned[i]
+        # Exit conditions: price returns to midpoint between H3 and L3
+        midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+        long_exit = close[i] < midpoint
+        short_exit = close[i] > midpoint
         
         if long_entry and position != 1:
             position = 1
@@ -109,6 +124,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1w_donchian_breakout_ema_volume_v1"
-timeframe = "12h"
+name = "4h_1d_camarilla_breakout_vol_chop_v5"
+timeframe = "4h"
 leverage = 1.0
