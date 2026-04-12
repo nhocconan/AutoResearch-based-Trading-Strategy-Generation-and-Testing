@@ -13,59 +13,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 12-period EMA filter (12-day EMA)
+    # Get daily data for weekly pivot calculation and volume profile
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 12:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily 12-period EMA
+    # Calculate weekly pivot levels from daily data (requires full week)
+    # Use daily high/low/close of previous week for pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema12_1d = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema12_1d_aligned = align_htf_to_ltf(prices, df_1d, ema12_1d)
     
-    # Calculate 24-period ATR for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = tr2[0] = tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.full(n, np.nan)
-    for i in range(23, n):
-        atr[i] = np.nanmean(tr[i-23:i+1])
+    # Calculate weekly pivot points (using last complete week)
+    # For each day, we use the previous week's data
+    pivot_points = np.full(len(close_1d), np.nan)
+    r1 = np.full(len(close_1d), np.nan)
+    s1 = np.full(len(close_1d), np.nan)
+    r2 = np.full(len(close_1d), np.nan)
+    s2 = np.full(len(close_1d), np.nan)
     
-    # Calculate 50-period ATR SMA for volatility regime
-    atr_sma50 = np.full(n, np.nan)
-    atr_series = pd.Series(atr)
-    atr_sma50_values = atr_series.rolling(window=50, min_periods=50).mean().values
-    atr_sma50[:] = atr_sma50_values
+    for i in range(7, len(close_1d)):  # Start from 7th day to have full previous week
+        # Previous week's data (7 days back to 1 day back)
+        week_high = np.max(high_1d[i-7:i])
+        week_low = np.min(low_1d[i-7:i])
+        week_close = close_1d[i-1]  # Previous day's close as weekly close approximation
+        
+        pivot = (week_high + week_low + week_close) / 3.0
+        pivot_points[i] = pivot
+        r1[i] = 2 * pivot - week_low
+        s1[i] = 2 * pivot - week_high
+        r2[i] = pivot + (week_high - week_low)
+        s2[i] = pivot - (week_high - week_low)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_points_aligned = align_htf_to_ltf(prices, df_1d, pivot_points)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Calculate 6-period RSI for overbought/oversold signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing for RSI
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    avg_gain[5] = np.mean(gain[1:6])  # First average
+    avg_loss[5] = np.mean(loss[1:6])
+    
+    for i in range(6, n):
+        avg_gain[i] = (avg_gain[i-1] * 5 + gain[i]) / 6
+        avg_loss[i] = (avg_loss[i-1] * 5 + loss[i]) / 6
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma20 = np.full(n, np.nan)
+    vol_series = pd.Series(volume)
+    vol_ma20_values = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma20[:] = vol_ma20_values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(ema12_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(atr_sma50[i])):
+        if (np.isnan(pivot_points_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR > 1.0x 50-period ATR SMA (elevated volatility)
-        vol_filter = atr[i] > atr_sma50[i] * 1.0
+        # Volume filter
+        vol_filter = volume[i] > vol_ma20[i] * 1.5
         
-        # Trend filter: price above/below daily 12 EMA
-        price_above_ema12 = close[i] > ema12_1d_aligned[i]
-        price_below_ema12 = close[i] < ema12_1d_aligned[i]
+        # Fade at R3/S3 levels (using R1/S1 as primary levels, R2/S2 as extremes)
+        # Long when price touches S1 with RSI < 30 (oversold) and volume confirmation
+        long_setup = (close[i] <= s1_aligned[i] * 1.001) and (rsi[i] < 30) and vol_filter
+        # Short when price touches R1 with RSI > 70 (overbought) and volume confirmation
+        short_setup = (close[i] >= r1_aligned[i] * 0.999) and (rsi[i] > 70) and vol_filter
         
-        # Entry conditions: breakout in direction of trend with volatility expansion
-        long_breakout = close[i] > high[i-1]  # break above previous high
-        short_breakout = close[i] < low[i-1]  # break below previous low
+        # Breakout continuation at R4/S4 levels (using R2/S2)
+        # Long breakout when price breaks above R2 with RSI > 50
+        long_breakout = (close[i] > r2_aligned[i] * 1.001) and (rsi[i] > 50) and vol_filter
+        # Short breakdown when price breaks below S2 with RSI < 50
+        short_breakout = (close[i] < s2_aligned[i] * 0.999) and (rsi[i] < 50) and vol_filter
         
-        long_entry = long_breakout and price_above_ema12 and vol_filter
-        short_entry = short_breakout and price_below_ema12 and vol_filter
+        long_entry = long_setup or long_breakout
+        short_entry = short_setup or short_breakout
         
-        # Exit conditions: reversal signal or volatility contraction
-        long_exit = (close[i] < ema12_1d_aligned[i]) or (atr[i] < atr_sma50[i] * 0.8)
-        short_exit = (close[i] > ema12_1d_aligned[i]) or (atr[i] < atr_sma50[i] * 0.8)
+        # Exit conditions: opposite touch or RSI extreme reversal
+        long_exit = (close[i] >= r1_aligned[i] * 0.999) or (rsi[i] > 70)
+        short_exit = (close[i] <= s1_aligned[i] * 1.001) or (rsi[i] < 30)
         
         if long_entry and position != 1:
             position = 1
@@ -90,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_ema12_breakout_vol_filter_v1"
-timeframe = "12h"
+name = "6h_1d_weekly_pivot_rsi_fade_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
