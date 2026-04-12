@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_keltner_breakout_v1"
-timeframe = "1d"
+name = "12h_1d_camarilla_breakout_v39"
+timezone = "UTC"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,52 +18,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Keltner channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla pivots (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly EMA(20) and ATR(10) for Keltner channels
-    ema_20 = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Previous 1d bar data (avoid look-ahead)
+    high_1d_prev = df_1d['high'].shift(1).values
+    low_1d_prev = df_1d['low'].shift(1).values
+    close_1d_prev = df_1d['close'].shift(1).values
     
-    # Keltner channel: Upper = EMA + 2*ATR, Lower = EMA - 2*ATR
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Calculate 1d Camarilla H3/L3 levels
+    pivot_prev = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+    range_1d_prev = high_1d_prev - low_1d_prev
+    h3_prev = pivot_prev + (range_1d_prev * 1.1 / 4)
+    l3_prev = pivot_prev - (range_1d_prev * 1.1 / 4)
     
-    # Align to daily timeframe (weekly channel based on previous week's close)
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1w, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1w, keltner_lower)
+    # Align to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3_prev)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3_prev)
     
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5x 30-period average (stricter to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_confirm = volume > (vol_ma * 1.5)
     
-    # Trend filter: price above/below 50-day SMA
-    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # ATR filter: avoid low volatility periods
+    atr_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_ratio = atr / atr_ma
+    vol_filter = vol_ratio > 0.8  # Avoid extremely low volatility
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(50, n):
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
-            np.isnan(vol_confirm[i]) or np.isnan(sma_50[i])):
+    for i in range(150, n):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(vol_confirm[i]) or np.isnan(vol_filter[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Long: break above upper Keltner band with volume confirmation and price > SMA50
-        long_signal = close[i] > keltner_upper_aligned[i] and vol_confirm[i] and close[i] > sma_50[i]
-        # Short: break below lower Keltner band with volume confirmation and price < SMA50
-        short_signal = close[i] < keltner_lower_aligned[i] and vol_confirm[i] and close[i] < sma_50[i]
+        # Long: break above H3 with volume confirmation and vol filter
+        long_signal = close[i] > h3_aligned[i] and vol_confirm[i] and vol_filter[i]
+        # Short: break below L3 with volume confirmation and vol filter
+        short_signal = close[i] < l3_aligned[i] and vol_confirm[i] and vol_filter[i]
         
-        # Exit when price returns to EMA20 (middle of Keltner channel)
-        ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
-        exit_long = close[i] < ema_20_aligned[i]
-        exit_short = close[i] > ema_20_aligned[i]
+        # Exit when price returns to pivot level
+        pivot_prev_val = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev_val)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         if long_signal and position != 1:
             position = 1
