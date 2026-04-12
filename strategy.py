@@ -13,81 +13,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ATR and price range calculations
+    # Get daily data for ATR and volatility regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate daily ATR (14-period) for volatility filter
+    # Calculate 14-day ATR on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range calculation
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First period
-    tr2[0] = np.nan  # No previous close
+    tr1[0] = high_1d[0] - low_1d[0]  # First bar
+    tr2[0] = np.nan
     tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # ATR calculation with proper smoothing
-    atr_1d = np.full(len(tr), np.nan)
+    atr_14 = np.full(len(tr), np.nan)
     for i in range(14, len(tr)):
-        if i == 14:
-            atr_1d[i] = np.mean(tr[1:i+1])  # Initial SMA
+        atr_14[i] = np.mean(tr[i-14:i])
+    
+    # Align ATR to 4h timeframe (1 day = 6 * 4h bars)
+    atr_14_4h = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Calculate 4-period RSI on 4h close prices
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(4, n):
+        if i == 4:
+            avg_gain[i] = np.mean(gain[0:4])
+            avg_loss[i] = np.mean(loss[0:4])
         else:
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
+            avg_gain[i] = (avg_gain[i-1] * 3 + gain[i]) / 4
+            avg_loss[i] = (avg_loss[i-1] * 3 + loss[i]) / 4
     
-    # Calculate daily price range (high - low)
-    daily_range = high_1d - low_1d
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate range ratio: current daily range / ATR
-    range_ratio = np.full(len(daily_range), np.nan)
-    for i in range(len(daily_range)):
-        if not np.isnan(atr_1d[i]) and atr_1d[i] > 0:
-            range_ratio[i] = daily_range[i] / atr_1d[i]
+    # Calculate Bollinger Bands (20, 2) on 4h
+    sma_20 = np.full(n, np.nan)
+    std_20 = np.full(n, np.nan)
+    for i in range(20, n):
+        sma_20[i] = np.mean(close[i-20:i])
+        std_20[i] = np.std(close[i-20:i])
     
-    # Align ATR and range ratio to 12h timeframe
-    atr_12h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    range_ratio_12h = align_htf_to_ltf(prices, df_1d, range_ratio)
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Calculate 12-period EMA of close for trend filter
-    close_series = pd.Series(close)
-    ema_12 = close_series.ewm(span=12, adjust=False, min_periods=12).values
+    # Bollinger Band Width for regime detection
+    bb_width = (upper_bb - lower_bb) / sma_20
     
-    # Calculate 12-period standard deviation for volatility bands
-    rolling_std = pd.Series(close).rolling(window=12, min_periods=12).std().values
-    
-    # Dynamic volatility bands: EMA ± (1.5 * std dev)
-    upper_band = ema_12 + 1.5 * rolling_std
-    lower_band = ema_12 - 1.5 * rolling_std
+    # Calculate 20-period percentile of BB width for regime classification
+    bb_width_percentile = np.full(n, np.nan)
+    for i in range(40, n):  # Need 20 * 2 for percentile calculation
+        window = bb_width[i-20:i]
+        if not np.all(np.isnan(window)):
+            # Calculate percentile of current value in window
+            bb_width_percentile[i] = np.sum(~np.isnan(window) & (window <= bb_width[i])) / np.sum(~np.isnan(window)) * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(40, n):
         # Skip if data not ready
-        if (np.isnan(range_ratio_12h[i]) or np.isnan(ema_12[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
+        if (np.isnan(atr_14_4h[i]) or np.isnan(rsi[i]) or np.isnan(bb_width_percentile[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: trade only when range is expanded (trending market)
-        vol_expansion = range_ratio_12h[i] > 1.2
+        # Regime filter: BB width percentile > 60 = trending regime (avoid chop)
+        trending_regime = bb_width_percentile[i] > 60
         
-        # Trend filter: price above/below EMA
-        price_above_ema = close[i] > ema_12[i]
-        price_below_ema = close[i] < ema_12[i]
+        # Volatility filter: ATR > 0.5 * price (avoid extremely low volatility)
+        vol_filter = atr_14_4h[i] > 0.005 * close[i]
         
-        # Entry conditions: volatility expansion + price outside volatility bands
-        long_entry = vol_expansion and price_above_ema and close[i] > upper_band[i]
-        short_entry = vol_expansion and price_below_ema and close[i] < lower_band[i]
+        # RSI conditions: oversold (<30) for long, overbought (>70) for short
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # Exit conditions: price returns to EMA or volatility contracts
-        long_exit = close[i] < ema_12[i] or range_ratio_12h[i] < 0.8
-        short_exit = close[i] > ema_12[i] or range_ratio_12h[i] < 0.8
+        # Bollinger Band conditions: price outside bands
+        bb_break_low = close[i] < lower_bb[i]
+        bb_break_high = close[i] > upper_bb[i]
+        
+        # Entry conditions
+        long_entry = rsi_oversold and bb_break_low and trending_regime and vol_filter
+        short_entry = rsi_overbought and bb_break_high and trending_regime and vol_filter
+        
+        # Exit conditions: opposite RSI extreme or middle BB
+        long_exit = rsi[i] > 50 or close[i] > sma_20[i]
+        short_exit = rsi[i] < 50 or close[i] < sma_20[i]
         
         if long_entry and position != 1:
             position = 1
@@ -112,6 +131,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "12h_1d_volatility_breakout_v1"
-timeframe = "12h"
+name = "4h_1d_rsi_bb_width_regime_v1"
+timeframe = "4h"
 leverage = 1.0
