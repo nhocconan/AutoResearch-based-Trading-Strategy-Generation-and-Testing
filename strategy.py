@@ -1,10 +1,17 @@
+# 12h_1d_camarilla_breakout_v36
+# Hypothesis: Camarilla pivot breakout on 12h with volume confirmation and volatility filter
+# Uses 1d Camarilla levels for structure, volume > 1.5x 20-period average for conviction,
+# and volatility filter to avoid chop. Designed for fewer trades (<150/4y) to reduce fee drag.
+# Works in bull (breakouts continue) and bear (mean reversion to pivot) via exit at pivot.
+# Target: 50-150 total trades over 4 years.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_1d_camarilla_breakout_v34"
-timeframe = "4h"
+name = "12h_1d_camarilla_breakout_v36"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -33,7 +40,7 @@ def generate_signals(prices):
     h4_prev = pivot_prev + (range_1d_prev * 1.1 / 2)
     l4_prev = pivot_prev - (range_1d_prev * 1.1 / 2)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     h4_aligned = align_htf_to_ltf(prices, df_1d, h4_prev)
     l4_aligned = align_htf_to_ltf(prices, df_1d, l4_prev)
     
