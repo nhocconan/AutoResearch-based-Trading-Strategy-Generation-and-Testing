@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_camarilla_volatility_breakout_v1"
-timeframe = "12h"
+name = "4h_12h_camarilla_volume_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,73 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for previous day
+    # Calculate Camarilla levels for previous 12h period
     # Camarilla: H4 = C + ((H-L) * 1.1/2), L4 = C - ((H-L) * 1.1/2)
-    # Where H, L, C are previous day's high, low, close
-    camarilla_high = np.zeros(len(close_1d))
-    camarilla_low = np.zeros(len(close_1d))
+    camarilla_high = np.zeros(len(close_12h))
+    camarilla_low = np.zeros(len(close_12h))
     
-    for i in range(1, len(close_1d)):
-        H = high_1d[i-1]
-        L = low_1d[i-1]
-        C = close_1d[i-1]
+    for i in range(1, len(close_12h)):
+        H = high_12h[i-1]
+        L = low_12h[i-1]
+        C = close_12h[i-1]
         camarilla_high[i] = C + ((H - L) * 1.1 / 2)
         camarilla_low[i] = C - ((H - L) * 1.1 / 2)
     
-    # Align to 12h timeframe
-    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Align to 4h timeframe
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_12h, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_12h, camarilla_low)
     
-    # Volume filter: current volume > 20-period average (on 12h data)
+    # Volume filter: current volume > 20-period average (on 4h data)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
-    
-    # Volatility filter: ATR(14) > 20-period average ATR (to avoid choppy markets)
-    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    volatility_ok = atr > atr_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):  # warmup for volatility and volume filters
+    for i in range(20, n):  # warmup for volume filter
         # Skip if not ready
         if (np.isnan(camarilla_high_aligned[i]) or np.isnan(camarilla_low_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(volatility_ok[i])):
+            np.isnan(volume_ok[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions with volume and volatility confirmation
+        # Breakout conditions with volume confirmation
         breakout_up = close[i] > camarilla_high_aligned[i]
         breakout_down = close[i] < camarilla_low_aligned[i]
         
-        # Volume and volatility confirmation
+        # Volume confirmation
         vol_ok = volume_ok[i]
-        vol_filter_ok = volatility_ok[i]
         
         # Entry signals
-        long_signal = breakout_up and vol_ok and vol_filter_ok
-        short_signal = breakout_down and vol_ok and vol_filter_ok
+        long_signal = breakout_up and vol_ok
+        short_signal = breakout_down and vol_ok
         
-        # Exit when price returns to the Camarilla pivot (close of previous day)
+        # Exit when price returns to the Camarilla pivot (close of previous 12h period)
         # Calculate pivot point: (H + L + C) / 3
-        pivot_point = np.zeros(len(close_1d))
-        for j in range(1, len(close_1d)):
-            H = high_1d[j-1]
-            L = low_1d[j-1]
-            C = close_1d[j-1]
+        pivot_point = np.zeros(len(close_12h))
+        for j in range(1, len(close_12h)):
+            H = high_12h[j-1]
+            L = low_12h[j-1]
+            C = close_12h[j-1]
             pivot_point[j] = (H + L + C) / 3
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_point)
         
         exit_long = close[i] < pivot_aligned[i]
         exit_short = close[i] > pivot_aligned[i]
