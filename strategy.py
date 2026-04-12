@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-6h_1d_Price_Action_Reversal_v1
-Hypothesis: On 6h timeframe, price reversals at key 1d support/resistance levels (prior day high/low) 
-with volume confirmation and RSI filter provide edge in both bull and bear markets. 
-Uses 1d for structure (key levels) and 6s for timely entries. Target: 20-40 trades per year.
+12h_1w_Camarilla_Breakout_Volume
+Hypothesis: Camarilla pivot levels from 1w chart act as strong support/resistance on 12h timeframe.
+Price tends to reverse or bounce from these levels with confirmation from volume spike.
+Uses 1w for structure (reduced noise) and 12h for timely entries. Works in both bull and bear markets.
+Target: 15-30 trades per year (60-120 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_Price_Action_Reversal_v1"
-timeframe = "6h"
+name = "12h_1w_Camarilla_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,34 +25,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for key levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1W data for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # === KEY LEVELS: Prior day high and low ===
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
+    # === CAMARILLA PIVOT LEVELS (based on previous 1w bar) ===
+    # Calculate from previous 1w bar's OHLC
+    prev_high = np.roll(weekly_high, 1)
+    prev_low = np.roll(weekly_low, 1)
+    prev_close = np.roll(weekly_close, 1)
     
-    # Align to 6h timeframe
-    prev_high_6h = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_6h = align_htf_to_ltf(prices, df_1d, prev_low)
+    # First bar will have invalid data, but we'll handle with valid check
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # === RSI FILTER (14-period on 1d) ===
-    delta = pd.Series(daily_close).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_6h = align_htf_to_ltf(prices, df_1d, rsi)
+    # Camarilla levels
+    l3 = pivot + (range_val * 1.1 / 4)
+    l4 = pivot + (range_val * 1.1 / 2)
+    h3 = pivot - (range_val * 1.1 / 4)
+    h4 = pivot - (range_val * 1.1 / 2)
     
-    # === VOLUME SPIKE (1.5x 20-period average on 6h) ===
+    # Align to 12h timeframe (these levels are valid for the entire 1w bar)
+    l3_12h = align_htf_to_ltf(prices, df_1w, l3)
+    l4_12h = align_htf_to_ltf(prices, df_1w, l4)
+    h3_12h = align_htf_to_ltf(prices, df_1w, h3)
+    h4_12h = align_htf_to_ltf(prices, df_1w, h4)
+    
+    # === VOLUME SPIKE (2x 20-period average on 12h) ===
     vol_ma = np.full(n, np.nan)
     if n >= 20:
         vol_sum = np.sum(volume[:20])
@@ -59,34 +64,33 @@ def generate_signals(prices):
         for i in range(20, n):
             vol_sum = vol_sum - volume[i-20] + volume[i]
             vol_ma[i] = vol_sum / 20
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(50, n):
-        # Skip if any data invalid
-        if (np.isnan(prev_high_6h[i]) or np.isnan(prev_low_6h[i]) or
-            np.isnan(rsi_6h[i]) or np.isnan(vol_ma[i])):
+    for i in range(100, n):
+        # Skip if any data invalid (first bar roll will have NaN)
+        if (np.isnan(l3_12h[i]) or np.isnan(l4_12h[i]) or 
+            np.isnan(h3_12h[i]) or np.isnan(h4_12h[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Price near prior day high/low (within 0.2% tolerance)
-        near_high = abs(high[i] - prev_high_6h[i]) / prev_high_6h[i] < 0.002
-        near_low = abs(low[i] - prev_low_6h[i]) / prev_low_6h[i] < 0.002
-        
-        # RSI conditions for reversal
-        rsi_oversold = rsi_6h[i] < 30
-        rsi_overbought = rsi_6h[i] > 70
+        # Price near Camarilla levels (within 0.2% tolerance for 12h)
+        near_l3 = abs(low[i] - l3_12h[i]) / l3_12h[i] < 0.002
+        near_l4 = abs(low[i] - l4_12h[i]) / l4_12h[i] < 0.002
+        near_h3 = abs(high[i] - h3_12h[i]) / h3_12h[i] < 0.002
+        near_h4 = abs(high[i] - h4_12h[i]) / h4_12h[i] < 0.002
         
         # Entry conditions with volume confirmation
-        long_entry = near_low and rsi_oversold and vol_spike[i]
-        short_entry = near_high and rsi_overbought and vol_spike[i]
+        long_entry = (near_l3 or near_l4) and vol_spike[i]
+        short_entry = (near_h3 or near_h4) and vol_spike[i]
         
-        # Exit conditions: price moves back toward mid-point or opposite signal
-        mid_point = (prev_high_6h[i] + prev_low_6h[i]) / 2.0
-        long_exit = close[i] >= mid_point  # Exit long when price reaches midpoint
-        short_exit = close[i] <= mid_point  # Exit short when price reaches midpoint
+        # Exit conditions: price moves back toward pivot or opposite signal
+        pivot_12h = align_htf_to_ltf(prices, df_1w, pivot)
+        long_exit = close[i] >= pivot_12h[i]  # Exit long when price reaches pivot
+        short_exit = close[i] <= pivot_12h[i]  # Exit short when price reaches pivot
         
         # Signal logic
         if long_entry and position != 1:
