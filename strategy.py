@@ -1,23 +1,38 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1h_1d_rsi_volatility_breakout
-Uses daily RSI extremes and volatility contraction (ATR ratio) to detect exhaustion points.
-Enters on 1h breakouts in the direction of the extreme with volume confirmation.
+12h_1d_alligator_trend
+Uses Williams Alligator on daily timeframe to identify trend direction.
+Enters on 12h when price crosses above/below Alligator teeth with volume confirmation.
+Exits when price crosses back below/above teeth or momentum weakens.
+Williams Alligator: Jaw (13-period SMMA, 8 offset), Teeth (8-period SMMA, 5 offset), Lips (5-period SMMA, 3 offset).
 Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drift.
-Works in both bull and bear markets by capturing mean reversion after overextension.
+Works in trending markets by following the Alligator's alignment.
 """
 
-name = "1h_1d_rsi_volatility_breakout"
-timeframe = "1h"
+name = "12h_1d_alligator_trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(series, period):
+    """Smoothed Moving Average (SMMA)"""
+    if len(series) < period:
+        return np.full_like(series, np.nan, dtype=float)
+    result = np.full_like(series, np.nan, dtype=float)
+    # First value is simple average
+    result[period-1] = np.mean(series[:period])
+    # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_value) / period
+    for i in range(period, len(series)):
+        result[i] = (result[i-1] * (period-1) + series[i]) / period
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,81 +40,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI and ATR
+    # Get daily data for Alligator calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Daily RSI (14)
-    rsi_length = 14
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=rsi_length, min_periods=rsi_length).mean()
-    avg_loss = loss.rolling(window=rsi_length, min_periods=rsi_length).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Williams Alligator components
+    # Jaw: 13-period SMMA, 8 bars offset
+    jaw_raw = smma(close_1d, 13)
+    jaw = np.roll(jaw_raw, 8)  # shift forward by 8 bars
+    # Teeth: 8-period SMMA, 5 bars offset
+    teeth_raw = smma(close_1d, 8)
+    teeth = np.roll(teeth_raw, 5)  # shift forward by 5 bars
+    # Lips: 5-period SMMA, 3 bars offset
+    lips_raw = smma(close_1d, 5)
+    lips = np.roll(lips_raw, 3)  # shift forward by 3 bars
     
-    # Daily ATR (14) for volatility measurement
-    atr_length = 14
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(abs(high_1d - pd.Series(close_1d).shift()))
-    tr3 = pd.Series(abs(low_1d - pd.Series(close_1d).shift()))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=atr_length, min_periods=atr_length).mean().values
+    # Align Alligator lines to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # ATR ratio: current ATR / 50-period average ATR (volatility contraction/expansion)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / np.where(atr_ma == 0, np.nan, atr_ma)
-    
-    # Align daily indicators to 1h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
-    
-    # 1h volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation on 12h: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(rsi_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: daily RSI oversold (<30) + volatility contraction (ATR ratio < 0.8) 
-        # + 1h breakout above recent high + volume
-        if (rsi_aligned[i] < 30 and atr_ratio_aligned[i] < 0.8 and 
-            close[i] > np.max(high[max(0, i-20):i]) and vol_confirm[i] and position != 1):
+        # Long entry: price crosses above teeth with lips above jaws (bullish alignment) and volume
+        if (close[i] > teeth_aligned[i] and lips_aligned[i] > jaw_aligned[i] and 
+            vol_confirm[i] and position != 1):
             position = 1
-            signals[i] = 0.20
-        # Short entry: daily RSI overbought (>70) + volatility contraction (ATR ratio < 0.8)
-        # + 1h breakout below recent low + volume
-        elif (rsi_aligned[i] > 70 and atr_ratio_aligned[i] < 0.8 and 
-              close[i] < np.min(low[max(0, i-20):i]) and vol_confirm[i] and position != -1):
+            signals[i] = 0.25
+        # Short entry: price crosses below teeth with lips below jaws (bearish alignment) and volume
+        elif (close[i] < teeth_aligned[i] and lips_aligned[i] < jaw_aligned[i] and 
+              vol_confirm[i] and position != -1):
             position = -1
-            signals[i] = -0.20
-        # Exit conditions: RSI returns to neutral zone (40-60) or volatility expands
-        elif position == 1 and (rsi_aligned[i] > 50 or atr_ratio_aligned[i] > 1.2):
+            signals[i] = -0.25
+        # Exit conditions: price crosses back below/above teeth
+        elif position == 1 and close[i] < teeth_aligned[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and (rsi_aligned[i] < 50 or atr_ratio_aligned[i] > 1.2):
+        elif position == -1 and close[i] > teeth_aligned[i]:
             position = 0
             signals[i] = 0.0
         else:
             # Hold current position
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
     
