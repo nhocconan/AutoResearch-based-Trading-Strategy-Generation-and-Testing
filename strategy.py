@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Camarilla_Breakout_Volume_Regime
-Hypothesis: On 1h timeframe, enter long when price breaks above 4h Camarilla R3 with volume confirmation (>1.5x average), short when breaks below 4h S3. Uses daily trend filter and session filter (08-20 UTC) to reduce noise. Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+4h_1d_1w_Camarilla_Breakout_Volume_Regime_v2
+Hypothesis: On 4h timeframe, enter long when price breaks above daily Camarilla R3 with volume confirmation (>1.5x average) and short when breaks below daily S3. Uses weekly context for trend filter (long only if above weekly S3, short only if below weekly R3). Exit at daily pivot (mean reversion). Designed for 20-40 trades per year by requiring confluence of breakout at key levels, volume surge, and trend alignment. Focus on BTC/ETH pairs.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Camarilla_Breakout_Volume_Regime"
-timeframe = "1h"
+name = "4h_1d_1w_Camarilla_Breakout_Volume_Regime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,24 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H CAMARILLA PIVOT LEVELS ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # 4h pivot calculation
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
-    
-    # Camarilla levels (4h)
-    r3_4h = close_4h + range_4h * 1.1
-    s3_4h = close_4h - range_4h * 1.1
-    
-    # === DAILY TREND FILTER ===
+    # === DAILY CAMARILLA PIVOT LEVELS ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -52,68 +35,82 @@ def generate_signals(prices):
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Daily Camarilla levels for trend filter
+    # Camarilla levels (daily)
     r3_1d = close_1d + range_1d * 1.1
     s3_1d = close_1d - range_1d * 1.1
     
-    # Align to 1h timeframe
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    # === WEEKLY CONTEXT (for trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot calculation
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    
+    # Weekly Camarilla levels
+    r3_1w = close_1w + range_1w * 1.1
+    s3_1w = close_1w - range_1w * 1.1
+    
+    # Align to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # Volume average (48-period for 1h = ~2 days) for confirmation
+    # Volume average (20-period for 4h = ~10 hours) for confirmation
     vol_avg = np.zeros(n)
     vol_sum = 0.0
     vol_count = 0
     for i in range(n):
         vol_sum += volume[i]
         vol_count += 1
-        if i >= 48:
-            vol_sum -= volume[i-48]
+        if i >= 20:
+            vol_sum -= volume[i-20]
             vol_count -= 1
         if vol_count > 0:
             vol_avg[i] = vol_sum / vol_count
         else:
             vol_avg[i] = 0.0
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):  # start after warmup
-        # Skip if indicators not available or outside session
-        if (np.isnan(r3_4h_aligned[i]) or np.isnan(s3_4h_aligned[i]) or 
-            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            vol_avg[i] == 0.0 or hours[i] < 8 or hours[i] > 20):
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
+        # Skip if indicators not available
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            vol_avg[i] == 0.0):
+            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
         # Volume confirmation
         vol_confirm = volume[i] > 1.5 * vol_avg[i]
         
-        # Trend filter: use daily context
-        # Only go long if above daily S3, only short if below daily R3
-        long_allowed = close[i] > s3_1d_aligned[i]
-        short_allowed = close[i] < r3_1d_aligned[i]
+        # Trend filter: use weekly context
+        # Only go long if above weekly S3, only short if below weekly R3
+        long_allowed = close[i] > s3_1w_aligned[i]
+        short_allowed = close[i] < r3_1w_aligned[i]
         
         # Breakout entries at S3/R3 with volume and trend filter
-        long_setup = (close[i] > r3_4h_aligned[i]) and vol_confirm and long_allowed
-        short_setup = (close[i] < s3_4h_aligned[i]) and vol_confirm and short_allowed
+        long_setup = (close[i] > r3_1d_aligned[i]) and vol_confirm and long_allowed
+        short_setup = (close[i] < s3_1d_aligned[i]) and vol_confirm and short_allowed
         
-        # Exit when price returns to 4h pivot (mean reversion)
-        pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-        exit_long = close[i] < pivot_4h_aligned[i]
-        exit_short = close[i] > pivot_4h_aligned[i]
+        # Exit when price returns to daily pivot (mean reversion)
+        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+        exit_long = close[i] < pivot_1d_aligned[i]
+        exit_short = close[i] > pivot_1d_aligned[i]
         
         if long_setup and position != 1:
             position = 1
-            signals[i] = 0.20
+            signals[i] = 0.25
         elif short_setup and position != -1:
             position = -1
-            signals[i] = -0.20
+            signals[i] = -0.25
         elif exit_long and position == 1:
             position = 0
             signals[i] = 0.0
@@ -122,6 +119,6 @@ def generate_signals(prices):
             signals[i] = 0.0
         else:
             # Hold current position
-            signals[i] = 0.20 if position == 1 else (-0.20 if position == -1 else 0.0)
+            signals[i] = 0.25 if position == 1 else (-0.25 if position == -1 else 0.0)
     
     return signals
