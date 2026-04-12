@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_12h_camarilla_breakout_volume_atr_v1
-# Hypothesis: 4-hour timeframe with 12-hour/1-day multi-timeframe analysis
-# Uses Camarilla levels from previous day for breakout signals, confirmed by volume
-# and volatility (ATR) filters. Works in bull/bear markets by using volatility-adjusted
-# breakouts and volume confirmation to avoid false signals. Targets 20-50 trades/year.
+# 1d_1w_camarilla_breakout_with_volume_and_atr
+# Hypothesis: Daily chart Camarilla breakout with weekly trend filter, volume confirmation, and ATR volatility filter.
+# Uses weekly timeframe for trend direction (only long above weekly EMA50, short below) to avoid counter-trend trades.
+# Daily Camarilla levels (R4/S4 breakouts) provide entry signals with volume > 1.5x 20-day average and ATR > 0.
+# Weekly trend filter reduces false signals in choppy markets. Target: 10-25 trades/year (40-100 total over 4 years).
 
-name = "4h_12h_camarilla_breakout_volume_atr_v1"
-timeframe = "4h"
+name = "1d_1w_camarilla_breakout_with_volume_and_atr"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,6 +22,16 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Get daily data for Camarilla and ATR calculation
     df_1d = get_htf_data(prices, '1d')
@@ -53,7 +63,7 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 4h timeframe
+    # Align Camarilla levels and ATR to daily timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -71,18 +81,18 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+            np.isnan(atr_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and volatility filter
+        # Long entry: close breaks above R4 with volume, volatility filter, and above weekly EMA50
         if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+            atr_aligned[i] > 0 and close[i] > ema_50_1w_aligned[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and volatility filter
+        # Short entry: close breaks below S4 with volume, volatility filter, and below weekly EMA50
         elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+              atr_aligned[i] > 0 and close[i] < ema_50_1w_aligned[i] and position != -1):
             position = -1
             signals[i] = -0.25
         # Exit: reverse signal or close crosses back to opposite S3/R3
