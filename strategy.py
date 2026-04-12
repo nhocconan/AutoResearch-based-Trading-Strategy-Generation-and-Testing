@@ -45,6 +45,11 @@ def generate_signals(prices):
     for i in range(13, n):
         atr14[i] = np.nanmean(tr[i-13:i+1])
     
+    # Calculate 20-period volume moving average
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma20[i] = np.mean(volume[i-19:i+1])
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -52,15 +57,12 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or np.isnan(atr14[i])):
+            np.isnan(s2_aligned[i]) or np.isnan(atr14[i]) or np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             continue
         
         # Volume filter: current volume > 1.5x 20-period average volume
-        vol_ma20 = np.full(n, np.nan)
-        for i in range(19, n):
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
-        vol_filter = volume[i] > vol_ma20[i] * 1.5 if not np.isnan(vol_ma20[i]) else False
+        vol_filter = volume[i] > vol_ma20[i] * 1.5
         
         # Entry conditions: bounce from S1/S2 with volume confirmation
         long_bounce_s1 = (low[i] <= s1_aligned[i] * 1.002) and (close[i] > s1_aligned[i])
@@ -73,8 +75,8 @@ def generate_signals(prices):
         short_entry = (short_reject_r1 or short_reject_r2) and vol_filter
         
         # Exit conditions: opposite signal or volatility drop
-        long_exit = (close[i] < pivot_aligned[i]) or (atr14[i] < np.nanmean(atr14[max(0,i-19):i+1]) * 0.7 if not np.isnan(atr14[i]) else False)
-        short_exit = (close[i] > pivot_aligned[i]) or (atr14[i] < np.nanmean(atr14[max(0,i-19):i+1]) * 0.7 if not np.isnan(atr14[i]) else False)
+        long_exit = (close[i] < pivot_aligned[i]) or (atr14[i] < np.nanmean(atr14[max(0,i-19):i+1]) * 0.7)
+        short_exit = (close[i] > pivot_aligned[i]) or (atr14[i] < np.nanmean(atr14[max(0,i-19):i+1]) * 0.7)
         
         if long_entry and position != 1:
             position = 1
@@ -99,6 +101,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "4h_1d_pivot_vol_filter_v1"
+name = "4h_1d_pivot_vol_filter_v2"
 timeframe = "4h"
 leverage = 1.0
