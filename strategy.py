@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
+# 6h_1d_fibonacci_reversal_zone
+# Hypothesis: Price reversals at 61.8% and 38.2% Fibonacci retracement levels of the daily range, confirmed by volume and momentum divergence.
+# Works in both bull and bear markets by fading extreme moves at key retracement levels with confirmation filters.
+# Target: 25-40 trades/year (100-160 total over 4 years) to minimize fee drag.
 
-# 4h_1d_camarilla_breakout_volume_filter_v3
-# Hypothesis: 4-hour Camarilla breakout with volume confirmation and volatility filter
-# Uses 1d Camarilla levels from prior day, requires volume > 1.5x 20-period average and ATR > 0
-# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-# Works in bull/bear by using volatility-adjusted breakouts and volume confirmation to avoid false signals.
-
-name = "4h_1d_camarilla_breakout_volume_filter_v3"
-timeframe = "4h"
+name = "6h_1d_fibonacci_reversal_zone"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,73 +22,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and ATR calculation
+    # Get daily data for Fibonacci levels and momentum
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's range
+    # Daily range and Fibonacci levels (based on previous day's range)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
     
-    # Camarilla levels (based on previous day)
-    range_ = prev_high - prev_low
-    # Resistance levels
-    r3 = prev_close + range_ * 1.1 / 2
-    r4 = prev_close + range_ * 1.1
-    # Support levels
-    s3 = prev_close - range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1
+    daily_range = prev_high - prev_low
+    # Avoid division by zero
+    daily_range = np.where(daily_range == 0, 1e-10, daily_range)
     
-    # ATR for volatility filter (14-day ATR)
-    tr1 = np.abs(np.subtract(high_1d, low_1d))
-    tr2 = np.abs(np.subtract(high_1d, np.roll(close_1d, 1)))
-    tr3 = np.abs(np.subtract(low_1d, np.roll(close_1d, 1)))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Fibonacci retracement levels (38.2% and 61.8%)
+    fib_382 = prev_close + 0.382 * daily_range  # 38.2% retracement from close
+    fib_618 = prev_close + 0.618 * daily_range  # 61.8% retracement from close
     
-    # Align Camarilla levels and ATR to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # For downtrends, we need inverse levels
+    fib_382_inv = prev_close - 0.382 * daily_range
+    fib_618_inv = prev_close - 0.618 * daily_range
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Momentum confirmation: RSI(14) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_confirm = volume > (vol_ma * 1.3)
+    
+    # Align Fibonacci levels and RSI to 6h timeframe
+    fib_382_a = align_htf_to_ltf(prices, df_1d, fib_382)
+    fib_618_a = align_htf_to_ltf(prices, df_1d, fib_618)
+    fib_382_inv_a = align_htf_to_ltf(prices, df_1d, fib_382_inv)
+    fib_618_inv_a = align_htf_to_ltf(prices, df_1d, fib_618_inv)
+    rsi_a = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(atr_aligned[i])):
+        if (np.isnan(fib_382_a[i]) or np.isnan(fib_618_a[i]) or 
+            np.isnan(fib_382_inv_a[i]) or np.isnan(fib_618_inv_a[i]) or
+            np.isnan(rsi_a[i])):
             signals[i] = 0.0
             continue
         
-        # Long entry: close breaks above R4 with volume and volatility filter
-        if (close[i] > r4_aligned[i] and vol_confirm[i] and 
-            atr_aligned[i] > 0 and position != 1):
+        # Long setup: price at 61.8% retracement level in uptrend (RSI > 50) or 38.2% in downtrend
+        # Short setup: price at 61.8% retracement level in downtrend (RSI < 50) or 38.2% in uptrend
+        
+        # Long conditions: bounce from support
+        long_condition = (
+            (close[i] <= fib_618_a[i] * 1.005 and close[i] >= fib_618_a[i] * 0.995 and rsi_a[i] > 50) or  # 61.8% support in uptrend
+            (close[i] <= fib_382_inv_a[i] * 1.005 and close[i] >= fib_382_inv_a[i] * 0.995 and rsi_a[i] < 50)  # 38.2% resistance in downtrend (inverted)
+        ) and vol_confirm[i]
+        
+        # Short conditions: rejection from resistance
+        short_condition = (
+            (close[i] >= fib_618_a[i] * 0.995 and close[i] <= fib_618_a[i] * 1.005 and rsi_a[i] < 50) or  # 61.8% resistance in downtrend
+            (close[i] >= fib_382_inv_a[i] * 0.995 and close[i] <= fib_382_inv_a[i] * 1.005 and rsi_a[i] > 50)  # 38.2% support in uptrend (inverted)
+        ) and vol_confirm[i]
+        
+        # Entry logic
+        if long_condition and position != 1:
             position = 1
             signals[i] = 0.25
-        # Short entry: close breaks below S4 with volume and volatility filter
-        elif (close[i] < s4_aligned[i] and vol_confirm[i] and 
-              atr_aligned[i] > 0 and position != -1):
+        elif short_condition and position != -1:
             position = -1
             signals[i] = -0.25
-        # Exit: reverse signal or close crosses back to opposite S3/R3
-        elif position == 1 and close[i] < s3_aligned[i]:
+        # Exit: opposite signal or price moves significantly away from level
+        elif position == 1 and (
+            close[i] < fib_618_a[i] * 0.98 or  # Broke below 61.8% level
+            close[i] > fib_382_a[i] * 1.02     # Went above 38.2% level (taking profits)
+        ):
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > r3_aligned[i]:
+        elif position == -1 and (
+            close[i] > fib_618_a[i] * 1.02 or  # Broke above 61.8% level
+            close[i] < fib_382_a[i] * 0.98     # Went below 38.2% level (taking profits)
+        ):
             position = 0
             signals[i] = 0.0
         else:
