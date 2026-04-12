@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_1d_camarilla_breakout_volume"
+name = "6h_12h_1d_williams_alligator_ema200"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,67 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter: EMA(21) - long-term trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Williams Alligator from 12h
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 13:
         return np.zeros(n)
-    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    close_12h = df_12h['close'].values
+    jaw = pd.Series(close_12h).rolling(window=13, center=False).mean().shift(8).values
+    teeth = pd.Series(close_12h).rolling(window=8, center=False).mean().shift(5).values
+    lips = pd.Series(close_12h).rolling(window=5, center=False).mean().shift(3).values
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
     
-    # Daily volatility for CAMARILLA calculation (using previous day)
+    # EMA200 filter from 1d
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    H_minus_L_1d = prev_high_1d - prev_low_1d
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # CAMARILLA LEVELS (daily)
-    R3 = prev_close_1d + H_minus_L_1d * 1.1 / 4  # Strong resistance
-    S3 = prev_close_1d - H_minus_L_1d * 1.1 / 4  # Strong support
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Volume filter: current 6h volume > 48h average volume (2 days)
-    vol_2d_avg = pd.Series(df_1d['volume']).rolling(window=2, min_periods=2).mean().values
-    vol_2d_aligned = align_htf_to_ltf(prices, df_1d, vol_2d_avg)
-    volume_filter = volume > vol_2d_aligned
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
     for i in range(100, n):
         # Skip if not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Apply session filter
-        if not session_filter[i]:
-            signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
-            continue
+        # Alligator alignment: jaws < teeth < lips for downtrend, jaws > teeth > lips for uptrend
+        alligator_long = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
+        alligator_short = jaw_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]
         
-        # Long: price breaks above daily R3 with volume and above weekly EMA21
-        long_signal = (close[i] > R3_aligned[i] and volume_filter[i] and close[i] > ema_21_1w_aligned[i])
+        # EMA200 filter: price above/below long-term trend
+        price_above_ema200 = close[i] > ema_200_aligned[i]
+        price_below_ema200 = close[i] < ema_200_aligned[i]
         
-        # Short: price breaks below daily S3 with volume and below weekly EMA21
-        short_signal = (close[i] < S3_aligned[i] and volume_filter[i] and close[i] < ema_21_1w_aligned[i])
+        # Volume confirmation
+        vol_ok = volume_filter[i]
         
-        # Exit: price returns to midpoint between daily R4/S4
-        R4 = prev_close_1d + H_minus_L_1d * 1.1 / 2
-        S4 = prev_close_1d - H_minus_L_1d * 1.1 / 2
-        R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-        S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-        midpoint = (R4_aligned + S4_aligned) / 2
+        # Entry signals
+        long_signal = alligator_long and price_above_ema200 and vol_ok
+        short_signal = alligator_short and price_below_ema200 and vol_ok
         
-        exit_long = (position == 1 and close[i] < midpoint[i])
-        exit_short = (position == -1 and close[i] > midpoint[i])
+        # Exit when Alligator lines cross (trend change)
+        exit_long = jaw_aligned[i] < teeth_aligned[i]
+        exit_short = jaw_aligned[i] > teeth_aligned[i]
         
         # Execute trades
         if long_signal and position != 1:
