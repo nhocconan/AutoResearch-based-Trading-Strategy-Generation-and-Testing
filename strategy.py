@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_donchian_breakout_volume"
-timeframe = "6h"
+name = "4h_1d_camarilla_pivot_breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,22 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels from daily
+    # Daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian(20)
-    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels (based on previous day)
+    # Pivot = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
     
-    # Align to 6h
-    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
+    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    r1 = close_1d + range_ * 1.1 / 12
+    r2 = close_1d + range_ * 1.1 / 6
+    r3 = close_1d + range_ * 1.1 / 4
+    r4 = close_1d + range_ * 1.1 / 2
+    s1 = close_1d - range_ * 1.1 / 12
+    s2 = close_1d - range_ * 1.1 / 6
+    s3 = close_1d - range_ * 1.1 / 4
+    s4 = close_1d - range_ * 1.1 / 2
     
-    # Volume filter: current volume > 20-period average
+    # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: current volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma
     
@@ -41,25 +62,23 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if not ready
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0 if position == 0 else (0.25 if position == 1 else -0.25)
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > upper_20_aligned[i]
-        breakout_down = close[i] < lower_20_aligned[i]
-        
-        # Volume confirmation
+        # Breakout conditions with volume confirmation
+        breakout_long = close[i] > r1_aligned[i]  # Break above R1
+        breakout_short = close[i] < s1_aligned[i]  # Break below S1
         vol_ok = volume_ok[i]
         
-        # Exit when price returns to midpoint of channel
-        midpoint = (upper_20_aligned[i] + lower_20_aligned[i]) / 2
-        exit_long = close[i] < midpoint
-        exit_short = close[i] > midpoint
+        # Exit when price returns to pivot (mean reversion)
+        exit_long = close[i] < pivot_aligned[i]
+        exit_short = close[i] > pivot_aligned[i]
         
         # Entry signals
-        long_signal = breakout_up and vol_ok
-        short_signal = breakout_down and vol_ok
+        long_signal = breakout_long and vol_ok
+        short_signal = breakout_short and vol_ok
         
         # Execute trades
         if long_signal and position != 1:
