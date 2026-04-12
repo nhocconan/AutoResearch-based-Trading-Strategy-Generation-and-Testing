@@ -1,18 +1,16 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_1w_donchian_breakout_volume
-1d Donchian breakout with 1w trend filter and volume confirmation.
-Enters long when price breaks above 20-day Donchian high with 1w bullish trend (price > 50-week SMA).
-Enters short when price breaks below 20-day Donchian low with 1w bearish trend (price < 50-week SMA).
-Requires volume > 1.5x 20-day average.
-Exits when price crosses 10-day SMA in opposite direction.
-Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
-Works in trending markets by following higher timeframe trend.
+6h_1d_cci_volatility_mean_reversion
+Uses daily CCI to identify overbought/oversold conditions and 6h Bollinger Bands for mean reversion entries.
+Enters long when daily CCI < -100 (oversold) and price touches lower Bollinger Band on 6h.
+Enters short when daily CCI > 100 (overbought) and price touches upper Bollinger Band on 6h.
+Exits when price returns to Bollinger Band middle (20-period SMA).
+Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drift.
+Works in both bull and bear markets by fading extremes in ranging conditions.
 """
 
-name = "1d_1w_donchian_breakout_volume"
-timeframe = "1d"
+name = "6h_1d_cci_volatility_mean_reversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,78 +19,62 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Donchian and volume calculations
+    # Get daily data for CCI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # 20-day Donchian channels
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Commodity Channel Index (CCI) on daily timeframe
+    # CCI = (Typical Price - SMA(TP, 20)) / (0.015 * Mean Deviation)
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    # Avoid division by zero
+    cci_1d = np.where((mad * 0.015) != 0, (tp_1d - sma_tp) / (mad * 0.015), 0.0)
     
-    # 10-day SMA for exit
-    sma_10 = pd.Series(close_1d).rolling(window=10, min_periods=10).mean().values
+    # Align daily CCI to 6h timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
     
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume_1d > (vol_ma * 1.5)
-    
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # 50-week SMA for trend filter
-    sma_50w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    
-    # Align all indicators to daily timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    sma_10_aligned = align_htf_to_ltf(prices, df_1d, sma_10)
-    vol_confirm_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm)
-    sma_50w_aligned = align_htf_to_ltf(prices, df_1w, sma_50w)
+    # Bollinger Bands on 6h timeframe (20-period, 2 standard deviations)
+    sma_6h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_6h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_6h + (2 * std_6h)
+    lower_bb = sma_6h - (2 * std_6h)
+    middle_bb = sma_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(sma_10_aligned[i]) or np.isnan(vol_confirm_aligned[i]) or 
-            np.isnan(sma_50w_aligned[i])):
+    for i in range(20, n):
+        # Skip if CCI data not ready
+        if np.isnan(cci_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Long entry: price breaks above Donchian high with 1w bullish trend and volume
-        if (close[i] > donch_high_aligned[i] and close[i] > sma_50w_aligned[i] and 
-            vol_confirm_aligned[i] and position != 1):
+        # Long entry: daily CCI oversold (< -100) and price touches lower Bollinger Band
+        if (cci_aligned[i] < -100 and close[i] <= lower_bb[i] and position != 1):
             position = 1
             signals[i] = 0.25
-        # Short entry: price breaks below Donchian low with 1w bearish trend and volume
-        elif (close[i] < donch_low_aligned[i] and close[i] < sma_50w_aligned[i] and 
-              vol_confirm_aligned[i] and position != -1):
+        # Short entry: daily CCI overbought (> 100) and price touches upper Bollinger Band
+        elif (cci_aligned[i] > 100 and close[i] >= upper_bb[i] and position != -1):
             position = -1
             signals[i] = -0.25
-        # Exit conditions: price crosses 10-day SMA in opposite direction
-        elif position == 1 and close[i] < sma_10_aligned[i]:
+        # Exit conditions: price returns to middle Bollinger Band
+        elif position == 1 and close[i] >= middle_bb[i]:
             position = 0
             signals[i] = 0.0
-        elif position == -1 and close[i] > sma_10_aligned[i]:
+        elif position == -1 and close[i] <= middle_bb[i]:
             position = 0
             signals[i] = 0.0
         else:
