@@ -5,7 +5,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Precompute hour filter for 08-20 UTC
@@ -17,73 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend context and signal generation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend context and signal generation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h EMA(34) for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1d ATR(14)
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate 12h RSI(14)
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14 if i >= 14 else np.nan
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14 if i >= 14 else np.nan
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_12h = 100 - (100 / (1 + rs))
+    
+    # Calculate 12h ATR(14)
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = np.full(len(df_1d), np.nan)
-    for i in range(14, len(df_1d)):
-        atr_1d[i] = np.mean(tr[i-14:i+1])
+    atr_12h = np.full(len(df_12h), np.nan)
+    for i in range(14, len(df_12h)):
+        atr_12h[i] = np.mean(tr[i-14:i+1])
     
-    # Calculate 1d volume moving average (20)
-    volume_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate 12h volume moving average (20)
+    volume_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
-    # Align 1d indicators to 1d timeframe (no alignment needed)
-    ema_50_1d_aligned = ema_50_1d
-    atr_1d_aligned = atr_1d
-    volume_ma_20_1d_aligned = volume_ma_20_1d
+    # Align 12h indicators to 6h timeframe
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    volume_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_ma_20_12h)
     
-    # Get 1w data for regime filter (choppiness)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1d data for volume spike confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate 14-period ATR for choppiness
-    tr1w = np.abs(high_1w - low_1w)
-    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr1w[0] = tr2w[0] = tr3w[0] = np.nan
-    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
-    atr_1w = np.full(len(df_1w), np.nan)
-    for i in range(14, len(df_1w)):
-        atr_1w[i] = np.mean(trw[i-14:i+1])
-    
-    # Calculate 14-period high-low range for choppiness
-    max_high_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(ATR14) / (max_high - min_low)) / log10(14)
-    sum_atr_14 = np.full(len(df_1w), np.nan)
-    range_hl_14 = np.full(len(df_1w), np.nan)
-    chop = np.full(len(df_1w), 50.0)  # Default to neutral
-    
-    for i in range(14, len(df_1w)):
-        sum_atr_14[i] = np.sum(trw[i-14:i+1])
-        range_hl_14[i] = max_high_14[i] - min_low_14[i]
-        if range_hl_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr_14[i] / range_hl_14[i]) / np.log10(14)
-    
-    # Align chop to 1d timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    volume_1d = df_1d['volume'].values
+    volume_ma_10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    volume_ma_10_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_10_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,37 +79,40 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(volume_ma_20_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(rsi_12h_aligned[i]) or 
+            np.isnan(atr_12h_aligned[i]) or np.isnan(volume_ma_20_12h_aligned[i]) or 
+            np.isnan(volume_ma_10_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volatility filter: 1d ATR > 0.3 * its 20-period MA (avoid low volatility)
-        atr_ma_20_1d = np.full(len(df_1d), np.nan)
-        for j in range(34, len(df_1d)):
-            if not np.isnan(np.mean(atr_1d[j-19:j+1])):
-                atr_ma_20_1d[j] = np.mean(atr_1d[j-19:j+1])
-        atr_ma_20_1d_aligned = atr_ma_20_1d
-        vol_filter = (not np.isnan(atr_ma_20_1d_aligned[i]) and 
-                     atr_1d_aligned[i] > 0.3 * atr_ma_20_1d_aligned[i])
+        # Trend filter: price above/below 12h EMA34
+        uptrend = close[i] > ema_34_12h_aligned[i]
+        downtrend = close[i] < ema_34_12h_aligned[i]
         
-        # Volume filter: current volume > 1.5 * 20-period average
-        vol_spike = volume[i] > 1.5 * volume_ma_20_1d_aligned[i]
+        # Momentum filter: RSI between 40-60 (avoid extremes)
+        rsi_mid = (rsi_12h_aligned[i] >= 40) & (rsi_12h_aligned[i] <= 60)
         
-        # Regime filter: choppiness < 50 (trending market)
-        trending_regime = chop_aligned[i] < 50
+        # Volatility filter: current 12h ATR > 0.5 * its 20-period MA (avoid low volatility)
+        atr_ma_20_12h = np.full(len(df_12h), np.nan)
+        for j in range(34, len(df_12h)):
+            if not np.isnan(np.mean(atr_12h[j-19:j+1])):
+                atr_ma_20_12h[j] = np.mean(atr_12h[j-19:j+1])
+        atr_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ma_20_12h)
+        vol_filter = (not np.isnan(atr_ma_20_12h_aligned[i]) and 
+                     atr_12h_aligned[i] > 0.5 * atr_ma_20_12h_aligned[i])
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Volume filter: current volume > 1.3 * 20-period 12h average AND > 1.2 * 10-period 1d average
+        vol_spike_12h = volume[i] > 1.3 * volume_ma_20_12h_aligned[i]
+        vol_spike_1d = volume[i] > 1.2 * volume_ma_10_1d_aligned[i]
+        vol_spike = vol_spike_12h & vol_spike_1d
         
-        # Entry conditions: EMA50 trend + volatility + volume + regime
-        long_entry = uptrend and vol_filter and vol_spike and trending_regime
-        short_entry = downtrend and vol_filter and vol_spike and trending_regime
+        # Entry conditions: EMA34 trend + RSI mid + volatility + volume spike
+        long_entry = uptrend & rsi_mid & vol_filter & vol_spike
+        short_entry = downtrend & rsi_mid & vol_filter & vol_spike
         
-        # Exit conditions: opposite EMA50 cross or volatility drop or regime change
-        long_exit = (not uptrend) or (not vol_filter) or (not trending_regime)
-        short_exit = (not downtrend) or (not vol_filter) or (not trending_regime)
+        # Exit conditions: opposite EMA34 cross or RSI extreme or volatility drop
+        long_exit = (~uptrend) | (~rsi_mid) | (~vol_filter)
+        short_exit = (~downtrend) | (~rsi_mid) | (~vol_filter)
         
         if long_entry and position != 1:
             position = 1
@@ -149,6 +137,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "1d_1w_ema50_vol_vol_chop"
-timeframe = "1d"
+name = "6h_12h_1d_ema34_rsi_vol_vol"
+timeframe = "6h"
 leverage = 1.0
