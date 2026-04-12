@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Camarilla_Bounce_v1
-Hypothesis: Bounce from daily Camarilla L3/H3 levels with 12h trend filter and volume confirmation.
+4h_12h_1d_Camarilla_Reversion_v1
+Hypothesis: Mean reversion at daily Camarilla L3/H3 levels with 12h trend filter and volume confirmation.
 Long when price touches L3 in uptrend (12h close > EMA20) with volume spike; short when touches H3 in downtrend.
-Uses actual Camarilla formulas from daily timeframe for institutional support/resistance.
-Designed for 4h timeframe to capture mean-reversion bounces in both bull and bear markets.
+Exit on trend reversal or break of H4/L4. Designed for 4h timeframe to capture mean-reversion bounces in both bull and bear markets.
 Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -12,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_1d_Camarilla_Bounce_v1"
+name = "4h_12h_1d_Camarilla_Reversion_v1"
 timeframe = "4h"
 leverage = 1.0
 
