@@ -8,12 +8,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Hypothesis: 6h Elder Ray + 1w trend filter
-    # Elder Ray (Bull/Bear Power) measures buying/selling pressure relative to EMA
-    # Weekly trend filter ensures we trade with the higher timeframe momentum
-    # Volume confirmation filters low-conviction moves
-    # Works in bull/bear by adapting to weekly trend while capturing 6h momentum shifts
-    # Target: 12-30 trades/year per symbol.
+    # Hypothesis: 12h Donchian breakout with 1d volume confirmation and chop regime filter
+    # Donchian(20) breakouts capture strong moves in both bull and bear markets
+    # Volume spike confirms institutional participation and reduces false breakouts
+    # Chop regime filter: in choppy markets (CHOP > 61.8) we fade Donchian touches (mean reversion)
+    #                 in trending markets (CHOP < 38.2) we follow breakouts
+    # This adapts to market conditions and works in both bull and bear regimes
+    # Target: 12-37 trades/year per symbol (50-150 total over 4 years)
     
     # Session filter: 8:00-20:00 UTC (avoid low volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -24,59 +25,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w and 1d data for multi-timeframe analysis
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Donchian channels, volume context, and chop regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 13-period EMA on 6h data (Elder Ray base)
-    ema_period = 13
-    alpha = 2.0 / (ema_period + 1)
-    ema_6h = np.full(n, np.nan)
-    ema_6h[ema_period-1] = np.mean(close[:ema_period])
-    for i in range(ema_period, n):
-        ema_6h[i] = alpha * close[i] + (1 - alpha) * ema_6h[i-1]
+    # Calculate 1d Donchian channels (20-period)
+    donchian_h = np.full(len(df_1d), np.nan)
+    donchian_l = np.full(len(df_1d), np.nan)
     
-    # Elder Ray components
-    bull_power = high - ema_6h  # Buying power
-    bear_power = low - ema_6h   # Selling power (negative values indicate selling pressure)
+    for i in range(19, len(df_1d)):
+        donchian_h[i] = np.max(high_1d[i-19:i+1])
+        donchian_l[i] = np.min(low_1d[i-19:i+1])
     
-    # Smooth Elder Ray with 8-period EMA to reduce noise
-    smooth_period = 8
-    alpha_smooth = 2.0 / (smooth_period + 1)
-    bull_power_smooth = np.full(n, np.nan)
-    bear_power_smooth = np.full(n, np.nan)
+    # Align 1d Donchian levels to 12h timeframe
+    donchian_h_aligned = align_htf_to_ltf(prices, df_1d, donchian_h)
+    donchian_l_aligned = align_htf_to_ltf(prices, df_1d, donchian_l)
     
-    # Initialize smoothed values
-    bull_power_smooth[smooth_period-1] = np.mean(bull_power[:smooth_period])
-    bear_power_smooth[smooth_period-1] = np.mean(bear_power[:smooth_period])
-    
-    for i in range(smooth_period, n):
-        bull_power_smooth[i] = alpha_smooth * bull_power[i] + (1 - alpha_smooth) * bull_power_smooth[i-1]
-        bear_power_smooth[i] = alpha_smooth * bear_power[i] + (1 - alpha_smooth) * bear_power_smooth[i-1]
-    
-    # Weekly trend filter: 21-period EMA on weekly close
-    ema_21_1w = np.full(len(df_1w), np.nan)
-    alpha_1w = 2.0 / (21 + 1)
-    ema_21_1w[20] = np.mean(close_1w[:21])
-    for i in range(21, len(df_1w)):
-        ema_21_1w[i] = alpha_1w * close_1w[i] + (1 - alpha_1w) * ema_21_1w[i-1]
-    
-    # Weekly trend: 1 if above EMA21, -1 if below
-    weekly_trend = np.where(close_1w > ema_21_1w, 1, -1)
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    
-    # 1d volume filter: volume > 1.2 * 20-day average
+    # 1d volume spike filter (current volume > 2.0 * 20-day average)
     vol_ma_20_1d = np.full(len(df_1d), np.nan)
     for i in range(19, len(df_1d)):
         vol_ma_20_1d[i] = np.mean(volume_1d[i-19:i+1])
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    volume_filter = volume > 1.2 * vol_ma_20_1d_aligned
+    volume_spike = volume > 2.0 * vol_ma_20_1d_aligned
+    
+    # Chop regime filter (using 1d data, 14-period)
+    # Chop > 61.8 = ranging (mean revert at Donchian levels)
+    # Chop < 38.2 = trending (follow Donchian breakouts)
+    atr_1d = np.full(len(df_1d), np.nan)
+    for i in range(14, len(df_1d)):
+        tr = np.max([
+            high_1d[i] - low_1d[i],
+            np.abs(high_1d[i] - close_1d[i-1]),
+            np.abs(low_1d[i] - close_1d[i-1])
+        ])
+        if i == 14:
+            atr_1d[i] = np.mean([high_1d[j] - low_1d[j] for j in range(i-13, i+1)])
+        else:
+            atr_1d[i] = (atr_1d[i-1] * 13 + tr) / 14
+    
+    # Calculate Chop (14-period)
+    sum_tr_14 = np.full(len(df_1d), np.nan)
+    max_min_range_14 = np.full(len(df_1d), np.nan)
+    chop = np.full(len(df_1d), 50.0)  # default neutral
+    
+    for i in range(13, len(df_1d)):
+        # Sum of true range over 14 periods
+        tr_sum = 0
+        for j in range(i-13, i+1):
+            tr = np.max([
+                high_1d[j] - low_1d[j],
+                np.abs(high_1d[j] - close_1d[j-1]) if j > 0 else 0,
+                np.abs(low_1d[j] - close_1d[j-1]) if j > 0 else 0
+            ])
+            tr_sum += tr
+        sum_tr_14[i] = tr_sum
+        
+        # Max high - min low over 14 periods
+        max_high = np.max(high_1d[i-13:i+1])
+        min_low = np.min(low_1d[i-13:i+1])
+        max_min_range_14[i] = max_high - min_low
+        
+        if max_min_range_14[i] > 0:
+            chop[i] = 100 * np.log10(sum_tr_14[i] / max_min_range_14[i]) / np.log10(14)
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,29 +105,25 @@ def generate_signals(prices):
             continue
         
         # Skip if data not ready
-        if (np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or
-            np.isnan(weekly_trend_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_h_aligned[i]) or np.isnan(donchian_l_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(chop_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Entry conditions: Elder Ray divergence with weekly trend filter
-        # Long: Bull power rising AND bear power weakening AND weekly uptrend
-        # Short: Bear power falling AND bull power weakening AND weekly downtrend
-        if i >= 1:
-            bull_rising = bull_power_smooth[i] > bull_power_smooth[i-1]
-            bull_falling = bull_power_smooth[i] < bull_power_smooth[i-1]
-            bear_rising = bear_power_smooth[i] > bear_power_smooth[i-1]  # Less negative = weakening
-            bear_falling = bear_power_smooth[i] < bear_power_smooth[i-1]  # More negative = strengthening
-            
-            long_entry = bull_rising and (not bear_falling) and weekly_trend_aligned[i] == 1 and volume_filter[i]
-            short_entry = bear_falling and (not bull_rising) and weekly_trend_aligned[i] == -1 and volume_filter[i]
-        else:
-            long_entry = False
-            short_entry = False
-        
-        # Exit conditions: Elder Ray convergence or weekly trend change
-        long_exit = (not bull_rising) or bear_falling or weekly_trend_aligned[i] != 1
-        short_exit = (not bear_falling) or bull_rising or weekly_trend_aligned[i] != -1
+        # Regime-based logic
+        if chop_aligned[i] > 61.8:  # Ranging market - mean revert at Donchian levels
+            # Long near lower band, short near upper band
+            long_entry = close[i] <= donchian_l_aligned[i] and volume_spike[i]
+            short_entry = close[i] >= donchian_h_aligned[i] and volume_spike[i]
+            long_exit = close[i] >= (donchian_l_aligned[i] + donchian_h_aligned[i]) / 2  # midpoint
+            short_exit = close[i] <= (donchian_l_aligned[i] + donchian_h_aligned[i]) / 2  # midpoint
+        else:  # Trending market - follow Donchian breakouts
+            # Breakout entries
+            long_entry = close[i] > donchian_h_aligned[i] and volume_spike[i]
+            short_entry = close[i] < donchian_l_aligned[i] and volume_spike[i]
+            # Exit on opposite test of Donchian levels or volume dropout
+            long_exit = close[i] < donchian_l_aligned[i] or (not volume_spike[i])
+            short_exit = close[i] > donchian_h_aligned[i] or (not volume_spike[i])
         
         if long_entry and position != 1:
             position = 1
@@ -134,6 +148,6 @@ def generate_signals(prices):
     
     return signals
 
-name = "6h_1w_1d_elder_ray_volume_v1"
-timeframe = "6h"
+name = "12h_1d_donchian_breakout_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
